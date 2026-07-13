@@ -97,6 +97,12 @@ class Tabit(Gtk.Window):
         # sort by row._order so reorder is a swap, not remove/insert
         self.listbox.set_sort_func(lambda a, b, _d: a._order - b._order, None)
         self.listbox.connect("row-selected", self._on_row_selected)
+        # Capture phase so clicks on row children still reach us
+        click = Gtk.GestureMultiPress.new(self.listbox)
+        click.set_button(0)  # all buttons
+        click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        click.connect("pressed", self._on_list_pressed)
+        self._list_click = click  # keep ref
 
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         sidebar.get_style_context().add_class("sidebar")
@@ -219,9 +225,6 @@ class Tabit(Gtk.Window):
         row.subtitle = subtitle
         row.dot = dot
         row.dead = False
-        # double-click / right-click on the row itself (listbox may not see them)
-        row.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
-        row.connect("button-press-event", self._on_row_button)
         # insert under the current tab (not always at the end)
         selected = self.listbox.get_selected_row()
         if selected is not None:
@@ -301,24 +304,32 @@ class Tabit(Gtk.Window):
         if not row.term.has_focus():
             row.term.grab_focus()
 
-    def _on_row_button(self, row, event):
-        if event.button == 1 and event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS:
+    def _on_list_pressed(self, gesture, n_press, x, y):
+        """Double-click or right-click a tab → rename dialog."""
+        row = self.listbox.get_row_at_y(int(y))
+        if row is None:
+            return
+        # ignore clicks on the close button (right side of the row)
+        close = row.get_child().get_children()[-1]
+        ok, cx, cy = close.translate_coordinates(self.listbox, 0, 0)
+        if ok and cx <= x < cx + close.get_allocated_width():
+            return
+        button = gesture.get_current_button()
+        if button == 1 and n_press == 2:
             self.listbox.select_row(row)
             self._rename_session(row)
-            return True
-        if event.button == 3 and event.type == Gdk.EventType.BUTTON_PRESS:
+        elif button == 3 and n_press == 1:
             self.listbox.select_row(row)
             menu = Gtk.Menu()
             item = Gtk.MenuItem(label="Rename…")
             item.connect("activate", lambda *_: self._rename_session(row))
             menu.append(item)
             menu.show_all()
-            menu.popup_at_pointer(event)
-            return True
-        return False
+            # popup at pointer; fall back to widget if no event
+            menu.popup_at_pointer(None)
 
     def _rename_session(self, row=None):
-        """Rename via a small dialog (stable; inline edit fought focus with VTE)."""
+        """Rename via a small dialog."""
         row = row or self.listbox.get_selected_row()
         if row is None:
             return
