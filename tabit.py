@@ -1,42 +1,52 @@
 #!/usr/bin/env python3
-"""tabit - vertical window tabs and pinned files on the left screen edge.
+"""tabit - terminal sessions as vertical tabs on the left.
 
-Works on any X11 window manager that follows EWMH (XFCE, GNOME, KDE, MATE...).
-Left-click a tab to focus or minimize it, middle-click to close it.
-Drag a file onto the sidebar to pin it; right-click a pin to remove it.
-Right-click empty space to quit.
+Each tab is a real terminal (VTE, the same engine xfce4-terminal uses):
+a local shell, a serial console (picocom), or any command you give it.
+Click a tab to switch, press its x to close, use the + buttons to add.
+When a session's process ends the tab stays (greyed) so the scrollback
+is not lost; only the x really closes it.
+
+Shortcuts: Ctrl+Shift+T new shell, Ctrl+Shift+S new serial,
+Ctrl+PageUp/PageDown previous/next session,
+Ctrl+Shift+C / Ctrl+Shift+V copy / paste.
 """
 
 import fcntl
-import json
+import glob
 import os
 import signal
-import subprocess
 import sys
 
 import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-gi.require_version("GdkX11", "3.0")
-gi.require_version("Wnck", "3.0")
-from gi.repository import Gdk, GdkX11, Gio, GLib, Gtk, Pango, Wnck
+gi.require_version("Vte", "2.91")
+from gi.repository import Gdk, GLib, Gtk, Pango, Vte
 
-WIDTH = 220
-CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "tabit")
-PINS_FILE = os.path.join(CONFIG_DIR, "pins.json")
+SIDEBAR_WIDTH = 200
+DEFAULT_BAUD = "115200"
+TERM_FG = "#d5d5df"
+TERM_BG = "#101016"
 
 CSS = b"""
-window { background-color: #15151c; border-right: 1px solid #2c2c38; }
-button { background: transparent; border: none; border-radius: 6px;
-         border-left: 3px solid transparent;
-         padding: 4px 8px 4px 5px; color: #d5d5df; outline-width: 0; }
-button:hover { background: rgba(255,255,255,0.11); }
-button:active { background: rgba(255,255,255,0.16); }
-button.active { background: rgba(122,162,247,0.18);
-                border-left-color: #7aa2f7;
-                color: #ececf4; font-weight: 600; }
-button.active:hover { background: rgba(122,162,247,0.30); }
-button.minimized { opacity: 0.48; }
+.sidebar { background-color: #15151c; border-right: 1px solid #2c2c38; }
+.sidebar list { background: transparent; }
+.sidebar row { border-radius: 6px; border-left: 3px solid transparent;
+               padding: 4px 6px 4px 4px; color: #d5d5df; }
+.sidebar row:hover { background: rgba(255,255,255,0.11); }
+.sidebar row:selected { background: rgba(122,162,247,0.18);
+                        border-left-color: #7aa2f7; color: #ececf4; }
+.sidebar row.dead label { color: #6a6a78; }
+.sidebar row .close { opacity: 0; }
+.sidebar row:hover .close, .sidebar row:selected .close { opacity: 1; }
+.sidebar button { background: transparent; border: none; border-radius: 6px;
+                  padding: 3px 6px; color: #8a8a98; }
+.sidebar button:hover { color: #ececf4; background: rgba(255,255,255,0.11); }
+.session-sub { color: #7a7a88; font-size: 8pt; }
+.activity { color: #7aa2f7; font-size: 8pt; }
+.adder button { padding: 4px 8px; font-size: 9pt; color: #9a9aa8; }
+.adder button:hover { color: #ececf4; background: rgba(255,255,255,0.11); }
 .section { color: #7a7a88; font-size: 8pt; font-weight: 600;
            letter-spacing: 1.5px; padding: 12px 8px 3px 8px; }
 """
@@ -44,212 +54,224 @@ button.minimized { opacity: 0.48; }
 
 class Tabit(Gtk.Window):
     def __init__(self):
-        super().__init__()
-        self.set_type_hint(Gdk.WindowTypeHint.DOCK)
-        self.set_decorated(False)
-        self.set_skip_taskbar_hint(True)
-        self.set_skip_pager_hint(True)
-        self.stick()
+        super().__init__(title="tabit")
+        self.set_default_size(1100, 700)
+        self.connect("destroy", Gtk.main_quit)
+        self.connect("key-press-event", self._on_window_key)
+        self._counter = 0
 
-        display = Gdk.Display.get_default()
-        # a left strut can only reserve the left edge of the whole X screen,
-        # so the sidebar lives on the leftmost monitor
-        monitors = [display.get_monitor(i) for i in range(display.get_n_monitors())]
-        monitor = min(monitors, key=lambda m: m.get_geometry().x)
-        self.geo = monitor.get_geometry()
-        self.scale = monitor.get_scale_factor()
-        self.set_size_request(WIDTH, self.geo.height)
+        self.stack = Gtk.Stack()
+        self.listbox = Gtk.ListBox()
+        self.listbox.connect("row-selected", self._on_row_selected)
 
-        self.pins = self._load_pins()
-
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        for side in ("top", "bottom", "start", "end"):
-            getattr(outer, f"set_margin_{side}")(6)
-        self.pin_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        self.win_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        sidebar.get_style_context().add_class("sidebar")
+        sidebar.set_size_request(SIDEBAR_WIDTH, -1)
+        sidebar.pack_start(self._section("SESSIONS"), False, False, 0)
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroll.add(self.win_box)
-        outer.pack_start(self.pin_box, False, False, 0)
-        outer.pack_start(scroll, True, True, 0)
-        self.add(outer)
+        scroll.add(self.listbox)
+        sidebar.pack_start(scroll, True, True, 0)
+        adders = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        adders.get_style_context().add_class("adder")
+        for side in ("start", "end", "bottom"):
+            getattr(adders, f"set_margin_{side}")(4)
+        for text, handler in (("+ Serial", self._on_add_serial),
+                              ("+ Shell", self._on_add_shell),
+                              ("+ Command", self._on_add_command)):
+            btn = Gtk.Button(label=text)
+            btn.connect("clicked", handler)
+            adders.pack_start(btn, False, False, 0)
+        sidebar.pack_start(adders, False, False, 0)
 
-        # accept files dragged from a file manager
-        self.drag_dest_set(Gtk.DestDefaults.ALL, [], Gdk.DragAction.COPY)
-        self.drag_dest_add_uri_targets()
-        self.connect("drag-data-received", self._on_drop)
+        root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        root.pack_start(sidebar, False, False, 0)
+        root.pack_start(self.stack, True, True, 0)
+        self.add(root)
 
-        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
-        self.connect("button-press-event", self._on_bg_press)
-        self.connect("map-event", self._on_map)
-        self.connect("destroy", Gtk.main_quit)
+        self._on_add_shell(None)
 
-        self._pending = False
-        self.wnck = Wnck.Screen.get_default()
-        self.wnck.force_update()
-        for sig in ("window-opened", "window-closed",
-                    "active-window-changed", "active-workspace-changed"):
-            self.wnck.connect(sig, self._queue_refresh)
-        self.wnck.connect("window-opened", lambda _s, w: self._hook(w))
-        for w in self.wnck.get_windows():
-            self._hook(w)
+    # --- sessions ---------------------------------------------------------
 
-        self._refresh_pins()
-        self._refresh_windows()
+    def _add_session(self, label, argv, icon_name, sub=None):
+        term = Vte.Terminal()
+        term.set_scrollback_lines(10000)
+        fg, bg = Gdk.RGBA(), Gdk.RGBA()
+        fg.parse(TERM_FG)
+        bg.parse(TERM_BG)
+        term.set_colors(fg, bg, [])
+        term.connect("key-press-event", self._on_term_key)
 
-    # --- screen edge -----------------------------------------------------
+        page = Gtk.ScrolledWindow()
+        page.add(term)
+        self._counter += 1
+        self.stack.add_named(page, f"session-{self._counter}")
 
-    def _on_map(self, *_args):
-        self.move(self.geo.x, self.geo.y)
-        s = self.scale
-        left = (self.geo.x + WIDTH) * s
-        y0 = self.geo.y * s
-        y1 = (self.geo.y + self.geo.height) * s - 1
-        partial = [left, 0, 0, 0, y0, y1, 0, 0, 0, 0, 0, 0]
-        xid = str(self.get_window().get_xid())
-        # ponytail: Gdk.property_change is not introspectable in PyGObject,
-        # so struts go through xprop; swap to python-xlib if this ever hurts
-        for prop, vals in (("_NET_WM_STRUT_PARTIAL", partial),
-                           ("_NET_WM_STRUT", partial[:4])):
-            subprocess.run(
-                ["xprop", "-id", xid, "-f", prop, "32c", "-set", prop,
-                 ",".join(str(v) for v in vals)],
-                check=False)
-
-    # --- window tabs ------------------------------------------------------
-
-    def _hook(self, win):
-        # window-opened fires once per window, so this never double-connects
-        for sig in ("name-changed", "icon-changed", "state-changed",
-                    "workspace-changed"):
-            win.connect(sig, self._queue_refresh)
-
-    def _queue_refresh(self, *_args):
-        if not self._pending:
-            self._pending = True
-            GLib.idle_add(self._refresh_windows)
-
-    def _refresh_windows(self):
-        self._pending = False
-        for child in self.win_box.get_children():
-            child.destroy()
-        ws = self.wnck.get_active_workspace()
-        active = self.wnck.get_active_window()
-        self.win_box.pack_start(self._section("WINDOWS"), False, False, 0)
-        for w in self.wnck.get_windows():
-            if w.is_skip_tasklist() or (ws and not w.is_on_workspace(ws)):
-                continue
-            self.win_box.pack_start(self._tab_button(w, w is active),
-                                    False, False, 0)
-        self.win_box.show_all()
-        return False
-
-    def _tab_button(self, w, is_active):
-        btn = Gtk.Button()
+        row = Gtk.ListBoxRow()
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        box.pack_start(Gtk.Image.new_from_pixbuf(w.get_mini_icon()),
+        box.pack_start(Gtk.Image.new_from_icon_name(icon_name,
+                                                    Gtk.IconSize.MENU),
                        False, False, 0)
-        label = Gtk.Label(label=w.get_name())
-        label.set_ellipsize(Pango.EllipsizeMode.END)
-        label.set_xalign(0)
-        box.pack_start(label, True, True, 0)
-        btn.add(box)
-        btn.set_tooltip_text(w.get_name())
-        if is_active:
-            btn.get_style_context().add_class("active")
-        if w.is_minimized():
-            btn.get_style_context().add_class("minimized")
-        btn.connect("clicked", self._on_tab_click, w)
-        btn.connect("button-press-event", self._on_tab_press, w)
-        return btn
+        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        title = Gtk.Label(label=label)
+        title.set_ellipsize(Pango.EllipsizeMode.END)
+        title.set_xalign(0)
+        titles.pack_start(title, False, False, 0)
+        subtitle = Gtk.Label(label=sub or "")
+        subtitle.set_ellipsize(Pango.EllipsizeMode.END)
+        subtitle.set_xalign(0)
+        subtitle.get_style_context().add_class("session-sub")
+        subtitle.set_no_show_all(not sub)
+        titles.pack_start(subtitle, False, False, 0)
+        box.pack_start(titles, True, True, 0)
+        dot = Gtk.Label(label="●")
+        dot.get_style_context().add_class("activity")
+        dot.set_no_show_all(True)
+        box.pack_start(dot, False, False, 0)
+        close = Gtk.Button.new_from_icon_name("window-close-symbolic",
+                                              Gtk.IconSize.MENU)
+        close.set_relief(Gtk.ReliefStyle.NONE)
+        close.get_style_context().add_class("close")
+        close.connect("clicked", lambda *_: self._close_session(row))
+        box.pack_start(close, False, False, 0)
+        row.add(box)
+        row.set_tooltip_text(" ".join(argv))
+        row.session_label = f"{label} {sub}" if sub else label
+        row.page = page
+        row.term = term
+        row.subtitle = subtitle
+        row.dot = dot
+        row.dead = False
+        self.listbox.add(row)
+        self.listbox.show_all()
+        self.stack.show_all()
+        self.listbox.select_row(row)
 
-    def _on_tab_click(self, _btn, w):
-        if w.is_active():
-            w.minimize()
+        term.connect("child-exited", self._on_child_exited, row)
+        term.connect("contents-changed", self._on_activity, row)
+        term.spawn_async(Vte.PtyFlags.DEFAULT, GLib.get_home_dir(), argv,
+                         None, GLib.SpawnFlags.SEARCH_PATH, None, None,
+                         -1, None, None, None)
+
+    def _on_child_exited(self, _term, _status, row):
+        # keep the tab and its scrollback; only the x really closes it
+        row.dead = True
+        row.get_style_context().add_class("dead")
+        row.dot.hide()
+        row.subtitle.set_text("exited")
+        row.subtitle.set_no_show_all(False)
+        row.subtitle.show()
+
+    def _on_activity(self, _term, row):
+        if not row.dead and self.listbox.get_selected_row() is not row:
+            row.dot.show()
+
+    def _close_session(self, row):
+        if row.get_parent() is None:
+            return
+        self.listbox.remove(row)
+        self.stack.remove(row.page)
+        row.page.destroy()  # destroys the pty, the child gets SIGHUP
+        rows = self.listbox.get_children()
+        if rows:
+            self.listbox.select_row(rows[-1])
         else:
-            w.activate(Gtk.get_current_event_time())
+            Gtk.main_quit()
 
-    def _on_tab_press(self, _btn, event, w):
-        if event.button == 2:
-            w.close(event.time)
+    def _on_row_selected(self, _listbox, row):
+        if row is None:
+            return
+        row.dot.hide()
+        self.stack.set_visible_child(row.page)
+        self.set_title(f"{row.session_label} — tabit")
+        row.term.grab_focus()
+
+    # --- add buttons --------------------------------------------------------
+
+    def _on_add_shell(self, _btn):
+        self._add_session("shell", [os.environ.get("SHELL", "/bin/bash")],
+                          "utilities-terminal-symbolic")
+
+    def _on_add_serial(self, _btn):
+        dialog = Gtk.Dialog(title="New serial session", transient_for=self,
+                            modal=True)
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                           "Open", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        grid = Gtk.Grid(row_spacing=6, column_spacing=6, margin=12)
+        combo = Gtk.ComboBoxText.new_with_entry()
+        for dev in sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")):
+            combo.append_text(dev)
+        combo.set_active(0)
+        baud = Gtk.Entry(text=DEFAULT_BAUD)
+        baud.set_activates_default(True)
+        grid.attach(Gtk.Label(label="Device", xalign=0), 0, 0, 1, 1)
+        grid.attach(combo, 1, 0, 1, 1)
+        grid.attach(Gtk.Label(label="Baud", xalign=0), 0, 1, 1, 1)
+        grid.attach(baud, 1, 1, 1, 1)
+        dialog.get_content_area().add(grid)
+        dialog.show_all()
+        if dialog.run() == Gtk.ResponseType.OK:
+            dev = (combo.get_active_text() or "").strip()
+            rate = baud.get_text().strip() or DEFAULT_BAUD
+            if dev:
+                self._add_session(os.path.basename(dev),
+                                  ["picocom", "-b", rate, dev],
+                                  "network-wired-symbolic", sub=f"@{rate}")
+        dialog.destroy()
+
+    def _on_add_command(self, _btn):
+        dialog = Gtk.Dialog(title="New command session", transient_for=self,
+                            modal=True)
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                           "Run", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        entry = Gtk.Entry(placeholder_text="e.g. ssh root@192.168.1.1",
+                          margin=12, width_chars=40)
+        entry.set_activates_default(True)
+        dialog.get_content_area().add(entry)
+        dialog.show_all()
+        if dialog.run() == Gtk.ResponseType.OK:
+            cmd = entry.get_text().strip()
+            if cmd:
+                parts = cmd.split(maxsplit=1)
+                self._add_session(parts[0], ["/bin/sh", "-c", cmd],
+                                  "utilities-terminal-symbolic",
+                                  sub=parts[1] if len(parts) > 1 else None)
+        dialog.destroy()
+
+    # --- keyboard -----------------------------------------------------------
+
+    def _on_window_key(self, _window, event):
+        ctrl = bool(event.state & Gdk.ModifierType.CONTROL_MASK)
+        shift = bool(event.state & Gdk.ModifierType.SHIFT_MASK)
+        name = Gdk.keyval_name(event.keyval).lower()
+        if ctrl and shift and name == "t":
+            self._on_add_shell(None)
+            return True
+        if ctrl and shift and name == "s":
+            self._on_add_serial(None)
+            return True
+        if ctrl and name in ("page_up", "page_down"):
+            rows = self.listbox.get_children()
+            current = self.listbox.get_selected_row()
+            i = rows.index(current) if current in rows else 0
+            i = (i - 1 if name == "page_up" else i + 1) % len(rows)
+            self.listbox.select_row(rows[i])
             return True
         return False
 
-    # --- pinned files -----------------------------------------------------
-
-    def _load_pins(self):
-        try:
-            with open(PINS_FILE) as f:
-                return [p for p in json.load(f) if isinstance(p, str)]
-        except (OSError, ValueError):
-            return []
-
-    def _save_pins(self):
-        os.makedirs(CONFIG_DIR, exist_ok=True)
-        with open(PINS_FILE, "w") as f:
-            json.dump(self.pins, f, indent=2)
-
-    def _refresh_pins(self):
-        for child in self.pin_box.get_children():
-            child.destroy()
-        if self.pins:
-            self.pin_box.pack_start(self._section("PINNED"), False, False, 0)
-            for path in self.pins:
-                self.pin_box.pack_start(self._pin_button(path), False, False, 0)
-        self.pin_box.show_all()
-
-    def _pin_button(self, path):
-        gfile = Gio.File.new_for_path(path)
-        try:
-            info = gfile.query_info("standard::icon", 0, None)
-            image = Gtk.Image.new_from_gicon(info.get_icon(),
-                                             Gtk.IconSize.MENU)
-        except GLib.Error:
-            image = Gtk.Image.new_from_icon_name("text-x-generic",
-                                                 Gtk.IconSize.MENU)
-        btn = Gtk.Button()
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        box.pack_start(image, False, False, 0)
-        label = Gtk.Label(label=os.path.basename(path))
-        label.set_ellipsize(Pango.EllipsizeMode.END)
-        label.set_xalign(0)
-        box.pack_start(label, True, True, 0)
-        btn.add(box)
-        btn.set_tooltip_text(path)
-        btn.connect("clicked", self._on_pin_click, gfile)
-        btn.connect("button-press-event", self._on_pin_press, path)
-        return btn
-
-    def _on_pin_click(self, _btn, gfile):
-        try:
-            Gio.AppInfo.launch_default_for_uri(gfile.get_uri(), None)
-        except GLib.Error as e:
-            print(f"tabit: cannot open {gfile.get_path()}: {e.message}",
-                  file=sys.stderr)
-
-    def _on_pin_press(self, _btn, event, path):
-        if event.button == 3:
-            menu = Gtk.Menu()
-            item = Gtk.MenuItem(label="Unpin")
-            item.connect("activate", self._on_unpin, path)
-            menu.append(item)
-            menu.show_all()
-            menu.popup_at_pointer(event)
-            return True
+    def _on_term_key(self, term, event):
+        mask = Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK
+        if event.state & mask == mask:
+            name = Gdk.keyval_name(event.keyval).lower()
+            if name == "c":
+                term.copy_clipboard_format(Vte.Format.TEXT)
+                return True
+            if name == "v":
+                term.paste_clipboard()
+                return True
         return False
-
-    def _on_unpin(self, _item, path):
-        self.pins.remove(path)
-        self._save_pins()
-        self._refresh_pins()
-
-    def _on_drop(self, _widget, _ctx, _x, _y, data, _info, _time):
-        for uri in data.get_uris():
-            path = Gio.File.new_for_uri(uri).get_path()
-            if path and path not in self.pins:
-                self.pins.append(path)
-        self._save_pins()
-        self._refresh_pins()
 
     # --- misc ---------------------------------------------------------------
 
@@ -260,25 +282,10 @@ class Tabit(Gtk.Window):
         label.get_style_context().add_class("section")
         return label
 
-    def _on_bg_press(self, _widget, event):
-        if event.button == 3:
-            menu = Gtk.Menu()
-            item = Gtk.MenuItem(label="Quit tabit")
-            item.connect("activate", lambda *_: Gtk.main_quit())
-            menu.append(item)
-            menu.show_all()
-            menu.popup_at_pointer(event)
-            return True
-        return False
-
 
 def main():
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     GLib.set_prgname("tabit")
-
-    display = Gdk.Display.get_default()
-    if display is None or not isinstance(display, GdkX11.X11Display):
-        sys.exit("tabit needs an X11 session (Wayland is not supported)")
 
     # one instance is enough; the lock dies with the process
     lock = open(os.path.join(GLib.get_user_runtime_dir(), "tabit.lock"), "w")

@@ -1,19 +1,20 @@
 # tabit
 
-Vertical window tabs on the left edge of your screen — like browser tabs,
-but for your whole desktop. Plus pinned files you can open with one click.
+Terminal sessions as vertical tabs on the left — one window for all your
+shells, serial consoles and remote logins.
 
 ```
-┌──────────┬───────────────────────┐
-│ PINNED   │                       │
-│ 📄 notes │                       │
-│ 📁 work  │                       │
-│──────────│      your desktop     │
-│ WINDOWS  │                       │
-│ ▣ Firefox│                       │
-│ ▣ Files  │                       │
-│ ▣ Editor │                       │
-└──────────┴───────────────────────┘
+┌───────────┬─────────────────────────────┐
+│ SESSIONS  │                             │
+│ ▌shell    │  $ make flash               │
+│  ttyUSB0  │  ...                        │
+│  ttyUSB1  │                             │
+│  ssh ecw  │      (real terminal,        │
+│           │       VTE engine)           │
+│ + Shell   │                             │
+│ + Serial  │                             │
+│ + Command │                             │
+└───────────┴─────────────────────────────┘
 ```
 
 One small Python file. No pip packages, no compiling — everything comes
@@ -21,8 +22,8 @@ from the Ubuntu archive.
 
 ## Requirements
 
-- An X11 session (Wayland is not supported)
-- Any window manager that follows EWMH: XFCE, GNOME (X11), KDE, MATE, ...
+- Linux with GTK3 + VTE (X11 or Wayland)
+- `picocom` for serial sessions
 - Tested on Ubuntu / Xubuntu
 
 ## Install
@@ -30,7 +31,7 @@ from the Ubuntu archive.
 ```sh
 git clone https://github.com/ChrisLi826/tabit.git
 cd tabit
-./install.sh      # installs deps via apt, copies to ~/.local/bin, autostarts on login
+./install.sh      # installs deps via apt, copies to ~/.local/bin, adds app menu entry
 ~/.local/bin/tabit &
 ```
 
@@ -40,22 +41,27 @@ To remove: `./install.sh --uninstall`
 
 | Action | Result |
 |---|---|
-| Left-click a window tab | Focus it (click again to minimize) |
-| Middle-click a window tab | Close that window |
-| Drag a file onto the sidebar | Pin it |
-| Left-click a pin | Open it with the default app |
-| Right-click a pin | Unpin it |
-| Right-click empty space | Quit tabit |
+| `+ Serial` | Pick a `/dev/ttyUSB*` / `/dev/ttyACM*` device and baud (default 115200), opens picocom |
+| `+ Shell` | New tab running your login shell |
+| `+ Command` | Run anything (e.g. `ssh root@192.168.1.1`) in a new tab |
+| Click a tab | Switch to that session |
+| `x` on a tab (shown on hover) | Close that session |
+| `Ctrl+Shift+S` / `Ctrl+Shift+T` | New serial / new shell |
+| `Ctrl+PageUp` / `Ctrl+PageDown` | Previous / next session |
+| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |
 
-Pins are stored in `~/.config/tabit/pins.json` (plain JSON, edit freely).
+A blue dot on a tab means that session printed output while you were
+looking elsewhere. When a session's process ends (device unplugged,
+`exit`, picocom quit) the tab stays, greyed and marked `exited`, so
+you keep the scrollback — press its `x` to really close it.
 
-## How it works
+Serial tabs run picocom, so its shortcuts apply inside the terminal:
+quit with `Ctrl-A Ctrl-X`. Closing the last tab quits tabit.
 
-- Window list and switching: [libwnck](https://gitlab.gnome.org/GNOME/libwnck)
-  over the EWMH X11 standard — the same library XFCE's own taskbar uses.
-- The sidebar reserves the screen edge with `_NET_WM_STRUT_PARTIAL`,
-  so maximized windows never cover it.
-- Opening files: `Gio.AppInfo.launch_default_for_uri` (same as `xdg-open`).
+## Roadmap
+
+- File browser pane + text editing tabs
+- Saved session profiles (named serial/ssh setups)
 
 ## License
 

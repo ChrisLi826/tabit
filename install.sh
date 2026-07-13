@@ -4,23 +4,30 @@ set -e
 cd "$(dirname "$0")"
 
 if [ "$1" = "--uninstall" ]; then
-    rm -f "$HOME/.local/bin/tabit" "$HOME/.config/autostart/tabit.desktop"
-    echo "tabit removed (pins kept in ~/.config/tabit)"
+    rm -f "$HOME/.local/bin/tabit" \
+          "$HOME/.local/share/applications/tabit.desktop" \
+          "$HOME/.config/autostart/tabit.desktop"
+    echo "tabit removed"
     exit 0
 fi
 
-sudo apt-get install -y python3-gi gir1.2-gtk-3.0 gir1.2-wnck-3.0 x11-utils
+sudo apt-get install -y python3-gi gir1.2-gtk-3.0 gir1.2-vte-2.91 picocom
 
-mkdir -p "$HOME/.local/bin" "$HOME/.config/autostart"
+mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
 install -m 755 tabit.py "$HOME/.local/bin/tabit"
 
-cat > "$HOME/.config/autostart/tabit.desktop" <<EOF
+# leftover from the pre-v2 window-tab version
+rm -f "$HOME/.config/autostart/tabit.desktop"
+
+cat > "$HOME/.local/share/applications/tabit.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=tabit
-Comment=Vertical window tabs on the left screen edge
+Comment=Terminal sessions as vertical tabs
 Exec=$HOME/.local/bin/tabit
+Icon=utilities-terminal
+Categories=System;TerminalEmulator;
 EOF
 
-echo "tabit installed. Start it now with: ~/.local/bin/tabit &"
-echo "It will also start automatically on next login."
+echo "tabit installed. Start it with: ~/.local/bin/tabit &"
+echo "(also available from the app menu)"
