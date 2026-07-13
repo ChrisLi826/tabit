@@ -50,6 +50,7 @@ To remove: `./install.sh --uninstall`
 | `Ctrl+PageUp` / `Ctrl+PageDown` | Previous / next session |
 | `Ctrl+Shift+PageUp` / `Ctrl+Shift+PageDown` | Move current tab up / down |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |
+| `Shortcuts…` (sidebar) | Edit any of the shortcuts above |
 
 A blue dot on a tab means that session printed output while you were
 looking elsewhere. When a session's process ends (device unplugged,
@@ -63,6 +64,10 @@ uses `~/senaoenv/kermrc` when present (`-c -E`). `picocom` quit is
 Tabs are remembered: the next start restores the same set of sessions
 as fresh processes (serial consoles reconnect, shells start clean —
 scrollback is not kept). Stored in `~/.config/tabit/sessions.json`.
+
+Keyboard shortcuts are editable via **Shortcuts…** in the sidebar
+(or hand-edit `~/.config/tabit/keys.json`). Defaults match the table
+above; **Reset defaults** in the dialog restores them.
 
 ## Roadmap
 

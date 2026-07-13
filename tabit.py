@@ -9,9 +9,8 @@ the + buttons to add. When a session's process ends the tab stays
 The set of tabs is remembered and restored (fresh processes) on the
 next start.
 
-Shortcuts: Ctrl+Shift+T new shell (under current tab),
-Ctrl+Shift+S new serial, Ctrl+PageUp/PageDown previous/next,
-Ctrl+Shift+PageUp/PageDown move tab, Ctrl+Shift+C/V copy/paste.
+Keyboard shortcuts are user-editable (sidebar → Shortcuts…, stored in
+~/.config/tabit/keys.json).
 """
 
 import fcntl
@@ -32,10 +31,27 @@ DEFAULT_BAUD = "115200"
 # serial backends shown in the +Serial dialog (first = default)
 SERIAL_BACKENDS = ("screen.sh", "kermit", "picocom")
 KERMRC = os.path.expanduser("~/senaoenv/kermrc")
-SESSIONS_FILE = os.path.join(GLib.get_user_config_dir(), "tabit",
-                             "sessions.json")
+CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "tabit")
+SESSIONS_FILE = os.path.join(CONFIG_DIR, "sessions.json")
+KEYS_FILE = os.path.join(CONFIG_DIR, "keys.json")
 TERM_FG = "#d5d5df"
 TERM_BG = "#101016"
+
+# (action_id, label, default GTK accelerator string)
+KEY_ACTIONS = (
+    ("new_shell", "New shell", "<Primary><Shift>t"),
+    ("new_serial", "New serial", "<Primary><Shift>s"),
+    ("prev_session", "Previous session", "<Primary>Page_Up"),
+    ("next_session", "Next session", "<Primary>Page_Down"),
+    ("move_tab_up", "Move tab up", "<Primary><Shift>Page_Up"),
+    ("move_tab_down", "Move tab down", "<Primary><Shift>Page_Down"),
+    ("copy", "Copy", "<Primary><Shift>c"),
+    ("paste", "Paste", "<Primary><Shift>v"),
+)
+DEFAULT_KEYS = {a: d for a, _label, d in KEY_ACTIONS}
+MOD_MASK = (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK |
+            Gdk.ModifierType.MOD1_MASK | Gdk.ModifierType.SUPER_MASK |
+            Gdk.ModifierType.META_MASK)
 
 CSS = b"""
 .sidebar { background-color: #15151c; border-right: 1px solid #2c2c38; }
@@ -69,6 +85,7 @@ class Tabit(Gtk.Window):
         self._counter = 0
         self._order_seq = 0
         self._save_src = None  # debounced sessions.json write
+        self._keys = self._load_keys()  # action -> (keyval, mods)
 
         self.stack = Gtk.Stack()
         self.listbox = Gtk.ListBox()
@@ -94,6 +111,9 @@ class Tabit(Gtk.Window):
             btn = Gtk.Button(label=text)
             btn.connect("clicked", handler)
             adders.pack_start(btn, False, False, 0)
+        keys_btn = Gtk.Button(label="Shortcuts…")
+        keys_btn.connect("clicked", self._on_edit_keys)
+        adders.pack_start(keys_btn, False, False, 0)
         sidebar.pack_start(adders, False, False, 0)
 
         root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
@@ -343,55 +363,179 @@ class Tabit(Gtk.Window):
 
     # --- keyboard -----------------------------------------------------------
 
-    def _handle_shortcut(self, event):
-        """Shared by window and terminal so bindings work while VTE has focus."""
-        if event.type != Gdk.EventType.KEY_PRESS:
-            return False
-        ctrl = bool(event.state & Gdk.ModifierType.CONTROL_MASK)
-        shift = bool(event.state & Gdk.ModifierType.SHIFT_MASK)
-        name = (Gdk.keyval_name(event.keyval) or "").lower()
-        # keypad Page_Up arrives as kp_page_up
-        if name.startswith("kp_"):
-            name = name[3:]
-        if ctrl and shift and name == "t":
+    @staticmethod
+    def _parse_accel(accel):
+        key, mods = Gtk.accelerator_parse(accel)
+        if key == 0:
+            return None
+        return (key, Gdk.ModifierType(mods))
+
+    @staticmethod
+    def _norm_keyval(keyval):
+        name = Gdk.keyval_name(keyval) or ""
+        if name.startswith("KP_"):
+            base = Gdk.keyval_from_name(name[3:])
+            if base:
+                keyval = base
+        return Gdk.keyval_to_lower(keyval)
+
+    @classmethod
+    def _load_keys(cls):
+        raw = dict(DEFAULT_KEYS)
+        try:
+            with open(KEYS_FILE) as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    if k in DEFAULT_KEYS and isinstance(v, str):
+                        raw[k] = v
+        except (OSError, ValueError):
+            pass
+        parsed = {}
+        for action, accel in raw.items():
+            pair = cls._parse_accel(accel)
+            if pair:
+                parsed[action] = pair
+            else:
+                parsed[action] = cls._parse_accel(DEFAULT_KEYS[action])
+        return parsed
+
+    def _save_keys(self, accel_map):
+        """accel_map: action -> accelerator string"""
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(KEYS_FILE, "w") as f:
+            json.dump(accel_map, f, indent=2)
+        self._keys = {}
+        for action, accel in accel_map.items():
+            pair = self._parse_accel(accel)
+            if pair:
+                self._keys[action] = pair
+
+    def _match_action(self, event):
+        key = self._norm_keyval(event.keyval)
+        mods = event.state & MOD_MASK
+        for action, (want_key, want_mods) in self._keys.items():
+            if key == self._norm_keyval(want_key) and mods == (want_mods & MOD_MASK):
+                return action
+        return None
+
+    def _run_action(self, action, term=None):
+        if action == "new_shell":
             self._on_add_shell(None)
-            return True
-        if ctrl and shift and name == "s":
+        elif action == "new_serial":
             self._on_add_serial(None)
-            return True
-        if ctrl and shift and name in ("page_up", "page_down"):
-            self._move_session(-1 if name == "page_up" else 1)
-            return True
-        if ctrl and not shift and name in ("page_up", "page_down"):
+        elif action == "move_tab_up":
+            self._move_session(-1)
+        elif action == "move_tab_down":
+            self._move_session(1)
+        elif action in ("prev_session", "next_session"):
             rows = self.listbox.get_children()
             if not rows:
                 return True
             current = self.listbox.get_selected_row()
             i = rows.index(current) if current in rows else 0
-            i = (i - 1 if name == "page_up" else i + 1) % len(rows)
+            i = (i - 1 if action == "prev_session" else i + 1) % len(rows)
             self.listbox.select_row(rows[i])
-            return True
-        return False
+        elif action == "copy":
+            t = term or (self.listbox.get_selected_row() and
+                         self.listbox.get_selected_row().term)
+            if t:
+                t.copy_clipboard_format(Vte.Format.TEXT)
+        elif action == "paste":
+            t = term or (self.listbox.get_selected_row() and
+                         self.listbox.get_selected_row().term)
+            if t:
+                t.paste_clipboard()
+        else:
+            return False
+        return True
+
+    def _handle_shortcut(self, event, term=None):
+        """Shared by window and terminal so bindings work while VTE has focus."""
+        if event.type != Gdk.EventType.KEY_PRESS:
+            return False
+        action = self._match_action(event)
+        if not action:
+            return False
+        return self._run_action(action, term=term)
 
     def _on_window_key(self, _window, event):
-        # When VTE has focus the term handler already runs; do not move twice.
+        # When VTE has focus the term handler already runs; do not fire twice.
         if isinstance(self.get_focus(), Vte.Terminal):
             return False
         return self._handle_shortcut(event)
 
     def _on_term_key(self, term, event):
-        if self._handle_shortcut(event):
-            return True
-        mask = Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK
-        if event.state & mask == mask:
-            name = (Gdk.keyval_name(event.keyval) or "").lower()
-            if name == "c":
-                term.copy_clipboard_format(Vte.Format.TEXT)
-                return True
-            if name == "v":
-                term.paste_clipboard()
-                return True
-        return False
+        return self._handle_shortcut(event, term=term)
+
+    def _on_edit_keys(self, _btn):
+        dialog = Gtk.Dialog(title="Keyboard shortcuts", transient_for=self,
+                            modal=True)
+        dialog.add_buttons("Reset defaults", Gtk.ResponseType.APPLY,
+                           "Cancel", Gtk.ResponseType.CANCEL,
+                           "Save", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        grid = Gtk.Grid(row_spacing=8, column_spacing=12, margin=12)
+        # current accel strings for editing
+        accels = {}
+        for action, _label, default in KEY_ACTIONS:
+            key, mods = self._keys.get(action, self._parse_accel(default))
+            accels[action] = Gtk.accelerator_name(key, mods)
+
+        buttons = {}
+        for i, (action, label, _default) in enumerate(KEY_ACTIONS):
+            grid.attach(Gtk.Label(label=label, xalign=0), 0, i, 1, 1)
+            btn = Gtk.Button(label=accels[action] or "(none)")
+            btn.set_hexpand(True)
+            buttons[action] = btn
+            grid.attach(btn, 1, i, 1, 1)
+
+            def capture(_b, act=action, b=btn):
+                b.set_label("Press a key…")
+                # grab keyboard on the dialog for one key
+                def on_key(_w, event):
+                    if event.type != Gdk.EventType.KEY_PRESS:
+                        return True
+                    name = (Gdk.keyval_name(event.keyval) or "").lower()
+                    if name in ("escape",):
+                        b.set_label(accels[act] or "(none)")
+                        dialog.disconnect(handler_id)
+                        return True
+                    if name in ("control_l", "control_r", "shift_l", "shift_r",
+                                "alt_l", "alt_r", "super_l", "super_r",
+                                "meta_l", "meta_r"):
+                        return True  # wait for the real key
+                    mods = event.state & MOD_MASK
+                    key = event.keyval
+                    accels[act] = Gtk.accelerator_name(key, mods)
+                    b.set_label(accels[act])
+                    dialog.disconnect(handler_id)
+                    return True
+                handler_id = dialog.connect("key-press-event", on_key)
+
+            btn.connect("clicked", capture)
+
+        hint = Gtk.Label(
+            label="Click a shortcut, then press the new key combo.\n"
+                  "Esc cancels capture. Stored in ~/.config/tabit/keys.json",
+            xalign=0)
+        hint.set_margin_top(8)
+        box = dialog.get_content_area()
+        box.add(grid)
+        box.add(hint)
+        dialog.show_all()
+
+        while True:
+            resp = dialog.run()
+            if resp == Gtk.ResponseType.APPLY:
+                for action, _label, default in KEY_ACTIONS:
+                    accels[action] = default
+                    buttons[action].set_label(default)
+                continue
+            if resp == Gtk.ResponseType.OK:
+                self._save_keys({a: accels[a] for a, _l, _d in KEY_ACTIONS})
+            break
+        dialog.destroy()
 
     # --- misc ---------------------------------------------------------------
 
