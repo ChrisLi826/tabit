@@ -42,6 +42,7 @@ KEY_ACTIONS = (
     ("new_shell", "New shell", "<Primary><Shift>t"),
     ("new_serial", "New serial", "<Primary><Shift>s"),
     ("close_session", "Close session", "<Primary><Shift>w"),
+    ("rename_session", "Rename session", "F2"),
     ("prev_session", "Previous session", "<Primary>Page_Up"),
     ("next_session", "Next session", "<Primary>Page_Down"),
     ("move_tab_up", "Move tab up", "<Primary><Shift>Page_Up"),
@@ -96,6 +97,8 @@ class Tabit(Gtk.Window):
         # sort by row._order so reorder is a swap, not remove/insert
         self.listbox.set_sort_func(lambda a, b, _d: a._order - b._order, None)
         self.listbox.connect("row-selected", self._on_row_selected)
+        self.listbox.connect("row-activated", self._on_row_activated)
+        self.listbox.connect("button-press-event", self._on_list_button)
 
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         sidebar.get_style_context().add_class("sidebar")
@@ -209,6 +212,7 @@ class Tabit(Gtk.Window):
         row.set_tooltip_text(" ".join(argv))
         row.session_label = f"{label} {sub}" if sub else label
         row.title_text = label
+        row.title_label = title
         row.sub_text = sub
         row.argv = argv
         row.icon_name = icon_name
@@ -295,6 +299,51 @@ class Tabit(Gtk.Window):
         self.set_title(f"{row.session_label} — tabit")
         if not row.term.has_focus():
             row.term.grab_focus()
+
+    def _on_row_activated(self, _listbox, row):
+        # double-click (or Enter) on a tab
+        self._rename_session(row)
+
+    def _on_list_button(self, listbox, event):
+        if event.type != Gdk.EventType.BUTTON_PRESS or event.button != 3:
+            return False
+        row = listbox.get_row_at_y(int(event.y))
+        if row is None:
+            return False
+        listbox.select_row(row)
+        menu = Gtk.Menu()
+        item = Gtk.MenuItem(label="Rename…")
+        item.connect("activate", lambda *_: self._rename_session(row))
+        menu.append(item)
+        menu.show_all()
+        menu.popup_at_pointer(event)
+        return True
+
+    def _rename_session(self, row=None):
+        row = row or self.listbox.get_selected_row()
+        if row is None:
+            return
+        dialog = Gtk.Dialog(title="Rename session", transient_for=self,
+                            modal=True)
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                           "Rename", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        entry = Gtk.Entry(text=row.title_text, margin=12, width_chars=28)
+        entry.set_activates_default(True)
+        entry.select_region(0, -1)
+        dialog.get_content_area().add(entry)
+        dialog.show_all()
+        if dialog.run() == Gtk.ResponseType.OK:
+            name = entry.get_text().strip()
+            if name:
+                row.title_text = name
+                row.title_label.set_text(name)
+                row.session_label = (f"{name} {row.sub_text}"
+                                     if row.sub_text else name)
+                if self.listbox.get_selected_row() is row:
+                    self.set_title(f"{row.session_label} — tabit")
+                self._save_sessions()
+        dialog.destroy()
 
     # --- add buttons --------------------------------------------------------
 
@@ -447,6 +496,8 @@ class Tabit(Gtk.Window):
             row = self.listbox.get_selected_row()
             if row is not None:
                 self._close_session(row)
+        elif action == "rename_session":
+            self._rename_session()
         elif action == "move_tab_up":
             self._move_session(-1)
         elif action == "move_tab_down":
