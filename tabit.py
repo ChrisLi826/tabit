@@ -67,10 +67,13 @@ class Tabit(Gtk.Window):
         self.connect("destroy", Gtk.main_quit)
         self.connect("key-press-event", self._on_window_key)
         self._counter = 0
-        self._moving = False  # suppress row-selected while reordering tabs
+        self._order_seq = 0
+        self._save_src = None  # debounced sessions.json write
 
         self.stack = Gtk.Stack()
         self.listbox = Gtk.ListBox()
+        # sort by row._order so reorder is a swap, not remove/insert
+        self.listbox.set_sort_func(lambda a, b, _d: a._order - b._order, None)
         self.listbox.connect("row-selected", self._on_row_selected)
 
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -125,6 +128,17 @@ class Tabit(Gtk.Window):
         os.makedirs(os.path.dirname(SESSIONS_FILE), exist_ok=True)
         with open(SESSIONS_FILE, "w") as f:
             json.dump(data, f, indent=2)
+
+    def _save_sessions_soon(self):
+        # key-repeat can fire many moves; coalesce disk writes
+        if self._save_src is not None:
+            GLib.source_remove(self._save_src)
+        self._save_src = GLib.timeout_add(150, self._save_sessions_now)
+
+    def _save_sessions_now(self):
+        self._save_src = None
+        self._save_sessions()
+        return False
 
     def _add_session(self, label, argv, icon_name, sub=None):
         term = Vte.Terminal()
@@ -182,10 +196,15 @@ class Tabit(Gtk.Window):
         # insert under the current tab (not always at the end)
         selected = self.listbox.get_selected_row()
         if selected is not None:
-            idx = self.listbox.get_children().index(selected)
-            self.listbox.insert(row, idx + 1)
+            row._order = selected._order + 1
+            for r in self.listbox.get_children():
+                if r._order >= row._order:
+                    r._order += 1
         else:
-            self.listbox.add(row)
+            row._order = self._order_seq
+        self._order_seq = max(self._order_seq, row._order) + 1
+        self.listbox.add(row)
+        self.listbox.invalidate_sort()
         self.listbox.show_all()
         self.stack.show_all()
         self.listbox.select_row(row)
@@ -206,18 +225,12 @@ class Tabit(Gtk.Window):
         j = i + delta
         if j < 0 or j >= len(rows):
             return
-        # remove/insert briefly changes selection; without this flag,
-        # row-selected grabs focus and switches the stack each step, so
-        # key-repeat (hold Ctrl+Shift+PgUp/Dn) feels broken.
-        self._moving = True
-        try:
-            self.listbox.remove(row)
-            self.listbox.insert(row, j)
-            self.listbox.select_row(row)
-            row.show_all()
-        finally:
-            self._moving = False
-        self._save_sessions()
+        # swap sort keys only — same row stays selected, no focus thrash,
+        # so key-repeat can move one step per event.
+        other = rows[j]
+        row._order, other._order = other._order, row._order
+        self.listbox.invalidate_sort()
+        self._save_sessions_soon()
 
     def _on_child_exited(self, _term, _status, row):
         # keep the tab and its scrollback; only the x really closes it
@@ -247,7 +260,7 @@ class Tabit(Gtk.Window):
             self.listbox.select_row(rows[-1])
 
     def _on_row_selected(self, _listbox, row):
-        if row is None or self._moving:
+        if row is None:
             return
         row.dot.hide()
         self.stack.set_visible_child(row.page)
@@ -332,6 +345,8 @@ class Tabit(Gtk.Window):
 
     def _handle_shortcut(self, event):
         """Shared by window and terminal so bindings work while VTE has focus."""
+        if event.type != Gdk.EventType.KEY_PRESS:
+            return False
         ctrl = bool(event.state & Gdk.ModifierType.CONTROL_MASK)
         shift = bool(event.state & Gdk.ModifierType.SHIFT_MASK)
         name = (Gdk.keyval_name(event.keyval) or "").lower()
@@ -359,6 +374,9 @@ class Tabit(Gtk.Window):
         return False
 
     def _on_window_key(self, _window, event):
+        # When VTE has focus the term handler already runs; do not move twice.
+        if isinstance(self.get_focus(), Vte.Terminal):
+            return False
         return self._handle_shortcut(event)
 
     def _on_term_key(self, term, event):
