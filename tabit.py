@@ -78,6 +78,9 @@ CSS = b"""
 .adder button:hover { color: #ececf4; background: rgba(255,255,255,0.11); }
 .section { color: #7a7a88; font-size: 8pt; font-weight: 600;
            padding: 12px 8px 3px 8px; }
+.sidebar entry { background-color: #1a1a24; color: #ececf4;
+                 border: 1px solid #7aa2f7; border-radius: 4px;
+                 padding: 0 4px; min-height: 0; font-size: 9pt; }
 """
 
 
@@ -297,6 +300,9 @@ class Tabit(Gtk.Window):
         row.dot.hide()
         self.stack.set_visible_child(row.page)
         self.set_title(f"{row.session_label} — tabit")
+        # do not steal focus from an in-place rename entry
+        if getattr(row, "_renaming", False):
+            return
         if not row.term.has_focus():
             row.term.grab_focus()
 
@@ -312,7 +318,7 @@ class Tabit(Gtk.Window):
             return False
         listbox.select_row(row)
         menu = Gtk.Menu()
-        item = Gtk.MenuItem(label="Rename…")
+        item = Gtk.MenuItem(label="Rename")
         item.connect("activate", lambda *_: self._rename_session(row))
         menu.append(item)
         menu.show_all()
@@ -320,30 +326,64 @@ class Tabit(Gtk.Window):
         return True
 
     def _rename_session(self, row=None):
+        """Edit the tab title in place (no dialog)."""
         row = row or self.listbox.get_selected_row()
-        if row is None:
+        if row is None or getattr(row, "_renaming", False):
             return
-        dialog = Gtk.Dialog(title="Rename session", transient_for=self,
-                            modal=True)
-        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
-                           "Rename", Gtk.ResponseType.OK)
-        dialog.set_default_response(Gtk.ResponseType.OK)
-        entry = Gtk.Entry(text=row.title_text, margin=12, width_chars=28)
-        entry.set_activates_default(True)
+        self.listbox.select_row(row)
+        row._renaming = True
+        title = row.title_label
+        titles = title.get_parent()
+        entry = Gtk.Entry(text=row.title_text)
+        entry.set_has_frame(False)
+        entry.set_hexpand(True)
+        entry.set_width_chars(8)
+        titles.pack_start(entry, False, False, 0)
+        titles.reorder_child(entry, 0)
+        title.hide()
+        entry.show()
+        entry.grab_focus()
         entry.select_region(0, -1)
-        dialog.get_content_area().add(entry)
-        dialog.show_all()
-        if dialog.run() == Gtk.ResponseType.OK:
+
+        finished = False
+
+        def finish(commit):
+            nonlocal finished
+            if finished:
+                return
+            finished = True
             name = entry.get_text().strip()
-            if name:
+            if commit and name:
                 row.title_text = name
-                row.title_label.set_text(name)
+                title.set_text(name)
                 row.session_label = (f"{name} {row.sub_text}"
                                      if row.sub_text else name)
                 if self.listbox.get_selected_row() is row:
                     self.set_title(f"{row.session_label} — tabit")
                 self._save_sessions()
-        dialog.destroy()
+            titles.remove(entry)
+            title.show()
+            row._renaming = False
+            if self.listbox.get_selected_row() is row:
+                row.term.grab_focus()
+
+        def on_key(_entry, event):
+            name = (Gdk.keyval_name(event.keyval) or "").lower()
+            if name in ("return", "kp_enter"):
+                finish(True)
+                return True
+            if name == "escape":
+                finish(False)
+                return True
+            return False
+
+        def on_focus_out(_entry, _event):
+            # click away or tab switch commits the name
+            finish(True)
+            return False
+
+        entry.connect("key-press-event", on_key)
+        entry.connect("focus-out-event", on_focus_out)
 
     # --- add buttons --------------------------------------------------------
 
