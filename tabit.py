@@ -318,9 +318,19 @@ class Tabit(Gtk.Window):
         return label
 
 
+def _ensure_user_path():
+    # Desktop launch gives a stripped PATH. +Command runs non-interactive sh
+    # (no .bashrc), so tools in ~/.local/bin (e.g. screen.sh) are missing.
+    local_bin = os.path.join(GLib.get_home_dir(), ".local", "bin")
+    path = os.environ.get("PATH", "")
+    if local_bin not in path.split(":"):
+        os.environ["PATH"] = local_bin + (":" + path if path else "")
+
+
 def main():
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     GLib.set_prgname("tabit")
+    _ensure_user_path()
 
     # one instance is enough; the lock dies with the process
     lock = open(os.path.join(GLib.get_user_runtime_dir(), "tabit.lock"), "w")
