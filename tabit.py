@@ -270,6 +270,8 @@ class Tabit(Gtk.Window):
         if row.get_parent() is None:
             return
         was_selected = self.listbox.get_selected_row() is row
+        rows = self.listbox.get_children()
+        idx = rows.index(row)
         self.listbox.remove(row)
         self.stack.remove(row.page)
         row.page.destroy()  # destroys the pty, the child gets SIGHUP
@@ -278,7 +280,9 @@ class Tabit(Gtk.Window):
         if not rows:
             Gtk.main_quit()
         elif was_selected:
-            self.listbox.select_row(rows[-1])
+            # focus the next tab (same index after remove); if we closed
+            # the last one, fall back to the new last
+            self.listbox.select_row(rows[min(idx, len(rows) - 1)])
 
     def _on_row_selected(self, _listbox, row):
         if row is None:
