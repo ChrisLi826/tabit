@@ -376,6 +376,17 @@ class Tabit(Gtk.Window):
         return (key, Gdk.ModifierType(mods))
 
     @staticmethod
+    def _accel_label(key, mods):
+        # Human text like "Ctrl+Shift+T" (not GTK's <Primary><Shift>t).
+        # Primary is GTK's portable name for Ctrl on Linux / Cmd on macOS.
+        return Gtk.accelerator_get_label(key, mods) or "(none)"
+
+    @classmethod
+    def _accel_label_from_name(cls, accel):
+        pair = cls._parse_accel(accel)
+        return cls._accel_label(*pair) if pair else "(none)"
+
+    @staticmethod
     def _norm_keyval(keyval):
         name = Gdk.keyval_name(keyval) or ""
         if name.startswith("KP_"):
@@ -485,7 +496,7 @@ class Tabit(Gtk.Window):
                            "Save", Gtk.ResponseType.OK)
         dialog.set_default_response(Gtk.ResponseType.OK)
         grid = Gtk.Grid(row_spacing=8, column_spacing=12, margin=12)
-        # current accel strings for editing
+        # store GTK accel names; show human labels on buttons
         accels = {}
         for action, _label, default in KEY_ACTIONS:
             key, mods = self._keys.get(action, self._parse_accel(default))
@@ -494,7 +505,7 @@ class Tabit(Gtk.Window):
         buttons = {}
         for i, (action, label, _default) in enumerate(KEY_ACTIONS):
             grid.attach(Gtk.Label(label=label, xalign=0), 0, i, 1, 1)
-            btn = Gtk.Button(label=accels[action] or "(none)")
+            btn = Gtk.Button(label=self._accel_label_from_name(accels[action]))
             btn.set_hexpand(True)
             buttons[action] = btn
             grid.attach(btn, 1, i, 1, 1)
@@ -507,7 +518,7 @@ class Tabit(Gtk.Window):
                         return True
                     name = (Gdk.keyval_name(event.keyval) or "").lower()
                     if name in ("escape",):
-                        b.set_label(accels[act] or "(none)")
+                        b.set_label(self._accel_label_from_name(accels[act]))
                         dialog.disconnect(handler_id)
                         return True
                     if name in ("control_l", "control_r", "shift_l", "shift_r",
@@ -517,7 +528,7 @@ class Tabit(Gtk.Window):
                     mods = event.state & MOD_MASK
                     key = event.keyval
                     accels[act] = Gtk.accelerator_name(key, mods)
-                    b.set_label(accels[act])
+                    b.set_label(self._accel_label(key, mods))
                     dialog.disconnect(handler_id)
                     return True
                 handler_id = dialog.connect("key-press-event", on_key)
@@ -539,7 +550,7 @@ class Tabit(Gtk.Window):
             if resp == Gtk.ResponseType.APPLY:
                 for action, _label, default in KEY_ACTIONS:
                     accels[action] = default
-                    buttons[action].set_label(default)
+                    buttons[action].set_label(self._accel_label_from_name(default))
                 continue
             if resp == Gtk.ResponseType.OK:
                 self._save_keys({a: accels[a] for a, _l, _d in KEY_ACTIONS})
