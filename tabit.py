@@ -100,7 +100,7 @@ class Tabit(Gtk.Window):
         # sort by row._order so reorder is a swap, not remove/insert
         self.listbox.set_sort_func(lambda a, b, _d: a._order - b._order, None)
         self.listbox.connect("row-selected", self._on_row_selected)
-        self.listbox.connect("row-activated", self._on_row_activated)
+        # double-click / right-click only (not Enter via row-activated)
         self.listbox.connect("button-press-event", self._on_list_button)
 
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -306,24 +306,26 @@ class Tabit(Gtk.Window):
         if not row.term.has_focus():
             row.term.grab_focus()
 
-    def _on_row_activated(self, _listbox, row):
-        # double-click (or Enter) on a tab
-        self._rename_session(row)
-
     def _on_list_button(self, listbox, event):
-        if event.type != Gdk.EventType.BUTTON_PRESS or event.button != 3:
-            return False
         row = listbox.get_row_at_y(int(event.y))
         if row is None:
             return False
-        listbox.select_row(row)
-        menu = Gtk.Menu()
-        item = Gtk.MenuItem(label="Rename")
-        item.connect("activate", lambda *_: self._rename_session(row))
-        menu.append(item)
-        menu.show_all()
-        menu.popup_at_pointer(event)
-        return True
+        # left double-click only (not Enter / row-activated)
+        if event.button == 1 and event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS:
+            listbox.select_row(row)
+            self._rename_session(row)
+            return True
+        # right-click → Rename menu
+        if event.button == 3 and event.type == Gdk.EventType.BUTTON_PRESS:
+            listbox.select_row(row)
+            menu = Gtk.Menu()
+            item = Gtk.MenuItem(label="Rename")
+            item.connect("activate", lambda *_: self._rename_session(row))
+            menu.append(item)
+            menu.show_all()
+            menu.popup_at_pointer(event)
+            return True
+        return False
 
     def _rename_session(self, row=None):
         """Edit the tab title in place (no dialog)."""

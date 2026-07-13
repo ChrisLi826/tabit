@@ -45,7 +45,7 @@ To remove: `./install.sh --uninstall`
 | `+ Shell` | New tab running your login shell |
 | `+ Command` | Run anything (e.g. `ssh root@192.168.1.1`) in a new tab |
 | Click a tab | Switch to that session |
-| Double-click a tab / right-click → Rename / `F2` | Rename inline on the tab (Enter save, Esc cancel) |
+| Double-click a tab / right-click → Rename / `F2` | Rename inline (Enter save, Esc cancel; not single Enter on the list) |
 | `x` on a tab (shown on hover) | Close that session |
 | `Ctrl+Shift+S` / `Ctrl+Shift+T` | New serial / new shell (inserted under the current tab) |
 | `Ctrl+Shift+W` | Close current session |
