@@ -9,9 +9,9 @@ the + buttons to add. When a session's process ends the tab stays
 The set of tabs is remembered and restored (fresh processes) on the
 next start.
 
-Shortcuts: Ctrl+Shift+T new shell, Ctrl+Shift+S new serial,
-Ctrl+PageUp/PageDown previous/next session,
-Ctrl+Shift+C / Ctrl+Shift+V copy / paste.
+Shortcuts: Ctrl+Shift+T new shell (under current tab),
+Ctrl+Shift+S new serial, Ctrl+PageUp/PageDown previous/next,
+Ctrl+Shift+PageUp/PageDown move tab, Ctrl+Shift+C/V copy/paste.
 """
 
 import fcntl
@@ -178,7 +178,13 @@ class Tabit(Gtk.Window):
         row.subtitle = subtitle
         row.dot = dot
         row.dead = False
-        self.listbox.add(row)
+        # insert under the current tab (not always at the end)
+        selected = self.listbox.get_selected_row()
+        if selected is not None:
+            idx = self.listbox.get_children().index(selected)
+            self.listbox.insert(row, idx + 1)
+        else:
+            self.listbox.add(row)
         self.listbox.show_all()
         self.stack.show_all()
         self.listbox.select_row(row)
@@ -189,6 +195,21 @@ class Tabit(Gtk.Window):
         term.spawn_async(Vte.PtyFlags.DEFAULT, GLib.get_home_dir(), argv,
                          None, GLib.SpawnFlags.SEARCH_PATH, None, None,
                          -1, None, None, None)
+
+    def _move_session(self, delta):
+        row = self.listbox.get_selected_row()
+        if row is None:
+            return
+        rows = self.listbox.get_children()
+        i = rows.index(row)
+        j = i + delta
+        if j < 0 or j >= len(rows):
+            return
+        self.listbox.remove(row)
+        self.listbox.insert(row, j)
+        self.listbox.select_row(row)
+        row.show_all()
+        self._save_sessions()
 
     def _on_child_exited(self, _term, _status, row):
         # keep the tab and its scrollback; only the x really closes it
@@ -300,7 +321,8 @@ class Tabit(Gtk.Window):
 
     # --- keyboard -----------------------------------------------------------
 
-    def _on_window_key(self, _window, event):
+    def _handle_shortcut(self, event):
+        """Shared by window and terminal so bindings work while VTE has focus."""
         ctrl = bool(event.state & Gdk.ModifierType.CONTROL_MASK)
         shift = bool(event.state & Gdk.ModifierType.SHIFT_MASK)
         name = (Gdk.keyval_name(event.keyval) or "").lower()
@@ -310,8 +332,13 @@ class Tabit(Gtk.Window):
         if ctrl and shift and name == "s":
             self._on_add_serial(None)
             return True
-        if ctrl and name in ("page_up", "page_down"):
+        if ctrl and shift and name in ("page_up", "page_down"):
+            self._move_session(-1 if name == "page_up" else 1)
+            return True
+        if ctrl and not shift and name in ("page_up", "page_down"):
             rows = self.listbox.get_children()
+            if not rows:
+                return True
             current = self.listbox.get_selected_row()
             i = rows.index(current) if current in rows else 0
             i = (i - 1 if name == "page_up" else i + 1) % len(rows)
@@ -319,7 +346,12 @@ class Tabit(Gtk.Window):
             return True
         return False
 
+    def _on_window_key(self, _window, event):
+        return self._handle_shortcut(event)
+
     def _on_term_key(self, term, event):
+        if self._handle_shortcut(event):
+            return True
         mask = Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK
         if event.state & mask == mask:
             name = (Gdk.keyval_name(event.keyval) or "").lower()

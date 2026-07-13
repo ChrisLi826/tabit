@@ -46,8 +46,9 @@ To remove: `./install.sh --uninstall`
 | `+ Command` | Run anything (e.g. `ssh root@192.168.1.1`) in a new tab |
 | Click a tab | Switch to that session |
 | `x` on a tab (shown on hover) | Close that session |
-| `Ctrl+Shift+S` / `Ctrl+Shift+T` | New serial / new shell |
+| `Ctrl+Shift+S` / `Ctrl+Shift+T` | New serial / new shell (inserted under the current tab) |
 | `Ctrl+PageUp` / `Ctrl+PageDown` | Previous / next session |
+| `Ctrl+Shift+PageUp` / `Ctrl+Shift+PageDown` | Move current tab up / down |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |
 
 A blue dot on a tab means that session printed output while you were
