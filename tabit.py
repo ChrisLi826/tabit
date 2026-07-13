@@ -70,6 +70,9 @@ CSS = b"""
 .sidebar button:hover { color: #ececf4; background: rgba(255,255,255,0.11); }
 .session-sub { color: #7a7a88; font-size: 8pt; }
 .activity { color: #7aa2f7; font-size: 8pt; }
+/* actions strip: slightly different surface so it is not the tab list */
+.adder { background-color: #0e0e14; border-top: 1px solid #2c2c38;
+         padding-top: 4px; }
 .adder button { padding: 4px 8px; font-size: 9pt; color: #9a9aa8; }
 .adder button:hover { color: #ececf4; background: rgba(255,255,255,0.11); }
 .section { color: #7a7a88; font-size: 8pt; font-weight: 600;
