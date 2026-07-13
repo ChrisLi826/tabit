@@ -37,7 +37,7 @@ button.minimized label { opacity: 0.45; font-style: italic; }
 """
 
 
-class Tabdesk(Gtk.Window):
+class Tabit(Gtk.Window):
     def __init__(self):
         super().__init__()
         self.set_type_hint(Gdk.WindowTypeHint.DOCK)
@@ -288,7 +288,7 @@ def main():
         Gdk.Screen.get_default(), provider,
         Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
-    Tabdesk().show_all()
+    Tabit().show_all()
     Gtk.main()
 
 
