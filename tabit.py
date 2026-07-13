@@ -78,9 +78,6 @@ CSS = b"""
 .adder button:hover { color: #ececf4; background: rgba(255,255,255,0.11); }
 .section { color: #7a7a88; font-size: 8pt; font-weight: 600;
            padding: 12px 8px 3px 8px; }
-.sidebar entry { background-color: #1a1a24; color: #ececf4;
-                 border: 1px solid #7aa2f7; border-radius: 4px;
-                 padding: 0 4px; min-height: 0; font-size: 9pt; }
 """
 
 
@@ -100,7 +97,6 @@ class Tabit(Gtk.Window):
         # sort by row._order so reorder is a swap, not remove/insert
         self.listbox.set_sort_func(lambda a, b, _d: a._order - b._order, None)
         self.listbox.connect("row-selected", self._on_row_selected)
-        self._rename_entry = None  # active inline rename Entry, if any
 
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         sidebar.get_style_context().add_class("sidebar")
@@ -299,15 +295,9 @@ class Tabit(Gtk.Window):
     def _on_row_selected(self, _listbox, row):
         if row is None:
             return
-        # switching tab while renaming another: commit first
-        if (self._rename_entry is not None and
-                getattr(self._rename_entry, "_row", None) is not row):
-            self._rename_finish(True)
         row.dot.hide()
         self.stack.set_visible_child(row.page)
         self.set_title(f"{row.session_label} — tabit")
-        if self._rename_entry is not None:
-            return
         if not row.term.has_focus():
             row.term.grab_focus()
 
@@ -319,7 +309,7 @@ class Tabit(Gtk.Window):
         if event.button == 3 and event.type == Gdk.EventType.BUTTON_PRESS:
             self.listbox.select_row(row)
             menu = Gtk.Menu()
-            item = Gtk.MenuItem(label="Rename")
+            item = Gtk.MenuItem(label="Rename…")
             item.connect("activate", lambda *_: self._rename_session(row))
             menu.append(item)
             menu.show_all()
@@ -327,89 +317,34 @@ class Tabit(Gtk.Window):
             return True
         return False
 
-    def _rename_finish(self, commit):
-        entry = self._rename_entry
-        if entry is None:
-            return
-        row = entry._row
-        title = row.title_label
-        titles = title.get_parent()
-        if Gtk.grab_get_current() is entry:
-            Gtk.grab_remove(entry)
-        name = entry.get_text().strip()
-        if commit and name:
-            row.title_text = name
-            title.set_text(name)
-            row.session_label = (f"{name} {row.sub_text}"
-                                 if row.sub_text else name)
-            if self.listbox.get_selected_row() is row:
-                self.set_title(f"{row.session_label} — tabit")
-            self._save_sessions()
-        if entry.get_parent() is titles:
-            titles.remove(entry)
-        title.show()
-        row._renaming = False
-        self._rename_entry = None
-        if self.listbox.get_selected_row() is row:
-            row.term.grab_focus()
-
     def _rename_session(self, row=None):
-        """Edit the tab title in place (no dialog)."""
+        """Rename via a small dialog (stable; inline edit fought focus with VTE)."""
         row = row or self.listbox.get_selected_row()
         if row is None:
             return
-        if self._rename_entry is not None:
-            if self._rename_entry._row is row:
-                return
-            self._rename_finish(True)
-        if self.listbox.get_selected_row() is not row:
-            self.listbox.select_row(row)
-        row._renaming = True
-        title = row.title_label
-        titles = title.get_parent()
-        entry = Gtk.Entry(text=row.title_text)
-        entry.set_has_frame(False)
-        entry.set_hexpand(True)
-        entry.set_width_chars(8)
-        entry._row = row
-        self._rename_entry = entry
-        titles.pack_start(entry, False, False, 0)
-        titles.reorder_child(entry, 0)
-        title.hide()
-        entry.show()
-
-        def on_key(_entry, event):
-            name = (Gdk.keyval_name(event.keyval) or "").lower()
-            if name in ("return", "kp_enter"):
-                self._rename_finish(True)
-                return True
-            if name == "escape":
-                self._rename_finish(False)
-                return True
-            return False
-
-        def on_focus_out(_entry, _event):
-            # only after grab is released (see below)
-            if Gtk.grab_get_current() is entry:
-                return False
-            self._rename_finish(True)
-            return False
-
-        entry.connect("key-press-event", on_key)
-        entry.connect("focus-out-event", on_focus_out)
-        # Hold a short grab so the double-click mouse-up cannot steal focus
-        # and abort rename. Then release and rely on focus-out / Enter / Esc.
-        Gtk.grab_add(entry)
-        entry.grab_focus()
+        dialog = Gtk.Dialog(title="Rename session", transient_for=self,
+                            modal=True)
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                           "Rename", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        entry = Gtk.Entry(text=row.title_text, margin=12, width_chars=28)
+        entry.set_activates_default(True)
         entry.select_region(0, -1)
-
-        def release_grab():
-            if self._rename_entry is entry and Gtk.grab_get_current() is entry:
-                Gtk.grab_remove(entry)
-                entry.grab_focus()
-            return False
-
-        GLib.timeout_add(200, release_grab)
+        dialog.get_content_area().add(entry)
+        dialog.show_all()
+        if dialog.run() == Gtk.ResponseType.OK:
+            name = entry.get_text().strip()
+            if name:
+                row.title_text = name
+                row.title_label.set_text(name)
+                row.session_label = (f"{name} {row.sub_text}"
+                                     if row.sub_text else name)
+                if self.listbox.get_selected_row() is row:
+                    self.set_title(f"{row.session_label} — tabit")
+                self._save_sessions()
+        dialog.destroy()
+        if self.listbox.get_selected_row() is row:
+            row.term.grab_focus()
 
     # --- add buttons --------------------------------------------------------
 
