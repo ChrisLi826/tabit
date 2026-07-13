@@ -5,7 +5,8 @@ Each tab is a real terminal (VTE, the same engine xfce4-terminal uses):
 a local shell, a serial console (picocom), or any command you give it.
 Click a tab to switch, press its x to close, use the + buttons to add.
 When a session's process ends the tab stays (greyed) so the scrollback
-is not lost; only the x really closes it.
+is not lost; only the x really closes it. The set of tabs is remembered
+and restored (fresh processes) on the next start.
 
 Shortcuts: Ctrl+Shift+T new shell, Ctrl+Shift+S new serial,
 Ctrl+PageUp/PageDown previous/next session,
@@ -14,6 +15,7 @@ Ctrl+Shift+C / Ctrl+Shift+V copy / paste.
 
 import fcntl
 import glob
+import json
 import os
 import signal
 import sys
@@ -26,6 +28,8 @@ from gi.repository import Gdk, GLib, Gtk, Pango, Vte
 
 SIDEBAR_WIDTH = 200
 DEFAULT_BAUD = "115200"
+SESSIONS_FILE = os.path.join(GLib.get_user_config_dir(), "tabit",
+                             "sessions.json")
 TERM_FG = "#d5d5df"
 TERM_BG = "#101016"
 
@@ -89,9 +93,33 @@ class Tabit(Gtk.Window):
         root.pack_start(self.stack, True, True, 0)
         self.add(root)
 
-        self._on_add_shell(None)
+        for s in self._load_sessions():
+            try:
+                self._add_session(s["label"], s["argv"], s["icon"],
+                                  s.get("sub"))
+            except (KeyError, TypeError):
+                continue  # skip broken entries in a hand-edited file
+        if not self.listbox.get_children():
+            self._on_add_shell(None)
 
     # --- sessions ---------------------------------------------------------
+
+    @staticmethod
+    def _load_sessions():
+        try:
+            with open(SESSIONS_FILE) as f:
+                data = json.load(f)
+            return data if isinstance(data, list) else []
+        except (OSError, ValueError):
+            return []
+
+    def _save_sessions(self):
+        data = [{"label": r.title_text, "sub": r.sub_text,
+                 "argv": r.argv, "icon": r.icon_name}
+                for r in self.listbox.get_children()]
+        os.makedirs(os.path.dirname(SESSIONS_FILE), exist_ok=True)
+        with open(SESSIONS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
 
     def _add_session(self, label, argv, icon_name, sub=None):
         term = Vte.Terminal()
@@ -137,6 +165,10 @@ class Tabit(Gtk.Window):
         row.add(box)
         row.set_tooltip_text(" ".join(argv))
         row.session_label = f"{label} {sub}" if sub else label
+        row.title_text = label
+        row.sub_text = sub
+        row.argv = argv
+        row.icon_name = icon_name
         row.page = page
         row.term = term
         row.subtitle = subtitle
@@ -146,6 +178,7 @@ class Tabit(Gtk.Window):
         self.listbox.show_all()
         self.stack.show_all()
         self.listbox.select_row(row)
+        self._save_sessions()
 
         term.connect("child-exited", self._on_child_exited, row)
         term.connect("contents-changed", self._on_activity, row)
@@ -173,6 +206,7 @@ class Tabit(Gtk.Window):
         self.listbox.remove(row)
         self.stack.remove(row.page)
         row.page.destroy()  # destroys the pty, the child gets SIGHUP
+        self._save_sessions()
         rows = self.listbox.get_children()
         if not rows:
             Gtk.main_quit()

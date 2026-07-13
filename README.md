@@ -58,6 +58,10 @@ you keep the scrollback — press its `x` to really close it.
 Serial tabs run picocom, so its shortcuts apply inside the terminal:
 quit with `Ctrl-A Ctrl-X`. Closing the last tab quits tabit.
 
+Tabs are remembered: the next start restores the same set of sessions
+as fresh processes (serial consoles reconnect, shells start clean —
+scrollback is not kept). Stored in `~/.config/tabit/sessions.json`.
+
 ## Roadmap
 
 - File browser pane + text editing tabs
