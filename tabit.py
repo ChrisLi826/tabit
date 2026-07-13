@@ -2,11 +2,12 @@
 """tabit - terminal sessions as vertical tabs on the left.
 
 Each tab is a real terminal (VTE, the same engine xfce4-terminal uses):
-a local shell, a serial console (picocom), or any command you give it.
-Click a tab to switch, press its x to close, use the + buttons to add.
-When a session's process ends the tab stays (greyed) so the scrollback
-is not lost; only the x really closes it. The set of tabs is remembered
-and restored (fresh processes) on the next start.
+a local shell, a serial console (screen.sh / kermit / picocom), or any
+command you give it. Click a tab to switch, press its x to close, use
+the + buttons to add. When a session's process ends the tab stays
+(greyed) so the scrollback is not lost; only the x really closes it.
+The set of tabs is remembered and restored (fresh processes) on the
+next start.
 
 Shortcuts: Ctrl+Shift+T new shell, Ctrl+Shift+S new serial,
 Ctrl+PageUp/PageDown previous/next session,
@@ -28,6 +29,9 @@ from gi.repository import Gdk, GLib, Gtk, Pango, Vte
 
 SIDEBAR_WIDTH = 200
 DEFAULT_BAUD = "115200"
+# serial backends shown in the +Serial dialog (first = default)
+SERIAL_BACKENDS = ("screen.sh", "kermit", "picocom")
+KERMRC = os.path.expanduser("~/senaoenv/kermrc")
 SESSIONS_FILE = os.path.join(GLib.get_user_config_dir(), "tabit",
                              "sessions.json")
 TERM_FG = "#d5d5df"
@@ -227,6 +231,17 @@ class Tabit(Gtk.Window):
         self._add_session("shell", [os.environ.get("SHELL", "/bin/bash")],
                           "utilities-terminal-symbolic")
 
+    @staticmethod
+    def _serial_argv(backend, dev, rate):
+        if backend == "screen.sh":
+            return ["screen.sh", dev, rate]
+        if backend == "kermit":
+            argv = ["kermit", "-l", dev, "-b", rate]
+            if os.path.isfile(KERMRC):
+                argv += ["-y", KERMRC]
+            return argv + ["-c", "-E"]
+        return ["picocom", "-b", rate, dev]
+
     def _on_add_serial(self, _btn):
         dialog = Gtk.Dialog(title="New serial session", transient_for=self,
                             modal=True)
@@ -240,19 +255,27 @@ class Tabit(Gtk.Window):
         combo.set_active(0)
         baud = Gtk.Entry(text=DEFAULT_BAUD)
         baud.set_activates_default(True)
+        backend = Gtk.ComboBoxText()
+        for name in SERIAL_BACKENDS:
+            backend.append_text(name)
+        backend.set_active(0)  # screen.sh
         grid.attach(Gtk.Label(label="Device", xalign=0), 0, 0, 1, 1)
         grid.attach(combo, 1, 0, 1, 1)
         grid.attach(Gtk.Label(label="Baud", xalign=0), 0, 1, 1, 1)
         grid.attach(baud, 1, 1, 1, 1)
+        grid.attach(Gtk.Label(label="Tool", xalign=0), 0, 2, 1, 1)
+        grid.attach(backend, 1, 2, 1, 1)
         dialog.get_content_area().add(grid)
         dialog.show_all()
         if dialog.run() == Gtk.ResponseType.OK:
             dev = (combo.get_active_text() or "").strip()
             rate = baud.get_text().strip() or DEFAULT_BAUD
+            tool = backend.get_active_text() or SERIAL_BACKENDS[0]
             if dev:
                 self._add_session(os.path.basename(dev),
-                                  ["picocom", "-b", rate, dev],
-                                  "network-wired-symbolic", sub=f"@{rate}")
+                                  self._serial_argv(tool, dev, rate),
+                                  "network-wired-symbolic",
+                                  sub=f"{tool} @{rate}")
         dialog.destroy()
 
     def _on_add_command(self, _btn):

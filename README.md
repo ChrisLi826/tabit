@@ -41,7 +41,7 @@ To remove: `./install.sh --uninstall`
 
 | Action | Result |
 |---|---|
-| `+ Serial` | Pick a `/dev/ttyUSB*` / `/dev/ttyACM*` device and baud (default 115200), opens picocom |
+| `+ Serial` | Pick device, baud (default 115200), and tool: `screen.sh` / `kermit` / `picocom` |
 | `+ Shell` | New tab running your login shell |
 | `+ Command` | Run anything (e.g. `ssh root@192.168.1.1`) in a new tab |
 | Click a tab | Switch to that session |
@@ -55,8 +55,9 @@ looking elsewhere. When a session's process ends (device unplugged,
 `exit`, picocom quit) the tab stays, greyed and marked `exited`, so
 you keep the scrollback — press its `x` to really close it.
 
-Serial tabs run picocom, so its shortcuts apply inside the terminal:
-quit with `Ctrl-A Ctrl-X`. Closing the last tab quits tabit.
+Serial tool defaults to `screen.sh` (multi-attach + logfile). `kermit`
+uses `~/senaoenv/kermrc` when present (`-c -E`). `picocom` quit is
+`Ctrl-A Ctrl-X`. Closing the last tab quits tabit.
 
 Tabs are remembered: the next start restores the same set of sessions
 as fresh processes (serial consoles reconnect, shells start clean —
