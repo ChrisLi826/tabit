@@ -130,10 +130,10 @@ class Tabit(Gtk.Window):
         term.set_colors(fg, bg, [])
         term.connect("key-press-event", self._on_term_key)
 
-        page = Gtk.ScrolledWindow()
-        page.add(term)
+        # VTE scrolls itself; a ScrolledWindow around it draws a spurious
+        # dashed bar at the bottom (horizontal scrollbar chrome).
         self._counter += 1
-        self.stack.add_named(page, f"session-{self._counter}")
+        self.stack.add_named(term, f"session-{self._counter}")
 
         row = Gtk.ListBoxRow()
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -169,7 +169,7 @@ class Tabit(Gtk.Window):
         row.sub_text = sub
         row.argv = argv
         row.icon_name = icon_name
-        row.page = page
+        row.page = term  # stack child (was a ScrolledWindow wrapper)
         row.term = term
         row.subtitle = subtitle
         row.dot = dot
