@@ -303,6 +303,9 @@ class Tabit(Gtk.Window):
         # do not steal focus from an in-place rename entry
         if getattr(row, "_renaming", False):
             return
+        if any(getattr(r, "_renaming", False)
+               for r in self.listbox.get_children()):
+            return
         if not row.term.has_focus():
             row.term.grab_focus()
 
@@ -313,7 +316,9 @@ class Tabit(Gtk.Window):
         # left double-click only (not Enter / row-activated)
         if event.button == 1 and event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS:
             listbox.select_row(row)
-            self._rename_session(row)
+            # defer past the release that ends the double-click, or the
+            # new entry gets focus-out immediately and rename aborts
+            GLib.idle_add(self._rename_session, row)
             return True
         # right-click → Rename menu
         if event.button == 3 and event.type == Gdk.EventType.BUTTON_PRESS:
@@ -331,7 +336,7 @@ class Tabit(Gtk.Window):
         """Edit the tab title in place (no dialog)."""
         row = row or self.listbox.get_selected_row()
         if row is None or getattr(row, "_renaming", False):
-            return
+            return False  # False: stop idle_add if used as callback
         self.listbox.select_row(row)
         row._renaming = True
         title = row.title_label
@@ -344,16 +349,20 @@ class Tabit(Gtk.Window):
         titles.reorder_child(entry, 0)
         title.hide()
         entry.show()
-        entry.grab_focus()
-        entry.select_region(0, -1)
 
         finished = False
+        focus_out_id = [0]
+        # ignore focus-out until double-click release / layout settles
+        armed = [False]
 
         def finish(commit):
             nonlocal finished
             if finished:
                 return
             finished = True
+            if focus_out_id[0]:
+                entry.disconnect(focus_out_id[0])
+                focus_out_id[0] = 0
             name = entry.get_text().strip()
             if commit and name:
                 row.title_text = name
@@ -380,12 +389,21 @@ class Tabit(Gtk.Window):
             return False
 
         def on_focus_out(_entry, _event):
-            # click away or tab switch commits the name
-            finish(True)
+            if armed[0]:
+                finish(True)
+            return False
+
+        def arm_and_focus():
+            entry.grab_focus()
+            entry.select_region(0, -1)
+            armed[0] = True
+            focus_out_id[0] = entry.connect("focus-out-event", on_focus_out)
             return False
 
         entry.connect("key-press-event", on_key)
-        entry.connect("focus-out-event", on_focus_out)
+        # ~1 frame is not enough after double-click; wait for release to pass
+        GLib.timeout_add(50, arm_and_focus)
+        return False
 
     # --- add buttons --------------------------------------------------------
 
