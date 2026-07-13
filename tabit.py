@@ -100,8 +100,7 @@ class Tabit(Gtk.Window):
         # sort by row._order so reorder is a swap, not remove/insert
         self.listbox.set_sort_func(lambda a, b, _d: a._order - b._order, None)
         self.listbox.connect("row-selected", self._on_row_selected)
-        # double-click / right-click only (not Enter via row-activated)
-        self.listbox.connect("button-press-event", self._on_list_button)
+        self._rename_entry = None  # active inline rename Entry, if any
 
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         sidebar.get_style_context().add_class("sidebar")
@@ -224,6 +223,9 @@ class Tabit(Gtk.Window):
         row.subtitle = subtitle
         row.dot = dot
         row.dead = False
+        # double-click / right-click on the row itself (listbox may not see them)
+        row.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        row.connect("button-press-event", self._on_row_button)
         # insert under the current tab (not always at the end)
         selected = self.listbox.get_selected_row()
         if selected is not None:
@@ -297,32 +299,25 @@ class Tabit(Gtk.Window):
     def _on_row_selected(self, _listbox, row):
         if row is None:
             return
+        # switching tab while renaming another: commit first
+        if (self._rename_entry is not None and
+                getattr(self._rename_entry, "_row", None) is not row):
+            self._rename_finish(True)
         row.dot.hide()
         self.stack.set_visible_child(row.page)
         self.set_title(f"{row.session_label} — tabit")
-        # do not steal focus from an in-place rename entry
-        if getattr(row, "_renaming", False):
-            return
-        if any(getattr(r, "_renaming", False)
-               for r in self.listbox.get_children()):
+        if self._rename_entry is not None:
             return
         if not row.term.has_focus():
             row.term.grab_focus()
 
-    def _on_list_button(self, listbox, event):
-        row = listbox.get_row_at_y(int(event.y))
-        if row is None:
-            return False
-        # left double-click only (not Enter / row-activated)
+    def _on_row_button(self, row, event):
         if event.button == 1 and event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS:
-            listbox.select_row(row)
-            # defer past the release that ends the double-click, or the
-            # new entry gets focus-out immediately and rename aborts
-            GLib.idle_add(self._rename_session, row)
+            self.listbox.select_row(row)
+            self._rename_session(row)
             return True
-        # right-click → Rename menu
         if event.button == 3 and event.type == Gdk.EventType.BUTTON_PRESS:
-            listbox.select_row(row)
+            self.listbox.select_row(row)
             menu = Gtk.Menu()
             item = Gtk.MenuItem(label="Rename")
             item.connect("activate", lambda *_: self._rename_session(row))
@@ -332,12 +327,43 @@ class Tabit(Gtk.Window):
             return True
         return False
 
+    def _rename_finish(self, commit):
+        entry = self._rename_entry
+        if entry is None:
+            return
+        row = entry._row
+        title = row.title_label
+        titles = title.get_parent()
+        if Gtk.grab_get_current() is entry:
+            Gtk.grab_remove(entry)
+        name = entry.get_text().strip()
+        if commit and name:
+            row.title_text = name
+            title.set_text(name)
+            row.session_label = (f"{name} {row.sub_text}"
+                                 if row.sub_text else name)
+            if self.listbox.get_selected_row() is row:
+                self.set_title(f"{row.session_label} — tabit")
+            self._save_sessions()
+        if entry.get_parent() is titles:
+            titles.remove(entry)
+        title.show()
+        row._renaming = False
+        self._rename_entry = None
+        if self.listbox.get_selected_row() is row:
+            row.term.grab_focus()
+
     def _rename_session(self, row=None):
         """Edit the tab title in place (no dialog)."""
         row = row or self.listbox.get_selected_row()
-        if row is None or getattr(row, "_renaming", False):
-            return False  # False: stop idle_add if used as callback
-        self.listbox.select_row(row)
+        if row is None:
+            return
+        if self._rename_entry is not None:
+            if self._rename_entry._row is row:
+                return
+            self._rename_finish(True)
+        if self.listbox.get_selected_row() is not row:
+            self.listbox.select_row(row)
         row._renaming = True
         title = row.title_label
         titles = title.get_parent()
@@ -345,65 +371,45 @@ class Tabit(Gtk.Window):
         entry.set_has_frame(False)
         entry.set_hexpand(True)
         entry.set_width_chars(8)
+        entry._row = row
+        self._rename_entry = entry
         titles.pack_start(entry, False, False, 0)
         titles.reorder_child(entry, 0)
         title.hide()
         entry.show()
 
-        finished = False
-        focus_out_id = [0]
-        # ignore focus-out until double-click release / layout settles
-        armed = [False]
-
-        def finish(commit):
-            nonlocal finished
-            if finished:
-                return
-            finished = True
-            if focus_out_id[0]:
-                entry.disconnect(focus_out_id[0])
-                focus_out_id[0] = 0
-            name = entry.get_text().strip()
-            if commit and name:
-                row.title_text = name
-                title.set_text(name)
-                row.session_label = (f"{name} {row.sub_text}"
-                                     if row.sub_text else name)
-                if self.listbox.get_selected_row() is row:
-                    self.set_title(f"{row.session_label} — tabit")
-                self._save_sessions()
-            titles.remove(entry)
-            title.show()
-            row._renaming = False
-            if self.listbox.get_selected_row() is row:
-                row.term.grab_focus()
-
         def on_key(_entry, event):
             name = (Gdk.keyval_name(event.keyval) or "").lower()
             if name in ("return", "kp_enter"):
-                finish(True)
+                self._rename_finish(True)
                 return True
             if name == "escape":
-                finish(False)
+                self._rename_finish(False)
                 return True
             return False
 
         def on_focus_out(_entry, _event):
-            if armed[0]:
-                finish(True)
-            return False
-
-        def arm_and_focus():
-            entry.grab_focus()
-            entry.select_region(0, -1)
-            armed[0] = True
-            focus_out_id[0] = entry.connect("focus-out-event", on_focus_out)
+            # only after grab is released (see below)
+            if Gtk.grab_get_current() is entry:
+                return False
+            self._rename_finish(True)
             return False
 
         entry.connect("key-press-event", on_key)
-        # ~1 frame is not enough after double-click; wait for release to pass
-        GLib.timeout_add(50, arm_and_focus)
-        return False
+        entry.connect("focus-out-event", on_focus_out)
+        # Hold a short grab so the double-click mouse-up cannot steal focus
+        # and abort rename. Then release and rely on focus-out / Enter / Esc.
+        Gtk.grab_add(entry)
+        entry.grab_focus()
+        entry.select_region(0, -1)
+
+        def release_grab():
+            if self._rename_entry is entry and Gtk.grab_get_current() is entry:
+                Gtk.grab_remove(entry)
+                entry.grab_focus()
+            return False
+
+        GLib.timeout_add(200, release_grab)
 
     # --- add buttons --------------------------------------------------------
 
