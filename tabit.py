@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tabdesk - vertical window tabs and pinned files on the left screen edge.
+"""tabit - vertical window tabs and pinned files on the left screen edge.
 
 Works on any X11 window manager that follows EWMH (XFCE, GNOME, KDE, MATE...).
 Left-click a tab to focus or minimize it, middle-click to close it.
@@ -22,7 +22,7 @@ gi.require_version("Wnck", "3.0")
 from gi.repository import Gdk, GdkX11, Gio, GLib, Gtk, Pango, Wnck
 
 WIDTH = 220
-CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "tabdesk")
+CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "tabit")
 PINS_FILE = os.path.join(CONFIG_DIR, "pins.json")
 
 CSS = b"""
@@ -219,7 +219,7 @@ class Tabdesk(Gtk.Window):
         try:
             Gio.AppInfo.launch_default_for_uri(gfile.get_uri(), None)
         except GLib.Error as e:
-            print(f"tabdesk: cannot open {gfile.get_path()}: {e.message}",
+            print(f"tabit: cannot open {gfile.get_path()}: {e.message}",
                   file=sys.stderr)
 
     def _on_pin_press(self, _btn, event, path):
@@ -258,7 +258,7 @@ class Tabdesk(Gtk.Window):
     def _on_bg_press(self, _widget, event):
         if event.button == 3:
             menu = Gtk.Menu()
-            item = Gtk.MenuItem(label="Quit tabdesk")
+            item = Gtk.MenuItem(label="Quit tabit")
             item.connect("activate", lambda *_: Gtk.main_quit())
             menu.append(item)
             menu.show_all()
@@ -269,18 +269,18 @@ class Tabdesk(Gtk.Window):
 
 def main():
     signal.signal(signal.SIGINT, signal.SIG_DFL)
-    GLib.set_prgname("tabdesk")
+    GLib.set_prgname("tabit")
 
     display = Gdk.Display.get_default()
     if display is None or not isinstance(display, GdkX11.X11Display):
-        sys.exit("tabdesk needs an X11 session (Wayland is not supported)")
+        sys.exit("tabit needs an X11 session (Wayland is not supported)")
 
     # one instance is enough; the lock dies with the process
-    lock = open(os.path.join(GLib.get_user_runtime_dir(), "tabdesk.lock"), "w")
+    lock = open(os.path.join(GLib.get_user_runtime_dir(), "tabit.lock"), "w")
     try:
         fcntl.lockf(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        sys.exit("tabdesk is already running")
+        sys.exit("tabit is already running")
 
     provider = Gtk.CssProvider()
     provider.load_from_data(CSS)

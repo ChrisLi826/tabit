@@ -1,4 +1,4 @@
-# tabdesk
+# tabit
 
 Vertical window tabs on the left edge of your screen — like browser tabs,
 but for your whole desktop. Plus pinned files you can open with one click.
@@ -28,10 +28,10 @@ from the Ubuntu archive.
 ## Install
 
 ```sh
-git clone https://github.com/ChrisLi826/tabdesk.git
-cd tabdesk
+git clone https://github.com/ChrisLi826/tabit.git
+cd tabit
 ./install.sh      # installs deps via apt, copies to ~/.local/bin, autostarts on login
-~/.local/bin/tabdesk &
+~/.local/bin/tabit &
 ```
 
 To remove: `./install.sh --uninstall`
@@ -45,9 +45,9 @@ To remove: `./install.sh --uninstall`
 | Drag a file onto the sidebar | Pin it |
 | Left-click a pin | Open it with the default app |
 | Right-click a pin | Unpin it |
-| Right-click empty space | Quit tabdesk |
+| Right-click empty space | Quit tabit |
 
-Pins are stored in `~/.config/tabdesk/pins.json` (plain JSON, edit freely).
+Pins are stored in `~/.config/tabit/pins.json` (plain JSON, edit freely).
 
 ## How it works
 
