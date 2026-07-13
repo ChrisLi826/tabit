@@ -26,14 +26,19 @@ CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "tabit")
 PINS_FILE = os.path.join(CONFIG_DIR, "pins.json")
 
 CSS = b"""
-window { background-color: #15151c; }
+window { background-color: #15151c; border-right: 1px solid #2c2c38; }
 button { background: transparent; border: none; border-radius: 6px;
-         padding: 5px 6px; color: #d5d5df; }
-button:hover { background: rgba(255,255,255,0.09); }
-button.active { background: rgba(122,162,247,0.25); }
-button.minimized label { opacity: 0.45; font-style: italic; }
-.section { color: #63636f; font-size: 8pt; letter-spacing: 2px;
-           padding: 4px 8px 2px 8px; }
+         border-left: 3px solid transparent;
+         padding: 4px 8px 4px 5px; color: #d5d5df; outline-width: 0; }
+button:hover { background: rgba(255,255,255,0.11); }
+button:active { background: rgba(255,255,255,0.16); }
+button.active { background: rgba(122,162,247,0.18);
+                border-left-color: #7aa2f7;
+                color: #ececf4; font-weight: 600; }
+button.active:hover { background: rgba(122,162,247,0.30); }
+button.minimized { opacity: 0.48; }
+.section { color: #7a7a88; font-size: 8pt; font-weight: 600;
+           letter-spacing: 1.5px; padding: 12px 8px 3px 8px; }
 """
 
 
