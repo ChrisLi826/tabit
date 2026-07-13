@@ -78,6 +78,8 @@ CSS = b"""
 .adder button:hover { color: #ececf4; background: rgba(255,255,255,0.11); }
 .section { color: #7a7a88; font-size: 8pt; font-weight: 600;
            padding: 12px 8px 3px 8px; }
+/* EventBox on each tab must have a window to receive double/right-click */
+.sidebar eventbox { background-color: transparent; }
 """
 
 
@@ -97,12 +99,6 @@ class Tabit(Gtk.Window):
         # sort by row._order so reorder is a swap, not remove/insert
         self.listbox.set_sort_func(lambda a, b, _d: a._order - b._order, None)
         self.listbox.connect("row-selected", self._on_row_selected)
-        # Capture phase so clicks on row children still reach us
-        click = Gtk.GestureMultiPress.new(self.listbox)
-        click.set_button(0)  # all buttons
-        click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-        click.connect("pressed", self._on_list_pressed)
-        self._list_click = click  # keep ref
 
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         sidebar.get_style_context().add_class("sidebar")
@@ -186,6 +182,11 @@ class Tabit(Gtk.Window):
         self.stack.add_named(term, f"session-{self._counter}")
 
         row = Gtk.ListBoxRow()
+        # EventBox with its own GdkWindow: clicks on Labels land here.
+        # above_child=False → close button still receives its own clicks.
+        hit = Gtk.EventBox()
+        hit.set_visible_window(True)
+        hit.set_above_child(False)
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         box.pack_start(Gtk.Image.new_from_icon_name(icon_name,
                                                     Gtk.IconSize.MENU),
@@ -212,7 +213,9 @@ class Tabit(Gtk.Window):
         close.get_style_context().add_class("close")
         close.connect("clicked", lambda *_: self._close_session(row))
         box.pack_start(close, False, False, 0)
-        row.add(box)
+        hit.add(box)
+        hit.connect("button-press-event", self._on_tab_button, row)
+        row.add(hit)
         row.set_tooltip_text(" ".join(argv))
         row.session_label = f"{label} {sub}" if sub else label
         row.title_text = label
@@ -304,35 +307,29 @@ class Tabit(Gtk.Window):
         if not row.term.has_focus():
             row.term.grab_focus()
 
-    def _on_list_pressed(self, gesture, n_press, x, y):
-        """Double-click or right-click a tab → rename dialog."""
-        row = self.listbox.get_row_at_y(int(y))
-        if row is None:
-            return
-        # ignore clicks on the close button (right side of the row)
-        close = row.get_child().get_children()[-1]
-        ok, cx, cy = close.translate_coordinates(self.listbox, 0, 0)
-        if ok and cx <= x < cx + close.get_allocated_width():
-            return
-        button = gesture.get_current_button()
-        if button == 1 and n_press == 2:
+    def _on_tab_button(self, _hit, event, row):
+        """EventBox on each tab: double-click / right-click → rename."""
+        if event.button == 1 and event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS:
             self.listbox.select_row(row)
-            self._rename_session(row)
-        elif button == 3 and n_press == 1:
+            # defer so ListBox finishes its own click handling first
+            GLib.idle_add(self._rename_session, row)
+            return True
+        if event.button == 3 and event.type == Gdk.EventType.BUTTON_PRESS:
             self.listbox.select_row(row)
             menu = Gtk.Menu()
             item = Gtk.MenuItem(label="Rename…")
             item.connect("activate", lambda *_: self._rename_session(row))
             menu.append(item)
             menu.show_all()
-            # popup at pointer; fall back to widget if no event
-            menu.popup_at_pointer(None)
+            menu.popup_at_pointer(event)
+            return True
+        return False
 
     def _rename_session(self, row=None):
         """Rename via a small dialog."""
         row = row or self.listbox.get_selected_row()
         if row is None:
-            return
+            return False
         dialog = Gtk.Dialog(title="Rename session", transient_for=self,
                             modal=True)
         dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
@@ -356,6 +353,7 @@ class Tabit(Gtk.Window):
         dialog.destroy()
         if self.listbox.get_selected_row() is row:
             row.term.grab_focus()
+        return False  # for idle_add
 
     # --- add buttons --------------------------------------------------------
 
