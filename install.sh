@@ -22,5 +22,5 @@ Comment=Vertical window tabs on the left screen edge
 Exec=$HOME/.local/bin/tabdesk
 EOF
 
-echo "tabdesk installed. Start it now with: tabdesk &"
+echo "tabdesk installed. Start it now with: ~/.local/bin/tabdesk &"
 echo "It will also start automatically on next login."

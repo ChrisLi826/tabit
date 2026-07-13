@@ -79,6 +79,7 @@ class Tabdesk(Gtk.Window):
         self.connect("map-event", self._on_map)
         self.connect("destroy", Gtk.main_quit)
 
+        self._pending = False
         self.wnck = Wnck.Screen.get_default()
         self.wnck.force_update()
         for sig in ("window-opened", "window-closed",
@@ -88,7 +89,6 @@ class Tabdesk(Gtk.Window):
         for w in self.wnck.get_windows():
             self._hook(w)
 
-        self._pending = False
         self._refresh_pins()
         self._refresh_windows()
 

@@ -31,7 +31,7 @@ from the Ubuntu archive.
 git clone https://github.com/ChrisLi826/tabdesk.git
 cd tabdesk
 ./install.sh      # installs deps via apt, copies to ~/.local/bin, autostarts on login
-tabdesk &
+~/.local/bin/tabdesk &
 ```
 
 To remove: `./install.sh --uninstall`
