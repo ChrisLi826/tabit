@@ -48,7 +48,7 @@ CSS = b"""
 .adder button { padding: 4px 8px; font-size: 9pt; color: #9a9aa8; }
 .adder button:hover { color: #ececf4; background: rgba(255,255,255,0.11); }
 .section { color: #7a7a88; font-size: 8pt; font-weight: 600;
-           letter-spacing: 1.5px; padding: 12px 8px 3px 8px; }
+           padding: 12px 8px 3px 8px; }
 """
 
 
@@ -169,14 +169,15 @@ class Tabit(Gtk.Window):
     def _close_session(self, row):
         if row.get_parent() is None:
             return
+        was_selected = self.listbox.get_selected_row() is row
         self.listbox.remove(row)
         self.stack.remove(row.page)
         row.page.destroy()  # destroys the pty, the child gets SIGHUP
         rows = self.listbox.get_children()
-        if rows:
-            self.listbox.select_row(rows[-1])
-        else:
+        if not rows:
             Gtk.main_quit()
+        elif was_selected:
+            self.listbox.select_row(rows[-1])
 
     def _on_row_selected(self, _listbox, row):
         if row is None:
@@ -245,7 +246,7 @@ class Tabit(Gtk.Window):
     def _on_window_key(self, _window, event):
         ctrl = bool(event.state & Gdk.ModifierType.CONTROL_MASK)
         shift = bool(event.state & Gdk.ModifierType.SHIFT_MASK)
-        name = Gdk.keyval_name(event.keyval).lower()
+        name = (Gdk.keyval_name(event.keyval) or "").lower()
         if ctrl and shift and name == "t":
             self._on_add_shell(None)
             return True
@@ -264,7 +265,7 @@ class Tabit(Gtk.Window):
     def _on_term_key(self, term, event):
         mask = Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK
         if event.state & mask == mask:
-            name = Gdk.keyval_name(event.keyval).lower()
+            name = (Gdk.keyval_name(event.keyval) or "").lower()
             if name == "c":
                 term.copy_clipboard_format(Vte.Format.TEXT)
                 return True
