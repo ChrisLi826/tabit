@@ -47,6 +47,7 @@ To remove: `./install.sh --uninstall`
 | Click a tab | Switch to that session |
 | `x` on a tab (shown on hover) | Close that session |
 | `Ctrl+Shift+S` / `Ctrl+Shift+T` | New serial / new shell (inserted under the current tab) |
+| `Ctrl+Shift+W` | Close current session |
 | `Ctrl+PageUp` / `Ctrl+PageDown` | Previous / next session |
 | `Ctrl+Shift+PageUp` / `Ctrl+Shift+PageDown` | Move current tab up / down |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |

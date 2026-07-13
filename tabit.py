@@ -41,6 +41,7 @@ TERM_BG = "#101016"
 KEY_ACTIONS = (
     ("new_shell", "New shell", "<Primary><Shift>t"),
     ("new_serial", "New serial", "<Primary><Shift>s"),
+    ("close_session", "Close session", "<Primary><Shift>w"),
     ("prev_session", "Previous session", "<Primary>Page_Up"),
     ("next_session", "Next session", "<Primary>Page_Down"),
     ("move_tab_up", "Move tab up", "<Primary><Shift>Page_Up"),
@@ -424,6 +425,10 @@ class Tabit(Gtk.Window):
             self._on_add_shell(None)
         elif action == "new_serial":
             self._on_add_serial(None)
+        elif action == "close_session":
+            row = self.listbox.get_selected_row()
+            if row is not None:
+                self._close_session(row)
         elif action == "move_tab_up":
             self._move_session(-1)
         elif action == "move_tab_down":
