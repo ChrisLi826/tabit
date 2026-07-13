@@ -67,6 +67,7 @@ class Tabit(Gtk.Window):
         self.connect("destroy", Gtk.main_quit)
         self.connect("key-press-event", self._on_window_key)
         self._counter = 0
+        self._moving = False  # suppress row-selected while reordering tabs
 
         self.stack = Gtk.Stack()
         self.listbox = Gtk.ListBox()
@@ -205,10 +206,17 @@ class Tabit(Gtk.Window):
         j = i + delta
         if j < 0 or j >= len(rows):
             return
-        self.listbox.remove(row)
-        self.listbox.insert(row, j)
-        self.listbox.select_row(row)
-        row.show_all()
+        # remove/insert briefly changes selection; without this flag,
+        # row-selected grabs focus and switches the stack each step, so
+        # key-repeat (hold Ctrl+Shift+PgUp/Dn) feels broken.
+        self._moving = True
+        try:
+            self.listbox.remove(row)
+            self.listbox.insert(row, j)
+            self.listbox.select_row(row)
+            row.show_all()
+        finally:
+            self._moving = False
         self._save_sessions()
 
     def _on_child_exited(self, _term, _status, row):
@@ -239,12 +247,13 @@ class Tabit(Gtk.Window):
             self.listbox.select_row(rows[-1])
 
     def _on_row_selected(self, _listbox, row):
-        if row is None:
+        if row is None or self._moving:
             return
         row.dot.hide()
         self.stack.set_visible_child(row.page)
         self.set_title(f"{row.session_label} — tabit")
-        row.term.grab_focus()
+        if not row.term.has_focus():
+            row.term.grab_focus()
 
     # --- add buttons --------------------------------------------------------
 
@@ -326,6 +335,9 @@ class Tabit(Gtk.Window):
         ctrl = bool(event.state & Gdk.ModifierType.CONTROL_MASK)
         shift = bool(event.state & Gdk.ModifierType.SHIFT_MASK)
         name = (Gdk.keyval_name(event.keyval) or "").lower()
+        # keypad Page_Up arrives as kp_page_up
+        if name.startswith("kp_"):
+            name = name[3:]
         if ctrl and shift and name == "t":
             self._on_add_shell(None)
             return True
