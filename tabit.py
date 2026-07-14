@@ -326,21 +326,30 @@ class Tabit(Gtk.Window):
         return False
 
     def _rename_session(self, row=None):
-        """Rename via a small dialog."""
+        """Rename in a popover bubble anchored to the right of the tab."""
         row = row or self.listbox.get_selected_row()
         if row is None:
             return False
-        dialog = Gtk.Dialog(title="Rename session", transient_for=self,
-                            modal=True)
-        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
-                           "Rename", Gtk.ResponseType.OK)
-        dialog.set_default_response(Gtk.ResponseType.OK)
-        entry = Gtk.Entry(text=row.title_text, margin=12, width_chars=28)
-        entry.set_activates_default(True)
-        entry.select_region(0, -1)
-        dialog.get_content_area().add(entry)
-        dialog.show_all()
-        if dialog.run() == Gtk.ResponseType.OK:
+        # one popover at a time
+        old = getattr(self, "_rename_pop", None)
+        if old is not None:
+            old.popdown()
+
+        pop = Gtk.Popover.new(row)
+        pop.set_position(Gtk.PositionType.RIGHT)
+        pop.set_modal(True)
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                      margin=8)
+        entry = Gtk.Entry(text=row.title_text, width_chars=18)
+        ok = Gtk.Button(label="OK")
+        ok.get_style_context().add_class("suggested-action")
+        box.pack_start(entry, True, True, 0)
+        box.pack_start(ok, False, False, 0)
+        pop.add(box)
+        box.show_all()
+        self._rename_pop = pop
+
+        def apply(*_a):
             name = entry.get_text().strip()
             if name:
                 row.title_text = name
@@ -350,9 +359,30 @@ class Tabit(Gtk.Window):
                 if self.listbox.get_selected_row() is row:
                     self.set_title(f"{row.session_label} — tabit")
                 self._save_sessions()
-        dialog.destroy()
-        if self.listbox.get_selected_row() is row:
-            row.term.grab_focus()
+            pop.popdown()
+
+        def on_key(_w, event):
+            name = (Gdk.keyval_name(event.keyval) or "").lower()
+            if name in ("return", "kp_enter"):
+                apply()
+                return True
+            if name == "escape":
+                pop.popdown()
+                return True
+            return False
+
+        def on_closed(*_a):
+            self._rename_pop = None
+            if self.listbox.get_selected_row() is row:
+                row.term.grab_focus()
+
+        entry.connect("activate", apply)
+        entry.connect("key-press-event", on_key)
+        ok.connect("clicked", apply)
+        pop.connect("closed", on_closed)
+        pop.popup()
+        entry.grab_focus()
+        entry.select_region(0, -1)
         return False  # for idle_add
 
     # --- add buttons --------------------------------------------------------
