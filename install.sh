@@ -13,7 +13,13 @@ if [ "$1" = "--uninstall" ]; then
 fi
 
 sudo apt-get install -y python3-gi gir1.2-gtk-3.0 gir1.2-vte-2.91 \
-    gir1.2-gtksource-4 gir1.2-webkit2-4.0 python3-markdown picocom
+    gir1.2-gtksource-4 python3-markdown picocom
+
+# WebKit for the note Markdown preview: 4.0 on older Ubuntu, 4.1 on 24.04+.
+# Optional - if neither is available the app just runs without the preview.
+sudo apt-get install -y gir1.2-webkit2-4.0 \
+    || sudo apt-get install -y gir1.2-webkit2-4.1 \
+    || echo "WebKit not found; note Markdown preview will be disabled"
 
 mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications" \
          "$HOME/.local/share/icons/hicolor/scalable/apps"

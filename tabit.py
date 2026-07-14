@@ -32,13 +32,18 @@ gi.require_version("GtkSource", "4")
 gi.require_version("Vte", "2.91")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, GtkSource, Pango, Vte
 
-try:
-    gi.require_version("WebKit2", "4.0")
-    from gi.repository import WebKit2
-    HAS_WEBKIT = True
-except (ValueError, ImportError):
-    WebKit2 = None
-    HAS_WEBKIT = False
+# WebKit2 4.0 (libsoup2, older Ubuntu) or 4.1 (libsoup3, 24.04+); same API
+# for what we use. Optional: without it the note Markdown preview is off.
+WebKit2 = None
+HAS_WEBKIT = False
+for _wk in ("4.0", "4.1"):
+    try:
+        gi.require_version("WebKit2", _wk)
+        from gi.repository import WebKit2
+        HAS_WEBKIT = True
+        break
+    except (ValueError, ImportError):
+        continue
 
 try:
     import markdown as markdown_lib
