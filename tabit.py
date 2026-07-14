@@ -24,11 +24,32 @@ import sys
 import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
+gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Vte", "2.91")
-from gi.repository import Gdk, GLib, Gtk, Pango, Vte
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango, Vte
 
 SIDEBAR_WIDTH = 200
 DEFAULT_BAUD = "115200"
+# custom sidebar icon for +AI tabs (stored as icon_name in sessions.json)
+ICON_AI = "tabit-ai"
+# 16×16 symbolic-style neural net + sparkle (accent matches activity blue)
+AI_ICON_SVG = b"""<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <g fill="none" stroke="#7aa2f7" stroke-width="1.2" stroke-linecap="round">
+    <line x1="8" y1="7.2" x2="4.2" y2="4.2"/>
+    <line x1="8" y1="7.2" x2="11.8" y2="4.2"/>
+    <line x1="8" y1="8.8" x2="4.2" y2="11.8"/>
+    <line x1="8" y1="8.8" x2="11.8" y2="11.8"/>
+  </g>
+  <circle cx="8" cy="8" r="2.1" fill="#7aa2f7"/>
+  <circle cx="3.6" cy="3.8" r="1.35" fill="#9ab4f0"/>
+  <circle cx="12.4" cy="3.8" r="1.35" fill="#9ab4f0"/>
+  <circle cx="3.6" cy="12.2" r="1.35" fill="#9ab4f0"/>
+  <circle cx="12.4" cy="12.2" r="1.35" fill="#9ab4f0"/>
+  <path fill="#a8c0ff"
+    d="M13.2 0.6l0.35 1.05 1.05 0.35-1.05 0.35-0.35 1.05-0.35-1.05-1.05-0.35 1.05-0.35z"/>
+</svg>
+"""
 # serial backends shown in the +Serial dialog (first = default)
 SERIAL_BACKENDS = ("screen.sh", "kermit", "picocom")
 # default AI CLI list for +AI (user-editable → ~/.config/tabit/ai_clis.json)
@@ -183,6 +204,21 @@ class Tabit(Gtk.Window):
         self._save_sessions()
         return False
 
+    @staticmethod
+    def _session_icon(icon_name):
+        if icon_name == ICON_AI:
+            try:
+                loader = GdkPixbuf.PixbufLoader.new_with_type("svg")
+                loader.set_size(16, 16)
+                loader.write(AI_ICON_SVG)
+                loader.close()
+                return Gtk.Image.new_from_pixbuf(loader.get_pixbuf())
+            except GLib.Error:
+                pass
+            return Gtk.Image.new_from_icon_name("applications-science-symbolic",
+                                                Gtk.IconSize.MENU)
+        return Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.MENU)
+
     def _add_session(self, label, argv, icon_name, sub=None):
         term = Vte.Terminal()
         term.set_scrollback_lines(10000)
@@ -204,9 +240,7 @@ class Tabit(Gtk.Window):
         hit.set_visible_window(True)
         hit.set_above_child(False)
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        box.pack_start(Gtk.Image.new_from_icon_name(icon_name,
-                                                    Gtk.IconSize.MENU),
-                       False, False, 0)
+        box.pack_start(self._session_icon(icon_name), False, False, 0)
         titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         title = Gtk.Label(label=label)
         title.set_ellipsize(Pango.EllipsizeMode.END)
@@ -902,8 +936,7 @@ class Tabit(Gtk.Window):
                     tries = list(DEFAULT_AI_TRY)
                 short = cwd if len(cwd) <= 28 else "…" + cwd[-27:]
                 self._add_session(tool, self._ai_argv(tool, cwd, tries),
-                                  "system-run-symbolic",
-                                  sub=short)
+                                  ICON_AI, sub=short)
                 self._save_ai_last(tool, cwd)
         dialog.destroy()
 
