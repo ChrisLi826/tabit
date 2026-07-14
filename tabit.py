@@ -260,6 +260,7 @@ TERM_FG = "#d5d5df"
 TERM_BG = "#101016"
 DEFAULT_SETTINGS = {
     "note_wrap": True,
+    "shell_inherit_cwd": False,  # new shell opens in the focused tab's path
 }
 
 # (action_id, label, default GTK accelerator string)
@@ -1480,9 +1481,25 @@ class Tabit(Gtk.Window):
 
     # --- add buttons --------------------------------------------------------
 
+    def _focused_cwd(self):
+        """Path of the currently selected tab: a terminal's live cwd, or a
+        saved note's folder. None if unknown."""
+        row = self.listbox.get_selected_row()
+        if row is None:
+            return None
+        if getattr(row, "kind", None) == "term":
+            return self._term_cwd(row)
+        if getattr(row, "file_path", None):
+            return os.path.dirname(row.file_path)
+        return None
+
     def _on_add_shell(self, _btn):
+        cwd = None
+        if self._load_settings().get("shell_inherit_cwd", False):
+            cwd = self._focused_cwd()
         self._add_session("shell", [os.environ.get("SHELL", "/bin/bash")],
-                          "utilities-terminal-symbolic", track_cwd=True)
+                          "utilities-terminal-symbolic", cwd=cwd,
+                          track_cwd=True)
 
     def _on_add_note(self, _btn):
         dialog = Gtk.Dialog(title="New note", transient_for=self, modal=True)
@@ -2371,16 +2388,29 @@ class Tabit(Gtk.Window):
         wrap.set_active(bool(s.get("note_wrap", True)))
         wrap.set_tooltip_text(
             "When off, very long lines may lag. Default is on.")
+
+        term_head = Gtk.Label(xalign=0)
+        term_head.set_markup("<b>Terminals</b>")
+        inherit = Gtk.CheckButton(
+            label="New shell opens in the current tab's path")
+        inherit.set_active(bool(s.get("shell_inherit_cwd", False)))
+        inherit.set_tooltip_text(
+            "Ctrl+Shift+T / + Shell starts in the focused tab's working "
+            "directory instead of home. Default is off.")
+
         hint = Gtk.Label(
             label="Stored in ~/.config/tabit/settings.json",
             xalign=0)
         hint.get_style_context().add_class("session-sub")
         box.pack_start(head, False, False, 0)
         box.pack_start(wrap, False, False, 0)
+        box.pack_start(term_head, False, False, 0)
+        box.pack_start(inherit, False, False, 0)
         box.pack_start(hint, False, False, 0)
         dialog.show_all()
         if dialog.run() == Gtk.ResponseType.OK:
-            self._save_settings({"note_wrap": wrap.get_active()})
+            self._save_settings({"note_wrap": wrap.get_active(),
+                                 "shell_inherit_cwd": inherit.get_active()})
             self._apply_note_wrap_setting(wrap.get_active())
         dialog.destroy()
 
