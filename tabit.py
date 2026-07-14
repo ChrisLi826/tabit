@@ -131,6 +131,7 @@ CSS = b"""
 .sidebar row:selected { background: rgba(122,162,247,0.18);
                         border-left-color: #7aa2f7; color: #ececf4; }
 .sidebar row.dead label { color: #6a6a78; }
+.sidebar row.drop-into { box-shadow: inset 0 0 0 2px #7aa2f7; }
 .sidebar row .close { opacity: 0; }
 .sidebar row:hover .close, .sidebar row:selected .close { opacity: 1; }
 .sidebar button { background: transparent; border: none; border-radius: 6px;
@@ -173,7 +174,7 @@ class Tabit(Gtk.Window):
 
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         sidebar.get_style_context().add_class("sidebar")
-        sidebar.set_size_request(SIDEBAR_WIDTH, -1)
+        sidebar.set_size_request(120, -1)  # min width; actual set by paned
         sidebar.pack_start(self._section("SESSIONS"), False, False, 0)
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -211,10 +212,12 @@ class Tabit(Gtk.Window):
             adders.pack_start(btn, False, False, 0)
         sidebar.pack_start(adders, False, False, 0)
 
-        root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        root.pack_start(sidebar, False, False, 0)
-        root.pack_start(self.stack, True, True, 0)
-        self.add(root)
+        self._paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        self._paned.pack1(sidebar, resize=False, shrink=False)
+        self._paned.pack2(self.stack, resize=True, shrink=True)
+        width = self._load_settings().get("sidebar_width", SIDEBAR_WIDTH)
+        self._paned.set_position(width)
+        self.add(self._paned)
 
         for s in self._load_sessions():
             try:
@@ -228,7 +231,8 @@ class Tabit(Gtk.Window):
                                            sub=s.get("sub"))
                 else:
                     self._add_session(s["label"], s["argv"], s["icon"],
-                                      s.get("sub"))
+                                      s.get("sub"), s.get("cwd"),
+                                      s.get("track_cwd", False))
             except (KeyError, TypeError, OSError):
                 continue  # skip broken entries in a hand-edited file
         if not self.listbox.get_children():
@@ -245,10 +249,58 @@ class Tabit(Gtk.Window):
         except (OSError, ValueError):
             return []
 
+    def _on_term_spawned(self, _term, pid, _error, row):
+        # keep the child pid so we can read its cwd on save
+        row.pid = pid if pid and pid > 0 else None
+        self._refresh_term_cwd(row)
+
+    def _refresh_term_cwd(self, row):
+        if row.dead or not getattr(row, "track_cwd", False):
+            return
+        cwd = self._term_cwd(row)
+        if not cwd:
+            return
+        home = GLib.get_home_dir()
+        if cwd == home:
+            shown = "~"
+        elif cwd.startswith(home + "/"):
+            shown = "~" + cwd[len(home):]
+        else:
+            shown = cwd
+        # long path: keep first level + "..." + last level
+        parts = shown.split("/")
+        if len(parts) > 3:
+            shown = "/".join(parts[:2] + ["..."] + parts[-1:])
+        if shown == row.sub_text:
+            return
+        row.sub_text = shown
+        row.subtitle.set_text(shown)
+        row.subtitle.set_no_show_all(False)
+        row.subtitle.show()
+        row.session_label = f"{row.title_text} {shown}"
+
+    @staticmethod
+    def _term_cwd(row):
+        pid = getattr(row, "pid", None)
+        if not pid:
+            return None
+        try:
+            return os.readlink("/proc/%d/cwd" % pid)
+        except OSError:
+            return None
+
     def _save_sessions(self):
-        data = [{"label": r.title_text, "sub": r.sub_text,
-                 "argv": r.argv, "icon": r.icon_name}
-                for r in self.listbox.get_children()]
+        data = []
+        for r in self.listbox.get_children():
+            entry = {"label": r.title_text, "sub": r.sub_text,
+                     "argv": r.argv, "icon": r.icon_name}
+            if getattr(r, "track_cwd", False):
+                entry["track_cwd"] = True
+                entry["sub"] = ""  # sub is the live cwd; recompute on reload
+            cwd = self._term_cwd(r)
+            if cwd:
+                entry["cwd"] = cwd
+            data.append(entry)
         os.makedirs(os.path.dirname(SESSIONS_FILE), exist_ok=True)
         with open(SESSIONS_FILE, "w") as f:
             json.dump(data, f, indent=2)
@@ -312,6 +364,7 @@ class Tabit(Gtk.Window):
         hit.add(box)
         hit.connect("button-press-event", self._on_tab_button, row)
         row.add(hit)
+        self._enable_row_dnd(row, hit)
         row.set_tooltip_text(tooltip or "")
         row.session_label = f"{label} {sub}" if sub else label
         row.title_text = label
@@ -349,7 +402,8 @@ class Tabit(Gtk.Window):
         self.listbox.select_row(row)
         self._save_sessions()
 
-    def _add_session(self, label, argv, icon_name, sub=None):
+    def _add_session(self, label, argv, icon_name, sub=None, cwd=None,
+                     track_cwd=False):
         term = Vte.Terminal()
         term.set_scrollback_lines(10000)
         fg, bg = Gdk.RGBA(), Gdk.RGBA()
@@ -363,13 +417,16 @@ class Tabit(Gtk.Window):
         row.argv = argv
         row.kind = "term"
         row.term = term
+        row.pid = None
+        row.track_cwd = track_cwd  # shell tabs show live cwd in the subtitle
         self._place_tab_row(row, term)
 
+        workdir = cwd if cwd and os.path.isdir(cwd) else GLib.get_home_dir()
         term.connect("child-exited", self._on_child_exited, row)
         term.connect("contents-changed", self._on_activity, row)
-        term.spawn_async(Vte.PtyFlags.DEFAULT, GLib.get_home_dir(), argv,
+        term.spawn_async(Vte.PtyFlags.DEFAULT, workdir, argv,
                          None, GLib.SpawnFlags.SEARCH_PATH, None, None,
-                         -1, None, None, None)
+                         -1, None, self._on_term_spawned, row)
 
     def _add_note_session(self, path=None, label=None, sub=None):
         """GtkSourceView note tab; path=None means untitled."""
@@ -823,6 +880,8 @@ class Tabit(Gtk.Window):
         for row in list(self.listbox.get_children()):
             if not self._confirm_close_row(row):
                 return True  # abort window close
+        self._save_sessions()  # capture each shell's current cwd before exit
+        self._save_settings({"sidebar_width": self._paned.get_position()})
         return False
 
     def _move_session(self, delta):
@@ -841,6 +900,56 @@ class Tabit(Gtk.Window):
         self.listbox.invalidate_sort()
         self._save_sessions_soon()
 
+    # --- drag-to-reorder --------------------------------------------------
+
+    def _enable_row_dnd(self, row, hit):
+        target = Gtk.TargetEntry.new("TABIT_ROW", Gtk.TargetFlags.SAME_APP, 0)
+        hit.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, [target],
+                            Gdk.DragAction.MOVE)
+        hit.connect("drag-begin", self._on_row_drag_begin, row)
+        hit.connect("drag-data-get", self._on_row_drag_get)
+        # MOTION|DROP keep auto accept + finish; drop HIGHLIGHT so we can
+        # draw our own themed drop frame instead of the default green box
+        row.drag_dest_set(Gtk.DestDefaults.MOTION | Gtk.DestDefaults.DROP,
+                          [target], Gdk.DragAction.MOVE)
+        row.connect("drag-data-received", self._on_row_drop)
+        row.connect("drag-motion", self._on_row_drag_motion)
+        row.connect("drag-leave", self._on_row_drag_leave)
+
+    def _on_row_drag_begin(self, _hit, _ctx, row):
+        self._drag_row = row
+
+    @staticmethod
+    def _on_row_drag_motion(row, _ctx, _x, _y, _time):
+        row.get_style_context().add_class("drop-into")
+        return False  # let DestDefaults.MOTION set the drag status
+
+    @staticmethod
+    def _on_row_drag_leave(row, _ctx, _time):
+        row.get_style_context().remove_class("drop-into")
+
+    @staticmethod
+    def _on_row_drag_get(_hit, _ctx, data, _info, _time):
+        data.set(data.get_target(), 8, b"1")  # payload unused; _drag_row holds it
+
+    def _on_row_drop(self, row, _ctx, _x, y, _data, _info, _time):
+        row.get_style_context().remove_class("drop-into")
+        dragged = getattr(self, "_drag_row", None)
+        self._drag_row = None
+        if dragged is None or dragged is row:
+            return
+        before = y < row.get_allocation().height / 2
+        rows = sorted(self.listbox.get_children(), key=lambda r: r._order)
+        rows.remove(dragged)
+        idx = rows.index(row) + (0 if before else 1)
+        rows.insert(idx, dragged)
+        for i, r in enumerate(rows):
+            r._order = i
+        self._order_seq = len(rows)
+        self.listbox.invalidate_sort()
+        self.listbox.select_row(dragged)
+        self._save_sessions()
+
     def _on_child_exited(self, _term, _status, row):
         # keep the tab and its scrollback; only the x really closes it
         row.dead = True
@@ -853,6 +962,7 @@ class Tabit(Gtk.Window):
     def _on_activity(self, _term, row):
         if not row.dead and self.listbox.get_selected_row() is not row:
             row.dot.show()
+        self._refresh_term_cwd(row)
 
     def _close_session(self, row):
         if row.get_parent() is None:
@@ -982,7 +1092,7 @@ class Tabit(Gtk.Window):
 
     def _on_add_shell(self, _btn):
         self._add_session("shell", [os.environ.get("SHELL", "/bin/bash")],
-                          "utilities-terminal-symbolic")
+                          "utilities-terminal-symbolic", track_cwd=True)
 
     def _on_add_note(self, _btn):
         dialog = Gtk.Dialog(title="New note", transient_for=self, modal=True)
