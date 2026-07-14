@@ -11,7 +11,8 @@ if [ "$1" = "--uninstall" ]; then
     exit 0
 fi
 
-sudo apt-get install -y python3-gi gir1.2-gtk-3.0 gir1.2-vte-2.91 picocom
+sudo apt-get install -y python3-gi gir1.2-gtk-3.0 gir1.2-vte-2.91 \
+    gir1.2-gtksource-4 picocom
 
 mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
 install -m 755 tabit.py "$HOME/.local/bin/tabit"

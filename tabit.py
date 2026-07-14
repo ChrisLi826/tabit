@@ -2,9 +2,10 @@
 """tabit - terminal sessions as vertical tabs on the left.
 
 Each tab is a real terminal (VTE, the same engine xfce4-terminal uses):
-a local shell, a serial console (screen.sh / kermit / picocom), or any
-command you give it. Click a tab to switch, press its x to close, use
-the + buttons to add. When a session's process ends the tab stays
+a local shell, a serial console (screen.sh / kermit / picocom), an AI
+CLI, a GtkSourceView note, or any command. Click a tab to switch,
+press its x to close, use the + buttons to add.
+ When a session's process ends the tab stays
 (greyed) so the scrollback is not lost; only the x really closes it.
 The set of tabs is remembered and restored (fresh processes) on the
 next start.
@@ -25,13 +26,17 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
+gi.require_version("GtkSource", "4")
 gi.require_version("Vte", "2.91")
-from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango, Vte
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, GtkSource, Pango, Vte
 
 SIDEBAR_WIDTH = 200
 DEFAULT_BAUD = "115200"
 # custom sidebar icon for +AI tabs (stored as icon_name in sessions.json)
 ICON_AI = "tabit-ai"
+# sessions.json argv[0] for note tabs; argv[1] is path or ""
+NOTE_SENTINEL = "__tabit_note__"
+ICON_NOTE = "text-editor-symbolic"
 # 16×16 badge with path-drawn "AI" (no font dependency in SVG loaders)
 AI_ICON_SVG = b"""<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
@@ -73,6 +78,8 @@ KEY_ACTIONS = (
     ("new_shell", "New shell", "<Primary><Shift>t"),
     ("new_serial", "New serial", "<Primary><Shift>s"),
     ("new_ai", "New AI session", "<Primary><Shift>a"),
+    ("new_note", "New note", "<Primary><Shift>n"),
+    ("save_note", "Save note", "<Primary>s"),
     ("close_session", "Close session", "<Primary><Shift>w"),
     ("rename_session", "Rename session", "F2"),
     ("prev_session", "Previous session", "<Primary>Page_Up"),
@@ -119,6 +126,7 @@ class Tabit(Gtk.Window):
     def __init__(self):
         super().__init__(title="tabit")
         self.set_default_size(1100, 700)
+        self.connect("delete-event", self._on_delete_event)
         self.connect("destroy", Gtk.main_quit)
         self.connect("key-press-event", self._on_window_key)
         self._counter = 0
@@ -147,6 +155,7 @@ class Tabit(Gtk.Window):
         for text, handler in (("+ Serial", self._on_add_serial),
                               ("+ Shell", self._on_add_shell),
                               ("+ AI", self._on_add_ai),
+                              ("+ Note", self._on_add_note),
                               ("+ Command", self._on_add_command)):
             btn = Gtk.Button(label=text)
             btn.connect("clicked", handler)
@@ -163,9 +172,18 @@ class Tabit(Gtk.Window):
 
         for s in self._load_sessions():
             try:
-                self._add_session(s["label"], s["argv"], s["icon"],
-                                  s.get("sub"))
-            except (KeyError, TypeError):
+                argv = s.get("argv") or []
+                if argv and argv[0] == NOTE_SENTINEL:
+                    path = argv[1] if len(argv) > 1 and argv[1] else None
+                    lab = s.get("label") or None
+                    if lab and lab.endswith(" *"):
+                        lab = lab[:-2]
+                    self._add_note_session(path=path, label=lab,
+                                           sub=s.get("sub"))
+                else:
+                    self._add_session(s["label"], s["argv"], s["icon"],
+                                      s.get("sub"))
+            except (KeyError, TypeError, OSError):
                 continue  # skip broken entries in a hand-edited file
         if not self.listbox.get_children():
             self._on_add_shell(None)
@@ -215,23 +233,9 @@ class Tabit(Gtk.Window):
                                                 Gtk.IconSize.MENU)
         return Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.MENU)
 
-    def _add_session(self, label, argv, icon_name, sub=None):
-        term = Vte.Terminal()
-        term.set_scrollback_lines(10000)
-        fg, bg = Gdk.RGBA(), Gdk.RGBA()
-        fg.parse(TERM_FG)
-        bg.parse(TERM_BG)
-        term.set_colors(fg, bg, [])
-        term.connect("key-press-event", self._on_term_key)
-
-        # VTE scrolls itself; a ScrolledWindow around it draws a spurious
-        # dashed bar at the bottom (horizontal scrollbar chrome).
-        self._counter += 1
-        self.stack.add_named(term, f"session-{self._counter}")
-
+    def _make_sidebar_row(self, label, sub, icon_name, tooltip):
+        """Build the shared left-tab chrome; caller fills row.page / kind."""
         row = Gtk.ListBoxRow()
-        # EventBox with its own GdkWindow: clicks on Labels land here.
-        # above_child=False → close button still receives its own clicks.
         hit = Gtk.EventBox()
         hit.set_visible_window(True)
         hit.set_above_child(False)
@@ -262,19 +266,27 @@ class Tabit(Gtk.Window):
         hit.add(box)
         hit.connect("button-press-event", self._on_tab_button, row)
         row.add(hit)
-        row.set_tooltip_text(" ".join(argv))
+        row.set_tooltip_text(tooltip or "")
         row.session_label = f"{label} {sub}" if sub else label
         row.title_text = label
         row.title_label = title
         row.sub_text = sub
-        row.argv = argv
         row.icon_name = icon_name
-        row.page = term  # stack child (was a ScrolledWindow wrapper)
-        row.term = term
         row.subtitle = subtitle
         row.dot = dot
         row.dead = False
-        # insert under the current tab (not always at the end)
+        row.kind = "term"
+        row.term = None
+        row.view = None
+        row.buffer = None
+        row.file_path = None
+        return row
+
+    def _place_tab_row(self, row, page):
+        """Insert row under selection, show, select, persist."""
+        self._counter += 1
+        self.stack.add_named(page, f"session-{self._counter}")
+        row.page = page
         selected = self.listbox.get_selected_row()
         if selected is not None:
             row._order = selected._order + 1
@@ -291,11 +303,186 @@ class Tabit(Gtk.Window):
         self.listbox.select_row(row)
         self._save_sessions()
 
+    def _add_session(self, label, argv, icon_name, sub=None):
+        term = Vte.Terminal()
+        term.set_scrollback_lines(10000)
+        fg, bg = Gdk.RGBA(), Gdk.RGBA()
+        fg.parse(TERM_FG)
+        bg.parse(TERM_BG)
+        term.set_colors(fg, bg, [])
+        term.connect("key-press-event", self._on_term_key)
+
+        # VTE scrolls itself; do not wrap in ScrolledWindow.
+        row = self._make_sidebar_row(label, sub, icon_name, " ".join(argv))
+        row.argv = argv
+        row.kind = "term"
+        row.term = term
+        self._place_tab_row(row, term)
+
         term.connect("child-exited", self._on_child_exited, row)
         term.connect("contents-changed", self._on_activity, row)
         term.spawn_async(Vte.PtyFlags.DEFAULT, GLib.get_home_dir(), argv,
                          None, GLib.SpawnFlags.SEARCH_PATH, None, None,
                          -1, None, None, None)
+
+    def _add_note_session(self, path=None, label=None, sub=None):
+        """GtkSourceView note tab; path=None means untitled."""
+        path = path or None
+        if path:
+            path = os.path.abspath(os.path.expanduser(path))
+        view = GtkSource.View()
+        view.set_show_line_numbers(True)
+        view.set_auto_indent(True)
+        view.set_monospace(True)
+        view.set_highlight_current_line(True)
+        view.set_tab_width(4)
+        view.set_insert_spaces_instead_of_tabs(True)
+        buf = view.get_buffer()
+        scheme_mgr = GtkSource.StyleSchemeManager.get_default()
+        scheme = (scheme_mgr.get_scheme("oblivion")
+                  or scheme_mgr.get_scheme("solarized-dark")
+                  or scheme_mgr.get_scheme("classic"))
+        if scheme:
+            buf.set_style_scheme(scheme)
+
+        if path and os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+            except OSError as e:
+                text = ""
+                sub = sub or f"open failed: {e}"
+            buf.begin_not_undoable_action()
+            buf.set_text(text)
+            buf.end_not_undoable_action()
+            buf.set_modified(False)
+            lang = GtkSource.LanguageManager.get_default().guess_language(
+                path, None)
+            if lang:
+                buf.set_language(lang)
+            base = os.path.basename(path)
+            label = label or base
+            sub = sub if sub is not None else os.path.dirname(path)
+            tooltip = path
+        else:
+            path = None
+            label = label or "untitled"
+            sub = sub if sub is not None else "note"
+            tooltip = "untitled note"
+            buf.set_modified(False)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scroll.add(view)
+
+        row = self._make_sidebar_row(label, sub, ICON_NOTE, tooltip)
+        row.argv = [NOTE_SENTINEL, path or ""]
+        row.kind = "note"
+        row.term = None
+        row.view = view
+        row.buffer = buf
+        row.file_path = path
+        row.dot.set_no_show_all(True)
+        self._place_tab_row(row, scroll)
+
+        buf.connect("modified-changed",
+                    lambda _b: self._refresh_note_title(row))
+        view.connect("key-press-event", self._on_editor_key)
+        self._refresh_note_title(row)
+        view.grab_focus()
+
+    def _refresh_note_title(self, row):
+        if getattr(row, "kind", None) != "note":
+            return
+        base = (os.path.basename(row.file_path) if row.file_path
+                else "untitled")
+        star = " *" if row.buffer.get_modified() else ""
+        row.title_text = base + star
+        row.title_label.set_text(row.title_text)
+        row.session_label = (f"{row.title_text} {row.sub_text}"
+                             if row.sub_text else row.title_text)
+        if self.listbox.get_selected_row() is row:
+            self.set_title(f"{row.session_label} — tabit")
+
+    def _save_note(self, row, save_as=False):
+        if getattr(row, "kind", None) != "note":
+            return False
+        path = row.file_path
+        if save_as or not path:
+            chooser = Gtk.FileChooserDialog(
+                title="Save note", parent=self,
+                action=Gtk.FileChooserAction.SAVE)
+            chooser.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                                "Save", Gtk.ResponseType.OK)
+            chooser.set_do_overwrite_confirmation(True)
+            if path:
+                chooser.set_filename(path)
+            else:
+                chooser.set_current_name("untitled.txt")
+            if chooser.run() != Gtk.ResponseType.OK:
+                chooser.destroy()
+                return False
+            path = chooser.get_filename()
+            chooser.destroy()
+        try:
+            start, end = row.buffer.get_bounds()
+            text = row.buffer.get_text(start, end, True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        except OSError as e:
+            err = Gtk.MessageDialog(
+                transient_for=self, modal=True,
+                message_type=Gtk.MessageType.ERROR,
+                buttons=Gtk.ButtonsType.OK,
+                text=f"Could not save:\n{e}")
+            err.run()
+            err.destroy()
+            return False
+        row.file_path = os.path.abspath(path)
+        row.argv = [NOTE_SENTINEL, row.file_path]
+        row.sub_text = os.path.dirname(row.file_path)
+        row.subtitle.set_text(row.sub_text)
+        row.subtitle.set_no_show_all(False)
+        row.subtitle.show()
+        row.set_tooltip_text(row.file_path)
+        lang = GtkSource.LanguageManager.get_default().guess_language(
+            row.file_path, None)
+        row.buffer.set_language(lang)
+        row.buffer.set_modified(False)
+        self._refresh_note_title(row)
+        self._save_sessions()
+        return True
+
+    def _confirm_close_row(self, row):
+        """Return True if row may be closed (notes prompt when dirty)."""
+        if getattr(row, "kind", None) != "note":
+            return True
+        if not row.buffer.get_modified():
+            return True
+        name = row.file_path or "untitled"
+        dialog = Gtk.MessageDialog(
+            transient_for=self, modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text=f'"{os.path.basename(name)}" has unsaved changes.')
+        dialog.format_secondary_text("Save before closing?")
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                           "Discard", Gtk.ResponseType.REJECT,
+                           "Save", Gtk.ResponseType.ACCEPT)
+        dialog.set_default_response(Gtk.ResponseType.ACCEPT)
+        resp = dialog.run()
+        dialog.destroy()
+        if resp == Gtk.ResponseType.CANCEL:
+            return False
+        if resp == Gtk.ResponseType.ACCEPT:
+            return self._save_note(row)
+        return True  # discard
+
+    def _on_delete_event(self, *_a):
+        for row in list(self.listbox.get_children()):
+            if not self._confirm_close_row(row):
+                return True  # abort window close
+        return False
 
     def _move_session(self, delta):
         row = self.listbox.get_selected_row()
@@ -329,12 +516,14 @@ class Tabit(Gtk.Window):
     def _close_session(self, row):
         if row.get_parent() is None:
             return
+        if not self._confirm_close_row(row):
+            return
         was_selected = self.listbox.get_selected_row() is row
         rows = self.listbox.get_children()
         idx = rows.index(row)
         self.listbox.remove(row)
         self.stack.remove(row.page)
-        row.page.destroy()  # destroys the pty, the child gets SIGHUP
+        row.page.destroy()  # term: SIGHUP child; note: destroys view
         self._save_sessions()
         rows = self.listbox.get_children()
         if not rows:
@@ -344,14 +533,20 @@ class Tabit(Gtk.Window):
             # the last one, fall back to the new last
             self.listbox.select_row(rows[min(idx, len(rows) - 1)])
 
+    def _focus_row_content(self, row):
+        if getattr(row, "kind", None) == "note" and row.view is not None:
+            if not row.view.has_focus():
+                row.view.grab_focus()
+        elif row.term is not None and not row.term.has_focus():
+            row.term.grab_focus()
+
     def _on_row_selected(self, _listbox, row):
         if row is None:
             return
         row.dot.hide()
         self.stack.set_visible_child(row.page)
         self.set_title(f"{row.session_label} — tabit")
-        if not row.term.has_focus():
-            row.term.grab_focus()
+        self._focus_row_content(row)
 
     def _on_tab_button(self, _hit, event, row):
         """EventBox on each tab: double-click / right-click → rename."""
@@ -376,6 +571,9 @@ class Tabit(Gtk.Window):
         row = row or self.listbox.get_selected_row()
         if row is None:
             return False
+        initial = row.title_text
+        if getattr(row, "kind", None) == "note" and initial.endswith(" *"):
+            initial = initial[:-2]
         # one popover at a time
         old = getattr(self, "_rename_pop", None)
         if old is not None:
@@ -386,7 +584,7 @@ class Tabit(Gtk.Window):
         pop.set_modal(True)
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
                       margin=8)
-        entry = Gtk.Entry(text=row.title_text, width_chars=18)
+        entry = Gtk.Entry(text=initial, width_chars=18)
         ok = Gtk.Button(label="OK")
         ok.get_style_context().add_class("suggested-action")
         box.pack_start(entry, True, True, 0)
@@ -398,10 +596,16 @@ class Tabit(Gtk.Window):
         def apply(*_a):
             name = entry.get_text().strip()
             if name:
-                row.title_text = name
-                row.title_label.set_text(name)
-                row.session_label = (f"{name} {row.sub_text}"
-                                     if row.sub_text else name)
+                if getattr(row, "kind", None) == "note":
+                    dirty = row.buffer.get_modified()
+                    row.title_text = name + (" *" if dirty else "")
+                    row.title_label.set_text(row.title_text)
+                else:
+                    row.title_text = name
+                    row.title_label.set_text(name)
+                shown = row.title_label.get_text()
+                row.session_label = (f"{shown} {row.sub_text}"
+                                     if row.sub_text else shown)
                 if self.listbox.get_selected_row() is row:
                     self.set_title(f"{row.session_label} — tabit")
                 self._save_sessions()
@@ -420,7 +624,7 @@ class Tabit(Gtk.Window):
         def on_closed(*_a):
             self._rename_pop = None
             if self.listbox.get_selected_row() is row:
-                row.term.grab_focus()
+                self._focus_row_content(row)
 
         entry.connect("activate", apply)
         entry.connect("key-press-event", on_key)
@@ -436,6 +640,31 @@ class Tabit(Gtk.Window):
     def _on_add_shell(self, _btn):
         self._add_session("shell", [os.environ.get("SHELL", "/bin/bash")],
                           "utilities-terminal-symbolic")
+
+    def _on_add_note(self, _btn):
+        dialog = Gtk.Dialog(title="New note", transient_for=self, modal=True)
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                           "Blank note", Gtk.ResponseType.YES,
+                           "Open file…", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.YES)
+        lab = Gtk.Label(
+            label="GtkSourceView note: blank buffer or open a file.",
+            margin=12, xalign=0)
+        dialog.get_content_area().add(lab)
+        dialog.show_all()
+        resp = dialog.run()
+        dialog.destroy()
+        if resp == Gtk.ResponseType.YES:
+            self._add_note_session()
+        elif resp == Gtk.ResponseType.OK:
+            chooser = Gtk.FileChooserDialog(
+                title="Open note", parent=self,
+                action=Gtk.FileChooserAction.OPEN)
+            chooser.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                                "Open", Gtk.ResponseType.OK)
+            if chooser.run() == Gtk.ResponseType.OK:
+                self._add_note_session(path=chooser.get_filename())
+            chooser.destroy()
 
     @staticmethod
     def _serial_argv(backend, dev, rate):
@@ -1006,14 +1235,21 @@ class Tabit(Gtk.Window):
         return None
 
     def _run_action(self, action, term=None):
+        row = self.listbox.get_selected_row()
         if action == "new_shell":
             self._on_add_shell(None)
         elif action == "new_serial":
             self._on_add_serial(None)
         elif action == "new_ai":
             self._on_add_ai(None)
+        elif action == "new_note":
+            self._on_add_note(None)
+        elif action == "save_note":
+            if row is not None and getattr(row, "kind", None) == "note":
+                self._save_note(row)
+            else:
+                return False
         elif action == "close_session":
-            row = self.listbox.get_selected_row()
             if row is not None:
                 self._close_session(row)
         elif action == "rename_session":
@@ -1026,26 +1262,30 @@ class Tabit(Gtk.Window):
             rows = self.listbox.get_children()
             if not rows:
                 return True
-            current = self.listbox.get_selected_row()
+            current = row
             i = rows.index(current) if current in rows else 0
             i = (i - 1 if action == "prev_session" else i + 1) % len(rows)
             self.listbox.select_row(rows[i])
         elif action == "copy":
-            t = term or (self.listbox.get_selected_row() and
-                         self.listbox.get_selected_row().term)
-            if t:
-                t.copy_clipboard_format(Vte.Format.TEXT)
+            if row is not None and getattr(row, "kind", None) == "note":
+                row.view.emit("copy-clipboard")
+            else:
+                t = term or (row.term if row is not None else None)
+                if t:
+                    t.copy_clipboard_format(Vte.Format.TEXT)
         elif action == "paste":
-            t = term or (self.listbox.get_selected_row() and
-                         self.listbox.get_selected_row().term)
-            if t:
-                t.paste_clipboard()
+            if row is not None and getattr(row, "kind", None) == "note":
+                row.view.emit("paste-clipboard")
+            else:
+                t = term or (row.term if row is not None else None)
+                if t:
+                    t.paste_clipboard()
         else:
             return False
         return True
 
     def _handle_shortcut(self, event, term=None):
-        """Shared by window and terminal so bindings work while VTE has focus."""
+        """Shared by window, terminal, and note editor."""
         if event.type != Gdk.EventType.KEY_PRESS:
             return False
         action = self._match_action(event)
@@ -1061,6 +1301,9 @@ class Tabit(Gtk.Window):
 
     def _on_term_key(self, term, event):
         return self._handle_shortcut(event, term=term)
+
+    def _on_editor_key(self, _view, event):
+        return self._handle_shortcut(event)
 
     def _on_edit_keys(self, _btn):
         dialog = Gtk.Dialog(title="Keyboard shortcuts", transient_for=self,

@@ -1,7 +1,8 @@
 # tabit
 
 **v1.0.1** — terminal sessions as vertical tabs on the left: one window
-for shells, serial consoles, AI CLIs, and remote logins.
+for shells, serial consoles, AI CLIs, notes (GtkSourceView), and remote
+logins.
 
 ```
 ┌───────────┬─────────────────────────────┐
@@ -22,7 +23,7 @@ from the Ubuntu archive.
 
 ## Requirements
 
-- Linux with GTK3 + VTE (X11 or Wayland)
+- Linux with GTK3 + VTE + GtkSourceView 4 (X11 or Wayland)
 - `picocom` for serial sessions
 - Tested on Ubuntu / Xubuntu
 
@@ -44,11 +45,13 @@ To remove: `./install.sh --uninstall`
 | `+ Serial` | Pick device, baud (default 115200), and tool: `screen.sh` / `kermit` / `picocom` |
 | `+ Shell` | New tab running your login shell |
 | `+ AI` | Pick AI CLI and working directory. **Edit list…** manages CLI names and per-CLI continue/resume tries (`~/.config/tabit/ai_clis.json`) |
+| `+ Note` | GtkSourceView editor: blank note or open a file (syntax highlight, line numbers) |
 | `+ Command` | Run anything (e.g. `ssh root@192.168.1.1`) in a new tab |
 | Click a tab | Switch to that session |
 | Double-click a tab / right-click → Rename… / `F2` | Rename (popover bubble to the right of the tab) |
 | `x` on a tab (shown on hover) | Close that session |
-| `Ctrl+Shift+S` / `Ctrl+Shift+T` / `Ctrl+Shift+A` | New serial / shell / AI (inserted under the current tab) |
+| `Ctrl+Shift+S` / `Ctrl+Shift+T` / `Ctrl+Shift+A` / `Ctrl+Shift+N` | New serial / shell / AI / note |
+| `Ctrl+S` | Save note (when a note tab is selected) |
 | `Ctrl+Shift+W` | Close current session |
 | `Ctrl+PageUp` / `Ctrl+PageDown` | Previous / next session |
 | `Ctrl+Shift+PageUp` / `Ctrl+Shift+PageDown` | Move current tab up / down |
