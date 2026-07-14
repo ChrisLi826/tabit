@@ -151,6 +151,18 @@ CSS = b"""
 .note-tools { background-color: #15151c; border-top: 1px solid #2c2c38;
               padding: 4px 6px; }
 .note-tools button { padding: 2px 8px; font-size: 9pt; }
+/* narrow the resize handle so it stops stealing clicks meant for the
+   terminal; the sidebar's border-right is the visible line. themes pad
+   the separator and add a grip image, which widens the grab zone, so
+   zero those out too.
+   ponytail: 2px hit zone, widen if it gets hard to grab on purpose */
+paned > separator {
+    min-width: 2px;
+    padding: 0;
+    margin: 0;
+    background-image: none;
+    background-color: transparent;
+}
 """
 
 
