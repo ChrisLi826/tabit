@@ -32,22 +32,18 @@ SIDEBAR_WIDTH = 200
 DEFAULT_BAUD = "115200"
 # custom sidebar icon for +AI tabs (stored as icon_name in sessions.json)
 ICON_AI = "tabit-ai"
-# 16×16 symbolic-style neural net + sparkle (accent matches activity blue)
+# 16×16 badge with path-drawn "AI" (no font dependency in SVG loaders)
 AI_ICON_SVG = b"""<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
-  <g fill="none" stroke="#7aa2f7" stroke-width="1.2" stroke-linecap="round">
-    <line x1="8" y1="7.2" x2="4.2" y2="4.2"/>
-    <line x1="8" y1="7.2" x2="11.8" y2="4.2"/>
-    <line x1="8" y1="8.8" x2="4.2" y2="11.8"/>
-    <line x1="8" y1="8.8" x2="11.8" y2="11.8"/>
-  </g>
-  <circle cx="8" cy="8" r="2.1" fill="#7aa2f7"/>
-  <circle cx="3.6" cy="3.8" r="1.35" fill="#9ab4f0"/>
-  <circle cx="12.4" cy="3.8" r="1.35" fill="#9ab4f0"/>
-  <circle cx="3.6" cy="12.2" r="1.35" fill="#9ab4f0"/>
-  <circle cx="12.4" cy="12.2" r="1.35" fill="#9ab4f0"/>
-  <path fill="#a8c0ff"
-    d="M13.2 0.6l0.35 1.05 1.05 0.35-1.05 0.35-0.35 1.05-0.35-1.05-1.05-0.35 1.05-0.35z"/>
+  <rect x="0.5" y="0.5" width="15" height="15" rx="3" ry="3"
+        fill="#1a2744" stroke="#7aa2f7" stroke-width="1"/>
+  <!-- A -->
+  <path fill="#b4ccff"
+    d="M2.2 12.2 L4.6 4.2 L5.4 4.2 L7.8 12.2 L6.7 12.2 L6.15 10.3 L3.85 10.3
+       L3.3 12.2 Z M4.2 9.2 L5.8 9.2 L5 6.4 Z"/>
+  <!-- I -->
+  <path fill="#b4ccff"
+    d="M9.2 4.2 H13.2 V5.3 H11.85 V11.1 H13.2 V12.2 H9.2 V11.1 H10.55 V5.3 H9.2 Z"/>
 </svg>
 """
 # serial backends shown in the +Serial dialog (first = default)
