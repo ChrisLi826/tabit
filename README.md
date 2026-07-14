@@ -1,6 +1,6 @@
 # tabit
 
-**v1.0.0** — terminal sessions as vertical tabs on the left: one window
+**v1.0.1** — terminal sessions as vertical tabs on the left: one window
 for shells, serial consoles, AI CLIs, and remote logins.
 
 ```
