@@ -59,6 +59,14 @@ ICON_AI = "tabit-ai"
 # sessions.json argv[0] for note tabs; argv[1] is path or ""
 NOTE_SENTINEL = "__tabit_note__"
 ICON_NOTE = "text-editor-symbolic"
+ICON_COMMAND = "system-run-symbolic"
+# per-type CSS class so each session icon gets its own color (see CSS)
+ICON_CLASS = {
+    "utilities-terminal-symbolic": "ic-shell",
+    "network-wired-symbolic": "ic-serial",
+    ICON_NOTE: "ic-note",
+    ICON_COMMAND: "ic-command",
+}
 # note performance: long lines / huge buffers can freeze GtkSourceView
 NOTE_BIG_CHARS = 200_000   # total characters
 NOTE_LONG_LINE = 8_000     # any single line
@@ -76,8 +84,153 @@ AI_ICON_SVG = b"""<?xml version="1.0" encoding="UTF-8"?>
     d="M9.2 4.2 H13.2 V5.3 H11.85 V11.1 H13.2 V12.2 H9.2 V11.1 H10.55 V5.3 H9.2 Z"/>
 </svg>
 """
-# serial backends shown in the +Serial dialog (first = default)
-SERIAL_BACKENDS = ("screen.sh", "kermit", "picocom")
+# serial backends shown in the +Serial dialog (first = default).
+# "screen" runs the bundled screen.sh script (written out at startup).
+SERIAL_BACKENDS = ("screen", "kermit", "picocom")
+
+# Bundled screen.sh: a `screen` wrapper for /dev/ttyUSB* with logfile,
+# multi-attach and log retention. Kept verbatim so tabit needs nothing in
+# ~/.local/bin; written to SCREEN_SH_PATH on startup and run from there.
+SCREEN_SH = r'''#!/bin/bash
+# screen.sh — wrapper around `screen` for /dev/ttyUSB* with sensible defaults
+#
+# Auto-names session as ap-ttyUSBN, opens a logfile so other shells (or AI
+# agents) can read output via `tail -f`, and if the session already exists
+# attaches with `-x` so multiple clients can share the same console.
+#
+# Usage:
+#   screen.sh                 interactive picker (or use sole device)
+#   screen.sh 0               /dev/ttyUSB0  @ 115200
+#   screen.sh ttyUSB2         /dev/ttyUSB2  @ 115200
+#   screen.sh /dev/ttyUSB1 9600
+#   screen.sh -l              list devices and exit
+#   screen.sh -f 0            force: kill any non-screen holder of ttyUSB0 first
+#
+# Env:
+#   SCREEN_SH_LOG_DIR         logfile dir (default /tmp)
+#   SCREEN_SH_BAUD            default baud (default 115200)
+#   SCREEN_SH_LOG_KEEP        per-device log retention count (default 5; 0 = unlimited)
+
+BAUD_DEFAULT="${SCREEN_SH_BAUD:-115200}"
+LOG_DIR="${SCREEN_SH_LOG_DIR:-/tmp}"
+LOG_KEEP="${SCREEN_SH_LOG_KEEP:-5}"
+
+usage() {
+    sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
+}
+
+list_devs() {
+    ls -1 /dev/ttyUSB* 2>/dev/null
+}
+
+FORCE=0
+case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -l|--list) list_devs; exit 0 ;;
+    -f|--force) FORCE=1; shift ;;
+esac
+
+# Resolve device argument
+arg="$1"
+if [ -z "$arg" ]; then
+    mapfile -t devs < <(list_devs)
+    if [ "${#devs[@]}" -eq 0 ]; then
+        echo "screen.sh: no /dev/ttyUSB* found" >&2
+        exit 1
+    elif [ "${#devs[@]}" -eq 1 ]; then
+        DEV="${devs[0]}"
+    else
+        echo "Available devices:"
+        for i in "${!devs[@]}"; do
+            holder=$(fuser "${devs[$i]}" 2>/dev/null | tr -d ' ' | head -c 20)
+            [ -n "$holder" ] && holder=" (in use by PID $holder)"
+            printf "  [%d] %s%s\n" "$i" "${devs[$i]}" "$holder"
+        done
+        read -rp "Pick: " idx
+        DEV="${devs[$idx]}"
+    fi
+elif [[ "$arg" == /dev/* ]]; then
+    DEV="$arg"
+elif [[ "$arg" =~ ^[0-9]+$ ]]; then
+    DEV="/dev/ttyUSB$arg"
+elif [[ "$arg" == ttyUSB* ]]; then
+    DEV="/dev/$arg"
+else
+    echo "screen.sh: don't recognize device '$arg'" >&2
+    exit 1
+fi
+
+if [ ! -e "$DEV" ]; then
+    echo "screen.sh: $DEV does not exist" >&2
+    exit 1
+fi
+
+BAUD="${2:-$BAUD_DEFAULT}"
+NAME="$(basename "$DEV")"
+SESSION="ap-$NAME"
+TS=$(date +%Y%m%d-%H%M%S)
+LOG="$LOG_DIR/screen-$NAME-$TS.log"
+
+# Detect anything already holding the device. If a screen daemon owns it,
+# attach to that session regardless of its name; otherwise tell the user.
+holder_pid=$(fuser "$DEV" 2>/dev/null | tr -d ' ' | head -c 20)
+if [ -n "$holder_pid" ] && [ "$FORCE" = "0" ]; then
+    # Match holder_pid against `screen -ls` (which prints "<pid>.<name>" lines)
+    existing_session=$(screen -ls 2>/dev/null | awk -v pid="$holder_pid" '
+        $1 ~ "^"pid"\\." { print $1; exit }')
+    if [ -n "$existing_session" ]; then
+        echo "screen.sh: $DEV already held by screen session '$existing_session' — multi-attaching with -x"
+        exec screen -x "$existing_session"
+    fi
+    holder_cmd=$(ps -p "$holder_pid" -o cmd= 2>/dev/null | head -c 120)
+    cat >&2 <<ERR
+screen.sh: $DEV is held by PID $holder_pid (not a screen session):
+    $holder_cmd
+
+  - If it's picocom or another terminal: kill it first, or use socat mux.
+  - To force kill the holder and start a new session: screen.sh -f $arg
+ERR
+    exit 1
+fi
+
+if [ "$FORCE" = "1" ] && [ -n "$holder_pid" ]; then
+    echo "screen.sh: --force given, killing PID $holder_pid (was holding $DEV)"
+    kill "$holder_pid" 2>/dev/null
+    sleep 1
+    fuser "$DEV" >/dev/null 2>&1 && {
+        echo "screen.sh: $DEV still busy after kill, aborting" >&2
+        exit 1
+    }
+fi
+
+mkdir -p "$LOG_DIR"
+
+# Retention: keep the newest (LOG_KEEP - 1) existing logs for this device;
+# the about-to-be-created file becomes the LOG_KEEP-th.
+if [ "$LOG_KEEP" -gt 0 ] 2>/dev/null; then
+    pruned=$(ls -1t "$LOG_DIR/screen-${NAME}-"*.log 2>/dev/null | tail -n +"$LOG_KEEP")
+    if [ -n "$pruned" ]; then
+        echo "$pruned" | xargs -r rm -f
+        n=$(echo "$pruned" | wc -l)
+        echo "screen.sh: pruned $n old log(s) for $NAME (keeping newest $((LOG_KEEP - 1)) + this new one)"
+    fi
+fi
+
+cat <<INFO
+screen.sh: session=$SESSION  device=$DEV @ $BAUD
+screen.sh: logfile=$LOG
+
+  Detach:               Ctrl-a d
+  Kill session:         Ctrl-a k    (or: screen -S $SESSION -X quit)
+  From another shell — inject command:
+      screen -S $SESSION -X stuff "<cmd>\$(printf '\\r')"
+  From another shell — read output:
+      tail -f $LOG
+
+INFO
+
+exec screen -S "$SESSION" -L -Logfile "$LOG" "$DEV" "$BAUD"
+'''
 # default AI CLI list for +AI (user-editable → ~/.config/tabit/ai_clis.json)
 # Each entry: {"cli": name, "try": ["args after cli", ...]} then plain cli.
 DEFAULT_AI_CLIS = [
@@ -91,6 +244,7 @@ DEFAULT_AI_CLIS = [
 DEFAULT_AI_TRY = ["--continue", "resume --last", "--resume latest"]
 KERMRC = os.path.expanduser("~/senaoenv/kermrc")
 CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "tabit")
+SCREEN_SH_PATH = os.path.join(CONFIG_DIR, "screen.sh")
 SESSIONS_FILE = os.path.join(CONFIG_DIR, "sessions.json")
 KEYS_FILE = os.path.join(CONFIG_DIR, "keys.json")
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
@@ -142,6 +296,11 @@ CSS = b"""
 .sidebar button { background: transparent; border: none; border-radius: 6px;
                   padding: 3px 6px; color: #8a8a98; }
 .sidebar button:hover { color: #ececf4; background: rgba(255,255,255,0.11); }
+/* per-type icon colors (symbolic icons follow the CSS color property) */
+.ic-shell   { color: #9ece6a; }
+.ic-serial  { color: #7dcfff; }
+.ic-note    { color: #e0af68; }
+.ic-command { color: #f7768e; }
 .session-sub { color: #7a7a88; font-size: 8pt; }
 .activity { color: #7aa2f7; font-size: 8pt; }
 /* actions strip: slightly different surface so it is not the tab list */
@@ -208,8 +367,7 @@ class Tabit(Gtk.Window):
                 ("+ Shell", "utilities-terminal-symbolic", self._on_add_shell),
                 ("+ AI", ICON_AI, self._on_add_ai),
                 ("+ Note", ICON_NOTE, self._on_add_note),
-                ("+ Command", "utilities-terminal-symbolic",
-                 self._on_add_command)):
+                ("+ Command", ICON_COMMAND, self._on_add_command)):
             btn = Gtk.Button(label=text)
             btn.set_image(self._session_icon(icon))
             btn.set_always_show_image(True)
@@ -347,7 +505,12 @@ class Tabit(Gtk.Window):
                 pass
             return Gtk.Image.new_from_icon_name("applications-science-symbolic",
                                                 Gtk.IconSize.MENU)
-        return Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.MENU)
+        img = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.MENU)
+        # per-type color for symbolic icons (recolored via CSS `color`)
+        cls = ICON_CLASS.get(icon_name)
+        if cls:
+            img.get_style_context().add_class(cls)
+        return img
 
     def _make_sidebar_row(self, label, sub, icon_name, tooltip):
         """Build the shared left-tab chrome; caller fills row.page / kind."""
@@ -1152,8 +1315,8 @@ class Tabit(Gtk.Window):
 
     @staticmethod
     def _serial_argv(backend, dev, rate):
-        if backend == "screen.sh":
-            return ["screen.sh", dev, rate]
+        if backend == "screen":
+            return [SCREEN_SH_PATH, dev, rate]
         if backend == "kermit":
             argv = ["kermit", "-l", dev, "-b", rate]
             if os.path.isfile(KERMRC):
@@ -1210,7 +1373,7 @@ class Tabit(Gtk.Window):
         backend = Gtk.ComboBoxText()
         for name in SERIAL_BACKENDS:
             backend.append_text(name)
-        backend.set_active(0)  # screen.sh
+        backend.set_active(0)  # screen
         grid.attach(Gtk.Label(label="Device", xalign=0), 0, 0, 1, 1)
         grid.attach(combo, 1, 0, 1, 1)
         grid.attach(Gtk.Label(label="Baud", xalign=0), 0, 1, 1, 1)
@@ -1246,7 +1409,7 @@ class Tabit(Gtk.Window):
             if cmd:
                 parts = cmd.split(maxsplit=1)
                 self._add_session(parts[0], ["/bin/sh", "-c", cmd],
-                                  "utilities-terminal-symbolic",
+                                  ICON_COMMAND,
                                   sub=parts[1] if len(parts) > 1 else None)
         dialog.destroy()
 
@@ -1949,10 +2112,27 @@ def _ensure_user_path():
         os.environ["PATH"] = local_bin + (":" + path if path else "")
 
 
+def _ensure_screen_sh():
+    # write the bundled screen.sh out so the "screen" serial backend works
+    # without anything in ~/.local/bin; rewrite only when it changed
+    try:
+        if os.path.isfile(SCREEN_SH_PATH):
+            with open(SCREEN_SH_PATH) as f:
+                if f.read() == SCREEN_SH:
+                    return
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(SCREEN_SH_PATH, "w") as f:
+            f.write(SCREEN_SH)
+        os.chmod(SCREEN_SH_PATH, 0o755)
+    except OSError:
+        pass  # serial "screen" will fail visibly if this could not be written
+
+
 def main():
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     GLib.set_prgname("tabit")
     _ensure_user_path()
+    _ensure_screen_sh()
 
     # one instance is enough; the lock dies with the process
     lock = open(os.path.join(GLib.get_user_runtime_dir(), "tabit.lock"), "w")
