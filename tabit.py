@@ -166,17 +166,30 @@ class Tabit(Gtk.Window):
         adders.get_style_context().add_class("adder")
         for side in ("start", "end", "bottom"):
             getattr(adders, f"set_margin_{side}")(4)
-        for text, handler in (("+ Serial", self._on_add_serial),
-                              ("+ Shell", self._on_add_shell),
-                              ("+ AI", self._on_add_ai),
-                              ("+ Note", self._on_add_note),
-                              ("+ Command", self._on_add_command)):
+        # icons match the session tab icons
+        for text, icon, handler in (
+                ("+ Serial", "network-wired-symbolic", self._on_add_serial),
+                ("+ Shell", "utilities-terminal-symbolic", self._on_add_shell),
+                ("+ AI", ICON_AI, self._on_add_ai),
+                ("+ Note", ICON_NOTE, self._on_add_note),
+                ("+ Command", "utilities-terminal-symbolic",
+                 self._on_add_command)):
             btn = Gtk.Button(label=text)
+            btn.set_image(self._session_icon(icon))
+            btn.set_always_show_image(True)
+            btn.set_image_position(Gtk.PositionType.LEFT)
             btn.connect("clicked", handler)
             adders.pack_start(btn, False, False, 0)
-        for text, handler in (("Settings…", self._on_edit_settings),
-                              ("Shortcuts…", self._on_edit_keys)):
+        for text, icon, handler in (
+                ("Settings…", "preferences-system-symbolic",
+                 self._on_edit_settings),
+                ("Shortcuts…", "input-keyboard-symbolic",
+                 self._on_edit_keys)):
             btn = Gtk.Button(label=text)
+            btn.set_image(Gtk.Image.new_from_icon_name(
+                icon, Gtk.IconSize.MENU))
+            btn.set_always_show_image(True)
+            btn.set_image_position(Gtk.PositionType.LEFT)
             btn.connect("clicked", handler)
             adders.pack_start(btn, False, False, 0)
         sidebar.pack_start(adders, False, False, 0)
