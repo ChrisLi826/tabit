@@ -59,7 +59,7 @@ DEFAULT_BAUD = "115200"
 ICON_AI = "tabit-ai"
 # sessions.json argv[0] for note tabs; argv[1] is path or ""
 NOTE_SENTINEL = "__tabit_note__"
-ICON_NOTE = "text-editor-symbolic"
+ICON_NOTE = "text-x-generic-symbolic"
 ICON_COMMAND = "system-run-symbolic"
 ICON_TMUX = "view-grid-symbolic"
 # per-type CSS class so each session icon gets its own color (see CSS)

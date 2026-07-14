@@ -55,7 +55,7 @@
       <g transform="translate(22,11)" fill="none" stroke="#e0af68" stroke-width="1.4">
         <path d="M3 2 h8 l4 4 v10 h-12 z"/>
         <path d="M11 2 v4 h4"/>
-        <line x1="5" y1="10" x2="12" y2="10"/><line x1="5" y1="13" x2="10" y2="13"/>
+        <line x1="5" y1="9" x2="12" y2="9"/><line x1="5" y1="12" x2="12" y2="12"/><line x1="5" y1="15" x2="9" y2="15"/>
       </g>
       <text x="48" y="20" fill="#ececf4" font-size="14">notes.md</text>
       <text x="48" y="35" fill="#7a7a88" font-size="10">~/docs</text>
@@ -84,16 +84,49 @@
       <text x="48" y="35" fill="#7a7a88" font-size="10">tmux</text>
     </g>
 
-    <!-- adder strip (vertical, like the app) -->
+    <!-- adder strip (vertical, like the app) — icon + label per button -->
     <rect x="16" y="312" width="250" height="172" fill="#0e0e14"/>
     <line x1="16" y1="312" x2="266" y2="312" stroke="#2c2c38" stroke-width="1"/>
-    <g font-size="13" fill="#9a9aa8" text-anchor="middle">
-      <text x="141" y="342">＋ Serial</text>
-      <text x="141" y="368">＋ Shell</text>
-      <text x="141" y="394">＋ AI</text>
-      <text x="141" y="420">＋ Note</text>
-      <text x="141" y="446">＋ Command</text>
-      <text x="141" y="472">＋ tmux</text>
+    <g font-size="13" fill="#9a9aa8">
+      <!-- + Serial (cyan network) -->
+      <g transform="translate(92,331)" fill="none" stroke="#7dcfff" stroke-width="1.4">
+        <circle cx="4" cy="4" r="2" fill="#7dcfff" stroke="none"/><circle cx="14" cy="4" r="2" fill="#7dcfff" stroke="none"/><circle cx="9" cy="14" r="2" fill="#7dcfff" stroke="none"/>
+        <line x1="4" y1="4" x2="14" y2="4"/><line x1="4" y1="4" x2="9" y2="14"/><line x1="14" y1="4" x2="9" y2="14"/>
+      </g>
+      <text x="118" y="344">+ Serial</text>
+
+      <!-- + Shell (green terminal) -->
+      <g transform="translate(92,357)" fill="none" stroke="#9ece6a" stroke-width="1.4">
+        <rect x="1" y="3" width="16" height="12" rx="2"/><polyline points="4,7 7,9 4,11"/><line x1="9" y1="11" x2="13" y2="11"/>
+      </g>
+      <text x="118" y="370">+ Shell</text>
+
+      <!-- + AI (blue box) -->
+      <g transform="translate(92,383)">
+        <rect x="1" y="1" width="16" height="16" rx="3" fill="#1a2744" stroke="#7aa2f7" stroke-width="1"/>
+        <text x="9" y="13" font-size="9" font-weight="bold" fill="#b4ccff" text-anchor="middle">AI</text>
+      </g>
+      <text x="118" y="396">+ AI</text>
+
+      <!-- + Note (yellow document) -->
+      <g transform="translate(92,409)" fill="none" stroke="#e0af68" stroke-width="1.4">
+        <path d="M3 2 h8 l4 4 v10 h-12 z"/><path d="M11 2 v4 h4"/>
+        <line x1="5" y1="9" x2="12" y2="9"/><line x1="5" y1="12" x2="12" y2="12"/><line x1="5" y1="15" x2="9" y2="15"/>
+      </g>
+      <text x="118" y="422">+ Note</text>
+
+      <!-- + Command (red gear) -->
+      <g transform="translate(92,435)" fill="none" stroke="#f7768e" stroke-width="1.4">
+        <circle cx="9" cy="9" r="4.5"/><circle cx="9" cy="9" r="1.6" fill="#f7768e" stroke="none"/>
+        <line x1="9" y1="1.5" x2="9" y2="3.5"/><line x1="9" y1="14.5" x2="9" y2="16.5"/><line x1="1.5" y1="9" x2="3.5" y2="9"/><line x1="14.5" y1="9" x2="16.5" y2="9"/>
+      </g>
+      <text x="118" y="448">+ Command</text>
+
+      <!-- + tmux (purple grid) -->
+      <g transform="translate(92,461)" fill="#bb9af7">
+        <rect x="2" y="2" width="6" height="6" rx="1"/><rect x="10" y="2" width="6" height="6" rx="1"/><rect x="2" y="10" width="6" height="6" rx="1"/><rect x="10" y="10" width="6" height="6" rx="1"/>
+      </g>
+      <text x="118" y="474">+ tmux</text>
     </g>
 
     <!-- content pane: shell prompt -->
