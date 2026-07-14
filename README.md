@@ -1,6 +1,6 @@
 # tabit
 
-**v1.1.2** — terminal sessions as vertical tabs on the left: one window
+**v1.2.0** — terminal sessions as vertical tabs on the left: one window
 for shells, serial consoles, AI CLIs, notes (GtkSourceView + Markdown
 preview), and remote logins.
 
@@ -43,12 +43,13 @@ To remove: `./install.sh --uninstall`
 
 | Action | Result |
 |---|---|
-| `+ Serial` | Pick device, baud (default 115200), and tool: `screen.sh` / `kermit` / `picocom` |
+| `+ Serial` | Pick device, baud (default 115200), and tool: `screen` (bundled `screen.sh`) / `kermit` / `picocom` |
 | `+ Shell` | New tab running your login shell |
 | `+ AI` | Pick AI CLI and working directory. **Edit list…** manages CLI names and per-CLI continue/resume tries (`~/.config/tabit/ai_clis.json`) |
 | `+ Note` | GtkSourceView editor + **Markdown Preview** (WebKit); bottom tools: Base64 / JSON Format; wrap in **Settings…**; huge-line guards |
 | `Settings…` | Note wrap default and other prefs (`settings.json`) |
 | `+ Command` | Run anything (e.g. `ssh root@192.168.1.1`) in a new tab |
+| `+ tmux` | Attach to a running tmux session or create one; rename / kill sessions from the list |
 | Click a tab | Switch to that session |
 | Double-click a tab / right-click → Rename… / `F2` | Rename (popover bubble to the right of the tab) |
 | `x` on a tab (shown on hover) | Close that session |
@@ -68,7 +69,8 @@ looking elsewhere. When a session's process ends (device unplugged,
 `exit`, picocom quit) the tab stays, greyed and marked `exited`, so
 you keep the scrollback — press its `x` to really close it.
 
-Serial tool defaults to `screen.sh` (multi-attach + logfile). `kermit`
+Serial tool defaults to `screen` — a bundled `screen.sh` wrapper
+(multi-attach + logfile), written to `~/.config/tabit/screen.sh`. `kermit`
 uses `~/senaoenv/kermrc` when present (`-c -E`). `picocom` quit is
 `Ctrl-A Ctrl-X`. Closing the last tab quits tabit.
 
