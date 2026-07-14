@@ -72,10 +72,14 @@ KERMRC = os.path.expanduser("~/senaoenv/kermrc")
 CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "tabit")
 SESSIONS_FILE = os.path.join(CONFIG_DIR, "sessions.json")
 KEYS_FILE = os.path.join(CONFIG_DIR, "keys.json")
+SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
 AI_LAST_FILE = os.path.join(CONFIG_DIR, "ai_last.json")
 AI_CLIS_FILE = os.path.join(CONFIG_DIR, "ai_clis.json")
 TERM_FG = "#d5d5df"
 TERM_BG = "#101016"
+DEFAULT_SETTINGS = {
+    "note_wrap": True,
+}
 
 # (action_id, label, default GTK accelerator string)
 KEY_ACTIONS = (
@@ -84,6 +88,10 @@ KEY_ACTIONS = (
     ("new_ai", "New AI session", "<Primary><Shift>a"),
     ("new_note", "New note", "<Primary><Shift>n"),
     ("save_note", "Save note", "<Primary>s"),
+    ("note_b64_enc", "Note: Base64 encode", "<Primary><Alt>b"),
+    ("note_b64_dec", "Note: Base64 decode", "<Primary><Alt><Shift>b"),
+    ("note_json_fmt", "Note: JSON format", "<Primary><Alt>j"),
+    ("note_json_val", "Note: JSON validate", "<Primary><Alt>k"),
     ("close_session", "Close session", "<Primary><Shift>w"),
     ("rename_session", "Rename session", "F2"),
     ("prev_session", "Previous session", "<Primary>Page_Up"),
@@ -123,7 +131,7 @@ CSS = b"""
            padding: 12px 8px 3px 8px; }
 /* EventBox on each tab must have a window to receive double/right-click */
 .sidebar eventbox { background-color: transparent; }
-.note-tools { background-color: #15151c; border-bottom: 1px solid #2c2c38;
+.note-tools { background-color: #15151c; border-top: 1px solid #2c2c38;
               padding: 4px 6px; }
 .note-tools button { padding: 2px 8px; font-size: 9pt; }
 """
@@ -167,9 +175,11 @@ class Tabit(Gtk.Window):
             btn = Gtk.Button(label=text)
             btn.connect("clicked", handler)
             adders.pack_start(btn, False, False, 0)
-        keys_btn = Gtk.Button(label="Shortcuts…")
-        keys_btn.connect("clicked", self._on_edit_keys)
-        adders.pack_start(keys_btn, False, False, 0)
+        for text, handler in (("Settings…", self._on_edit_settings),
+                              ("Shortcuts…", self._on_edit_keys)):
+            btn = Gtk.Button(label=text)
+            btn.connect("clicked", handler)
+            adders.pack_start(btn, False, False, 0)
         sidebar.pack_start(adders, False, False, 0)
 
         root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
@@ -344,8 +354,9 @@ class Tabit(Gtk.Window):
         view.set_highlight_current_line(True)
         view.set_tab_width(4)
         view.set_insert_spaces_instead_of_tabs(True)
-        # default wrap: long lines otherwise freeze layout
-        view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        wrap_on = self._load_settings().get("note_wrap", True)
+        view.set_wrap_mode(
+            Gtk.WrapMode.WORD_CHAR if wrap_on else Gtk.WrapMode.NONE)
         buf = view.get_buffer()
         scheme_mgr = GtkSource.StyleSchemeManager.get_default()
         scheme = (scheme_mgr.get_scheme("oblivion")
@@ -383,33 +394,6 @@ class Tabit(Gtk.Window):
         scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroll.add(view)
 
-        tools = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        tools.get_style_context().add_class("note-tools")
-        wrap_btn = Gtk.ToggleButton(label="Wrap")
-        wrap_btn.set_active(True)
-        wrap_btn.set_tooltip_text("Word wrap (off = one long line, may lag)")
-        tools.pack_start(wrap_btn, False, False, 0)
-        tool_specs = (
-            ("Base64 Enc",),
-            ("Base64 Dec",),
-            ("JSON Format",),
-            ("JSON Check",),
-        )
-        tool_buttons = []
-        for (text,) in tool_specs:
-            b = Gtk.Button(label=text)
-            tools.pack_start(b, False, False, 0)
-            tool_buttons.append(b)
-        tip = Gtk.Label(
-            label="  (selection, or whole note if none)",
-            xalign=0)
-        tip.get_style_context().add_class("session-sub")
-        tools.pack_start(tip, False, False, 0)
-
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        page.pack_start(tools, False, False, 0)
-        page.pack_start(scroll, True, True, 0)
-
         row = self._make_sidebar_row(label, sub, ICON_NOTE, tooltip)
         row.argv = [NOTE_SENTINEL, path or ""]
         row.kind = "note"
@@ -421,22 +405,34 @@ class Tabit(Gtk.Window):
         row._note_heavy = False
         row._tune_src = None
         row.dot.set_no_show_all(True)
-        self._place_tab_row(row, page)
 
-        def on_wrap(btn):
-            view.set_wrap_mode(
-                Gtk.WrapMode.WORD_CHAR if btn.get_active()
-                else Gtk.WrapMode.NONE)
-
-        wrap_btn.connect("toggled", on_wrap)
-        handlers = (
-            self._note_b64_encode,
-            self._note_b64_decode,
-            self._note_json_format,
-            self._note_json_validate,
+        # tools bar at bottom; labels include shortcut hints
+        tools = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        tools.get_style_context().add_class("note-tools")
+        tool_specs = (
+            ("Base64 Enc", "note_b64_enc", self._note_b64_encode),
+            ("Base64 Dec", "note_b64_dec", self._note_b64_decode),
+            ("JSON Format", "note_json_fmt", self._note_json_format),
+            ("JSON Check", "note_json_val", self._note_json_validate),
         )
-        for b, h in zip(tool_buttons, handlers):
-            b.connect("clicked", lambda _b, fn=h: fn(row))
+        for text, action_id, handler in tool_specs:
+            acc = self._action_accel_label(action_id)
+            lab = f"{text}  ({acc})" if acc else text
+            b = Gtk.Button(label=lab)
+            b.set_tooltip_text(
+                f"{text} — {acc}" if acc else text)
+            tools.pack_start(b, False, False, 0)
+            b.connect("clicked", lambda _b, fn=handler, r=row: fn(r))
+        tip = Gtk.Label(
+            label="  (selection, or whole note if none)",
+            xalign=0)
+        tip.get_style_context().add_class("session-sub")
+        tools.pack_start(tip, False, False, 0)
+
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        page.pack_start(scroll, True, True, 0)
+        page.pack_start(tools, False, False, 0)
+        self._place_tab_row(row, page)
 
         buf.connect("modified-changed",
                     lambda _b: self._refresh_note_title(row))
@@ -588,18 +584,26 @@ class Tabit(Gtk.Window):
             return False
         menu = Gtk.Menu()
         items = (
-            ("Base64 Encode", self._note_b64_encode),
-            ("Base64 Decode", self._note_b64_decode),
-            ("JSON Format", self._note_json_format),
-            ("JSON Validate", self._note_json_validate),
+            ("Base64 Encode", "note_b64_enc", self._note_b64_encode),
+            ("Base64 Decode", "note_b64_dec", self._note_b64_decode),
+            ("JSON Format", "note_json_fmt", self._note_json_format),
+            ("JSON Validate", "note_json_val", self._note_json_validate),
         )
-        for label, fn in items:
-            item = Gtk.MenuItem(label=label)
+        for label, action_id, fn in items:
+            acc = self._action_accel_label(action_id)
+            text = f"{label}    {acc}" if acc else label
+            item = Gtk.MenuItem(label=text)
             item.connect("activate", lambda _i, f=fn: f(row))
             menu.append(item)
         menu.show_all()
         menu.popup_at_pointer(event)
         return True
+
+    def _action_accel_label(self, action_id):
+        pair = self._keys.get(action_id)
+        if not pair:
+            return ""
+        return self._accel_label(*pair)
 
     def _refresh_note_title(self, row):
         if getattr(row, "kind", None) != "note":
@@ -1459,6 +1463,26 @@ class Tabit(Gtk.Window):
                 self._save_note(row)
             else:
                 return False
+        elif action == "note_b64_enc":
+            if row is not None and getattr(row, "kind", None) == "note":
+                self._note_b64_encode(row)
+            else:
+                return False
+        elif action == "note_b64_dec":
+            if row is not None and getattr(row, "kind", None) == "note":
+                self._note_b64_decode(row)
+            else:
+                return False
+        elif action == "note_json_fmt":
+            if row is not None and getattr(row, "kind", None) == "note":
+                self._note_json_format(row)
+            else:
+                return False
+        elif action == "note_json_val":
+            if row is not None and getattr(row, "kind", None) == "note":
+                self._note_json_validate(row)
+            else:
+                return False
         elif action == "close_session":
             if row is not None:
                 self._close_session(row)
@@ -1514,6 +1538,61 @@ class Tabit(Gtk.Window):
 
     def _on_editor_key(self, _view, event):
         return self._handle_shortcut(event)
+
+    @staticmethod
+    def _load_settings():
+        data = dict(DEFAULT_SETTINGS)
+        try:
+            with open(SETTINGS_FILE) as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                data.update(raw)
+        except (OSError, ValueError):
+            pass
+        return data
+
+    @staticmethod
+    def _save_settings(data):
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        cur = Tabit._load_settings()
+        cur.update(data)
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(cur, f, indent=2)
+
+    def _apply_note_wrap_setting(self, wrap_on):
+        mode = Gtk.WrapMode.WORD_CHAR if wrap_on else Gtk.WrapMode.NONE
+        for row in self.listbox.get_children():
+            if getattr(row, "kind", None) == "note" and row.view is not None:
+                row.view.set_wrap_mode(mode)
+
+    def _on_edit_settings(self, _btn):
+        s = self._load_settings()
+        dialog = Gtk.Dialog(title="Settings", transient_for=self, modal=True)
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                           "Save", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        box = dialog.get_content_area()
+        box.set_spacing(10)
+        for side in ("top", "bottom", "start", "end"):
+            getattr(box, f"set_margin_{side}")(12)
+        head = Gtk.Label(xalign=0)
+        head.set_markup("<b>Notes</b>")
+        wrap = Gtk.CheckButton(label="Word wrap notes (recommended)")
+        wrap.set_active(bool(s.get("note_wrap", True)))
+        wrap.set_tooltip_text(
+            "When off, very long lines may lag. Default is on.")
+        hint = Gtk.Label(
+            label="Stored in ~/.config/tabit/settings.json",
+            xalign=0)
+        hint.get_style_context().add_class("session-sub")
+        box.pack_start(head, False, False, 0)
+        box.pack_start(wrap, False, False, 0)
+        box.pack_start(hint, False, False, 0)
+        dialog.show_all()
+        if dialog.run() == Gtk.ResponseType.OK:
+            self._save_settings({"note_wrap": wrap.get_active()})
+            self._apply_note_wrap_setting(wrap.get_active())
+        dialog.destroy()
 
     def _on_edit_keys(self, _btn):
         dialog = Gtk.Dialog(title="Keyboard shortcuts", transient_for=self,
