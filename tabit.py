@@ -31,13 +31,14 @@ SIDEBAR_WIDTH = 200
 DEFAULT_BAUD = "115200"
 # serial backends shown in the +Serial dialog (first = default)
 SERIAL_BACKENDS = ("screen.sh", "kermit", "picocom")
-# AI CLIs offered in +AI (combo is editable for anything else)
-AI_CLIS = ("claude", "codex", "grok", "gemini", "antigravity")
+# default AI CLI list for +AI (user-editable → ~/.config/tabit/ai_clis.json)
+DEFAULT_AI_CLIS = ["claude", "codex", "grok", "gemini", "antigravity"]
 KERMRC = os.path.expanduser("~/senaoenv/kermrc")
 CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "tabit")
 SESSIONS_FILE = os.path.join(CONFIG_DIR, "sessions.json")
 KEYS_FILE = os.path.join(CONFIG_DIR, "keys.json")
 AI_LAST_FILE = os.path.join(CONFIG_DIR, "ai_last.json")
+AI_CLIS_FILE = os.path.join(CONFIG_DIR, "ai_clis.json")
 TERM_FG = "#d5d5df"
 TERM_BG = "#101016"
 
@@ -482,6 +483,25 @@ class Tabit(Gtk.Window):
             json.dump({"cli": cli, "path": path}, f, indent=2)
 
     @staticmethod
+    def _load_ai_clis():
+        try:
+            with open(AI_CLIS_FILE) as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                names = [str(x).strip() for x in data if str(x).strip()]
+                if names:
+                    return names
+        except (OSError, ValueError):
+            pass
+        return list(DEFAULT_AI_CLIS)
+
+    @staticmethod
+    def _save_ai_clis(names):
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(AI_CLIS_FILE, "w") as f:
+            json.dump(names, f, indent=2)
+
+    @staticmethod
     def _ai_argv(cli, path):
         # Try resume/continue styles in order, then a plain start.
         #   --continue     claude, grok, …
@@ -498,8 +518,80 @@ class Tabit(Gtk.Window):
         )
         return ["/bin/sh", "-c", script]
 
+    def _fill_ai_combo(self, combo, names, prefer=None):
+        combo.remove_all()
+        for name in names:
+            combo.append_text(name)
+        prefer = prefer or (names[0] if names else "")
+        if prefer in names:
+            combo.set_active(names.index(prefer))
+        elif prefer:
+            combo.get_child().set_text(prefer)
+            combo.set_active(-1)
+        elif names:
+            combo.set_active(0)
+
+    def _on_manage_ai_clis(self, parent, combo=None):
+        """Edit the AI CLI select list (one command name per line)."""
+        names = self._load_ai_clis()
+        dialog = Gtk.Dialog(title="Manage AI CLI list", transient_for=parent,
+                            modal=True)
+        dialog.add_buttons(
+            "Reset defaults", Gtk.ResponseType.APPLY,
+            "Cancel", Gtk.ResponseType.CANCEL,
+            "Save", Gtk.ResponseType.OK)
+        dialog.set_default_size(360, 280)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        box = dialog.get_content_area()
+        box.set_spacing(6)
+        box.set_margin_top(8)
+        box.set_margin_bottom(8)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+        hint = Gtk.Label(
+            label="One CLI command per line (order = dropdown order).\n"
+                  "Stored in ~/.config/tabit/ai_clis.json",
+            xalign=0)
+        hint.get_style_context().add_class("session-sub")
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_hexpand(True)
+        scroll.set_vexpand(True)
+        buf = Gtk.TextBuffer()
+        buf.set_text("\n".join(names))
+        view = Gtk.TextView(buffer=buf)
+        view.set_accepts_tab(False)
+        view.set_monospace(True)
+        scroll.add(view)
+        box.pack_start(hint, False, False, 0)
+        box.pack_start(scroll, True, True, 0)
+        dialog.show_all()
+
+        while True:
+            resp = dialog.run()
+            if resp == Gtk.ResponseType.APPLY:
+                buf.set_text("\n".join(DEFAULT_AI_CLIS))
+                continue
+            if resp == Gtk.ResponseType.OK:
+                start, end = buf.get_bounds()
+                text = buf.get_text(start, end, False)
+                new_names = []
+                for line in text.splitlines():
+                    s = line.strip()
+                    if s and s not in new_names:
+                        new_names.append(s)
+                if not new_names:
+                    new_names = list(DEFAULT_AI_CLIS)
+                self._save_ai_clis(new_names)
+                if combo is not None:
+                    cur = (combo.get_active_text() or "").strip()
+                    self._fill_ai_combo(combo, new_names, prefer=cur)
+            break
+        dialog.destroy()
+
     def _on_add_ai(self, _btn):
         last = self._load_ai_last()
+        names = self._load_ai_clis()
         dialog = Gtk.Dialog(title="New AI session", transient_for=self,
                             modal=True)
         dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
@@ -508,14 +600,13 @@ class Tabit(Gtk.Window):
         grid = Gtk.Grid(row_spacing=6, column_spacing=6, margin=12)
 
         cli = Gtk.ComboBoxText.new_with_entry()
-        for name in AI_CLIS:
-            cli.append_text(name)
-        last_cli = last.get("cli") or AI_CLIS[0]
-        if last_cli in AI_CLIS:
-            cli.set_active(AI_CLIS.index(last_cli))
-        else:
-            cli.get_child().set_text(last_cli)
-            cli.set_active(-1)
+        self._fill_ai_combo(cli, names, prefer=last.get("cli"))
+        manage = Gtk.Button(label="Edit list…")
+        manage.connect("clicked",
+                       lambda *_: self._on_manage_ai_clis(dialog, cli))
+        cli_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        cli_box.pack_start(cli, True, True, 0)
+        cli_box.pack_start(manage, False, False, 0)
 
         path_default = last.get("path") or GLib.get_home_dir()
         path = Gtk.Entry(text=path_default, width_chars=36)
@@ -545,7 +636,7 @@ class Tabit(Gtk.Window):
         hint.get_style_context().add_class("session-sub")
 
         grid.attach(Gtk.Label(label="CLI", xalign=0), 0, 0, 1, 1)
-        grid.attach(cli, 1, 0, 1, 1)
+        grid.attach(cli_box, 1, 0, 1, 1)
         grid.attach(Gtk.Label(label="Path", xalign=0), 0, 1, 1, 1)
         grid.attach(path_box, 1, 1, 1, 1)
         grid.attach(hint, 0, 2, 2, 1)
