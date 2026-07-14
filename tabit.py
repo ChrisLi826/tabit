@@ -253,6 +253,9 @@ KEYS_FILE = os.path.join(CONFIG_DIR, "keys.json")
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
 AI_LAST_FILE = os.path.join(CONFIG_DIR, "ai_last.json")
 AI_CLIS_FILE = os.path.join(CONFIG_DIR, "ai_clis.json")
+COMMANDS_FILE = os.path.join(CONFIG_DIR, "commands.json")
+# quick commands shown in the terminal bottom bar (user-editable)
+DEFAULT_COMMANDS = [{"cmd": "hom18", "enter": True}]
 TERM_FG = "#d5d5df"
 TERM_BG = "#101016"
 DEFAULT_SETTINGS = {
@@ -319,6 +322,9 @@ CSS = b"""
 .note-tools { background-color: #15151c; border-top: 1px solid #2c2c38;
               padding: 4px 6px; }
 .note-tools button { padding: 2px 8px; font-size: 9pt; }
+.cmd-bar { background-color: #15151c; border-top: 1px solid #2c2c38;
+           padding: 4px 6px; }
+.cmd-bar button { padding: 2px 10px; font-size: 9pt; }
 /* narrow the resize handle so it stops stealing clicks meant for the
    terminal; the sidebar's border-right is the visible line. themes pad
    the separator and add a grip image, which widens the grab zone, so
@@ -565,6 +571,7 @@ class Tabit(Gtk.Window):
         row.view = None
         row.buffer = None
         row.file_path = None
+        row.cmd_bar = None
         return row
 
     def _place_tab_row(self, row, page):
@@ -605,7 +612,11 @@ class Tabit(Gtk.Window):
         row.term = term
         row.pid = None
         row.track_cwd = track_cwd  # shell tabs show live cwd in the subtitle
-        self._place_tab_row(row, term)
+        # terminal page = VTE on top, quick-command bar at the bottom
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        page.pack_start(term, True, True, 0)
+        page.pack_start(self._build_cmd_bar(row), False, False, 0)
+        self._place_tab_row(row, page)
 
         workdir = cwd if cwd and os.path.isdir(cwd) else GLib.get_home_dir()
         term.connect("child-exited", self._on_child_exited, row)
@@ -613,6 +624,147 @@ class Tabit(Gtk.Window):
         term.spawn_async(Vte.PtyFlags.DEFAULT, workdir, argv,
                          None, GLib.SpawnFlags.SEARCH_PATH, None, None,
                          -1, None, self._on_term_spawned, row)
+
+    # --- quick command bar ------------------------------------------------
+
+    @staticmethod
+    def _load_commands():
+        try:
+            with open(COMMANDS_FILE) as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                out = [{"cmd": str(it["cmd"]),
+                        "enter": bool(it.get("enter", True))}
+                       for it in data
+                       if isinstance(it, dict) and it.get("cmd")]
+                return out
+        except (OSError, ValueError):
+            pass
+        return [dict(c) for c in DEFAULT_COMMANDS]
+
+    @staticmethod
+    def _save_commands(cmds):
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        data = [{"cmd": c["cmd"], "enter": bool(c.get("enter", True))}
+                for c in cmds if c.get("cmd")]
+        with open(COMMANDS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+
+    def _build_cmd_bar(self, row):
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        bar.get_style_context().add_class("cmd-bar")
+        row.cmd_bar = bar
+        self._populate_cmd_bar(row)
+        return bar
+
+    def _populate_cmd_bar(self, row):
+        bar = row.cmd_bar
+        for c in bar.get_children():
+            bar.remove(c)
+        for entry in self._load_commands():
+            b = Gtk.Button(label=entry["cmd"])
+            b.set_tooltip_text(("runs" if entry.get("enter") else "types")
+                               + f" “{entry['cmd']}”")
+            b.connect("clicked",
+                      lambda _b, e=entry, r=row: self._send_cmd(r, e))
+            bar.pack_start(b, False, False, 0)
+        edit = Gtk.Button.new_from_icon_name("document-edit-symbolic",
+                                             Gtk.IconSize.MENU)
+        edit.set_relief(Gtk.ReliefStyle.NONE)
+        edit.set_tooltip_text("Edit quick commands…")
+        edit.connect("clicked", lambda *_: self._on_edit_commands())
+        bar.pack_end(edit, False, False, 0)
+        bar.show_all()
+
+    def _refresh_cmd_bars(self):
+        for r in self.listbox.get_children():
+            if getattr(r, "cmd_bar", None) is not None:
+                self._populate_cmd_bar(r)
+
+    def _send_cmd(self, row, entry):
+        term = getattr(row, "term", None)
+        if term is None or row.dead:
+            return
+        # "\r" is what the Enter key sends on a pty, so the shell runs it
+        text = entry["cmd"] + ("\r" if entry.get("enter") else "")
+        term.feed_child(text.encode("utf-8"))
+        term.grab_focus()
+
+    def _on_edit_commands(self):
+        dialog = Gtk.Dialog(title="Quick commands", transient_for=self,
+                            modal=True)
+        dialog.add_button("Close", Gtk.ResponseType.CLOSE)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                      margin=12)
+        dialog.get_content_area().add(box)
+
+        listbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.pack_start(listbox, True, True, 0)
+        box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
+                       False, False, 0)
+
+        add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        entry = Gtk.Entry(placeholder_text="command", width_chars=20)
+        entry.set_hexpand(True)
+        enter_chk = Gtk.CheckButton(label="send Enter")
+        enter_chk.set_active(True)
+        add_btn = Gtk.Button(label="Add")
+        add_row.pack_start(entry, True, True, 0)
+        add_row.pack_start(enter_chk, False, False, 0)
+        add_row.pack_start(add_btn, False, False, 0)
+        box.pack_start(add_row, False, False, 0)
+
+        def refresh():
+            for c in listbox.get_children():
+                listbox.remove(c)
+            cmds = self._load_commands()
+            if not cmds:
+                lbl = Gtk.Label(label="No quick commands yet.", xalign=0)
+                lbl.get_style_context().add_class("session-sub")
+                listbox.pack_start(lbl, False, False, 0)
+            for i, e in enumerate(cmds):
+                r = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+                nl = Gtk.Label(label=e["cmd"], xalign=0)
+                nl.set_hexpand(True)
+                nl.set_ellipsize(Pango.EllipsizeMode.END)
+                tag = Gtk.Label(label="↵ Enter" if e.get("enter") else "no Enter")
+                tag.get_style_context().add_class("session-sub")
+                dele = Gtk.Button.new_from_icon_name("user-trash-symbolic",
+                                                     Gtk.IconSize.MENU)
+                dele.set_relief(Gtk.ReliefStyle.NONE)
+                dele.connect("clicked", lambda _b, idx=i: do_delete(idx))
+                r.pack_start(nl, True, True, 0)
+                r.pack_start(tag, False, False, 0)
+                r.pack_start(dele, False, False, 0)
+                listbox.pack_start(r, False, False, 0)
+            listbox.show_all()
+
+        def do_delete(idx):
+            cmds = self._load_commands()
+            if 0 <= idx < len(cmds):
+                del cmds[idx]
+                self._save_commands(cmds)
+                refresh()
+                self._refresh_cmd_bars()
+
+        def do_add(*_a):
+            cmd = entry.get_text().strip()
+            if not cmd:
+                return
+            cmds = self._load_commands()
+            cmds.append({"cmd": cmd, "enter": enter_chk.get_active()})
+            self._save_commands(cmds)
+            entry.set_text("")
+            enter_chk.set_active(True)
+            refresh()
+            self._refresh_cmd_bars()
+
+        add_btn.connect("clicked", do_add)
+        entry.connect("activate", do_add)
+        refresh()
+        dialog.show_all()
+        dialog.run()
+        dialog.destroy()
 
     def _add_note_session(self, path=None, label=None, sub=None):
         """GtkSourceView note tab; path=None means untitled."""
