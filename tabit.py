@@ -532,60 +532,175 @@ class Tabit(Gtk.Window):
             combo.set_active(0)
 
     def _on_manage_ai_clis(self, parent, combo=None):
-        """Edit the AI CLI select list (one command name per line)."""
+        """Edit the AI CLI select list with a list UI (not a free text dump)."""
         names = self._load_ai_clis()
+        store = Gtk.ListStore(str)
+        for name in names:
+            store.append([name])
+
         dialog = Gtk.Dialog(title="Manage AI CLI list", transient_for=parent,
                             modal=True)
         dialog.add_buttons(
             "Reset defaults", Gtk.ResponseType.APPLY,
             "Cancel", Gtk.ResponseType.CANCEL,
             "Save", Gtk.ResponseType.OK)
-        dialog.set_default_size(360, 280)
+        dialog.set_default_size(420, 340)
         dialog.set_default_response(Gtk.ResponseType.OK)
-        box = dialog.get_content_area()
-        box.set_spacing(6)
-        box.set_margin_top(8)
-        box.set_margin_bottom(8)
-        box.set_margin_start(12)
-        box.set_margin_end(12)
-        hint = Gtk.Label(
-            label="One CLI command per line (order = dropdown order).\n"
-                  "Stored in ~/.config/tabit/ai_clis.json",
-            xalign=0)
-        hint.get_style_context().add_class("session-sub")
+        root = dialog.get_content_area()
+        root.set_spacing(10)
+        for side in ("top", "bottom", "start", "end"):
+            getattr(root, f"set_margin_{side}")(12)
+
+        header = Gtk.Label(xalign=0)
+        header.set_markup(
+            "<b>AI command list</b>\n"
+            "<span size='small' foreground='#7a7a88'>"
+            "Order is the +AI dropdown order. Double-click a name to edit."
+            "</span>")
+        root.pack_start(header, False, False, 0)
+
+        mid = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_shadow_type(Gtk.ShadowType.IN)
         scroll.set_hexpand(True)
         scroll.set_vexpand(True)
-        buf = Gtk.TextBuffer()
-        buf.set_text("\n".join(names))
-        view = Gtk.TextView(buffer=buf)
-        view.set_accepts_tab(False)
-        view.set_monospace(True)
-        scroll.add(view)
-        box.pack_start(hint, False, False, 0)
-        box.pack_start(scroll, True, True, 0)
-        dialog.show_all()
+        scroll.set_min_content_height(200)
 
+        tree = Gtk.TreeView(model=store)
+        tree.set_headers_visible(False)
+        tree.set_reorderable(True)  # drag to reorder
+        sel = tree.get_selection()
+        sel.set_mode(Gtk.SelectionMode.SINGLE)
+        cell = Gtk.CellRendererText(editable=True)
+        cell.set_property("ypad", 6)
+        cell.set_property("xpad", 8)
+
+        def on_edited(_cell, path, text):
+            text = text.strip()
+            if not text:
+                return
+            it = store.get_iter(path)
+            # reject duplicates (except same row)
+            for i, row in enumerate(store):
+                if row[0] == text and str(i) != path:
+                    return
+            store[it][0] = text
+
+        cell.connect("edited", on_edited)
+        col = Gtk.TreeViewColumn("CLI", cell, text=0)
+        col.set_expand(True)
+        tree.append_column(col)
+        scroll.add(tree)
+        mid.pack_start(scroll, True, True, 0)
+
+        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        btn_up = Gtk.Button.new_from_icon_name("go-up-symbolic",
+                                               Gtk.IconSize.BUTTON)
+        btn_down = Gtk.Button.new_from_icon_name("go-down-symbolic",
+                                                 Gtk.IconSize.BUTTON)
+        btn_del = Gtk.Button.new_from_icon_name("list-remove-symbolic",
+                                                Gtk.IconSize.BUTTON)
+        for b, tip in ((btn_up, "Move up"), (btn_down, "Move down"),
+                       (btn_del, "Remove")):
+            b.set_tooltip_text(tip)
+            side.pack_start(b, False, False, 0)
+        mid.pack_start(side, False, False, 0)
+        root.pack_start(mid, True, True, 0)
+
+        add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        add_entry = Gtk.Entry()
+        add_entry.set_placeholder_text("e.g. claude, codex, my-wrapper")
+        add_entry.set_hexpand(True)
+        btn_add = Gtk.Button.new_from_icon_name("list-add-symbolic",
+                                                Gtk.IconSize.BUTTON)
+        btn_add.set_label("Add")
+        btn_add.set_always_show_image(True)
+        add_row.pack_start(add_entry, True, True, 0)
+        add_row.pack_start(btn_add, False, False, 0)
+        root.pack_start(add_row, False, False, 0)
+
+        foot = Gtk.Label(
+            label="Saved to ~/.config/tabit/ai_clis.json",
+            xalign=0)
+        foot.get_style_context().add_class("session-sub")
+        root.pack_start(foot, False, False, 0)
+
+        def selected_iter():
+            _model, it = sel.get_selected()
+            return it
+
+        def on_up(_b):
+            it = selected_iter()
+            if it is None:
+                return
+            path = store.get_path(it)
+            if path[0] == 0:
+                return
+            prev = store.get_iter((path[0] - 1,))
+            store.swap(it, prev)
+
+        def on_down(_b):
+            it = selected_iter()
+            if it is None:
+                return
+            path = store.get_path(it)
+            if path[0] >= store.iter_n_children(None) - 1:
+                return
+            nxt = store.get_iter((path[0] + 1,))
+            store.swap(it, nxt)
+
+        def on_del(_b):
+            it = selected_iter()
+            if it is not None:
+                store.remove(it)
+
+        def on_add(_b=None):
+            text = add_entry.get_text().strip()
+            if not text:
+                return
+            for row in store:
+                if row[0] == text:
+                    add_entry.set_text("")
+                    return
+            store.append([text])
+            add_entry.set_text("")
+            n = store.iter_n_children(None)
+            last = store.get_iter((n - 1,))
+            sel.select_iter(last)
+            tree.scroll_to_cell(store.get_path(last), None, False, 0, 0)
+
+        def refill(defaults):
+            store.clear()
+            for name in defaults:
+                store.append([name])
+
+        btn_up.connect("clicked", on_up)
+        btn_down.connect("clicked", on_down)
+        btn_del.connect("clicked", on_del)
+        btn_add.connect("clicked", on_add)
+        add_entry.connect("activate", on_add)
+
+        dialog.show_all()
         while True:
             resp = dialog.run()
             if resp == Gtk.ResponseType.APPLY:
-                buf.set_text("\n".join(DEFAULT_AI_CLIS))
+                refill(DEFAULT_AI_CLIS)
                 continue
             if resp == Gtk.ResponseType.OK:
-                start, end = buf.get_bounds()
-                text = buf.get_text(start, end, False)
-                new_names = []
-                for line in text.splitlines():
-                    s = line.strip()
-                    if s and s not in new_names:
-                        new_names.append(s)
-                if not new_names:
-                    new_names = list(DEFAULT_AI_CLIS)
-                self._save_ai_clis(new_names)
+                new_names = [row[0] for row in store if row[0].strip()]
+                # de-dupe preserve order
+                seen, ordered = set(), []
+                for n in new_names:
+                    if n not in seen:
+                        seen.add(n)
+                        ordered.append(n)
+                if not ordered:
+                    ordered = list(DEFAULT_AI_CLIS)
+                self._save_ai_clis(ordered)
                 if combo is not None:
                     cur = (combo.get_active_text() or "").strip()
-                    self._fill_ai_combo(combo, new_names, prefer=cur)
+                    self._fill_ai_combo(combo, ordered, prefer=cur)
             break
         dialog.destroy()
 
