@@ -17,6 +17,7 @@ Keyboard shortcuts are user-editable (sidebar → Shortcuts…, stored in
 import base64
 import fcntl
 import glob
+import html as html_module
 import json
 import os
 import shlex
@@ -30,6 +31,21 @@ gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("GtkSource", "4")
 gi.require_version("Vte", "2.91")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, GtkSource, Pango, Vte
+
+try:
+    gi.require_version("WebKit2", "4.0")
+    from gi.repository import WebKit2
+    HAS_WEBKIT = True
+except (ValueError, ImportError):
+    WebKit2 = None
+    HAS_WEBKIT = False
+
+try:
+    import markdown as markdown_lib
+    HAS_MARKDOWN = True
+except ImportError:
+    markdown_lib = None
+    HAS_MARKDOWN = False
 
 SIDEBAR_WIDTH = 200
 DEFAULT_BAUD = "115200"
@@ -91,6 +107,7 @@ KEY_ACTIONS = (
     ("note_b64_enc", "Note: Base64 encode", "<Primary><Alt>b"),
     ("note_b64_dec", "Note: Base64 decode", "<Primary><Alt><Shift>b"),
     ("note_json_fmt", "Note: JSON format", "<Primary><Alt>j"),
+    ("note_preview", "Note: Markdown preview", "<Primary><Alt>m"),
     ("close_session", "Close session", "<Primary><Shift>w"),
     ("rename_session", "Rename session", "F2"),
     ("prev_session", "Previous session", "<Primary>Page_Up"),
@@ -406,6 +423,18 @@ class Tabit(Gtk.Window):
         scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroll.add(view)
 
+        content = Gtk.Stack()
+        content.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        content.add_named(scroll, "edit")
+
+        webview = None
+        if HAS_WEBKIT:
+            webview = WebKit2.WebView()
+            wset = webview.get_settings()
+            wset.set_enable_javascript(False)
+            wset.set_allow_file_access_from_file_urls(True)
+            content.add_named(webview, "preview")
+
         row = self._make_sidebar_row(label, sub, ICON_NOTE, tooltip)
         row.argv = [NOTE_SENTINEL, path or ""]
         row.kind = "note"
@@ -413,6 +442,9 @@ class Tabit(Gtk.Window):
         row.view = view
         row.buffer = buf
         row.file_path = path
+        row.webview = webview
+        row.content_stack = content
+        row.preview_on = False
         row._wanted_lang = wanted_lang  # restore after heavy-mode ends
         row._note_heavy = False
         row._tune_src = None
@@ -421,6 +453,23 @@ class Tabit(Gtk.Window):
         # tools bar at bottom; labels include shortcut hints
         tools = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         tools.get_style_context().add_class("note-tools")
+        preview_btn = None
+        if HAS_WEBKIT:
+            acc = self._action_accel_label("note_preview")
+            plab = f"Preview  ({acc})" if acc else "Preview"
+            preview_btn = Gtk.ToggleButton(label=plab)
+            preview_btn.set_tooltip_text(
+                "Markdown preview" + (f" — {acc}" if acc else ""))
+            tools.pack_start(preview_btn, False, False, 0)
+            row.preview_btn = preview_btn
+            row._preview_syncing = False
+
+            def on_preview_toggle(btn):
+                if getattr(row, "_preview_syncing", False):
+                    return
+                self._note_set_preview(row, btn.get_active())
+
+            preview_btn.connect("toggled", on_preview_toggle)
         tool_specs = (
             ("Base64 Enc", "note_b64_enc", self._note_b64_encode),
             ("Base64 Dec", "note_b64_dec", self._note_b64_decode),
@@ -441,7 +490,7 @@ class Tabit(Gtk.Window):
         tools.pack_start(tip, False, False, 0)
 
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        page.pack_start(scroll, True, True, 0)
+        page.pack_start(content, True, True, 0)
         page.pack_start(tools, False, False, 0)
         self._place_tab_row(row, page)
 
@@ -500,6 +549,86 @@ class Tabit(Gtk.Window):
                     row._wanted_lang = lang
                 if lang is not None:
                     buf.set_language(lang)
+
+    @staticmethod
+    def _md_to_html(text, base_path=None):
+        """Render markdown to a dark-themed HTML document."""
+        if HAS_MARKDOWN:
+            exts = ["fenced_code", "tables", "nl2br", "sane_lists"]
+            try:
+                body = markdown_lib.markdown(
+                    text,
+                    extensions=exts + ["codehilite"],
+                    extension_configs={
+                        "codehilite": {
+                            "guess_lang": False, "noclasses": True,
+                        },
+                    },
+                )
+            except Exception:
+                body = markdown_lib.markdown(text, extensions=exts)
+        else:
+            body = ("<p><em>python3-markdown not installed; "
+                    "showing plain text. "
+                    "sudo apt install python3-markdown</em></p>"
+                    f"<pre>{html_module.escape(text)}</pre>")
+        return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+  body {{ background:#101016; color:#d5d5df; font-family:sans-serif;
+         padding:16px 22px; line-height:1.55; max-width:52em; }}
+  a {{ color:#7aa2f7; }}
+  h1,h2,h3,h4 {{ color:#ececf4; border-bottom:1px solid #2c2c38;
+                 padding-bottom:.2em; }}
+  code, pre {{ background:#1a1a24; border-radius:4px; font-size:.92em; }}
+  code {{ padding:.1em .35em; }}
+  pre {{ padding:12px; overflow:auto; }}
+  pre code {{ padding:0; background:none; }}
+  blockquote {{ border-left:3px solid #7aa2f7; margin-left:0;
+                padding-left:12px; color:#9a9aa8; }}
+  table {{ border-collapse:collapse; }}
+  th, td {{ border:1px solid #2c2c38; padding:6px 10px; }}
+  hr {{ border:none; border-top:1px solid #2c2c38; }}
+  img {{ max-width:100%; }}
+</style></head><body>{body}</body></html>"""
+
+    def _note_set_preview(self, row, on):
+        if not HAS_WEBKIT or getattr(row, "webview", None) is None:
+            return
+        on = bool(on)
+        row.preview_on = on
+        btn = getattr(row, "preview_btn", None)
+        if btn is not None and btn.get_active() != on:
+            row._preview_syncing = True
+            try:
+                btn.set_active(on)
+            finally:
+                row._preview_syncing = False
+        if on:
+            start, end = row.buffer.get_bounds()
+            text = row.buffer.get_text(start, end, True)
+            doc = self._md_to_html(text, row.file_path)
+            base = "file:///"
+            if row.file_path:
+                base = "file://" + os.path.dirname(row.file_path) + "/"
+            row.webview.load_html(doc, base)
+            row.content_stack.set_visible_child_name("preview")
+        else:
+            row.content_stack.set_visible_child_name("edit")
+            row.view.grab_focus()
+
+    def _note_toggle_preview(self, row=None):
+        row = row or self.listbox.get_selected_row()
+        if row is None or getattr(row, "kind", None) != "note":
+            return False
+        if not HAS_WEBKIT:
+            self._note_msg(
+                Gtk.MessageType.WARNING,
+                "Markdown preview needs WebKit2",
+                "Install gir1.2-webkit2-4.0 and python3-markdown.")
+            return False
+        self._note_set_preview(row, not getattr(row, "preview_on", False))
+        return True
 
     def _note_get_range(self, row):
         """Text + iters for selection, or whole buffer if nothing selected."""
@@ -581,6 +710,8 @@ class Tabit(Gtk.Window):
             return False
         menu = Gtk.Menu()
         items = (
+            ("Markdown Preview", "note_preview",
+             lambda r: self._note_toggle_preview(r)),
             ("Base64 Encode", "note_b64_enc", self._note_b64_encode),
             ("Base64 Decode", "note_b64_dec", self._note_b64_decode),
             ("JSON Format", "note_json_fmt", self._note_json_format),
@@ -744,8 +875,10 @@ class Tabit(Gtk.Window):
             self.listbox.select_row(rows[min(idx, len(rows) - 1)])
 
     def _focus_row_content(self, row):
-        if getattr(row, "kind", None) == "note" and row.view is not None:
-            if not row.view.has_focus():
+        if getattr(row, "kind", None) == "note":
+            if getattr(row, "preview_on", False):
+                return  # WebKit keeps its own focus
+            if row.view is not None and not row.view.has_focus():
                 row.view.grab_focus()
         elif row.term is not None and not row.term.has_focus():
             row.term.grab_focus()
@@ -1474,6 +1607,8 @@ class Tabit(Gtk.Window):
                 self._note_json_format(row)
             else:
                 return False
+        elif action == "note_preview":
+            return self._note_toggle_preview(row)
         elif action == "close_session":
             if row is not None:
                 self._close_session(row)

@@ -12,7 +12,7 @@ if [ "$1" = "--uninstall" ]; then
 fi
 
 sudo apt-get install -y python3-gi gir1.2-gtk-3.0 gir1.2-vte-2.91 \
-    gir1.2-gtksource-4 picocom
+    gir1.2-gtksource-4 gir1.2-webkit2-4.0 python3-markdown picocom
 
 mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
 install -m 755 tabit.py "$HOME/.local/bin/tabit"

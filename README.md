@@ -24,6 +24,7 @@ from the Ubuntu archive.
 ## Requirements
 
 - Linux with GTK3 + VTE + GtkSourceView 4 (X11 or Wayland)
+- WebKit2 + `python3-markdown` for note Markdown preview
 - `picocom` for serial sessions
 - Tested on Ubuntu / Xubuntu
 
@@ -45,7 +46,7 @@ To remove: `./install.sh --uninstall`
 | `+ Serial` | Pick device, baud (default 115200), and tool: `screen.sh` / `kermit` / `picocom` |
 | `+ Shell` | New tab running your login shell |
 | `+ AI` | Pick AI CLI and working directory. **Edit list…** manages CLI names and per-CLI continue/resume tries (`~/.config/tabit/ai_clis.json`) |
-| `+ Note` | GtkSourceView editor; tools bar at bottom: Base64 encode/decode, JSON format (with shortcuts); wrap default on (toggle in **Settings…**); huge/long-line auto-disable syntax highlight |
+| `+ Note` | GtkSourceView editor + **Markdown Preview** (WebKit); bottom tools: Base64 / JSON Format; wrap in **Settings…**; huge-line guards |
 | `Settings…` | Note wrap default and other prefs (`settings.json`) |
 | `+ Command` | Run anything (e.g. `ssh root@192.168.1.1`) in a new tab |
 | Click a tab | Switch to that session |
@@ -55,6 +56,7 @@ To remove: `./install.sh --uninstall`
 | `Ctrl+S` | Save note (when a note tab is selected) |
 | `Ctrl+Alt+B` / `Ctrl+Alt+Shift+B` | Note Base64 encode / decode |
 | `Ctrl+Alt+J` | Note JSON format (also validates) |
+| `Ctrl+Alt+M` | Note Markdown preview toggle |
 | `Ctrl+Shift+W` | Close current session |
 | `Ctrl+PageUp` / `Ctrl+PageDown` | Previous / next session |
 | `Ctrl+Shift+PageUp` / `Ctrl+Shift+PageDown` | Move current tab up / down |
