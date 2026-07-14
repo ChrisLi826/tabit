@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <clipPath id="win"><rect x="10" y="22" width="108" height="84" rx="14"/></clipPath>
+  </defs>
+  <!-- app window -->
+  <rect x="10" y="22" width="108" height="84" rx="14"
+        fill="#101016" stroke="#7aa2f7" stroke-width="4"/>
+  <g clip-path="url(#win)">
+    <!-- left sidebar -->
+    <rect x="10" y="22" width="42" height="84" fill="#15151c"/>
+    <line x1="52" y1="22" x2="52" y2="106" stroke="#2c2c38" stroke-width="1.5"/>
+    <!-- selected tab: accent left bar + soft fill + label -->
+    <rect x="15" y="34" width="32" height="13" rx="3" fill="#7aa2f7" fill-opacity="0.20"/>
+    <rect x="15" y="34" width="3" height="13" fill="#7aa2f7"/>
+    <rect x="22" y="39" width="20" height="4" rx="2" fill="#b4ccff"/>
+    <!-- other tabs -->
+    <rect x="22" y="55" width="22" height="4" rx="2" fill="#5a5a6a"/>
+    <rect x="22" y="67" width="17" height="4" rx="2" fill="#5a5a6a"/>
+    <rect x="22" y="79" width="21" height="4" rx="2" fill="#5a5a6a"/>
+    <!-- content pane: a terminal prompt -->
+    <rect x="60" y="35" width="8" height="4" rx="2" fill="#7aa2f7"/>
+    <rect x="72" y="35" width="34" height="4" rx="2" fill="#d5d5df"/>
+    <rect x="60" y="49" width="46" height="4" rx="2" fill="#3a3a48"/>
+    <rect x="60" y="61" width="38" height="4" rx="2" fill="#3a3a48"/>
+  </g>
+</svg>

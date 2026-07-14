@@ -158,6 +158,7 @@ class Tabit(Gtk.Window):
     def __init__(self):
         super().__init__(title="tabit")
         self.set_default_size(1100, 700)
+        self._set_app_icon()
         self.connect("delete-event", self._on_delete_event)
         self.connect("destroy", Gtk.main_quit)
         self.connect("key-press-event", self._on_window_key)
@@ -875,6 +876,19 @@ class Tabit(Gtk.Window):
         if resp == Gtk.ResponseType.ACCEPT:
             return self._save_note(row)
         return True  # discard
+
+    def _set_app_icon(self):
+        # running from the repo: load the svg next to this script; once
+        # installed, tabit.py has no svg beside it so use the theme icon
+        here = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "tabit.svg")
+        if os.path.isfile(here):
+            try:
+                self.set_icon_from_file(here)
+                return
+            except GLib.Error:
+                pass
+        self.set_icon_name("tabit")
 
     def _on_delete_event(self, *_a):
         for row in list(self.listbox.get_children()):

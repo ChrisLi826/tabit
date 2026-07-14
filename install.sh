@@ -6,6 +6,7 @@ cd "$(dirname "$0")"
 if [ "$1" = "--uninstall" ]; then
     rm -f "$HOME/.local/bin/tabit" \
           "$HOME/.local/share/applications/tabit.desktop" \
+          "$HOME/.local/share/icons/hicolor/scalable/apps/tabit.svg" \
           "$HOME/.config/autostart/tabit.desktop"
     echo "tabit removed"
     exit 0
@@ -14,8 +15,11 @@ fi
 sudo apt-get install -y python3-gi gir1.2-gtk-3.0 gir1.2-vte-2.91 \
     gir1.2-gtksource-4 gir1.2-webkit2-4.0 python3-markdown picocom
 
-mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
+mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications" \
+         "$HOME/.local/share/icons/hicolor/scalable/apps"
 install -m 755 tabit.py "$HOME/.local/bin/tabit"
+install -m 644 tabit.svg "$HOME/.local/share/icons/hicolor/scalable/apps/tabit.svg"
+gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 
 # leftover from the pre-v2 window-tab version
 rm -f "$HOME/.config/autostart/tabit.desktop"
@@ -26,7 +30,7 @@ Type=Application
 Name=tabit
 Comment=Terminal sessions as vertical tabs
 Exec=$HOME/.local/bin/tabit
-Icon=utilities-terminal
+Icon=tabit
 Categories=System;TerminalEmulator;
 EOF
 
