@@ -1,8 +1,8 @@
 # tabit
 
-**v1.0.2** — terminal sessions as vertical tabs on the left: one window
-for shells, serial consoles, AI CLIs, notes (GtkSourceView), and remote
-logins.
+**v1.1.0** — terminal sessions as vertical tabs on the left: one window
+for shells, serial consoles, AI CLIs, notes (GtkSourceView + Markdown
+preview), and remote logins.
 
 ```
 ┌───────────┬─────────────────────────────┐
