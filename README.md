@@ -43,7 +43,7 @@ To remove: `./install.sh --uninstall`
 |---|---|
 | `+ Serial` | Pick device, baud (default 115200), and tool: `screen.sh` / `kermit` / `picocom` |
 | `+ Shell` | New tab running your login shell |
-| `+ AI` | Pick AI CLI (`claude` / `codex` / `grok` / `gemini` / …) and working directory; tries `--continue`, then plain start |
+| `+ AI` | Pick AI CLI (`claude` / `codex` / `grok` / `gemini` / …) and working directory; tries `--continue`, then `resume --last`, then `--resume latest`, then plain start |
 | `+ Command` | Run anything (e.g. `ssh root@192.168.1.1`) in a new tab |
 | Click a tab | Switch to that session |
 | Double-click a tab / right-click → Rename… / `F2` | Rename (popover bubble to the right of the tab) |

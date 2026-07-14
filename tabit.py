@@ -483,11 +483,19 @@ class Tabit(Gtk.Window):
 
     @staticmethod
     def _ai_argv(cli, path):
-        # Try --continue first; if that fails, start a fresh session.
-        # (CLIs that do not support --continue fall through to the plain cmd.)
+        # Try resume/continue styles in order, then a plain start.
+        #   --continue     claude, grok, …
+        #   resume --last  codex
+        #   --resume latest  gemini
         c = shlex.quote(cli)
         d = shlex.quote(path)
-        script = f"cd {d} || exit 1; {c} --continue || exec {c}"
+        script = (
+            f"cd {d} || exit 1; "
+            f"{c} --continue || "
+            f"{c} resume --last || "
+            f"{c} --resume latest || "
+            f"exec {c}"
+        )
         return ["/bin/sh", "-c", script]
 
     def _on_add_ai(self, _btn):
@@ -532,7 +540,7 @@ class Tabit(Gtk.Window):
         path_box.pack_start(browse, False, False, 0)
 
         hint = Gtk.Label(
-            label="Runs:  cd <path> && <cli> --continue || <cli>",
+            label="Tries: --continue → resume --last → --resume latest → plain",
             xalign=0)
         hint.get_style_context().add_class("session-sub")
 
