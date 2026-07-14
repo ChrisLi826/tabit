@@ -14,6 +14,7 @@ Keyboard shortcuts are user-editable (sidebar → Shortcuts…, stored in
 ~/.config/tabit/keys.json).
 """
 
+import base64
 import fcntl
 import glob
 import json
@@ -119,6 +120,9 @@ CSS = b"""
            padding: 12px 8px 3px 8px; }
 /* EventBox on each tab must have a window to receive double/right-click */
 .sidebar eventbox { background-color: transparent; }
+.note-tools { background-color: #15151c; border-bottom: 1px solid #2c2c38;
+              padding: 4px 6px; }
+.note-tools button { padding: 2px 8px; font-size: 9pt; }
 """
 
 
@@ -375,6 +379,30 @@ class Tabit(Gtk.Window):
         scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroll.add(view)
 
+        tools = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        tools.get_style_context().add_class("note-tools")
+        # row is created below; wire after row exists via closures later
+        tool_specs = (
+            ("Base64 Enc", "note_b64_enc"),
+            ("Base64 Dec", "note_b64_dec"),
+            ("JSON Format", "note_json_fmt"),
+            ("JSON Check", "note_json_val"),
+        )
+        tool_buttons = []
+        for text, _key in tool_specs:
+            b = Gtk.Button(label=text)
+            tools.pack_start(b, False, False, 0)
+            tool_buttons.append(b)
+        tip = Gtk.Label(
+            label="  (selection, or whole note if none)",
+            xalign=0)
+        tip.get_style_context().add_class("session-sub")
+        tools.pack_start(tip, False, False, 0)
+
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        page.pack_start(tools, False, False, 0)
+        page.pack_start(scroll, True, True, 0)
+
         row = self._make_sidebar_row(label, sub, ICON_NOTE, tooltip)
         row.argv = [NOTE_SENTINEL, path or ""]
         row.kind = "note"
@@ -383,13 +411,126 @@ class Tabit(Gtk.Window):
         row.buffer = buf
         row.file_path = path
         row.dot.set_no_show_all(True)
-        self._place_tab_row(row, scroll)
+        self._place_tab_row(row, page)
+
+        handlers = (
+            self._note_b64_encode,
+            self._note_b64_decode,
+            self._note_json_format,
+            self._note_json_validate,
+        )
+        for b, h in zip(tool_buttons, handlers):
+            b.connect("clicked", lambda _b, fn=h: fn(row))
 
         buf.connect("modified-changed",
                     lambda _b: self._refresh_note_title(row))
         view.connect("key-press-event", self._on_editor_key)
+        view.connect("button-press-event", self._on_note_button, row)
         self._refresh_note_title(row)
         view.grab_focus()
+
+    def _note_get_range(self, row):
+        """Text + iters for selection, or whole buffer if nothing selected."""
+        buf = row.buffer
+        bounds = buf.get_selection_bounds()
+        if bounds:
+            start, end = bounds
+        else:
+            start, end = buf.get_bounds()
+        text = buf.get_text(start, end, True)
+        return text, start, end
+
+    def _note_replace_range(self, row, start, end, new_text):
+        buf = row.buffer
+        buf.begin_user_action()
+        buf.delete(start, end)
+        buf.insert(start, new_text)
+        buf.end_user_action()
+
+    def _note_msg(self, kind, text, secondary=None):
+        dialog = Gtk.MessageDialog(
+            transient_for=self, modal=True,
+            message_type=kind,
+            buttons=Gtk.ButtonsType.OK,
+            text=text)
+        if secondary:
+            dialog.format_secondary_text(secondary)
+        dialog.run()
+        dialog.destroy()
+
+    def _note_b64_encode(self, row):
+        text, start, end = self._note_get_range(row)
+        if text == "":
+            return
+        try:
+            out = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        except Exception as e:
+            self._note_msg(Gtk.MessageType.ERROR, "Base64 encode failed", str(e))
+            return
+        self._note_replace_range(row, start, end, out)
+
+    def _note_b64_decode(self, row):
+        text, start, end = self._note_get_range(row)
+        if text == "":
+            return
+        raw = "".join(text.split())  # allow wrapped base64
+        try:
+            out = base64.b64decode(raw, validate=False).decode("utf-8")
+        except Exception as e:
+            self._note_msg(Gtk.MessageType.ERROR, "Base64 decode failed", str(e))
+            return
+        self._note_replace_range(row, start, end, out)
+
+    def _note_json_format(self, row):
+        text, start, end = self._note_get_range(row)
+        if text.strip() == "":
+            return
+        try:
+            data = json.loads(text)
+            out = json.dumps(data, indent=2, ensure_ascii=False)
+            if text.endswith("\n"):
+                out += "\n"
+        except json.JSONDecodeError as e:
+            self._note_msg(
+                Gtk.MessageType.ERROR, "Invalid JSON",
+                f"Line {e.lineno}, col {e.colno}: {e.msg}")
+            return
+        self._note_replace_range(row, start, end, out)
+        lang = GtkSource.LanguageManager.get_default().get_language("json")
+        if lang:
+            row.buffer.set_language(lang)
+
+    def _note_json_validate(self, row):
+        text, _s, _e = self._note_get_range(row)
+        if text.strip() == "":
+            self._note_msg(Gtk.MessageType.WARNING, "Nothing to validate")
+            return
+        try:
+            json.loads(text)
+        except json.JSONDecodeError as e:
+            self._note_msg(
+                Gtk.MessageType.ERROR, "Invalid JSON",
+                f"Line {e.lineno}, col {e.colno}: {e.msg}")
+            return
+        self._note_msg(Gtk.MessageType.INFO, "Valid JSON")
+
+    def _on_note_button(self, view, event, row):
+        if event.type != Gdk.EventType.BUTTON_PRESS or event.button != 3:
+            return False
+        menu = Gtk.Menu()
+        items = (
+            ("Base64 Encode", self._note_b64_encode),
+            ("Base64 Decode", self._note_b64_decode),
+            ("JSON Format", self._note_json_format),
+            ("JSON Validate", self._note_json_validate),
+        )
+        for label, fn in items:
+            item = Gtk.MenuItem(label=label)
+            item.connect("activate", lambda _i, f=fn: f(row))
+            menu.append(item)
+        menu.show_all()
+        menu.popup_at_pointer(event)
+        return True
 
     def _refresh_note_title(self, row):
         if getattr(row, "kind", None) != "note":
