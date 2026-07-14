@@ -818,17 +818,20 @@ class Tabit(Gtk.Window):
         scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroll.add(view)
 
-        content = Gtk.Stack()
-        content.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
-        content.add_named(scroll, "edit")
-
+        # editor on the left; when preview is on, the reader shows on the
+        # right of a draggable split (Gtk.Paned). No webkit → just the editor.
         webview = None
         if HAS_WEBKIT:
             webview = WebKit2.WebView()
             wset = webview.get_settings()
             wset.set_enable_javascript(False)
             wset.set_allow_file_access_from_file_urls(True)
-            content.add_named(webview, "preview")
+            content = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+            content.pack1(scroll, resize=True, shrink=False)
+            content.pack2(webview, resize=True, shrink=False)
+            webview.set_no_show_all(True)  # hidden until preview toggled on
+        else:
+            content = scroll
 
         row = self._make_sidebar_row(label, sub, ICON_NOTE, tooltip)
         row.argv = [NOTE_SENTINEL, path or ""]
@@ -838,8 +841,10 @@ class Tabit(Gtk.Window):
         row.buffer = buf
         row.file_path = path
         row.webview = webview
-        row.content_stack = content
+        row.content_paned = content if HAS_WEBKIT else None
         row.preview_on = False
+        row._preview_src = None       # debounced live re-render
+        row._preview_pos_set = False  # split divider placed once
         row._wanted_lang = wanted_lang  # restore after heavy-mode ends
         row._note_heavy = False
         row._tune_src = None
@@ -892,6 +897,7 @@ class Tabit(Gtk.Window):
         buf.connect("modified-changed",
                     lambda _b: self._refresh_note_title(row))
         buf.connect("changed", lambda _b: self._note_schedule_tune(row))
+        buf.connect("changed", lambda _b: self._note_schedule_preview(row))
         view.connect("key-press-event", self._on_editor_key)
         view.connect("button-press-event", self._on_note_button, row)
         self._note_tune_perf(row)  # apply language only if not huge
@@ -987,6 +993,30 @@ class Tabit(Gtk.Window):
   img {{ max-width:100%; }}
 </style></head><body>{body}</body></html>"""
 
+    def _note_render_preview(self, row):
+        start, end = row.buffer.get_bounds()
+        text = row.buffer.get_text(start, end, True)
+        doc = self._md_to_html(text, row.file_path)
+        base = "file:///"
+        if row.file_path:
+            base = "file://" + os.path.dirname(row.file_path) + "/"
+        row.webview.load_html(doc, base)
+
+    def _note_schedule_preview(self, row):
+        # live re-render while the split reader is open (debounced)
+        if not getattr(row, "preview_on", False):
+            return
+        if getattr(row, "_preview_src", None):
+            GLib.source_remove(row._preview_src)
+
+        def run():
+            row._preview_src = None
+            if row.preview_on:
+                self._note_render_preview(row)
+            return False
+
+        row._preview_src = GLib.timeout_add(300, run)
+
     def _note_set_preview(self, row, on):
         if not HAS_WEBKIT or getattr(row, "webview", None) is None:
             return
@@ -1000,17 +1030,19 @@ class Tabit(Gtk.Window):
             finally:
                 row._preview_syncing = False
         if on:
-            start, end = row.buffer.get_bounds()
-            text = row.buffer.get_text(start, end, True)
-            doc = self._md_to_html(text, row.file_path)
-            base = "file:///"
-            if row.file_path:
-                base = "file://" + os.path.dirname(row.file_path) + "/"
-            row.webview.load_html(doc, base)
-            row.content_stack.set_visible_child_name("preview")
+            self._note_render_preview(row)
+            row.webview.set_no_show_all(False)
+            row.webview.show_all()
+            # place the divider in the middle the first time only, so a
+            # user's later drag is kept across toggles
+            if not row._preview_pos_set:
+                w = row.content_paned.get_allocated_width()
+                if w > 0:
+                    row.content_paned.set_position(w // 2)
+                    row._preview_pos_set = True
         else:
-            row.content_stack.set_visible_child_name("edit")
-            row.view.grab_focus()
+            row.webview.hide()
+        row.view.grab_focus()
 
     def _note_toggle_preview(self, row=None):
         row = row or self.listbox.get_selected_row()
@@ -1323,6 +1355,13 @@ class Tabit(Gtk.Window):
         was_selected = self.listbox.get_selected_row() is row
         rows = self.listbox.get_children()
         idx = rows.index(row)
+        # drop pending note timers so they don't fire on a destroyed widget
+        for attr in ("_preview_src", "_tune_src"):
+            src = getattr(row, attr, None)
+            if src:
+                GLib.source_remove(src)
+                setattr(row, attr, None)
+        row.preview_on = False
         self.listbox.remove(row)
         self.stack.remove(row.page)
         row.page.destroy()  # term: SIGHUP child; note: destroys view
@@ -1337,8 +1376,7 @@ class Tabit(Gtk.Window):
 
     def _focus_row_content(self, row):
         if getattr(row, "kind", None) == "note":
-            if getattr(row, "preview_on", False):
-                return  # WebKit keeps its own focus
+            # editor is always visible (split view), so focus it
             if row.view is not None and not row.view.has_focus():
                 row.view.grab_focus()
         elif row.term is not None and not row.term.has_focus():
