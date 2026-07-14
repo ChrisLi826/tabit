@@ -409,19 +409,52 @@ class Tabit(Gtk.Window):
             return argv + ["-c", "-E"]
         return ["picocom", "-b", rate, dev]
 
+    @staticmethod
+    def _dialog_enter_is_ok(dialog, response=Gtk.ResponseType.OK):
+        """Enter in any field acts like the default Open/OK/Run button."""
+        dialog.set_default_response(response)
+        ok = dialog.get_widget_for_response(response)
+        if ok is not None:
+            ok.set_can_default(True)
+            dialog.set_default(ok)
+
+        def wire(widget):
+            if isinstance(widget, Gtk.Entry):
+                widget.set_activates_default(True)
+            elif isinstance(widget, Gtk.ComboBox):
+                child = widget.get_child()
+                if isinstance(child, Gtk.Entry):
+                    child.set_activates_default(True)
+            if isinstance(widget, Gtk.Container):
+                for child in widget.get_children():
+                    wire(child)
+
+        wire(dialog.get_content_area())
+
+        def on_key(_w, event):
+            name = (Gdk.keyval_name(event.keyval) or "").lower()
+            if name not in ("return", "kp_enter"):
+                return False
+            focus = dialog.get_focus()
+            # leave multiline editors alone
+            if isinstance(focus, Gtk.TextView):
+                return False
+            dialog.response(response)
+            return True
+
+        dialog.connect("key-press-event", on_key)
+
     def _on_add_serial(self, _btn):
         dialog = Gtk.Dialog(title="New serial session", transient_for=self,
                             modal=True)
         dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                            "Open", Gtk.ResponseType.OK)
-        dialog.set_default_response(Gtk.ResponseType.OK)
         grid = Gtk.Grid(row_spacing=6, column_spacing=6, margin=12)
         combo = Gtk.ComboBoxText.new_with_entry()
         for dev in sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")):
             combo.append_text(dev)
         combo.set_active(0)
         baud = Gtk.Entry(text=DEFAULT_BAUD)
-        baud.set_activates_default(True)
         backend = Gtk.ComboBoxText()
         for name in SERIAL_BACKENDS:
             backend.append_text(name)
@@ -433,6 +466,7 @@ class Tabit(Gtk.Window):
         grid.attach(Gtk.Label(label="Tool", xalign=0), 0, 2, 1, 1)
         grid.attach(backend, 1, 2, 1, 1)
         dialog.get_content_area().add(grid)
+        self._dialog_enter_is_ok(dialog)
         dialog.show_all()
         if dialog.run() == Gtk.ResponseType.OK:
             dev = (combo.get_active_text() or "").strip()
@@ -450,11 +484,10 @@ class Tabit(Gtk.Window):
                             modal=True)
         dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                            "Run", Gtk.ResponseType.OK)
-        dialog.set_default_response(Gtk.ResponseType.OK)
         entry = Gtk.Entry(placeholder_text="e.g. ssh root@192.168.1.1",
                           margin=12, width_chars=40)
-        entry.set_activates_default(True)
         dialog.get_content_area().add(entry)
+        self._dialog_enter_is_ok(dialog)
         dialog.show_all()
         if dialog.run() == Gtk.ResponseType.OK:
             cmd = entry.get_text().strip()
@@ -711,7 +744,6 @@ class Tabit(Gtk.Window):
                             modal=True)
         dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                            "Open", Gtk.ResponseType.OK)
-        dialog.set_default_response(Gtk.ResponseType.OK)
         grid = Gtk.Grid(row_spacing=6, column_spacing=6, margin=12)
 
         cli = Gtk.ComboBoxText.new_with_entry()
@@ -725,7 +757,6 @@ class Tabit(Gtk.Window):
 
         path_default = last.get("path") or GLib.get_home_dir()
         path = Gtk.Entry(text=path_default, width_chars=36)
-        path.set_activates_default(True)
         browse = Gtk.Button(label="Browse…")
 
         def on_browse(_b):
@@ -756,6 +787,7 @@ class Tabit(Gtk.Window):
         grid.attach(path_box, 1, 1, 1, 1)
         grid.attach(hint, 0, 2, 2, 1)
         dialog.get_content_area().add(grid)
+        self._dialog_enter_is_ok(dialog)
         dialog.show_all()
         if dialog.run() == Gtk.ResponseType.OK:
             tool = (cli.get_active_text() or "").strip()
