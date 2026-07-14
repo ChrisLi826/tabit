@@ -22,6 +22,7 @@ import json
 import os
 import shlex
 import signal
+import subprocess
 import sys
 
 import gi
@@ -60,12 +61,14 @@ ICON_AI = "tabit-ai"
 NOTE_SENTINEL = "__tabit_note__"
 ICON_NOTE = "text-editor-symbolic"
 ICON_COMMAND = "system-run-symbolic"
+ICON_TMUX = "view-grid-symbolic"
 # per-type CSS class so each session icon gets its own color (see CSS)
 ICON_CLASS = {
     "utilities-terminal-symbolic": "ic-shell",
     "network-wired-symbolic": "ic-serial",
     ICON_NOTE: "ic-note",
     ICON_COMMAND: "ic-command",
+    ICON_TMUX: "ic-tmux",
 }
 # note performance: long lines / huge buffers can freeze GtkSourceView
 NOTE_BIG_CHARS = 200_000   # total characters
@@ -301,6 +304,7 @@ CSS = b"""
 .ic-serial  { color: #7dcfff; }
 .ic-note    { color: #e0af68; }
 .ic-command { color: #f7768e; }
+.ic-tmux    { color: #bb9af7; }
 .session-sub { color: #7a7a88; font-size: 8pt; }
 .activity { color: #7aa2f7; font-size: 8pt; }
 /* actions strip: slightly different surface so it is not the tab list */
@@ -367,7 +371,8 @@ class Tabit(Gtk.Window):
                 ("+ Shell", "utilities-terminal-symbolic", self._on_add_shell),
                 ("+ AI", ICON_AI, self._on_add_ai),
                 ("+ Note", ICON_NOTE, self._on_add_note),
-                ("+ Command", ICON_COMMAND, self._on_add_command)):
+                ("+ Command", ICON_COMMAND, self._on_add_command),
+                ("+ tmux", ICON_TMUX, self._on_add_tmux)):
             btn = Gtk.Button(label=text)
             btn.set_image(self._session_icon(icon))
             btn.set_always_show_image(True)
@@ -1412,6 +1417,140 @@ class Tabit(Gtk.Window):
                                   ICON_COMMAND,
                                   sub=parts[1] if len(parts) > 1 else None)
         dialog.destroy()
+
+    @staticmethod
+    def _tmux_sessions():
+        try:
+            out = subprocess.run(
+                ["tmux", "list-sessions", "-F", "#{session_name}"],
+                capture_output=True, text=True, timeout=2)
+        except (OSError, subprocess.SubprocessError):
+            return []
+        if out.returncode != 0:  # no server running / no sessions
+            return []
+        return [s for s in out.stdout.splitlines() if s]
+
+    def _on_add_tmux(self, _btn):
+        dialog = Gtk.Dialog(title="tmux sessions", transient_for=self,
+                            modal=True)
+        dialog.add_button("Close", Gtk.ResponseType.CANCEL)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                      margin=12)
+        dialog.get_content_area().add(box)
+
+        # create-new row
+        new_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        entry = Gtk.Entry(placeholder_text="new session name", width_chars=22)
+        entry.set_hexpand(True)
+        create = Gtk.Button(label="Create")
+        new_row.pack_start(entry, True, True, 0)
+        new_row.pack_start(create, False, False, 0)
+        box.pack_start(new_row, False, False, 0)
+        box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
+                       False, False, 0)
+
+        listbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.pack_start(listbox, True, True, 0)
+
+        chosen = {}  # filled with label/argv when the user picks a session
+
+        def open_session(label, argv):
+            chosen["label"] = label
+            chosen["argv"] = argv
+            dialog.response(Gtk.ResponseType.OK)
+
+        def create_new(*_a):
+            name = entry.get_text().strip()
+            # -A: attach if it already exists, otherwise create it
+            argv = (["tmux", "new-session", "-A", "-s", name] if name
+                    else ["tmux"])
+            open_session(name or "tmux", argv)
+
+        def do_rename(name):
+            new = self._tmux_prompt_rename(dialog, name)
+            if new and new != name:
+                subprocess.run(["tmux", "rename-session", "-t", name, new],
+                               capture_output=True)
+                refresh()
+
+        def do_kill(name):
+            if self._tmux_confirm_kill(dialog, name):
+                subprocess.run(["tmux", "kill-session", "-t", name],
+                               capture_output=True)
+                refresh()
+
+        def refresh():
+            for c in listbox.get_children():
+                listbox.remove(c)
+            sessions = self._tmux_sessions()
+            if not sessions:
+                lbl = Gtk.Label(label="No running tmux sessions.", xalign=0)
+                lbl.get_style_context().add_class("session-sub")
+                listbox.pack_start(lbl, False, False, 0)
+            for name in sessions:
+                row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+                nl = Gtk.Label(label=name, xalign=0)
+                nl.set_hexpand(True)
+                nl.set_ellipsize(Pango.EllipsizeMode.END)
+                row.pack_start(nl, True, True, 0)
+                att = Gtk.Button(label="Attach")
+                ren = Gtk.Button.new_from_icon_name("document-edit-symbolic",
+                                                    Gtk.IconSize.MENU)
+                ren.set_tooltip_text("Rename")
+                kill = Gtk.Button.new_from_icon_name("user-trash-symbolic",
+                                                     Gtk.IconSize.MENU)
+                kill.set_tooltip_text("Kill session")
+                att.connect("clicked", lambda _b, n=name: open_session(
+                    n, ["tmux", "new-session", "-A", "-s", n]))
+                ren.connect("clicked", lambda _b, n=name: do_rename(n))
+                kill.connect("clicked", lambda _b, n=name: do_kill(n))
+                for b in (att, ren, kill):
+                    row.pack_start(b, False, False, 0)
+                listbox.pack_start(row, False, False, 0)
+            listbox.show_all()
+
+        create.connect("clicked", create_new)
+        entry.connect("activate", create_new)
+        refresh()
+        dialog.show_all()
+        resp = dialog.run()
+        dialog.destroy()
+        if resp == Gtk.ResponseType.OK and chosen:
+            self._add_session(chosen["label"], chosen["argv"], ICON_TMUX,
+                              sub="tmux")
+
+    @staticmethod
+    def _tmux_prompt_rename(parent, old):
+        d = Gtk.Dialog(title="Rename session", transient_for=parent,
+                       modal=True)
+        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                      "Rename", Gtk.ResponseType.OK)
+        e = Gtk.Entry(text=old, margin=12, width_chars=24)
+        e.set_activates_default(True)
+        d.set_default_response(Gtk.ResponseType.OK)
+        ok = d.get_widget_for_response(Gtk.ResponseType.OK)
+        ok.set_can_default(True)
+        d.set_default(ok)
+        d.get_content_area().add(e)
+        d.show_all()
+        new = e.get_text().strip() if d.run() == Gtk.ResponseType.OK else None
+        d.destroy()
+        return new
+
+    @staticmethod
+    def _tmux_confirm_kill(parent, name):
+        d = Gtk.MessageDialog(
+            transient_for=parent, modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text=f"Kill tmux session '{name}'?")
+        d.format_secondary_text("Its running programs will be terminated.")
+        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                      "Kill", Gtk.ResponseType.OK)
+        d.set_default_response(Gtk.ResponseType.CANCEL)
+        resp = d.run()
+        d.destroy()
+        return resp == Gtk.ResponseType.OK
 
     @staticmethod
     def _load_ai_last():
