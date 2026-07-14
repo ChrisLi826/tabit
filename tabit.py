@@ -2432,6 +2432,12 @@ def main():
     except OSError:
         sys.exit("tabit is already running")
 
+    # ask for the dark theme variant; the WM reads this to draw a dark
+    # title bar (via the _GTK_THEME_VARIANT hint) instead of the pale one
+    settings = Gtk.Settings.get_default()
+    if settings is not None:
+        settings.set_property("gtk-application-prefer-dark-theme", True)
+
     provider = Gtk.CssProvider()
     provider.load_from_data(CSS)
     Gtk.StyleContext.add_provider_for_screen(
