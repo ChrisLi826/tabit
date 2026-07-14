@@ -17,6 +17,7 @@ import fcntl
 import glob
 import json
 import os
+import shlex
 import signal
 import sys
 
@@ -30,10 +31,13 @@ SIDEBAR_WIDTH = 200
 DEFAULT_BAUD = "115200"
 # serial backends shown in the +Serial dialog (first = default)
 SERIAL_BACKENDS = ("screen.sh", "kermit", "picocom")
+# AI CLIs offered in +AI (combo is editable for anything else)
+AI_CLIS = ("claude", "codex", "grok", "gemini", "antigravity")
 KERMRC = os.path.expanduser("~/senaoenv/kermrc")
 CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "tabit")
 SESSIONS_FILE = os.path.join(CONFIG_DIR, "sessions.json")
 KEYS_FILE = os.path.join(CONFIG_DIR, "keys.json")
+AI_LAST_FILE = os.path.join(CONFIG_DIR, "ai_last.json")
 TERM_FG = "#d5d5df"
 TERM_BG = "#101016"
 
@@ -41,6 +45,7 @@ TERM_BG = "#101016"
 KEY_ACTIONS = (
     ("new_shell", "New shell", "<Primary><Shift>t"),
     ("new_serial", "New serial", "<Primary><Shift>s"),
+    ("new_ai", "New AI session", "<Primary><Shift>a"),
     ("close_session", "Close session", "<Primary><Shift>w"),
     ("rename_session", "Rename session", "F2"),
     ("prev_session", "Previous session", "<Primary>Page_Up"),
@@ -114,6 +119,7 @@ class Tabit(Gtk.Window):
             getattr(adders, f"set_margin_{side}")(4)
         for text, handler in (("+ Serial", self._on_add_serial),
                               ("+ Shell", self._on_add_shell),
+                              ("+ AI", self._on_add_ai),
                               ("+ Command", self._on_add_command)):
             btn = Gtk.Button(label=text)
             btn.connect("clicked", handler)
@@ -458,6 +464,97 @@ class Tabit(Gtk.Window):
                                   sub=parts[1] if len(parts) > 1 else None)
         dialog.destroy()
 
+    @staticmethod
+    def _load_ai_last():
+        try:
+            with open(AI_LAST_FILE) as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except (OSError, ValueError):
+            pass
+        return {}
+
+    @staticmethod
+    def _save_ai_last(cli, path):
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(AI_LAST_FILE, "w") as f:
+            json.dump({"cli": cli, "path": path}, f, indent=2)
+
+    @staticmethod
+    def _ai_argv(cli, path):
+        # Try --continue first; if that fails, start a fresh session.
+        # (CLIs that do not support --continue fall through to the plain cmd.)
+        c = shlex.quote(cli)
+        d = shlex.quote(path)
+        script = f"cd {d} || exit 1; {c} --continue || exec {c}"
+        return ["/bin/sh", "-c", script]
+
+    def _on_add_ai(self, _btn):
+        last = self._load_ai_last()
+        dialog = Gtk.Dialog(title="New AI session", transient_for=self,
+                            modal=True)
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                           "Open", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        grid = Gtk.Grid(row_spacing=6, column_spacing=6, margin=12)
+
+        cli = Gtk.ComboBoxText.new_with_entry()
+        for name in AI_CLIS:
+            cli.append_text(name)
+        last_cli = last.get("cli") or AI_CLIS[0]
+        if last_cli in AI_CLIS:
+            cli.set_active(AI_CLIS.index(last_cli))
+        else:
+            cli.get_child().set_text(last_cli)
+            cli.set_active(-1)
+
+        path_default = last.get("path") or GLib.get_home_dir()
+        path = Gtk.Entry(text=path_default, width_chars=36)
+        path.set_activates_default(True)
+        browse = Gtk.Button(label="Browse…")
+
+        def on_browse(_b):
+            chooser = Gtk.FileChooserDialog(
+                title="Working directory", parent=dialog,
+                action=Gtk.FileChooserAction.SELECT_FOLDER)
+            chooser.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                                "Select", Gtk.ResponseType.OK)
+            if os.path.isdir(path.get_text()):
+                chooser.set_current_folder(path.get_text())
+            if chooser.run() == Gtk.ResponseType.OK:
+                path.set_text(chooser.get_filename())
+            chooser.destroy()
+
+        browse.connect("clicked", on_browse)
+        path_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        path_box.pack_start(path, True, True, 0)
+        path_box.pack_start(browse, False, False, 0)
+
+        hint = Gtk.Label(
+            label="Runs:  cd <path> && <cli> --continue || <cli>",
+            xalign=0)
+        hint.get_style_context().add_class("session-sub")
+
+        grid.attach(Gtk.Label(label="CLI", xalign=0), 0, 0, 1, 1)
+        grid.attach(cli, 1, 0, 1, 1)
+        grid.attach(Gtk.Label(label="Path", xalign=0), 0, 1, 1, 1)
+        grid.attach(path_box, 1, 1, 1, 1)
+        grid.attach(hint, 0, 2, 2, 1)
+        dialog.get_content_area().add(grid)
+        dialog.show_all()
+        if dialog.run() == Gtk.ResponseType.OK:
+            tool = (cli.get_active_text() or "").strip()
+            cwd = (path.get_text() or "").strip() or GLib.get_home_dir()
+            cwd = os.path.expanduser(cwd)
+            if tool:
+                short = cwd if len(cwd) <= 28 else "…" + cwd[-27:]
+                self._add_session(tool, self._ai_argv(tool, cwd),
+                                  "system-run-symbolic",
+                                  sub=short)
+                self._save_ai_last(tool, cwd)
+        dialog.destroy()
+
     # --- keyboard -----------------------------------------------------------
 
     @staticmethod
@@ -532,6 +629,8 @@ class Tabit(Gtk.Window):
             self._on_add_shell(None)
         elif action == "new_serial":
             self._on_add_serial(None)
+        elif action == "new_ai":
+            self._on_add_ai(None)
         elif action == "close_session":
             row = self.listbox.get_selected_row()
             if row is not None:
