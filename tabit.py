@@ -91,7 +91,6 @@ KEY_ACTIONS = (
     ("note_b64_enc", "Note: Base64 encode", "<Primary><Alt>b"),
     ("note_b64_dec", "Note: Base64 decode", "<Primary><Alt><Shift>b"),
     ("note_json_fmt", "Note: JSON format", "<Primary><Alt>j"),
-    ("note_json_val", "Note: JSON validate", "<Primary><Alt>k"),
     ("close_session", "Close session", "<Primary><Shift>w"),
     ("rename_session", "Rename session", "F2"),
     ("prev_session", "Previous session", "<Primary>Page_Up"),
@@ -413,7 +412,6 @@ class Tabit(Gtk.Window):
             ("Base64 Enc", "note_b64_enc", self._note_b64_encode),
             ("Base64 Dec", "note_b64_dec", self._note_b64_decode),
             ("JSON Format", "note_json_fmt", self._note_json_format),
-            ("JSON Check", "note_json_val", self._note_json_validate),
         )
         for text, action_id, handler in tool_specs:
             acc = self._action_accel_label(action_id)
@@ -565,20 +563,6 @@ class Tabit(Gtk.Window):
             if not getattr(row, "_note_heavy", False):
                 row.buffer.set_language(lang)
 
-    def _note_json_validate(self, row):
-        text, _s, _e = self._note_get_range(row)
-        if text.strip() == "":
-            self._note_msg(Gtk.MessageType.WARNING, "Nothing to validate")
-            return
-        try:
-            json.loads(text)
-        except json.JSONDecodeError as e:
-            self._note_msg(
-                Gtk.MessageType.ERROR, "Invalid JSON",
-                f"Line {e.lineno}, col {e.colno}: {e.msg}")
-            return
-        self._note_msg(Gtk.MessageType.INFO, "Valid JSON")
-
     def _on_note_button(self, view, event, row):
         if event.type != Gdk.EventType.BUTTON_PRESS or event.button != 3:
             return False
@@ -587,7 +571,6 @@ class Tabit(Gtk.Window):
             ("Base64 Encode", "note_b64_enc", self._note_b64_encode),
             ("Base64 Decode", "note_b64_dec", self._note_b64_decode),
             ("JSON Format", "note_json_fmt", self._note_json_format),
-            ("JSON Validate", "note_json_val", self._note_json_validate),
         )
         for label, action_id, fn in items:
             acc = self._action_accel_label(action_id)
@@ -1476,11 +1459,6 @@ class Tabit(Gtk.Window):
         elif action == "note_json_fmt":
             if row is not None and getattr(row, "kind", None) == "note":
                 self._note_json_format(row)
-            else:
-                return False
-        elif action == "note_json_val":
-            if row is not None and getattr(row, "kind", None) == "note":
-                self._note_json_validate(row)
             else:
                 return False
         elif action == "close_session":
