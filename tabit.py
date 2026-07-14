@@ -38,6 +38,9 @@ ICON_AI = "tabit-ai"
 # sessions.json argv[0] for note tabs; argv[1] is path or ""
 NOTE_SENTINEL = "__tabit_note__"
 ICON_NOTE = "text-editor-symbolic"
+# note performance: long lines / huge buffers can freeze GtkSourceView
+NOTE_BIG_CHARS = 200_000   # total characters
+NOTE_LONG_LINE = 8_000     # any single line
 # 16×16 badge with path-drawn "AI" (no font dependency in SVG loaders)
 AI_ICON_SVG = b"""<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
@@ -341,6 +344,8 @@ class Tabit(Gtk.Window):
         view.set_highlight_current_line(True)
         view.set_tab_width(4)
         view.set_insert_spaces_instead_of_tabs(True)
+        # default wrap: long lines otherwise freeze layout
+        view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         buf = view.get_buffer()
         scheme_mgr = GtkSource.StyleSchemeManager.get_default()
         scheme = (scheme_mgr.get_scheme("oblivion")
@@ -349,6 +354,7 @@ class Tabit(Gtk.Window):
         if scheme:
             buf.set_style_scheme(scheme)
 
+        wanted_lang = None
         if path and os.path.isfile(path):
             try:
                 with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -360,10 +366,8 @@ class Tabit(Gtk.Window):
             buf.set_text(text)
             buf.end_not_undoable_action()
             buf.set_modified(False)
-            lang = GtkSource.LanguageManager.get_default().guess_language(
+            wanted_lang = GtkSource.LanguageManager.get_default().guess_language(
                 path, None)
-            if lang:
-                buf.set_language(lang)
             base = os.path.basename(path)
             label = label or base
             sub = sub if sub is not None else os.path.dirname(path)
@@ -381,15 +385,18 @@ class Tabit(Gtk.Window):
 
         tools = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         tools.get_style_context().add_class("note-tools")
-        # row is created below; wire after row exists via closures later
+        wrap_btn = Gtk.ToggleButton(label="Wrap")
+        wrap_btn.set_active(True)
+        wrap_btn.set_tooltip_text("Word wrap (off = one long line, may lag)")
+        tools.pack_start(wrap_btn, False, False, 0)
         tool_specs = (
-            ("Base64 Enc", "note_b64_enc"),
-            ("Base64 Dec", "note_b64_dec"),
-            ("JSON Format", "note_json_fmt"),
-            ("JSON Check", "note_json_val"),
+            ("Base64 Enc",),
+            ("Base64 Dec",),
+            ("JSON Format",),
+            ("JSON Check",),
         )
         tool_buttons = []
-        for text, _key in tool_specs:
+        for (text,) in tool_specs:
             b = Gtk.Button(label=text)
             tools.pack_start(b, False, False, 0)
             tool_buttons.append(b)
@@ -410,9 +417,18 @@ class Tabit(Gtk.Window):
         row.view = view
         row.buffer = buf
         row.file_path = path
+        row._wanted_lang = wanted_lang  # restore after heavy-mode ends
+        row._note_heavy = False
+        row._tune_src = None
         row.dot.set_no_show_all(True)
         self._place_tab_row(row, page)
 
+        def on_wrap(btn):
+            view.set_wrap_mode(
+                Gtk.WrapMode.WORD_CHAR if btn.get_active()
+                else Gtk.WrapMode.NONE)
+
+        wrap_btn.connect("toggled", on_wrap)
         handlers = (
             self._note_b64_encode,
             self._note_b64_decode,
@@ -424,10 +440,59 @@ class Tabit(Gtk.Window):
 
         buf.connect("modified-changed",
                     lambda _b: self._refresh_note_title(row))
+        buf.connect("changed", lambda _b: self._note_schedule_tune(row))
         view.connect("key-press-event", self._on_editor_key)
         view.connect("button-press-event", self._on_note_button, row)
+        self._note_tune_perf(row)  # apply language only if not huge
         self._refresh_note_title(row)
         view.grab_focus()
+
+    def _note_buffer_stats(self, buf):
+        start, end = buf.get_bounds()
+        text = buf.get_text(start, end, True)
+        n = len(text)
+        max_line = 0
+        for line in text.splitlines() or [text]:
+            if len(line) > max_line:
+                max_line = len(line)
+        return n, max_line
+
+    def _note_schedule_tune(self, row):
+        if getattr(row, "_tune_src", None):
+            GLib.source_remove(row._tune_src)
+
+        def run():
+            row._tune_src = None
+            self._note_tune_perf(row)
+            return False
+
+        row._tune_src = GLib.timeout_add(300, run)
+
+    def _note_tune_perf(self, row):
+        """Disable syntax / current-line highlight for huge or long-line notes."""
+        if getattr(row, "kind", None) != "note":
+            return
+        buf, view = row.buffer, row.view
+        n, max_line = self._note_buffer_stats(buf)
+        heavy = n >= NOTE_BIG_CHARS or max_line >= NOTE_LONG_LINE
+        was_heavy = getattr(row, "_note_heavy", False)
+        row._note_heavy = heavy
+        if heavy:
+            lang = buf.get_language()
+            if lang is not None:
+                row._wanted_lang = lang
+            buf.set_language(None)
+            view.set_highlight_current_line(False)
+        else:
+            view.set_highlight_current_line(True)
+            if was_heavy or buf.get_language() is None:
+                lang = getattr(row, "_wanted_lang", None)
+                if lang is None and row.file_path:
+                    lang = GtkSource.LanguageManager.get_default().guess_language(
+                        row.file_path, None)
+                    row._wanted_lang = lang
+                if lang is not None:
+                    buf.set_language(lang)
 
     def _note_get_range(self, row):
         """Text + iters for selection, or whole buffer if nothing selected."""
@@ -446,6 +511,7 @@ class Tabit(Gtk.Window):
         buf.delete(start, end)
         buf.insert(start, new_text)
         buf.end_user_action()
+        self._note_tune_perf(row)
 
     def _note_msg(self, kind, text, secondary=None):
         dialog = Gtk.MessageDialog(
@@ -498,7 +564,10 @@ class Tabit(Gtk.Window):
         self._note_replace_range(row, start, end, out)
         lang = GtkSource.LanguageManager.get_default().get_language("json")
         if lang:
-            row.buffer.set_language(lang)
+            row._wanted_lang = lang
+            # only apply if buffer is not in heavy mode
+            if not getattr(row, "_note_heavy", False):
+                row.buffer.set_language(lang)
 
     def _note_json_validate(self, row):
         text, _s, _e = self._note_get_range(row)

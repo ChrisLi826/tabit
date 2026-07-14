@@ -45,7 +45,7 @@ To remove: `./install.sh --uninstall`
 | `+ Serial` | Pick device, baud (default 115200), and tool: `screen.sh` / `kermit` / `picocom` |
 | `+ Shell` | New tab running your login shell |
 | `+ AI` | Pick AI CLI and working directory. **Edit list…** manages CLI names and per-CLI continue/resume tries (`~/.config/tabit/ai_clis.json`) |
-| `+ Note` | GtkSourceView editor: blank or open file; toolbar/right-click: Base64 encode/decode, JSON format/validate (selection or whole note) |
+| `+ Note` | GtkSourceView editor: blank or open file; toolbar/right-click Base64 + JSON tools; **Wrap** on by default; huge/long-line buffers auto-disable syntax highlight to avoid freezes |
 | `+ Command` | Run anything (e.g. `ssh root@192.168.1.1`) in a new tab |
 | Click a tab | Switch to that session |
 | Double-click a tab / right-click → Rename… / `F2` | Rename (popover bubble to the right of the tab) |
