@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="380" viewBox="0 0 860 380"
+     font-family="ui-monospace, 'DejaVu Sans Mono', 'Menlo', monospace">
+  <defs>
+    <clipPath id="win"><rect x="20" y="20" width="820" height="340" rx="16"/></clipPath>
+  </defs>
+
+  <!-- window -->
+  <rect x="20" y="20" width="820" height="340" rx="16" fill="#101016"
+        stroke="#7aa2f7" stroke-width="3"/>
+
+  <g clip-path="url(#win)">
+    <!-- sidebar -->
+    <rect x="20" y="20" width="232" height="340" fill="#15151c"/>
+    <line x1="252" y1="20" x2="252" y2="360" stroke="#2c2c38" stroke-width="1.5"/>
+    <text x="42" y="54" fill="#7a7a88" font-size="12" letter-spacing="1.5">SESSIONS</text>
+
+    <!-- selected tab: shell (green) -->
+    <rect x="30" y="68" width="212" height="30" rx="6" fill="#7aa2f7" fill-opacity="0.18"/>
+    <rect x="30" y="68" width="3" height="30" fill="#7aa2f7"/>
+    <rect x="44" y="76" width="14" height="14" rx="3" fill="#9ece6a"/>
+    <text x="68" y="88" fill="#ececf4" font-size="14">shell</text>
+
+    <!-- serial (cyan) -->
+    <rect x="44" y="110" width="14" height="14" rx="3" fill="#7dcfff"/>
+    <text x="68" y="122" fill="#d5d5df" font-size="14">ttyUSB0</text>
+
+    <!-- AI (blue) -->
+    <rect x="44" y="144" width="14" height="14" rx="3" fill="#7aa2f7"/>
+    <text x="68" y="156" fill="#d5d5df" font-size="14">claude</text>
+
+    <!-- note (yellow) -->
+    <rect x="44" y="178" width="14" height="14" rx="3" fill="#e0af68"/>
+    <text x="68" y="190" fill="#d5d5df" font-size="14">build.md</text>
+
+    <!-- command (red) -->
+    <rect x="44" y="212" width="14" height="14" rx="3" fill="#f7768e"/>
+    <text x="68" y="224" fill="#d5d5df" font-size="14">ssh r7000</text>
+
+    <!-- tmux (purple) -->
+    <rect x="44" y="246" width="14" height="14" rx="3" fill="#bb9af7"/>
+    <text x="68" y="258" fill="#d5d5df" font-size="14">devbox</text>
+
+    <!-- adder strip -->
+    <rect x="20" y="300" width="232" height="60" fill="#0e0e14"/>
+    <line x1="20" y1="300" x2="252" y2="300" stroke="#2c2c38" stroke-width="1"/>
+    <text x="42" y="324" font-size="12.5" fill="#9a9aa8">+ Shell   + Serial   + AI</text>
+    <text x="42" y="344" font-size="12.5" fill="#9a9aa8">+ Note   + Command   + tmux</text>
+
+    <!-- terminal content -->
+    <text x="278" y="70"  font-size="14"><tspan fill="#9ece6a">$</tspan><tspan fill="#d5d5df"> make flash</tspan></text>
+    <text x="278" y="94"  font-size="14" fill="#6a6a78">  flashing ECC500 … done</text>
+
+    <text x="278" y="130" font-size="14"><tspan fill="#bb9af7">$</tspan><tspan fill="#d5d5df"> tmux new -A -s devbox</tspan></text>
+    <text x="278" y="154" font-size="14" fill="#6a6a78">  [devbox] attached — 3 windows</text>
+
+    <text x="278" y="190" font-size="14"><tspan fill="#7dcfff">$</tspan><tspan fill="#d5d5df"> picocom -b 115200 /dev/ttyUSB0</tspan></text>
+    <text x="278" y="214" font-size="14" fill="#6a6a78">  Terminal ready — Ctrl-A Ctrl-X to quit</text>
+
+    <text x="278" y="250" font-size="14"><tspan fill="#9ece6a">$</tspan><tspan fill="#d5d5df"> </tspan></text>
+    <rect x="294" y="239" width="9" height="16" fill="#d5d5df"/>
+
+    <!-- caption -->
+    <text x="278" y="330" font-size="13" fill="#7a7a88">shells · serial · AI · notes · commands · tmux — tabbed on the left</text>
+  </g>
+</svg>

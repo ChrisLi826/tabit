@@ -1,22 +1,16 @@
 # tabit
 
-**v1.2.0** — terminal sessions as vertical tabs on the left: one window
-for shells, serial consoles, AI CLIs, notes (GtkSourceView + Markdown
-preview), and remote logins.
+**v1.2.0** — a terminal built around a **left tab sidebar**.
 
-```
-┌───────────┬─────────────────────────────┐
-│ SESSIONS  │                             │
-│ ▌shell    │  $ make flash               │
-│  ttyUSB0  │  ...                        │
-│  ttyUSB1  │                             │
-│  ssh ecw  │      (real terminal,        │
-│           │       VTE engine)           │
-│ + Shell   │                             │
-│ + Serial  │                             │
-│ + Command │                             │
-└───────────┴─────────────────────────────┘
-```
+<p align="center">
+  <img src="banner.svg" alt="tabit — color-coded session tabs down the left edge of one window" width="820">
+</p>
+
+Every session lives as a **color-coded tab down the left edge** of a single
+window — a shell, a serial console, an AI CLI, a note (GtkSourceView +
+Markdown preview), an arbitrary command, or a tmux session. Click to switch,
+drag to reorder, double-click to rename. Real terminals throughout, powered
+by the VTE engine.
 
 One small Python file. No pip packages, no compiling — everything comes
 from the Ubuntu archive.
