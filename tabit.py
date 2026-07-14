@@ -32,7 +32,16 @@ DEFAULT_BAUD = "115200"
 # serial backends shown in the +Serial dialog (first = default)
 SERIAL_BACKENDS = ("screen.sh", "kermit", "picocom")
 # default AI CLI list for +AI (user-editable → ~/.config/tabit/ai_clis.json)
-DEFAULT_AI_CLIS = ["claude", "codex", "grok", "gemini", "antigravity"]
+# Each entry: {"cli": name, "try": ["args after cli", ...]} then plain cli.
+DEFAULT_AI_CLIS = [
+    {"cli": "claude", "try": ["--continue"]},
+    {"cli": "codex", "try": ["resume --last"]},
+    {"cli": "grok", "try": ["--continue"]},
+    {"cli": "gemini", "try": ["--resume latest"]},
+    {"cli": "antigravity", "try": ["--continue"]},
+]
+# used when user types a CLI not in the list
+DEFAULT_AI_TRY = ["--continue", "resume --last", "--resume latest"]
 KERMRC = os.path.expanduser("~/senaoenv/kermrc")
 CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "tabit")
 SESSIONS_FILE = os.path.join(CONFIG_DIR, "sessions.json")
@@ -516,42 +525,87 @@ class Tabit(Gtk.Window):
             json.dump({"cli": cli, "path": path}, f, indent=2)
 
     @staticmethod
-    def _load_ai_clis():
+    def _normalize_ai_entry(item):
+        """Return {"cli": str, "try": [str, ...]} or None."""
+        if isinstance(item, str):
+            name = item.strip()
+            if not name:
+                return None
+            # legacy plain string → keep old multi-try behaviour
+            return {"cli": name, "try": list(DEFAULT_AI_TRY)}
+        if isinstance(item, dict):
+            name = str(item.get("cli") or item.get("name") or "").strip()
+            if not name:
+                return None
+            tries = item.get("try") or item.get("resume") or []
+            if isinstance(tries, str):
+                tries = [t.strip() for t in tries.split("||")]
+            tries = [str(t).strip() for t in tries if str(t).strip()]
+            return {"cli": name, "try": tries}
+        return None
+
+    @classmethod
+    def _load_ai_clis(cls):
+        """List of {cli, try}; try = args after the CLI name, in order."""
         try:
             with open(AI_CLIS_FILE) as f:
                 data = json.load(f)
             if isinstance(data, list):
-                names = [str(x).strip() for x in data if str(x).strip()]
-                if names:
-                    return names
+                out = []
+                seen = set()
+                for item in data:
+                    ent = cls._normalize_ai_entry(item)
+                    if ent and ent["cli"] not in seen:
+                        seen.add(ent["cli"])
+                        out.append(ent)
+                if out:
+                    return out
         except (OSError, ValueError):
             pass
-        return list(DEFAULT_AI_CLIS)
+        return [{"cli": e["cli"], "try": list(e["try"])}
+                for e in DEFAULT_AI_CLIS]
 
     @staticmethod
-    def _save_ai_clis(names):
+    def _save_ai_clis(entries):
         os.makedirs(CONFIG_DIR, exist_ok=True)
+        data = [{"cli": e["cli"], "try": list(e.get("try") or [])}
+                for e in entries if e.get("cli")]
         with open(AI_CLIS_FILE, "w") as f:
-            json.dump(names, f, indent=2)
+            json.dump(data, f, indent=2)
 
     @staticmethod
-    def _ai_argv(cli, path):
-        # Try resume/continue styles in order, then a plain start.
-        #   --continue     claude, grok, …
-        #   resume --last  codex
-        #   --resume latest  gemini
+    def _format_try_display(tries):
+        return " || ".join(tries) if tries else ""
+
+    @staticmethod
+    def _parse_try_display(text):
+        # " --continue || resume --last " → list of arg strings
+        return [p.strip() for p in text.split("||") if p.strip()]
+
+    @staticmethod
+    def _ai_argv(cli, path, tries=None):
+        # For each try string T: run `cli T`; if all fail, plain `cli`.
         c = shlex.quote(cli)
         d = shlex.quote(path)
-        script = (
-            f"cd {d} || exit 1; "
-            f"{c} --continue || "
-            f"{c} resume --last || "
-            f"{c} --resume latest || "
-            f"exec {c}"
-        )
-        return ["/bin/sh", "-c", script]
+        parts = [f"cd {d} || exit 1"]
+        cmds = []
+        for t in tries or []:
+            t = t.strip()
+            if not t:
+                continue
+            # quote each token so user can write: resume --last
+            try:
+                tokens = shlex.split(t)
+            except ValueError:
+                tokens = t.split()
+            extra = " ".join(shlex.quote(tok) for tok in tokens)
+            cmds.append(f"{c} {extra}")
+        cmds.append(f"exec {c}")
+        parts.append(" || ".join(cmds))
+        return ["/bin/sh", "-c", "; ".join(parts)]
 
-    def _fill_ai_combo(self, combo, names, prefer=None):
+    def _fill_ai_combo(self, combo, entries, prefer=None):
+        names = [e["cli"] for e in entries]
         combo.remove_all()
         for name in names:
             combo.append_text(name)
@@ -565,11 +619,12 @@ class Tabit(Gtk.Window):
             combo.set_active(0)
 
     def _on_manage_ai_clis(self, parent, combo=None):
-        """Edit the AI CLI select list with a list UI (not a free text dump)."""
-        names = self._load_ai_clis()
-        store = Gtk.ListStore(str)
-        for name in names:
-            store.append([name])
+        """Edit CLI names and their continue/resume try lists."""
+        entries = self._load_ai_clis()
+        # columns: cli name, try display ("a || b")
+        store = Gtk.ListStore(str, str)
+        for e in entries:
+            store.append([e["cli"], self._format_try_display(e.get("try"))])
 
         dialog = Gtk.Dialog(title="Manage AI CLI list", transient_for=parent,
                             modal=True)
@@ -577,7 +632,7 @@ class Tabit(Gtk.Window):
             "Reset defaults", Gtk.ResponseType.APPLY,
             "Cancel", Gtk.ResponseType.CANCEL,
             "Save", Gtk.ResponseType.OK)
-        dialog.set_default_size(420, 340)
+        dialog.set_default_size(560, 360)
         dialog.set_default_response(Gtk.ResponseType.OK)
         root = dialog.get_content_area()
         root.set_spacing(10)
@@ -588,7 +643,9 @@ class Tabit(Gtk.Window):
         header.set_markup(
             "<b>AI command list</b>\n"
             "<span size='small' foreground='#7a7a88'>"
-            "Order is the +AI dropdown order. Double-click a name to edit."
+            "Continue tries: arguments after the CLI, tried left→right with "
+            "<tt>||</tt>, then a plain start. "
+            "Example: <tt>--continue</tt> or <tt>resume --last</tt>"
             "</span>")
         root.pack_start(header, False, False, 0)
 
@@ -601,29 +658,43 @@ class Tabit(Gtk.Window):
         scroll.set_min_content_height(200)
 
         tree = Gtk.TreeView(model=store)
-        tree.set_headers_visible(False)
-        tree.set_reorderable(True)  # drag to reorder
+        tree.set_headers_visible(True)
+        tree.set_reorderable(True)
         sel = tree.get_selection()
         sel.set_mode(Gtk.SelectionMode.SINGLE)
-        cell = Gtk.CellRendererText(editable=True)
-        cell.set_property("ypad", 6)
-        cell.set_property("xpad", 8)
 
-        def on_edited(_cell, path, text):
+        def on_cli_edited(_cell, path, text):
             text = text.strip()
             if not text:
                 return
             it = store.get_iter(path)
-            # reject duplicates (except same row)
             for i, row in enumerate(store):
                 if row[0] == text and str(i) != path:
                     return
             store[it][0] = text
 
-        cell.connect("edited", on_edited)
-        col = Gtk.TreeViewColumn("CLI", cell, text=0)
-        col.set_expand(True)
-        tree.append_column(col)
+        def on_try_edited(_cell, path, text):
+            store[store.get_iter(path)][1] = text.strip()
+
+        cell_cli = Gtk.CellRendererText(editable=True)
+        cell_cli.set_property("ypad", 6)
+        cell_cli.set_property("xpad", 8)
+        cell_cli.connect("edited", on_cli_edited)
+        col_cli = Gtk.TreeViewColumn("CLI", cell_cli, text=0)
+        col_cli.set_min_width(120)
+        col_cli.set_resizable(True)
+        tree.append_column(col_cli)
+
+        cell_try = Gtk.CellRendererText(editable=True)
+        cell_try.set_property("ypad", 6)
+        cell_try.set_property("xpad", 8)
+        cell_try.connect("edited", on_try_edited)
+        col_try = Gtk.TreeViewColumn("Continue tries ( || separated)",
+                                    cell_try, text=1)
+        col_try.set_expand(True)
+        col_try.set_resizable(True)
+        tree.append_column(col_try)
+
         scroll.add(tree)
         mid.pack_start(scroll, True, True, 0)
 
@@ -642,19 +713,24 @@ class Tabit(Gtk.Window):
         root.pack_start(mid, True, True, 0)
 
         add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        add_entry = Gtk.Entry()
-        add_entry.set_placeholder_text("e.g. claude, codex, my-wrapper")
-        add_entry.set_hexpand(True)
+        add_cli = Gtk.Entry()
+        add_cli.set_placeholder_text("CLI, e.g. claude")
+        add_cli.set_width_chars(12)
+        add_try = Gtk.Entry()
+        add_try.set_placeholder_text("Continue tries, e.g. --continue")
+        add_try.set_hexpand(True)
         btn_add = Gtk.Button.new_from_icon_name("list-add-symbolic",
                                                 Gtk.IconSize.BUTTON)
         btn_add.set_label("Add")
         btn_add.set_always_show_image(True)
-        add_row.pack_start(add_entry, True, True, 0)
+        add_row.pack_start(add_cli, False, False, 0)
+        add_row.pack_start(add_try, True, True, 0)
         add_row.pack_start(btn_add, False, False, 0)
         root.pack_start(add_row, False, False, 0)
 
         foot = Gtk.Label(
-            label="Saved to ~/.config/tabit/ai_clis.json",
+            label="Saved to ~/.config/tabit/ai_clis.json  ·  "
+                  "Runs: cd <path> && (cli <try1> || cli <try2> || … || cli)",
             xalign=0)
         foot.get_style_context().add_class("session-sub")
         root.pack_start(foot, False, False, 0)
@@ -670,8 +746,7 @@ class Tabit(Gtk.Window):
             path = store.get_path(it)
             if path[0] == 0:
                 return
-            prev = store.get_iter((path[0] - 1,))
-            store.swap(it, prev)
+            store.swap(it, store.get_iter((path[0] - 1,)))
 
         def on_down(_b):
             it = selected_iter()
@@ -680,8 +755,7 @@ class Tabit(Gtk.Window):
             path = store.get_path(it)
             if path[0] >= store.iter_n_children(None) - 1:
                 return
-            nxt = store.get_iter((path[0] + 1,))
-            store.swap(it, nxt)
+            store.swap(it, store.get_iter((path[0] + 1,)))
 
         def on_del(_b):
             it = selected_iter()
@@ -689,15 +763,17 @@ class Tabit(Gtk.Window):
                 store.remove(it)
 
         def on_add(_b=None):
-            text = add_entry.get_text().strip()
-            if not text:
+            name = add_cli.get_text().strip()
+            if not name:
                 return
             for row in store:
-                if row[0] == text:
-                    add_entry.set_text("")
+                if row[0] == name:
+                    add_cli.set_text("")
+                    add_try.set_text("")
                     return
-            store.append([text])
-            add_entry.set_text("")
+            store.append([name, add_try.get_text().strip()])
+            add_cli.set_text("")
+            add_try.set_text("")
             n = store.iter_n_children(None)
             last = store.get_iter((n - 1,))
             sel.select_iter(last)
@@ -705,14 +781,29 @@ class Tabit(Gtk.Window):
 
         def refill(defaults):
             store.clear()
-            for name in defaults:
-                store.append([name])
+            for e in defaults:
+                store.append([e["cli"], self._format_try_display(e.get("try"))])
+
+        def store_to_entries():
+            out, seen = [], set()
+            for row in store:
+                name = row[0].strip()
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                out.append({
+                    "cli": name,
+                    "try": self._parse_try_display(row[1] or ""),
+                })
+            return out or [{"cli": e["cli"], "try": list(e["try"])}
+                           for e in DEFAULT_AI_CLIS]
 
         btn_up.connect("clicked", on_up)
         btn_down.connect("clicked", on_down)
         btn_del.connect("clicked", on_del)
         btn_add.connect("clicked", on_add)
-        add_entry.connect("activate", on_add)
+        add_cli.connect("activate", on_add)
+        add_try.connect("activate", on_add)
 
         dialog.show_all()
         while True:
@@ -721,15 +812,7 @@ class Tabit(Gtk.Window):
                 refill(DEFAULT_AI_CLIS)
                 continue
             if resp == Gtk.ResponseType.OK:
-                new_names = [row[0] for row in store if row[0].strip()]
-                # de-dupe preserve order
-                seen, ordered = set(), []
-                for n in new_names:
-                    if n not in seen:
-                        seen.add(n)
-                        ordered.append(n)
-                if not ordered:
-                    ordered = list(DEFAULT_AI_CLIS)
+                ordered = store_to_entries()
                 self._save_ai_clis(ordered)
                 if combo is not None:
                     cur = (combo.get_active_text() or "").strip()
@@ -739,7 +822,7 @@ class Tabit(Gtk.Window):
 
     def _on_add_ai(self, _btn):
         last = self._load_ai_last()
-        names = self._load_ai_clis()
+        entries = self._load_ai_clis()
         dialog = Gtk.Dialog(title="New AI session", transient_for=self,
                             modal=True)
         dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
@@ -747,7 +830,7 @@ class Tabit(Gtk.Window):
         grid = Gtk.Grid(row_spacing=6, column_spacing=6, margin=12)
 
         cli = Gtk.ComboBoxText.new_with_entry()
-        self._fill_ai_combo(cli, names, prefer=last.get("cli"))
+        self._fill_ai_combo(cli, entries, prefer=last.get("cli"))
         manage = Gtk.Button(label="Edit list…")
         manage.connect("clicked",
                        lambda *_: self._on_manage_ai_clis(dialog, cli))
@@ -776,16 +859,32 @@ class Tabit(Gtk.Window):
         path_box.pack_start(path, True, True, 0)
         path_box.pack_start(browse, False, False, 0)
 
-        hint = Gtk.Label(
-            label="Tries: --continue → resume --last → --resume latest → plain",
-            xalign=0)
-        hint.get_style_context().add_class("session-sub")
+        try_hint = Gtk.Label(xalign=0)
+        try_hint.get_style_context().add_class("session-sub")
+
+        def update_try_hint(*_a):
+            tool = (cli.get_active_text() or "").strip()
+            tries = None
+            for e in self._load_ai_clis():
+                if e["cli"] == tool:
+                    tries = e.get("try") or []
+                    break
+            if tries is None:
+                tries = list(DEFAULT_AI_TRY)
+            if tries:
+                chain = " → ".join(tries) + " → plain"
+            else:
+                chain = "plain start only"
+            try_hint.set_text(f"Will try: {chain}")
+
+        cli.connect("changed", update_try_hint)
+        update_try_hint()
 
         grid.attach(Gtk.Label(label="CLI", xalign=0), 0, 0, 1, 1)
         grid.attach(cli_box, 1, 0, 1, 1)
         grid.attach(Gtk.Label(label="Path", xalign=0), 0, 1, 1, 1)
         grid.attach(path_box, 1, 1, 1, 1)
-        grid.attach(hint, 0, 2, 2, 1)
+        grid.attach(try_hint, 0, 2, 2, 1)
         dialog.get_content_area().add(grid)
         self._dialog_enter_is_ok(dialog)
         dialog.show_all()
@@ -794,8 +893,15 @@ class Tabit(Gtk.Window):
             cwd = (path.get_text() or "").strip() or GLib.get_home_dir()
             cwd = os.path.expanduser(cwd)
             if tool:
+                tries = None
+                for e in self._load_ai_clis():
+                    if e["cli"] == tool:
+                        tries = e.get("try") or []
+                        break
+                if tries is None:
+                    tries = list(DEFAULT_AI_TRY)
                 short = cwd if len(cwd) <= 28 else "…" + cwd[-27:]
-                self._add_session(tool, self._ai_argv(tool, cwd),
+                self._add_session(tool, self._ai_argv(tool, cwd, tries),
                                   "system-run-symbolic",
                                   sub=short)
                 self._save_ai_last(tool, cwd)
