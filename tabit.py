@@ -604,6 +604,7 @@ class Tabit(Gtk.Window):
         bg.parse(TERM_BG)
         term.set_colors(fg, bg, [])
         term.connect("key-press-event", self._on_term_key)
+        term.connect("button-press-event", self._on_term_button)
 
         # VTE scrolls itself; do not wrap in ScrolledWindow.
         row = self._make_sidebar_row(label, sub, icon_name, " ".join(argv))
@@ -2094,10 +2095,17 @@ class Tabit(Gtk.Window):
         path_box.pack_start(path, True, True, 0)
         path_box.pack_start(browse, False, False, 0)
 
+        resume_chk = Gtk.CheckButton(
+            label="Continue / resume previous session")
+        resume_chk.set_active(True)
+
         try_hint = Gtk.Label(xalign=0)
         try_hint.get_style_context().add_class("session-sub")
 
         def update_try_hint(*_a):
+            if not resume_chk.get_active():
+                try_hint.set_text("Will start fresh (no continue/resume)")
+                return
             tool = (cli.get_active_text() or "").strip()
             tries = None
             for e in self._load_ai_clis():
@@ -2113,13 +2121,15 @@ class Tabit(Gtk.Window):
             try_hint.set_text(f"Will try: {chain}")
 
         cli.connect("changed", update_try_hint)
+        resume_chk.connect("toggled", update_try_hint)
         update_try_hint()
 
         grid.attach(Gtk.Label(label="CLI", xalign=0), 0, 0, 1, 1)
         grid.attach(cli_box, 1, 0, 1, 1)
         grid.attach(Gtk.Label(label="Path", xalign=0), 0, 1, 1, 1)
         grid.attach(path_box, 1, 1, 1, 1)
-        grid.attach(try_hint, 0, 2, 2, 1)
+        grid.attach(resume_chk, 1, 2, 1, 1)
+        grid.attach(try_hint, 0, 3, 2, 1)
         dialog.get_content_area().add(grid)
         self._dialog_enter_is_ok(dialog)
         dialog.show_all()
@@ -2128,13 +2138,15 @@ class Tabit(Gtk.Window):
             cwd = (path.get_text() or "").strip() or GLib.get_home_dir()
             cwd = os.path.expanduser(cwd)
             if tool:
-                tries = None
-                for e in self._load_ai_clis():
-                    if e["cli"] == tool:
-                        tries = e.get("try") or []
-                        break
-                if tries is None:
-                    tries = list(DEFAULT_AI_TRY)
+                tries = []
+                if resume_chk.get_active():
+                    tries = None
+                    for e in self._load_ai_clis():
+                        if e["cli"] == tool:
+                            tries = e.get("try") or []
+                            break
+                    if tries is None:
+                        tries = list(DEFAULT_AI_TRY)
                 short = cwd if len(cwd) <= 28 else "…" + cwd[-27:]
                 self._add_session(tool, self._ai_argv(tool, cwd, tries),
                                   ICON_AI, sub=short)
@@ -2294,6 +2306,25 @@ class Tabit(Gtk.Window):
 
     def _on_term_key(self, term, event):
         return self._handle_shortcut(event, term=term)
+
+    def _on_term_button(self, term, event):
+        """Right-click menu for terminals: copy / paste / select all."""
+        if event.button != 3 or event.type != Gdk.EventType.BUTTON_PRESS:
+            return False
+        menu = Gtk.Menu()
+        copy = Gtk.MenuItem(label="Copy")
+        copy.set_sensitive(term.get_has_selection())
+        copy.connect("activate",
+                     lambda *_: term.copy_clipboard_format(Vte.Format.TEXT))
+        paste = Gtk.MenuItem(label="Paste")
+        paste.connect("activate", lambda *_: term.paste_clipboard())
+        select_all = Gtk.MenuItem(label="Select All")
+        select_all.connect("activate", lambda *_: term.select_all())
+        for item in (copy, paste, select_all):
+            menu.append(item)
+        menu.show_all()
+        menu.popup_at_pointer(event)
+        return True
 
     def _on_editor_key(self, _view, event):
         return self._handle_shortcut(event)
