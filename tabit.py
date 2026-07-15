@@ -279,6 +279,8 @@ KEY_ACTIONS = (
     ("note_json_fmt", "Note: JSON format", "<Primary><Alt>j"),
     ("note_preview", "Note: Markdown preview", "<Primary><Alt>m"),
     ("note_find", "Note: Find text", "<Primary>f"),
+    ("note_find_next", "Note: Find next", "F3"),
+    ("note_find_prev", "Note: Find previous", "<Shift>F3"),
     ("close_session", "Close session", "<Primary><Shift>w"),
     ("rename_session", "Rename session", "F2"),
     ("prev_session", "Previous session", "<Primary>Page_Up"),
@@ -1246,10 +1248,18 @@ class Tabit(Gtk.Window):
         btn_close.set_relief(Gtk.ReliefStyle.NONE)
         btn_close.set_tooltip_text("Close search")
 
+        chk_case = Gtk.CheckButton(label="Match Case")
+        chk_word = Gtk.CheckButton(label="Whole Word")
+
         search_box.pack_start(entry, False, False, 0)
         search_box.pack_start(btn_prev, False, False, 0)
         search_box.pack_start(btn_next, False, False, 0)
+        search_box.pack_start(chk_case, False, False, 0)
+        search_box.pack_start(chk_word, False, False, 0)
         search_box.pack_start(btn_close, False, False, 0)
+
+        chk_case.connect("toggled", lambda b: search_settings.set_case_sensitive(b.get_active()))
+        chk_word.connect("toggled", lambda b: search_settings.set_at_word_boundaries(b.get_active()))
 
         lbl_status = Gtk.Label(label="")
         lbl_status.get_style_context().add_class("session-sub")
@@ -1273,6 +1283,7 @@ class Tabit(Gtk.Window):
         btn_prev.connect("clicked", go_prev)
 
         def on_close(*_):
+            search_box.set_no_show_all(True)
             search_box.hide()
             search_settings.set_search_text(None)
             view.grab_focus()
@@ -1282,6 +1293,10 @@ class Tabit(Gtk.Window):
         def on_entry_key(widget, event):
             if event.keyval == Gdk.KEY_Escape:
                 on_close()
+                return True
+            elif event.keyval == Gdk.KEY_F3:
+                shift = (event.state & Gdk.ModifierType.SHIFT_MASK) != 0
+                self._search_find(row, forward=not shift)
                 return True
             return False
         entry.connect("key-press-event", on_entry_key)
@@ -1303,11 +1318,15 @@ class Tabit(Gtk.Window):
     def _note_find_trigger(self, row):
         if not hasattr(row, "search_box"):
             return
+        row.search_box.set_no_show_all(False)
+        row.search_box.show()
         row.search_box.show_all()
+        row.page.queue_resize()
         row.search_entry.grab_focus()
         buf = row.buffer
-        has_sel, start, end = buf.get_selection_bounds()
-        if has_sel:
+        bounds = buf.get_selection_bounds()
+        if bounds:
+            start, end = bounds
             text = buf.get_text(start, end, True)
             if "\n" not in text and len(text) < 100:
                 row.search_entry.set_text(text)
@@ -1326,8 +1345,8 @@ class Tabit(Gtk.Window):
 
         if res and res[0]:
             match_start, match_end = res[1], res[2]
-            has_selection, sel_start, sel_end = buf.get_selection_bounds()
-            if has_selection and sel_start.equal(match_start) and sel_end.equal(match_end):
+            sel_bounds = buf.get_selection_bounds()
+            if sel_bounds and sel_bounds[0].equal(match_start) and sel_bounds[1].equal(match_end):
                 if forward:
                     start_iter.forward_char()
                     res = row.search_context.forward(start_iter)
@@ -2618,6 +2637,16 @@ class Tabit(Gtk.Window):
                 self._note_find_trigger(row)
             else:
                 return False
+        elif action == "note_find_next":
+            if row is not None and getattr(row, "kind", None) == "note" and hasattr(row, "search_box") and row.search_box.get_visible():
+                self._search_find(row, forward=True)
+            else:
+                return False
+        elif action == "note_find_prev":
+            if row is not None and getattr(row, "kind", None) == "note" and hasattr(row, "search_box") and row.search_box.get_visible():
+                self._search_find(row, forward=False)
+            else:
+                return False
         elif action == "close_session":
             if row is not None:
                 self._close_session(row)
@@ -2652,6 +2681,9 @@ class Tabit(Gtk.Window):
         else:
             return False
         return True
+
+    def _on_editor_key(self, _view, event):
+        return self._handle_shortcut(event)
 
     def _handle_shortcut(self, event, term=None):
         """Shared by window, terminal, and note editor."""
@@ -2711,8 +2743,7 @@ class Tabit(Gtk.Window):
                     self._add_note_session(path=path)
         context.finish(True, False, time)
 
-    def _on_editor_key(self, _view, event):
-        return self._handle_shortcut(event)
+
 
     @staticmethod
     def _load_settings():
