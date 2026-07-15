@@ -1429,12 +1429,21 @@ class Tabit(Gtk.Window):
             self.listbox.select_row(rows[min(idx, len(rows) - 1)])
 
     def _focus_row_content(self, row):
-        if getattr(row, "kind", None) == "note":
-            # editor is always visible (split view), so focus it
-            if row.view is not None and not row.view.has_focus():
-                row.view.grab_focus()
-        elif row.term is not None and not row.term.has_focus():
-            row.term.grab_focus()
+        # defer to idle: a mouse click grabs focus to the row afterwards, so
+        # grabbing now would not stick. Skip while a rename popover is open.
+        def grab():
+            if row.get_parent() is None:  # row closed meanwhile
+                return False
+            if getattr(self, "_rename_pop", None) is not None:
+                return False  # renaming: keep focus in the rename entry
+            if getattr(row, "kind", None) == "note":
+                if row.view is not None and not row.view.has_focus():
+                    row.view.grab_focus()
+            elif row.term is not None and not row.term.has_focus():
+                row.term.grab_focus()
+            return False
+
+        GLib.idle_add(grab)
 
     def _on_row_selected(self, _listbox, row):
         if row is None:
