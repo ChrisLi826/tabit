@@ -73,6 +73,10 @@ ICON_CLASS = {
 # note performance: long lines / huge buffers can freeze GtkSourceView
 NOTE_BIG_CHARS = 200_000   # total characters
 NOTE_LONG_LINE = 8_000     # any single line
+# a single very long line (or a huge file) freezes GtkSourceView on open;
+# past these limits, offer to open it in a terminal editor instead
+NOTE_MAX_OPEN_SIZE = 5_000_000   # bytes
+NOTE_MAX_OPEN_LINE = 20_000      # any single line (chars)
 # 16×16 badge with path-drawn "AI" (no font dependency in SVG loaders)
 AI_ICON_SVG = b"""<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
@@ -768,8 +772,9 @@ class Tabit(Gtk.Window):
         dialog.run()
         dialog.destroy()
 
-    def _add_note_session(self, path=None, label=None, sub=None):
-        """GtkSourceView note tab; path=None means untitled."""
+    def _add_note_session(self, path=None, label=None, sub=None, content=None):
+        """GtkSourceView note tab; path=None means untitled.
+        content fills an untitled note (e.g. base64-decoded text)."""
         path = path or None
         if path:
             path = os.path.abspath(os.path.expanduser(path))
@@ -814,7 +819,13 @@ class Tabit(Gtk.Window):
             label = label or "untitled"
             sub = sub if sub is not None else "note"
             tooltip = "untitled note"
-            buf.set_modified(False)
+            if content is not None:
+                buf.begin_not_undoable_action()
+                buf.set_text(content)
+                buf.end_not_undoable_action()
+                buf.set_modified(True)  # decoded content is unsaved
+            else:
+                buf.set_modified(False)
 
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
@@ -1071,12 +1082,50 @@ class Tabit(Gtk.Window):
         return text, start, end
 
     def _note_replace_range(self, row, start, end, new_text):
+        # a result with a very long line (e.g. base64 of a big file) would
+        # freeze GtkSourceView; hand it to a terminal editor instead
+        longest = max((len(ln) for ln in new_text.splitlines()),
+                      default=len(new_text))
+        if longest > NOTE_MAX_OPEN_LINE or len(new_text) > NOTE_MAX_OPEN_SIZE:
+            self._note_result_to_editor(new_text, row)
+            return
         buf = row.buffer
         buf.begin_user_action()
         buf.delete(start, end)
         buf.insert(start, new_text)
         buf.end_user_action()
         self._note_tune_perf(row)
+
+    def _note_result_to_editor(self, text, row):
+        """Oversized result: let the user choose where to save it, then open
+        it in $EDITOR (terminal) — GtkSourceView can't show a huge line."""
+        editor = os.environ.get("EDITOR") or "vi"
+        chooser = Gtk.FileChooserDialog(
+            title="Result is too large for the note editor — save to a file",
+            parent=self, action=Gtk.FileChooserAction.SAVE)
+        chooser.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                            f"Save & open in {editor}", Gtk.ResponseType.OK)
+        chooser.set_do_overwrite_confirmation(True)
+        if row is not None and getattr(row, "file_path", None):
+            chooser.set_current_folder(os.path.dirname(row.file_path))
+            chooser.set_current_name(os.path.basename(row.file_path) + ".b64")
+        else:
+            chooser.set_current_name("output.b64")
+        path = chooser.get_filename() if chooser.run() == Gtk.ResponseType.OK \
+            else None
+        chooser.destroy()
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        except OSError as e:
+            self._note_msg(Gtk.MessageType.ERROR, "Could not save", str(e))
+            return
+        q = shlex.quote(path)
+        self._add_session(os.path.basename(path),
+                          ["/bin/sh", "-c", f"exec {editor} {q}"],
+                          "utilities-terminal-symbolic", sub=editor)
 
     def _note_msg(self, kind, text, secondary=None):
         dialog = Gtk.MessageDialog(
@@ -1522,9 +1571,90 @@ class Tabit(Gtk.Window):
                 action=Gtk.FileChooserAction.OPEN)
             chooser.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                                 "Open", Gtk.ResponseType.OK)
-            if chooser.run() == Gtk.ResponseType.OK:
-                self._add_note_session(path=chooser.get_filename())
+            ok = chooser.run() == Gtk.ResponseType.OK
+            fn = chooser.get_filename() if ok else None
             chooser.destroy()
+            if fn and os.path.isfile(fn) and self._note_file_too_big(fn):
+                self._open_big_file(fn)  # GtkSourceView would freeze
+            elif fn is not None:
+                self._add_note_session(path=fn)
+
+    @staticmethod
+    def _note_file_too_big(path):
+        """True if the file is too big / long-lined for GtkSourceView."""
+        try:
+            if os.path.getsize(path) > NOTE_MAX_OPEN_SIZE:
+                return True
+            with open(path, "rb") as f:
+                data = f.read()
+            return max((len(ln) for ln in data.split(b"\n")),
+                       default=0) > NOTE_MAX_OPEN_LINE
+        except OSError:
+            return False
+
+    @staticmethod
+    def _b64_decode_file(path):
+        """If the file is valid base64, return the decoded bytes, else None."""
+        try:
+            if os.path.getsize(path) > 50_000_000:
+                return None
+            with open(path, "rb") as f:
+                compact = b"".join(f.read().split())  # drop any whitespace
+            if not compact or len(compact) % 4 != 0:
+                return None
+            return base64.b64decode(compact, validate=True)
+        except (OSError, ValueError):
+            return None
+
+    def _open_big_file(self, path):
+        """Large / long-line file: open it in a terminal editor (viewport
+        based, handles it) instead of freezing GtkSourceView. If it is base64,
+        also offer to decode it."""
+        size_mb = os.path.getsize(path) / 1_000_000
+        editor = os.environ.get("EDITOR") or "vi"
+        decoded = self._b64_decode_file(path)
+        dialog = Gtk.MessageDialog(
+            transient_for=self, modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text=f"“{os.path.basename(path)}” is large "
+                 f"({size_mb:.1f} MB) or has very long lines.")
+        dialog.format_secondary_text(
+            f"The note editor would freeze on it. Open it in {editor} "
+            "(terminal)" + (", or decode it?" if decoded is not None
+                            else " instead?"))
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Open in editor anyway", Gtk.ResponseType.REJECT)
+        if decoded is not None:
+            dialog.add_button("Base64 decode", 2)
+        dialog.add_button(f"Open in {editor}", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        resp = dialog.run()
+        dialog.destroy()
+        if resp == Gtk.ResponseType.OK:            # edit with $EDITOR
+            q = shlex.quote(path)
+            self._add_session(os.path.basename(path),
+                              ["/bin/sh", "-c", f"exec {editor} {q}"],
+                              "utilities-terminal-symbolic", sub=editor)
+        elif resp == Gtk.ResponseType.REJECT:      # force into the note editor
+            self._add_note_session(path=path)
+        elif resp == 2 and decoded is not None:    # base64 decode
+            self._open_decoded(decoded, os.path.basename(path))
+
+    def _open_decoded(self, data, name):
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            self._note_msg(Gtk.MessageType.WARNING,
+                           "Decoded content is binary",
+                           "It is not UTF-8 text, so it can't open as a note.")
+            return
+        longest = max((len(ln) for ln in text.splitlines()), default=len(text))
+        if longest > NOTE_MAX_OPEN_LINE or len(text) > NOTE_MAX_OPEN_SIZE:
+            self._note_result_to_editor(text, None)  # still too big → save+vi
+        else:
+            self._add_note_session(content=text, label=f"{name} (decoded)",
+                                   sub="decoded")
 
     @staticmethod
     def _serial_argv(backend, dev, rate):
