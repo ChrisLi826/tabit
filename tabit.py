@@ -93,7 +93,8 @@ AI_ICON_SVG = b"""<?xml version="1.0" encoding="UTF-8"?>
 """
 # serial backends shown in the +Serial dialog (first = default).
 # "screen" runs the bundled screen.sh script (written out at startup).
-SERIAL_BACKENDS = ("screen", "kermit", "picocom")
+SERIAL_BACKENDS = ("screen", "kermit", "picocom", "ssh", "telnet")
+SERIAL_NET_BACKENDS = ("ssh", "telnet")  # target a host, not a /dev device
 
 # Bundled screen.sh: a `screen` wrapper for /dev/ttyUSB* with logfile,
 # multi-attach and log retention. Kept verbatim so tabit needs nothing in
@@ -470,6 +471,8 @@ class Tabit(Gtk.Window):
         row.subtitle.set_no_show_all(False)
         row.subtitle.show()
         row.session_label = f"{row.title_text} {shown}"
+        # persist the new cwd soon, so a restart (even an abrupt kill) keeps it
+        self._save_sessions_soon()
 
     @staticmethod
     def _term_cwd(row):
@@ -1657,7 +1660,15 @@ class Tabit(Gtk.Window):
                                    sub="decoded")
 
     @staticmethod
-    def _serial_argv(backend, dev, rate):
+    def _serial_argv(backend, dev, rate, port=""):
+        if backend in ("ssh", "telnet"):
+            try:
+                parts = shlex.split(dev)  # host, or "user@host [args]"
+            except ValueError:
+                parts = dev.split()
+            if backend == "ssh":  # ssh takes the port with -p
+                return ["ssh"] + (["-p", port] if port else []) + parts
+            return ["telnet"] + parts + ([port] if port else [])  # telnet: host port
         if backend == "screen":
             return [SCREEN_SH_PATH, dev, rate]
         if backend == "kermit":
@@ -1705,36 +1716,89 @@ class Tabit(Gtk.Window):
     def _on_add_serial(self, _btn):
         dialog = Gtk.Dialog(title="New serial session", transient_for=self,
                             modal=True)
-        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
-                           "Open", Gtk.ResponseType.OK)
         grid = Gtk.Grid(row_spacing=6, column_spacing=6, margin=12)
+        # serial: a /dev dropdown; ssh/telnet: a plain host entry (no dropdown)
         combo = Gtk.ComboBoxText.new_with_entry()
         for dev in sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")):
             combo.append_text(dev)
         combo.set_active(0)
+        host = Gtk.Entry()
+        host.set_placeholder_text("user@host")
+        target_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        target_box.pack_start(combo, True, True, 0)
+        target_box.pack_start(host, True, True, 0)
+
         baud = Gtk.Entry(text=DEFAULT_BAUD)
+        port = Gtk.Entry()
+        port.set_placeholder_text("port (optional)")
+        field2_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        field2_box.pack_start(baud, True, True, 0)
+        field2_box.pack_start(port, True, True, 0)
+
         backend = Gtk.ComboBoxText()
         for name in SERIAL_BACKENDS:
             backend.append_text(name)
         backend.set_active(0)  # screen
-        grid.attach(Gtk.Label(label="Device", xalign=0), 0, 0, 1, 1)
-        grid.attach(combo, 1, 0, 1, 1)
-        grid.attach(Gtk.Label(label="Baud", xalign=0), 0, 1, 1, 1)
-        grid.attach(baud, 1, 1, 1, 1)
+        target_label = Gtk.Label(label="Device", xalign=0)
+        field2_label = Gtk.Label(label="Baud", xalign=0)
+        for w in (target_box, field2_box, backend):
+            w.set_hexpand(True)  # fill the width so there's no right-side gap
+        grid.attach(target_label, 0, 0, 1, 1)
+        grid.attach(target_box, 1, 0, 1, 1)
+        grid.attach(field2_label, 0, 1, 1, 1)
+        grid.attach(field2_box, 1, 1, 1, 1)
         grid.attach(Gtk.Label(label="Tool", xalign=0), 0, 2, 1, 1)
         grid.attach(backend, 1, 2, 1, 1)
+        # buttons directly under the fields (not the far-right action area)
+        btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        btns.set_halign(Gtk.Align.END)
+        btns.set_margin_top(6)
+        cancel_b = Gtk.Button(label="Cancel")
+        open_b = Gtk.Button(label="Open")
+        cancel_b.connect("clicked",
+                         lambda *_: dialog.response(Gtk.ResponseType.CANCEL))
+        open_b.connect("clicked",
+                       lambda *_: dialog.response(Gtk.ResponseType.OK))
+        btns.pack_start(cancel_b, False, False, 0)
+        btns.pack_start(open_b, False, False, 0)
+        grid.attach(btns, 0, 3, 2, 1)
+        open_b.set_can_default(True)
+        dialog.set_default(open_b)
         dialog.get_content_area().add(grid)
+
+        def on_backend_changed(*_a):
+            net = backend.get_active_text() in SERIAL_NET_BACKENDS
+            target_label.set_text("Host" if net else "Device")
+            field2_label.set_text("Port" if net else "Baud")
+            combo.set_visible(not net)
+            host.set_visible(net)
+            baud.set_visible(not net)
+            port.set_visible(net)
+
+        backend.connect("changed", on_backend_changed)
         self._dialog_enter_is_ok(dialog)
         dialog.show_all()
+        on_backend_changed()  # after show_all so hide() sticks
         if dialog.run() == Gtk.ResponseType.OK:
-            dev = (combo.get_active_text() or "").strip()
-            rate = baud.get_text().strip() or DEFAULT_BAUD
             tool = backend.get_active_text() or SERIAL_BACKENDS[0]
-            if dev:
-                self._add_session(os.path.basename(dev),
-                                  self._serial_argv(tool, dev, rate),
-                                  "network-wired-symbolic",
-                                  sub=f"{tool} @{rate}")
+            net = tool in SERIAL_NET_BACKENDS
+            if net:
+                dev = (host.get_text() or "").strip()
+                prt = (port.get_text() or "").strip()
+                if dev:
+                    label = (dev.split() or [dev])[0]
+                    sub = f"{tool}:{prt}" if prt else tool
+                    self._add_session(
+                        label, self._serial_argv(tool, dev, "", prt),
+                        "network-wired-symbolic", sub=sub)
+            else:
+                dev = (combo.get_active_text() or "").strip()
+                rate = baud.get_text().strip() or DEFAULT_BAUD
+                if dev:
+                    self._add_session(os.path.basename(dev),
+                                      self._serial_argv(tool, dev, rate),
+                                      "network-wired-symbolic",
+                                      sub=f"{tool} @{rate}")
         dialog.destroy()
 
     def _on_add_command(self, _btn):
@@ -2222,6 +2286,10 @@ class Tabit(Gtk.Window):
         cli_box.pack_start(manage, False, False, 0)
 
         path_default = last.get("path") or GLib.get_home_dir()
+        if self._load_settings().get("shell_inherit_cwd", False):
+            cwd = self._focused_cwd()
+            if cwd:
+                path_default = cwd  # inherit the focused tab's path
         path = Gtk.Entry(text=path_default, width_chars=36)
         browse = Gtk.Button(label="Browse…")
 
@@ -2522,11 +2590,11 @@ class Tabit(Gtk.Window):
         term_head = Gtk.Label(xalign=0)
         term_head.set_markup("<b>Terminals</b>")
         inherit = Gtk.CheckButton(
-            label="New shell opens in the current tab's path")
+            label="New shell / AI opens in the current tab's path")
         inherit.set_active(bool(s.get("shell_inherit_cwd", False)))
         inherit.set_tooltip_text(
-            "Ctrl+Shift+T / + Shell starts in the focused tab's working "
-            "directory instead of home. Default is off.")
+            "+ Shell (Ctrl+Shift+T) and + AI start in the focused tab's "
+            "working directory instead of home. Default is off.")
 
         hint = Gtk.Label(
             label="Stored in ~/.config/tabit/settings.json",
