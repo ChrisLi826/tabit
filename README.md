@@ -1,6 +1,6 @@
 # tabit
 
-**v1.2.2** — a terminal built around a **left tab sidebar**.
+**v1.3.0** — a terminal built around a **left tab sidebar**.
 
 <p align="center">
   <img src="banner.svg" alt="tabit — color-coded session tabs down the left edge of one window" width="820">
@@ -37,7 +37,7 @@ To remove: `./install.sh --uninstall`
 
 | Action | Result |
 |---|---|
-| `+ Serial` | Pick device, baud (default 115200), and tool: `screen` (bundled `screen.sh`) / `kermit` / `picocom` |
+| `+ Serial` | Pick device, baud (default 115200), and tool: `screen` (bundled `screen.sh`) / `kermit` / `picocom`; or `ssh` / `telnet` to a host + port (for network console servers) |
 | `+ Shell` | New tab running your login shell |
 | `+ AI` | Pick AI CLI and working directory. **Edit list…** manages CLI names and per-CLI continue/resume tries (`~/.config/tabit/ai_clis.json`) |
 | `+ Note` | GtkSourceView editor + **Markdown Preview** (WebKit); bottom tools: Base64 / JSON Format; wrap in **Settings…**; huge-line guards |
