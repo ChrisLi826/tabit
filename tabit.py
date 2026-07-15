@@ -245,8 +245,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "claude", "try": ["--continue"]},
     {"cli": "codex", "try": ["resume --last"]},
     {"cli": "grok", "try": ["--continue"]},
-    {"cli": "gemini", "try": ["--resume latest"]},
-    {"cli": "antigravity", "try": ["--continue"]},
+    {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
 DEFAULT_AI_TRY = ["--continue", "resume --last", "--resume latest"]
