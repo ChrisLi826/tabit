@@ -278,6 +278,7 @@ KEY_ACTIONS = (
     ("note_b64_dec", "Note: Base64 decode", "<Primary><Alt><Shift>b"),
     ("note_json_fmt", "Note: JSON format", "<Primary><Alt>j"),
     ("note_preview", "Note: Markdown preview", "<Primary><Alt>m"),
+    ("note_find", "Note: Find text", "<Primary>f"),
     ("close_session", "Close session", "<Primary><Shift>w"),
     ("rename_session", "Rename session", "F2"),
     ("prev_session", "Previous session", "<Primary>Page_Up"),
@@ -612,6 +613,10 @@ class Tabit(Gtk.Window):
         term.set_colors(fg, bg, [])
         term.connect("key-press-event", self._on_term_key)
         term.connect("button-press-event", self._on_term_button)
+        term.drag_dest_set(Gtk.DestDefaults.ALL,
+                            [Gtk.TargetEntry.new("text/uri-list", 0, 0)],
+                            Gdk.DragAction.COPY)
+        term.connect("drag-data-received", self._on_term_drag_data_received)
 
         # VTE scrolls itself; do not wrap in ScrolledWindow.
         row = self._make_sidebar_row(label, sub, icon_name, " ".join(argv))
@@ -787,6 +792,10 @@ class Tabit(Gtk.Window):
         view.set_highlight_current_line(True)
         view.set_tab_width(4)
         view.set_insert_spaces_instead_of_tabs(True)
+        view.drag_dest_set(Gtk.DestDefaults.ALL,
+                            [Gtk.TargetEntry.new("text/uri-list", 0, 0)],
+                            Gdk.DragAction.COPY)
+        view.connect("drag-data-received", self._on_note_drag_data_received)
         wrap_on = self._load_settings().get("note_wrap", True)
         view.set_wrap_mode(
             Gtk.WrapMode.WORD_CHAR if wrap_on else Gtk.WrapMode.NONE)
@@ -904,7 +913,10 @@ class Tabit(Gtk.Window):
         tip.get_style_context().add_class("session-sub")
         tools.pack_start(tip, False, False, 0)
 
+        search_bar = self._build_search_bar(row, view)
+
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        page.pack_start(search_bar, False, False, 0)
         page.pack_start(content, True, True, 0)
         page.pack_start(tools, False, False, 0)
         self._place_tab_row(row, page)
@@ -1205,6 +1217,130 @@ class Tabit(Gtk.Window):
         menu.show_all()
         menu.popup_at_pointer(event)
         return True
+
+    def _build_search_bar(self, row, view):
+        search_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6, margin=4)
+        search_box.get_style_context().add_class("search-bar")
+
+        entry = Gtk.SearchEntry()
+        entry.set_placeholder_text("Search note...")
+        entry.set_width_chars(30)
+
+        search_settings = GtkSource.SearchSettings.new()
+        search_settings.set_wrap_around(True)
+
+        search_context = GtkSource.SearchContext.new(view.get_buffer(), search_settings)
+        search_context.set_highlight(True)
+
+        row.search_settings = search_settings
+        row.search_context = search_context
+        row.search_entry = entry
+        row.search_box = search_box
+
+        btn_prev = Gtk.Button.new_from_icon_name("go-up-symbolic", Gtk.IconSize.BUTTON)
+        btn_prev.set_tooltip_text("Previous occurrence")
+        btn_next = Gtk.Button.new_from_icon_name("go-down-symbolic", Gtk.IconSize.BUTTON)
+        btn_next.set_tooltip_text("Next occurrence")
+
+        btn_close = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.BUTTON)
+        btn_close.set_relief(Gtk.ReliefStyle.NONE)
+        btn_close.set_tooltip_text("Close search")
+
+        search_box.pack_start(entry, False, False, 0)
+        search_box.pack_start(btn_prev, False, False, 0)
+        search_box.pack_start(btn_next, False, False, 0)
+        search_box.pack_start(btn_close, False, False, 0)
+
+        lbl_status = Gtk.Label(label="")
+        lbl_status.get_style_context().add_class("session-sub")
+        search_box.pack_start(lbl_status, False, False, 0)
+        row.search_status_lbl = lbl_status
+
+        def on_search_changed(entry_widget):
+            text = entry_widget.get_text()
+            search_settings.set_search_text(text)
+
+        entry.connect("search-changed", on_search_changed)
+
+        def go_next(*_):
+            self._search_find(row, forward=True)
+
+        def go_prev(*_):
+            self._search_find(row, forward=False)
+
+        entry.connect("activate", go_next)
+        btn_next.connect("clicked", go_next)
+        btn_prev.connect("clicked", go_prev)
+
+        def on_close(*_):
+            search_box.hide()
+            search_settings.set_search_text(None)
+            view.grab_focus()
+
+        btn_close.connect("clicked", on_close)
+
+        def on_entry_key(widget, event):
+            if event.keyval == Gdk.KEY_Escape:
+                on_close()
+                return True
+            return False
+        entry.connect("key-press-event", on_entry_key)
+
+        def on_occurrences_changed(*_):
+            cnt = search_context.get_occurrences_count()
+            if not search_settings.get_search_text():
+                lbl_status.set_text("")
+            elif cnt == 0:
+                lbl_status.set_text("No matches")
+            else:
+                lbl_status.set_text(f"{cnt} matches")
+        search_context.connect("notify::occurrences-count", on_occurrences_changed)
+
+        search_box.set_no_show_all(True)
+        search_box.hide()
+        return search_box
+
+    def _note_find_trigger(self, row):
+        if not hasattr(row, "search_box"):
+            return
+        row.search_box.show_all()
+        row.search_entry.grab_focus()
+        buf = row.buffer
+        has_sel, start, end = buf.get_selection_bounds()
+        if has_sel:
+            text = buf.get_text(start, end, True)
+            if "\n" not in text and len(text) < 100:
+                row.search_entry.set_text(text)
+
+    def _search_find(self, row, forward=True):
+        if not hasattr(row, "search_context"):
+            return
+        buf = row.buffer
+        insert_mark = buf.get_insert()
+        start_iter = buf.get_iter_at_mark(insert_mark)
+
+        if forward:
+            res = row.search_context.forward(start_iter)
+        else:
+            res = row.search_context.backward(start_iter)
+
+        if res and res[0]:
+            match_start, match_end = res[1], res[2]
+            has_selection, sel_start, sel_end = buf.get_selection_bounds()
+            if has_selection and sel_start.equal(match_start) and sel_end.equal(match_end):
+                if forward:
+                    start_iter.forward_char()
+                    res = row.search_context.forward(start_iter)
+                else:
+                    start_iter.backward_char()
+                    res = row.search_context.backward(start_iter)
+                if res and res[0]:
+                    match_start, match_end = res[1], res[2]
+                else:
+                    return
+
+            buf.select_range(match_start, match_end)
+            row.view.scroll_to_iter(match_start, 0.0, False, 0.5, 0.5)
 
     def _action_accel_label(self, action_id):
         pair = self._keys.get(action_id)
@@ -2477,6 +2613,11 @@ class Tabit(Gtk.Window):
                 return False
         elif action == "note_preview":
             return self._note_toggle_preview(row)
+        elif action == "note_find":
+            if row is not None and getattr(row, "kind", None) == "note":
+                self._note_find_trigger(row)
+            else:
+                return False
         elif action == "close_session":
             if row is not None:
                 self._close_session(row)
@@ -2548,6 +2689,27 @@ class Tabit(Gtk.Window):
         menu.show_all()
         menu.popup_at_pointer(event)
         return True
+
+    def _on_term_drag_data_received(self, widget, context, x, y, selection_data, info, time):
+        uris = selection_data.get_uris()
+        if uris:
+            paths = []
+            for uri in uris:
+                path = GLib.filename_from_uri(uri)[0]
+                paths.append(shlex.quote(path))
+            text = " ".join(paths)
+            widget.feed_child(text.encode("utf-8"))
+            widget.grab_focus()
+        context.finish(True, False, time)
+
+    def _on_note_drag_data_received(self, widget, context, x, y, selection_data, info, time):
+        uris = selection_data.get_uris()
+        if uris:
+            for uri in uris:
+                path = GLib.filename_from_uri(uri)[0]
+                if os.path.isfile(path):
+                    self._add_note_session(path=path)
+        context.finish(True, False, time)
 
     def _on_editor_key(self, _view, event):
         return self._handle_shortcut(event)
