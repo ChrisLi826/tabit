@@ -20,6 +20,8 @@ import glob
 import html as html_module
 import json
 import os
+import random
+import re
 import shlex
 import signal
 import subprocess
@@ -258,13 +260,17 @@ SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
 AI_LAST_FILE = os.path.join(CONFIG_DIR, "ai_last.json")
 AI_CLIS_FILE = os.path.join(CONFIG_DIR, "ai_clis.json")
 COMMANDS_FILE = os.path.join(CONFIG_DIR, "commands.json")
-# quick commands shown in the terminal bottom bar (user-editable)
-DEFAULT_COMMANDS = [{"cmd": "hom18", "enter": True}]
+# quick commands shown in the terminal bottom bar (user-editable; empty
+# by default — add your own from the bar's edit button)
+DEFAULT_COMMANDS = []
+# tab-group colors (names match the .group-bar.grp-* CSS classes)
+GROUP_COLORS = ["red", "orange", "yellow", "green", "cyan", "purple"]
 TERM_FG = "#d5d5df"
 TERM_BG = "#101016"
 DEFAULT_SETTINGS = {
     "note_wrap": True,
     "shell_inherit_cwd": False,  # new shell opens in the focused tab's path
+    "ai_fresh_on_restore": False,  # restored AI tabs start fresh (no continue)
 }
 
 # (action_id, label, default GTK accelerator string)
@@ -281,6 +287,7 @@ KEY_ACTIONS = (
     ("note_find", "Note: Find text", "<Primary>f"),
     ("note_find_next", "Note: Find next", "F3"),
     ("note_find_prev", "Note: Find previous", "<Shift>F3"),
+    ("term_find", "Terminal: Find text", "<Primary><Shift>f"),
     ("close_session", "Close session", "<Primary><Shift>w"),
     ("rename_session", "Rename session", "F2"),
     ("prev_session", "Previous session", "<Primary>Page_Up"),
@@ -305,6 +312,16 @@ CSS = b"""
                         border-left-color: #7aa2f7; color: #ececf4; }
 .sidebar row.dead label { color: #6a6a78; }
 .sidebar row.drop-into { box-shadow: inset 0 0 0 2px #7aa2f7; }
+.sidebar row.drop-above { box-shadow: inset 0 3px 0 0 #7aa2f7; }
+.sidebar row.drop-below { box-shadow: inset 0 -3px 0 0 #7aa2f7; }
+/* tab-group color stripe on the far left of a row */
+.group-bar { background-color: transparent; border-radius: 2px; }
+.group-bar.grp-red    { background-color: #f7768e; }
+.group-bar.grp-orange { background-color: #ff9e64; }
+.group-bar.grp-yellow { background-color: #e0af68; }
+.group-bar.grp-green  { background-color: #9ece6a; }
+.group-bar.grp-cyan   { background-color: #7dcfff; }
+.group-bar.grp-purple { background-color: #bb9af7; }
 .sidebar row .close { opacity: 0; }
 .sidebar row:hover .close, .sidebar row:selected .close { opacity: 1; }
 .sidebar button { background: transparent; border: none; border-radius: 6px;
@@ -414,6 +431,7 @@ class Tabit(Gtk.Window):
         self._paned.set_position(width)
         self.add(self._paned)
 
+        ai_fresh = self._load_settings().get("ai_fresh_on_restore", False)
         for s in self._load_sessions():
             try:
                 argv = s.get("argv") or []
@@ -425,9 +443,17 @@ class Tabit(Gtk.Window):
                     self._add_note_session(path=path, label=lab,
                                            sub=s.get("sub"))
                 else:
-                    self._add_session(s["label"], s["argv"], s["icon"],
+                    argv = s["argv"]
+                    if ai_fresh and s.get("icon") == ICON_AI:
+                        argv = self._ai_argv_plain(argv)  # no continue/resume
+                    self._add_session(s["label"], argv, s["icon"],
                                       s.get("sub"), s.get("cwd"),
                                       s.get("track_cwd", False))
+                color = s.get("color")
+                if color:  # restore the tab-group stripe on the new row
+                    r = self.listbox.get_selected_row()
+                    if r is not None:
+                        self._apply_group(r, color)
             except (KeyError, TypeError, OSError):
                 continue  # skip broken entries in a hand-edited file
         if not self.listbox.get_children():
@@ -497,6 +523,8 @@ class Tabit(Gtk.Window):
             cwd = self._term_cwd(r)
             if cwd:
                 entry["cwd"] = cwd
+            if getattr(r, "group_color", None):
+                entry["color"] = r.group_color
             data.append(entry)
         os.makedirs(os.path.dirname(SESSIONS_FILE), exist_ok=True)
         with open(SESSIONS_FILE, "w") as f:
@@ -540,6 +568,10 @@ class Tabit(Gtk.Window):
         hit.set_visible_window(True)
         hit.set_above_child(False)
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        group_bar = Gtk.Box()
+        group_bar.set_size_request(4, -1)
+        group_bar.get_style_context().add_class("group-bar")
+        box.pack_start(group_bar, False, False, 0)
         box.pack_start(self._session_icon(icon_name), False, False, 0)
         titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         title = Gtk.Label(label=label)
@@ -575,6 +607,8 @@ class Tabit(Gtk.Window):
         row.icon_name = icon_name
         row.subtitle = subtitle
         row.dot = dot
+        row.group_bar = group_bar
+        row.group_color = None
         row.dead = False
         row.kind = "term"
         row.term = None
@@ -627,8 +661,9 @@ class Tabit(Gtk.Window):
         row.term = term
         row.pid = None
         row.track_cwd = track_cwd  # shell tabs show live cwd in the subtitle
-        # terminal page = VTE on top, quick-command bar at the bottom
+        # terminal page = search bar (hidden) + VTE + quick-command bar
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        page.pack_start(self._build_term_search_bar(row, term), False, False, 0)
         page.pack_start(term, True, True, 0)
         page.pack_start(self._build_cmd_bar(row), False, False, 0)
         self._place_tab_row(row, page)
@@ -676,6 +711,12 @@ class Tabit(Gtk.Window):
         bar = row.cmd_bar
         for c in bar.get_children():
             bar.remove(c)
+        acc = self._action_accel_label("term_find")
+        find = Gtk.Button(label=f"Find  ({acc})" if acc else "Find")
+        find.set_tooltip_text("Search the terminal"
+                              + (f" — {acc}" if acc else ""))
+        find.connect("clicked", lambda _b, r=row: self._term_find_trigger(r))
+        bar.pack_start(find, False, False, 0)
         for entry in self._load_commands():
             b = Gtk.Button(label=entry["cmd"])
             b.set_tooltip_text(("runs" if entry.get("enter") else "types")
@@ -909,6 +950,13 @@ class Tabit(Gtk.Window):
                 f"{text} — {acc}" if acc else text)
             tools.pack_start(b, False, False, 0)
             b.connect("clicked", lambda _b, fn=handler, r=row: fn(r))
+        acc = self._action_accel_label("note_find")
+        find_btn = Gtk.Button(label=f"Find  ({acc})" if acc else "Find")
+        find_btn.set_tooltip_text("Search the note"
+                                  + (f" — {acc}" if acc else ""))
+        find_btn.connect("clicked",
+                         lambda _b, r=row: self._note_find_trigger(r))
+        tools.pack_start(find_btn, False, False, 0)
         tip = Gtk.Label(
             label="  (selection, or whole note if none)",
             xalign=0)
@@ -1268,7 +1316,9 @@ class Tabit(Gtk.Window):
 
         def on_search_changed(entry_widget):
             text = entry_widget.get_text()
-            search_settings.set_search_text(text)
+            search_settings.set_search_text(text or None)
+            if text:  # jump to the first match as you type
+                self._search_find(row, forward=True)
 
         entry.connect("search-changed", on_search_changed)
 
@@ -1315,14 +1365,106 @@ class Tabit(Gtk.Window):
         search_box.hide()
         return search_box
 
+    # --- terminal (VTE) search -------------------------------------------
+
+    def _build_term_search_bar(self, row, term):
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                      margin=4)
+        box.get_style_context().add_class("search-bar")
+        entry = Gtk.SearchEntry()
+        entry.set_placeholder_text("Search terminal...")
+        entry.set_width_chars(30)
+        btn_prev = Gtk.Button.new_from_icon_name("go-up-symbolic",
+                                                 Gtk.IconSize.BUTTON)
+        btn_prev.set_tooltip_text("Previous occurrence")
+        btn_next = Gtk.Button.new_from_icon_name("go-down-symbolic",
+                                                 Gtk.IconSize.BUTTON)
+        btn_next.set_tooltip_text("Next occurrence")
+        chk_case = Gtk.CheckButton(label="Match Case")
+        chk_word = Gtk.CheckButton(label="Whole Word")
+        btn_close = Gtk.Button.new_from_icon_name("window-close-symbolic",
+                                                  Gtk.IconSize.BUTTON)
+        btn_close.set_relief(Gtk.ReliefStyle.NONE)
+        for w in (entry, btn_prev, btn_next, chk_case, chk_word, btn_close):
+            box.pack_start(w, False, False, 0)
+        row.term_search_box = box
+        row.term_search_entry = entry
+
+        def apply_regex():
+            text = entry.get_text()
+            if not text:
+                term.search_set_regex(None, 0)
+                return False
+            # PCRE2: multiline + utf, caseless unless "Match Case"
+            flags = 0x00000400 | 0x00080000
+            if not chk_case.get_active():
+                flags |= 0x00000008
+            pat = re.escape(text)
+            if chk_word.get_active():
+                pat = r"\b" + pat + r"\b"
+            try:
+                rx = Vte.Regex.new_for_search(pat, -1, flags)
+            except GLib.Error:
+                return False
+            term.search_set_regex(rx, 0)
+            term.search_set_wrap_around(True)
+            return True
+
+        def go_next(*_):
+            if apply_regex():
+                term.search_find_next()
+
+        def go_prev(*_):
+            if apply_regex():
+                term.search_find_previous()
+
+        entry.connect("search-changed", go_next)  # jump as you type
+        entry.connect("activate", go_next)
+        btn_next.connect("clicked", go_next)
+        btn_prev.connect("clicked", go_prev)
+        chk_case.connect("toggled", go_next)
+        chk_word.connect("toggled", go_next)
+        row._term_find_next = go_next  # so F3 works from the terminal too
+        row._term_find_prev = go_prev
+
+        def on_close(*_):
+            box.set_no_show_all(True)
+            box.hide()
+            term.search_set_regex(None, 0)
+            term.grab_focus()
+
+        btn_close.connect("clicked", on_close)
+
+        def on_key(_w, event):
+            if event.keyval == Gdk.KEY_Escape:
+                on_close()
+                return True
+            if event.keyval == Gdk.KEY_F3:
+                shift = (event.state & Gdk.ModifierType.SHIFT_MASK) != 0
+                go_prev() if shift else go_next()
+                return True
+            return False
+
+        entry.connect("key-press-event", on_key)
+        box.set_no_show_all(True)
+        box.hide()
+        return box
+
+    def _term_find_trigger(self, row):
+        if not hasattr(row, "term_search_box"):
+            return
+        row.term_search_box.set_no_show_all(False)
+        row.term_search_box.show_all()
+        row.page.queue_resize()
+        row.term_search_entry.grab_focus()
+        row.term_search_entry.select_region(0, -1)
+
     def _note_find_trigger(self, row):
         if not hasattr(row, "search_box"):
             return
         row.search_box.set_no_show_all(False)
-        row.search_box.show()
         row.search_box.show_all()
         row.page.queue_resize()
-        row.search_entry.grab_focus()
         buf = row.buffer
         bounds = buf.get_selection_bounds()
         if bounds:
@@ -1330,6 +1472,11 @@ class Tabit(Gtk.Window):
             text = buf.get_text(start, end, True)
             if "\n" not in text and len(text) < 100:
                 row.search_entry.set_text(text)
+        # re-sync the entry text into the search settings so reopening Find
+        # keeps working (on_close cleared it); select all so typing replaces
+        row.search_settings.set_search_text(row.search_entry.get_text() or None)
+        row.search_entry.grab_focus()
+        row.search_entry.select_region(0, -1)
 
     def _search_find(self, row, forward=True):
         if not hasattr(row, "search_context"):
@@ -1510,26 +1657,47 @@ class Tabit(Gtk.Window):
     def _on_row_drag_begin(self, _hit, _ctx, row):
         self._drag_row = row
 
-    @staticmethod
-    def _on_row_drag_motion(row, _ctx, _x, _y, _time):
-        row.get_style_context().add_class("drop-into")
-        return False  # let DestDefaults.MOTION set the drag status
+    _DROP_CLASSES = ("drop-into", "drop-above", "drop-below")
 
     @staticmethod
-    def _on_row_drag_leave(row, _ctx, _time):
-        row.get_style_context().remove_class("drop-into")
+    def _row_drop_zone(row, y):
+        # top/bottom quarters reorder; the middle half joins the group
+        h = row.get_allocation().height or 1
+        if y < h * 0.25:
+            return "above"
+        if y > h * 0.75:
+            return "below"
+        return "into"
+
+    @staticmethod
+    def _clear_drop_classes(row):
+        ctx = row.get_style_context()
+        for c in Tabit._DROP_CLASSES:
+            ctx.remove_class(c)
+
+    def _on_row_drag_motion(self, row, _ctx, _x, y, _time):
+        self._clear_drop_classes(row)
+        row.get_style_context().add_class("drop-" + self._row_drop_zone(row, y))
+        return False  # let DestDefaults.MOTION set the drag status
+
+    def _on_row_drag_leave(self, row, _ctx, _time):
+        self._clear_drop_classes(row)
 
     @staticmethod
     def _on_row_drag_get(_hit, _ctx, data, _info, _time):
         data.set(data.get_target(), 8, b"1")  # payload unused; _drag_row holds it
 
     def _on_row_drop(self, row, _ctx, _x, y, _data, _info, _time):
-        row.get_style_context().remove_class("drop-into")
+        self._clear_drop_classes(row)
         dragged = getattr(self, "_drag_row", None)
         self._drag_row = None
         if dragged is None or dragged is row:
             return
-        before = y < row.get_allocation().height / 2
+        zone = self._row_drop_zone(row, y)
+        if zone == "into":                 # drop on the middle → join the group
+            self._group_with(dragged, row)
+            return
+        before = (zone == "above")         # top/bottom edge → reorder
         rows = sorted(self.listbox.get_children(), key=lambda r: r._order)
         rows.remove(dragged)
         idx = rows.index(row) + (0 if before else 1)
@@ -1539,6 +1707,20 @@ class Tabit(Gtk.Window):
         self._order_seq = len(rows)
         self.listbox.invalidate_sort()
         self.listbox.select_row(dragged)
+        self._save_sessions()
+
+    def _new_group_color(self):
+        used = {getattr(r, "group_color", None)
+                for r in self.listbox.get_children()}
+        free = [c for c in GROUP_COLORS if c not in used]
+        return random.choice(free or GROUP_COLORS)
+
+    def _group_with(self, dragged, target):
+        color = getattr(target, "group_color", None)
+        if not color:                      # target ungrouped → start a new group
+            color = self._new_group_color()
+            self._apply_group(target, color)
+        self._apply_group(dragged, color)
         self._save_sessions()
 
     def _on_child_exited(self, _term, _status, row):
@@ -1620,10 +1802,36 @@ class Tabit(Gtk.Window):
             item = Gtk.MenuItem(label="Rename…")
             item.connect("activate", lambda *_: self._rename_session(row))
             menu.append(item)
+
+            group_item = Gtk.MenuItem(label="Group color")
+            submenu = Gtk.Menu()
+            none_it = Gtk.MenuItem(label="None")
+            none_it.connect("activate", lambda *_: self._set_group(row, None))
+            submenu.append(none_it)
+            for color in GROUP_COLORS:
+                it = Gtk.MenuItem(label=color.capitalize())
+                it.connect("activate", lambda _i, c=color: self._set_group(row, c))
+                submenu.append(it)
+            group_item.set_submenu(submenu)
+            menu.append(group_item)
+
             menu.show_all()
             menu.popup_at_pointer(event)
             return True
         return False
+
+    def _apply_group(self, row, color):
+        """Set the row's group-color stripe (no persistence)."""
+        ctx = row.group_bar.get_style_context()
+        for c in GROUP_COLORS:
+            ctx.remove_class("grp-" + c)
+        row.group_color = color if color in GROUP_COLORS else None
+        if row.group_color:
+            ctx.add_class("grp-" + row.group_color)
+
+    def _set_group(self, row, color):
+        self._apply_group(row, color)
+        self._save_sessions()
 
     def _rename_session(self, row=None):
         """Rename in a popover bubble anchored to the right of the tab."""
@@ -2214,6 +2422,23 @@ class Tabit(Gtk.Window):
         parts.append(" || ".join(cmds))
         return ["/bin/sh", "-c", "; ".join(parts)]
 
+    @staticmethod
+    def _ai_argv_plain(argv):
+        """Strip the continue/resume tries from a stored AI argv, leaving just
+        `cd <path>; exec <cli>` so a restored AI tab starts fresh."""
+        marker = " || exit 1; "
+        if len(argv) != 3 or argv[0] != "/bin/sh":
+            return argv
+        cmd = argv[2]
+        i = cmd.find(marker)
+        if i == -1:
+            return argv
+        cd_part = cmd[:i]                        # "cd <path>"
+        exec_part = cmd[i + len(marker):].rsplit(" || ", 1)[-1]  # "exec <cli>"
+        if not exec_part.startswith("exec "):
+            return argv
+        return ["/bin/sh", "-c", f"{cd_part}{marker}{exec_part}"]
+
     def _fill_ai_combo(self, combo, entries, prefer=None):
         names = [e["cli"] for e in entries]
         combo.remove_all()
@@ -2637,14 +2862,31 @@ class Tabit(Gtk.Window):
                 self._note_find_trigger(row)
             else:
                 return False
+        elif action == "term_find":
+            if row is not None and getattr(row, "kind", None) == "term":
+                self._term_find_trigger(row)
+            else:
+                return False
         elif action == "note_find_next":
-            if row is not None and getattr(row, "kind", None) == "note" and hasattr(row, "search_box") and row.search_box.get_visible():
+            if (row is not None and getattr(row, "kind", None) == "note"
+                    and getattr(row, "search_box", None)
+                    and row.search_box.get_visible()):
                 self._search_find(row, forward=True)
+            elif (row is not None and getattr(row, "kind", None) == "term"
+                    and getattr(row, "term_search_box", None)
+                    and row.term_search_box.get_visible()):
+                row._term_find_next()
             else:
                 return False
         elif action == "note_find_prev":
-            if row is not None and getattr(row, "kind", None) == "note" and hasattr(row, "search_box") and row.search_box.get_visible():
+            if (row is not None and getattr(row, "kind", None) == "note"
+                    and getattr(row, "search_box", None)
+                    and row.search_box.get_visible()):
                 self._search_find(row, forward=False)
+            elif (row is not None and getattr(row, "kind", None) == "term"
+                    and getattr(row, "term_search_box", None)
+                    and row.term_search_box.get_visible()):
+                row._term_find_prev()
             else:
                 return False
         elif action == "close_session":
@@ -2797,6 +3039,15 @@ class Tabit(Gtk.Window):
             "+ Shell (Ctrl+Shift+T) and + AI start in the focused tab's "
             "working directory instead of home. Default is off.")
 
+        ai_head = Gtk.Label(xalign=0)
+        ai_head.set_markup("<b>AI</b>")
+        ai_fresh = Gtk.CheckButton(
+            label="Start AI tabs fresh after reopening (no continue/resume)")
+        ai_fresh.set_active(bool(s.get("ai_fresh_on_restore", False)))
+        ai_fresh.set_tooltip_text(
+            "When tabit reopens, restored AI tabs launch the CLI without "
+            "--continue / resume. Default is off (they continue).")
+
         hint = Gtk.Label(
             label="Stored in ~/.config/tabit/settings.json",
             xalign=0)
@@ -2805,11 +3056,14 @@ class Tabit(Gtk.Window):
         box.pack_start(wrap, False, False, 0)
         box.pack_start(term_head, False, False, 0)
         box.pack_start(inherit, False, False, 0)
+        box.pack_start(ai_head, False, False, 0)
+        box.pack_start(ai_fresh, False, False, 0)
         box.pack_start(hint, False, False, 0)
         dialog.show_all()
         if dialog.run() == Gtk.ResponseType.OK:
             self._save_settings({"note_wrap": wrap.get_active(),
-                                 "shell_inherit_cwd": inherit.get_active()})
+                                 "shell_inherit_cwd": inherit.get_active(),
+                                 "ai_fresh_on_restore": ai_fresh.get_active()})
             self._apply_note_wrap_setting(wrap.get_active())
         dialog.destroy()
 
