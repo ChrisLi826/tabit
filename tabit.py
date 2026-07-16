@@ -2974,7 +2974,7 @@ class Tabit(Gtk.Window):
 
         resume_chk = Gtk.CheckButton(
             label="Continue / resume previous session")
-        resume_chk.set_active(True)
+        resume_chk.set_active(False)
 
         try_hint = Gtk.Label(xalign=0)
         try_hint.get_style_context().add_class("session-sub")
