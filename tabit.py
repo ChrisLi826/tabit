@@ -271,6 +271,7 @@ DEFAULT_SETTINGS = {
     "note_wrap": True,
     "shell_inherit_cwd": False,  # new shell opens in the focused tab's path
     "ai_fresh_on_restore": False,  # restored AI tabs start fresh (no continue)
+    "group_names": {},             # tab-group color -> display name
 }
 
 # (action_id, label, default GTK accelerator string)
@@ -294,6 +295,8 @@ KEY_ACTIONS = (
     ("next_session", "Next session", "<Primary>Page_Down"),
     ("move_tab_up", "Move tab up", "<Primary><Shift>Page_Up"),
     ("move_tab_down", "Move tab down", "<Primary><Shift>Page_Down"),
+    ("move_group_up", "Move group up", "<Primary><Alt><Shift>Page_Up"),
+    ("move_group_down", "Move group down", "<Primary><Alt><Shift>Page_Down"),
     ("copy", "Copy", "<Primary><Shift>c"),
     ("paste", "Paste", "<Primary><Shift>v"),
 )
@@ -314,6 +317,8 @@ CSS = b"""
 .sidebar row.drop-into { box-shadow: inset 0 0 0 2px #7aa2f7; }
 .sidebar row.drop-above { box-shadow: inset 0 3px 0 0 #7aa2f7; }
 .sidebar row.drop-below { box-shadow: inset 0 -3px 0 0 #7aa2f7; }
+/* Ctrl+clicked tabs pending a group action */
+.sidebar row.marked { box-shadow: inset 0 0 0 2px #7dcfff; }
 /* tab-group color stripe on the far left of a row */
 .group-bar { background-color: transparent; border-radius: 2px; }
 .group-bar.grp-red    { background-color: #f7768e; }
@@ -322,6 +327,16 @@ CSS = b"""
 .group-bar.grp-green  { background-color: #9ece6a; }
 .group-bar.grp-cyan   { background-color: #7dcfff; }
 .group-bar.grp-purple { background-color: #bb9af7; }
+/* group header row: a small color dot + the group name */
+.group-header { padding: 5px 6px 1px 8px; }
+.group-header label { font-size: 8pt; font-weight: 600; color: #b0b0bc; }
+.group-dot { border-radius: 50%; }
+.group-dot.grp-red    { background-color: #f7768e; }
+.group-dot.grp-orange { background-color: #ff9e64; }
+.group-dot.grp-yellow { background-color: #e0af68; }
+.group-dot.grp-green  { background-color: #9ece6a; }
+.group-dot.grp-cyan   { background-color: #7dcfff; }
+.group-dot.grp-purple { background-color: #bb9af7; }
 .sidebar row .close { opacity: 0; }
 .sidebar row:hover .close, .sidebar row:selected .close { opacity: 1; }
 .sidebar button { background: transparent; border: none; border-radius: 6px;
@@ -383,6 +398,9 @@ class Tabit(Gtk.Window):
         # sort by row._order so reorder is a swap, not remove/insert
         self.listbox.set_sort_func(lambda a, b, _d: a._order - b._order, None)
         self.listbox.connect("row-selected", self._on_row_selected)
+        self._marked = set()  # rows Ctrl+clicked for a group action
+        gn = self._load_settings().get("group_names", {})
+        self._group_names = dict(gn) if isinstance(gn, dict) else {}
 
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         sidebar.get_style_context().add_class("sidebar")
@@ -456,6 +474,7 @@ class Tabit(Gtk.Window):
                         self._apply_group(r, color)
             except (KeyError, TypeError, OSError):
                 continue  # skip broken entries in a hand-edited file
+        self._relayout()  # build group headers + cluster restored members
         if not self.listbox.get_children():
             self._on_add_shell(None)
 
@@ -514,7 +533,7 @@ class Tabit(Gtk.Window):
 
     def _save_sessions(self):
         data = []
-        for r in self.listbox.get_children():
+        for r in self._session_rows():  # skip group-header rows
             entry = {"label": r.title_text, "sub": r.sub_text,
                      "argv": r.argv, "icon": r.icon_name}
             if getattr(r, "track_cwd", False):
@@ -633,9 +652,8 @@ class Tabit(Gtk.Window):
             row._order = self._order_seq
         self._order_seq = max(self._order_seq, row._order) + 1
         self.listbox.add(row)
-        self.listbox.invalidate_sort()
-        self.listbox.show_all()
         self.stack.show_all()
+        self._relayout()  # keep group members clustered under their header
         self.listbox.select_row(row)
         self._save_sessions()
 
@@ -1624,19 +1642,42 @@ class Tabit(Gtk.Window):
 
     def _move_session(self, delta):
         row = self.listbox.get_selected_row()
-        if row is None:
+        if row is None or getattr(row, "kind", None) == "group_header":
             return
-        rows = self.listbox.get_children()
-        i = rows.index(row)
-        j = i + delta
-        if j < 0 or j >= len(rows):
+        rows = self._session_rows()  # ignore group-header rows
+        if row not in rows:
             return
-        # swap sort keys only — same row stays selected, no focus thrash,
-        # so key-repeat can move one step per event.
-        other = rows[j]
-        row._order, other._order = other._order, row._order
-        self.listbox.invalidate_sort()
-        self._save_sessions_soon()
+        blocks = self._blocks()
+        g = row.group_color
+        if g:
+            gb = next(b for b in blocks if b[0] == "group" and b[1] == g)
+            members = gb[2]
+            gi = members.index(row)
+            if (delta < 0 and gi == 0) or (delta > 0 and gi == len(members) - 1):
+                self._apply_group(row, None)  # at an edge → leave the group
+                self._relayout()
+                self._save_sessions_soon()
+            else:                             # reorder within the group
+                members[gi], members[gi + delta] = \
+                    members[gi + delta], members[gi]
+                self._apply_block_order(blocks)
+            return
+        # ungrouped tab
+        bi = next(i for i, b in enumerate(blocks)
+                  if b[0] == "tab" and b[1] is row)
+        j = bi + delta
+        if j < 0 or j >= len(blocks):
+            return
+        neighbor = blocks[j]
+        if neighbor[0] == "group":            # entering a group → join its edge
+            self._apply_group(row, neighbor[1])
+            blocks.pop(bi)
+            members = neighbor[2]
+            members.insert(0, row) if delta > 0 else members.append(row)
+            self._apply_block_order(blocks)
+        else:                                 # swap with the adjacent tab
+            blocks[bi], blocks[j] = blocks[j], blocks[bi]
+            self._apply_block_order(blocks)
 
     # --- drag-to-reorder --------------------------------------------------
 
@@ -1693,25 +1734,94 @@ class Tabit(Gtk.Window):
         self._drag_row = None
         if dragged is None or dragged is row:
             return
+        if getattr(dragged, "kind", None) == "group_header":
+            self._drop_group(dragged.group_color, row, y)  # move whole group
+            return
         zone = self._row_drop_zone(row, y)
         if zone == "into":                 # drop on the middle → join the group
             self._group_with(dragged, row)
             return
         before = (zone == "above")         # top/bottom edge → reorder
-        rows = sorted(self.listbox.get_children(), key=lambda r: r._order)
+        rows = self._session_rows()
         rows.remove(dragged)
         idx = rows.index(row) + (0 if before else 1)
         rows.insert(idx, dragged)
         for i, r in enumerate(rows):
             r._order = i
         self._order_seq = len(rows)
-        self.listbox.invalidate_sort()
+        self._relayout()                   # re-cluster groups + headers
         self.listbox.select_row(dragged)
         self._save_sessions()
 
+    def _session_rows(self):
+        """Session rows (not group headers), in visual order."""
+        return sorted((r for r in self.listbox.get_children()
+                       if getattr(r, "kind", None) != "group_header"),
+                      key=lambda r: r._order)
+
+    def _blocks(self):
+        """Sidebar as movable blocks: ('tab', row) or ('group', color, rows)."""
+        blocks, seen = [], set()
+        sessions = self._session_rows()
+        for r in sessions:
+            g = r.group_color
+            if g:
+                if g in seen:
+                    continue
+                blocks.append(("group", g,
+                               [m for m in sessions if m.group_color == g]))
+                seen.add(g)
+            else:
+                blocks.append(("tab", r))
+        return blocks
+
+    def _apply_block_order(self, blocks):
+        o = 0
+        for b in blocks:
+            for r in ([b[1]] if b[0] == "tab" else b[2]):
+                r._order = o
+                o += 1
+        self._relayout()
+        self._save_sessions_soon()
+
+    def _move_block(self, match, delta):
+        blocks = self._blocks()
+        bi = next((i for i, b in enumerate(blocks) if match(b)), None)
+        if bi is None:
+            return
+        j = bi + delta
+        if 0 <= j < len(blocks):
+            blocks[bi], blocks[j] = blocks[j], blocks[bi]
+            self._apply_block_order(blocks)
+
+    def _move_group(self, color, delta):
+        self._move_block(lambda b: b[0] == "group" and b[1] == color, delta)
+
+    def _drop_group(self, color, target_row, y):
+        """Move a whole group (dragged by its header) next to target_row."""
+        tcolor = target_row.group_color
+        if tcolor == color:
+            return  # dropped on its own group
+        blocks = self._blocks()
+        gi = next((i for i, b in enumerate(blocks)
+                   if b[0] == "group" and b[1] == color), None)
+        if gi is None:
+            return
+        if tcolor:
+            ti = next(i for i, b in enumerate(blocks)
+                      if b[0] == "group" and b[1] == tcolor)
+        else:
+            ti = next(i for i, b in enumerate(blocks)
+                      if b[0] == "tab" and b[1] is target_row)
+        grp = blocks.pop(gi)
+        if gi < ti:
+            ti -= 1
+        before = y < (target_row.get_allocation().height or 1) / 2
+        blocks.insert(ti if before else ti + 1, grp)
+        self._apply_block_order(blocks)
+
     def _new_group_color(self):
-        used = {getattr(r, "group_color", None)
-                for r in self.listbox.get_children()}
+        used = {getattr(r, "group_color", None) for r in self._session_rows()}
         free = [c for c in GROUP_COLORS if c not in used]
         return random.choice(free or GROUP_COLORS)
 
@@ -1721,6 +1831,121 @@ class Tabit(Gtk.Window):
             color = self._new_group_color()
             self._apply_group(target, color)
         self._apply_group(dragged, color)
+        self._relayout()
+        self._save_sessions()
+
+    def _make_group_header(self, color):
+        row = Gtk.ListBoxRow()
+        row.set_selectable(False)
+        row.kind = "group_header"
+        row.group_color = color
+        row.get_style_context().add_class("group-header")
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        dot = Gtk.Box()
+        dot.set_size_request(9, 9)
+        dot.set_valign(Gtk.Align.CENTER)
+        dot.get_style_context().add_class("group-dot")
+        dot.get_style_context().add_class("grp-" + color)
+        box.pack_start(dot, False, False, 0)
+        name = self._group_names.get(color) or color.capitalize()
+        box.pack_start(Gtk.Label(label=name.upper(), xalign=0), True, True, 0)
+        hit = Gtk.EventBox()
+        hit.add(box)
+        hit.connect("button-press-event", self._on_header_button, color)
+        # drag the header to move the whole group (source only; not a drop dest)
+        target = Gtk.TargetEntry.new("TABIT_ROW", Gtk.TargetFlags.SAME_APP, 0)
+        hit.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, [target],
+                            Gdk.DragAction.MOVE)
+        hit.connect("drag-begin", self._on_row_drag_begin, row)
+        hit.connect("drag-data-get", self._on_row_drag_get)
+        row.add(hit)
+        return row
+
+    def _relayout(self):
+        """Rebuild the sidebar: each group's members cluster under a color
+        header, ungrouped tabs keep their place. No collapsing."""
+        children = self.listbox.get_children()
+        for h in children:
+            if getattr(h, "kind", None) == "group_header":
+                self.listbox.remove(h)
+        sessions = self._session_rows()
+        seq, emitted = [], set()
+        for r in sessions:
+            g = getattr(r, "group_color", None)
+            if g:
+                if g in emitted:
+                    continue
+                seq.append(self._make_group_header(g))
+                seq.extend(m for m in sessions if m.group_color == g)
+                emitted.add(g)
+            else:
+                seq.append(r)
+        for i, r in enumerate(seq):
+            r._order = i
+            if getattr(r, "kind", None) == "group_header":
+                self.listbox.add(r)
+        self._order_seq = len(seq)
+        self.listbox.invalidate_sort()
+        self.listbox.show_all()
+        # forget names of colors no longer in use; persist so a later reuse of
+        # that color can't inherit the deleted group's name after a restart
+        pruned = False
+        for c in list(self._group_names):
+            if c not in emitted:
+                del self._group_names[c]
+                pruned = True
+        if pruned:
+            self._save_group_names()
+
+    def _save_group_names(self):
+        self._save_settings({"group_names": self._group_names})
+
+    def _on_header_button(self, _hit, event, color):
+        if event.button != 3 or event.type != Gdk.EventType.BUTTON_PRESS:
+            return False
+        menu = Gtk.Menu()
+        rn = Gtk.MenuItem(label="Rename group…")
+        rn.connect("activate", lambda *_: self._rename_group(color))
+        up = Gtk.MenuItem(label="Move group up")
+        up.connect("activate", lambda *_: self._move_group(color, -1))
+        dn = Gtk.MenuItem(label="Move group down")
+        dn.connect("activate", lambda *_: self._move_group(color, 1))
+        ug = Gtk.MenuItem(label="Ungroup")
+        ug.connect("activate", lambda *_: self._ungroup(color))
+        for it in (rn, up, dn, ug):
+            menu.append(it)
+        menu.show_all()
+        menu.popup_at_pointer(event)
+        return True
+
+    def _rename_group(self, color):
+        dialog = Gtk.Dialog(title="Rename group", transient_for=self,
+                            modal=True)
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                           "Rename", Gtk.ResponseType.OK)
+        entry = Gtk.Entry(text=self._group_names.get(color, ""),
+                          margin=12, width_chars=24)
+        entry.set_activates_default(True)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        dialog.get_content_area().add(entry)
+        dialog.show_all()
+        if dialog.run() == Gtk.ResponseType.OK:
+            name = entry.get_text().strip()
+            if name:
+                self._group_names[color] = name
+            else:
+                self._group_names.pop(color, None)
+            self._save_group_names()
+            self._relayout()
+        dialog.destroy()
+
+    def _ungroup(self, color):
+        for r in self._session_rows():
+            if r.group_color == color:
+                self._apply_group(r, None)
+        self._group_names.pop(color, None)
+        self._save_group_names()
+        self._relayout()
         self._save_sessions()
 
     def _on_child_exited(self, _term, _status, row):
@@ -1743,7 +1968,7 @@ class Tabit(Gtk.Window):
         if not self._confirm_close_row(row):
             return
         was_selected = self.listbox.get_selected_row() is row
-        rows = self.listbox.get_children()
+        rows = self._session_rows()
         idx = rows.index(row)
         # drop pending note timers so they don't fire on a destroyed widget
         for attr in ("_preview_src", "_tune_src"):
@@ -1752,11 +1977,13 @@ class Tabit(Gtk.Window):
                 GLib.source_remove(src)
                 setattr(row, attr, None)
         row.preview_on = False
+        self._marked.discard(row)
         self.listbox.remove(row)
         self.stack.remove(row.page)
         row.page.destroy()  # term: SIGHUP child; note: destroys view
+        self._relayout()  # drop empty group headers, re-cluster
         self._save_sessions()
-        rows = self.listbox.get_children()
+        rows = self._session_rows()
         if not rows:
             Gtk.main_quit()
         elif was_selected:
@@ -1782,6 +2009,7 @@ class Tabit(Gtk.Window):
         GLib.idle_add(grab)
 
     def _on_row_selected(self, _listbox, row):
+        self._clear_marks()  # a plain tab switch drops any Ctrl+click marks
         if row is None:
             return
         row.dot.hide()
@@ -1789,32 +2017,77 @@ class Tabit(Gtk.Window):
         self.set_title(f"{row.session_label} — tabit")
         self._focus_row_content(row)
 
+    def _toggle_mark(self, row):
+        ctx = row.get_style_context()
+        if row in self._marked:
+            self._marked.discard(row)
+            ctx.remove_class("marked")
+        else:
+            self._marked.add(row)
+            ctx.add_class("marked")
+
+    def _clear_marks(self):
+        for r in self._marked:
+            r.get_style_context().remove_class("marked")
+        self._marked.clear()
+
+    def _group_marked(self):
+        rows = [r for r in self._marked if r.get_parent() is not None]
+        if not rows:
+            return
+        # reuse an existing group color among the marked rows, else a new one
+        color = next((r.group_color for r in rows
+                      if getattr(r, "group_color", None)), None) \
+            or self._new_group_color()
+        for r in rows:
+            self._apply_group(r, color)
+        self._clear_marks()
+        self._relayout()
+        self._save_sessions()
+
     def _on_tab_button(self, _hit, event, row):
-        """EventBox on each tab: double-click / right-click → rename."""
+        """EventBox on each tab: Ctrl+click mark, double-click rename,
+        right-click menu."""
+        if (event.button == 1 and event.type == Gdk.EventType.BUTTON_PRESS
+                and (event.state & Gdk.ModifierType.CONTROL_MASK)):
+            self._toggle_mark(row)  # multi-select for a group action
+            return True
         if event.button == 1 and event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS:
             self.listbox.select_row(row)
             # defer so ListBox finishes its own click handling first
             GLib.idle_add(self._rename_session, row)
             return True
         if event.button == 3 and event.type == Gdk.EventType.BUTTON_PRESS:
-            self.listbox.select_row(row)
             menu = Gtk.Menu()
-            item = Gtk.MenuItem(label="Rename…")
-            item.connect("activate", lambda *_: self._rename_session(row))
-            menu.append(item)
-
-            group_item = Gtk.MenuItem(label="Group color")
-            submenu = Gtk.Menu()
-            none_it = Gtk.MenuItem(label="None")
-            none_it.connect("activate", lambda *_: self._set_group(row, None))
-            submenu.append(none_it)
-            for color in GROUP_COLORS:
-                it = Gtk.MenuItem(label=color.capitalize())
-                it.connect("activate", lambda _i, c=color: self._set_group(row, c))
-                submenu.append(it)
-            group_item.set_submenu(submenu)
-            menu.append(group_item)
-
+            if self._marked:
+                # act on the Ctrl+clicked selection, keep the marks intact
+                if row not in self._marked:
+                    self._toggle_mark(row)
+                n = len(self._marked)
+                grp = Gtk.MenuItem(label=f"Add {n} selected tabs to a group")
+                grp.connect("activate", lambda *_: self._group_marked())
+                menu.append(grp)
+                clr = Gtk.MenuItem(label="Clear selection")
+                clr.connect("activate", lambda *_: self._clear_marks())
+                menu.append(clr)
+            else:
+                self.listbox.select_row(row)
+                item = Gtk.MenuItem(label="Rename…")
+                item.connect("activate", lambda *_: self._rename_session(row))
+                menu.append(item)
+                group_item = Gtk.MenuItem(label="Group color")
+                submenu = Gtk.Menu()
+                none_it = Gtk.MenuItem(label="None")
+                none_it.connect("activate",
+                                lambda *_: self._set_group(row, None))
+                submenu.append(none_it)
+                for color in GROUP_COLORS:
+                    it = Gtk.MenuItem(label=color.capitalize())
+                    it.connect("activate",
+                               lambda _i, c=color: self._set_group(row, c))
+                    submenu.append(it)
+                group_item.set_submenu(submenu)
+                menu.append(group_item)
             menu.show_all()
             menu.popup_at_pointer(event)
             return True
@@ -1831,6 +2104,7 @@ class Tabit(Gtk.Window):
 
     def _set_group(self, row, color):
         self._apply_group(row, color)
+        self._relayout()
         self._save_sessions()
 
     def _rename_session(self, row=None):
@@ -2898,8 +3172,15 @@ class Tabit(Gtk.Window):
             self._move_session(-1)
         elif action == "move_tab_down":
             self._move_session(1)
+        elif action in ("move_group_up", "move_group_down"):
+            sel = self.listbox.get_selected_row()
+            if sel is not None and getattr(sel, "group_color", None):
+                self._move_group(sel.group_color,
+                                 -1 if action == "move_group_up" else 1)
+            else:
+                return False
         elif action in ("prev_session", "next_session"):
-            rows = self.listbox.get_children()
+            rows = self._session_rows()  # skip group headers
             if not rows:
                 return True
             current = row
@@ -3082,12 +3363,17 @@ class Tabit(Gtk.Window):
             accels[action] = Gtk.accelerator_name(key, mods)
 
         buttons = {}
+        half = (len(KEY_ACTIONS) + 1) // 2  # split into two columns
         for i, (action, label, _default) in enumerate(KEY_ACTIONS):
-            grid.attach(Gtk.Label(label=label, xalign=0), 0, i, 1, 1)
+            col, r = (0, i) if i < half else (2, i - half)
+            lbl = Gtk.Label(label=label, xalign=0)
+            if col == 2:
+                lbl.set_margin_start(24)  # gap between the two columns
+            grid.attach(lbl, col, r, 1, 1)
             btn = Gtk.Button(label=self._accel_label_from_name(accels[action]))
             btn.set_hexpand(True)
             buttons[action] = btn
-            grid.attach(btn, 1, i, 1, 1)
+            grid.attach(btn, col + 1, r, 1, 1)
 
             def capture(_b, act=action, b=btn):
                 b.set_label("Press a key…")
