@@ -239,7 +239,18 @@ screen.sh: logfile=$LOG
 
 INFO
 
-exec screen -S "$SESSION" -L -Logfile "$LOG" "$DEV" "$BAUD"
+# Disable the alternate screen so screen's output stays in the terminal's
+# real scrollback — then the mouse wheel scrolls back through history. Keep
+# the user's own ~/.screenrc, then apply our overrides.
+RC="$LOG_DIR/tabit-screenrc"
+{
+    [ -f "$HOME/.screenrc" ] && echo "source $HOME/.screenrc"
+    echo "defscrollback 10000"
+    echo "termcapinfo xterm* ti@:te@"
+    echo "termcapinfo linux* ti@:te@"
+} > "$RC" 2>/dev/null
+
+exec screen -c "$RC" -S "$SESSION" -L -Logfile "$LOG" "$DEV" "$BAUD"
 '''
 # default AI CLI list for +AI (user-editable → ~/.config/tabit/ai_clis.json)
 # Each entry: {"cli": name, "try": ["args after cli", ...]} then plain cli.
