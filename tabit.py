@@ -2443,10 +2443,49 @@ class Tabit(Gtk.Window):
                        lambda *_: dialog.response(Gtk.ResponseType.OK))
         btns.pack_start(cancel_b, False, False, 0)
         btns.pack_start(open_b, False, False, 0)
-        grid.attach(btns, 0, 3, 2, 1)
+
+        # existing screen sessions: kill a stale one, then Open makes a fresh
+        screens_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4,
+                              margin_top=8)
+
+        def refresh_screens():
+            for c in screens_box.get_children():
+                screens_box.remove(c)
+            sess = self._screen_sessions()
+            hdr = Gtk.Label(
+                label="Running screens (kill to reopen fresh):" if sess
+                else "No running screen sessions", xalign=0)
+            hdr.get_style_context().add_class("session-sub")
+            screens_box.pack_start(hdr, False, False, 0)
+            for name in sess:
+                r = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+                lbl = Gtk.Label(label=name, xalign=0)
+                lbl.set_hexpand(True)
+                lbl.set_ellipsize(Pango.EllipsizeMode.END)
+                kill = Gtk.Button.new_from_icon_name("user-trash-symbolic",
+                                                     Gtk.IconSize.MENU)
+                kill.set_relief(Gtk.ReliefStyle.NONE)
+                kill.set_tooltip_text("Kill this screen session")
+                kill.connect("clicked", lambda _b, n=name: do_kill(n))
+                r.pack_start(lbl, True, True, 0)
+                r.pack_start(kill, False, False, 0)
+                screens_box.pack_start(r, False, False, 0)
+            screens_box.show_all()
+
+        def do_kill(name):
+            if not self._confirm_kill(dialog, f"Kill screen session “{name}”?"):
+                return
+            subprocess.run(["screen", "-S", name, "-X", "quit"],
+                           capture_output=True)
+            subprocess.run(["screen", "-wipe"], capture_output=True)
+            refresh_screens()
+
+        grid.attach(screens_box, 0, 3, 2, 1)
+        grid.attach(btns, 0, 4, 2, 1)
         open_b.set_can_default(True)
         dialog.set_default(open_b)
         dialog.get_content_area().add(grid)
+        refresh_screens()
 
         def on_backend_changed(*_a):
             net = backend.get_active_text() in SERIAL_NET_BACKENDS
@@ -2456,6 +2495,8 @@ class Tabit(Gtk.Window):
             host.set_visible(net)
             baud.set_visible(not net)
             port.set_visible(net)
+            # session list only makes sense for the "screen" backend
+            screens_box.set_visible(backend.get_active_text() == "screen")
 
         backend.connect("changed", on_backend_changed)
         self._dialog_enter_is_ok(dialog)
@@ -2482,6 +2523,34 @@ class Tabit(Gtk.Window):
                                       "network-wired-symbolic",
                                       sub=f"{tool} @{rate}")
         dialog.destroy()
+
+    @staticmethod
+    def _screen_sessions():
+        """Names of running GNU screen sessions (e.g. ap-ttyUSB0)."""
+        try:
+            out = subprocess.run(["screen", "-ls"], capture_output=True,
+                                 text=True, timeout=2)
+        except (OSError, subprocess.SubprocessError):
+            return []
+        names = []
+        for line in out.stdout.splitlines():
+            m = re.match(r"^\s*\d+\.(\S+)", line)  # "12345.ap-ttyUSB0  (...)"
+            if m:
+                names.append(m.group(1))
+        return names
+
+    def _confirm_kill(self, parent, text):
+        d = Gtk.MessageDialog(
+            transient_for=parent, modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE, text=text)
+        d.format_secondary_text("Its running programs will be terminated.")
+        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                      "Kill", Gtk.ResponseType.OK)
+        d.set_default_response(Gtk.ResponseType.CANCEL)
+        resp = d.run()
+        d.destroy()
+        return resp == Gtk.ResponseType.OK
 
     def _on_add_command(self, _btn):
         dialog = Gtk.Dialog(title="New command session", transient_for=self,
