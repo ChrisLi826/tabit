@@ -265,8 +265,29 @@ COMMANDS_FILE = os.path.join(CONFIG_DIR, "commands.json")
 DEFAULT_COMMANDS = []
 # tab-group colors (names match the .group-bar.grp-* CSS classes)
 GROUP_COLORS = ["red", "orange", "yellow", "green", "cyan", "purple"]
-TERM_FG = "#d5d5df"
+TERM_FG = "#c0c5d0"  # soft, lower-contrast body text (was harsher #d5d5df)
 TERM_BG = "#101016"
+# 16-color ANSI palette for VTE (indexes 0–15). Matches the Tokyo Night
+# accents used in the sidebar CSS. Blue (4 / 12) is a soft sky tone so
+# `ls` dirs stay readable without a harsh pure blue on TERM_BG.
+TERM_PALETTE = (
+    "#15151c",  # 0  black
+    "#f7768e",  # 1  red
+    "#9ece6a",  # 2  green
+    "#e0af68",  # 3  yellow
+    "#89dceb",  # 4  blue  (ls directories) — sky, less saturated than #7aa2f7
+    "#bb9af7",  # 5  magenta
+    "#7dcfff",  # 6  cyan
+    "#c0caf5",  # 7  white
+    "#565f89",  # 8  bright black
+    "#f7768e",  # 9  bright red
+    "#9ece6a",  # 10 bright green
+    "#e0af68",  # 11 bright yellow
+    "#89dceb",  # 12 bright blue
+    "#bb9af7",  # 13 bright magenta
+    "#7dcfff",  # 14 bright cyan
+    "#c0caf5",  # 15 bright white
+)
 DEFAULT_SETTINGS = {
     "note_wrap": True,
     "shell_inherit_cwd": False,  # new shell opens in the focused tab's path
@@ -664,7 +685,12 @@ class Tabit(Gtk.Window):
         fg, bg = Gdk.RGBA(), Gdk.RGBA()
         fg.parse(TERM_FG)
         bg.parse(TERM_BG)
-        term.set_colors(fg, bg, [])
+        palette = []
+        for hex_color in TERM_PALETTE:
+            c = Gdk.RGBA()
+            c.parse(hex_color)
+            palette.append(c)
+        term.set_colors(fg, bg, palette)
         term.connect("key-press-event", self._on_term_key)
         term.connect("button-press-event", self._on_term_button)
         term.drag_dest_set(Gtk.DestDefaults.ALL,
