@@ -409,6 +409,22 @@ paned > separator {
     background-image: none;
     background-color: transparent;
 }
+/* terminal scrollbar: always visible, styled to match the Tokyo Night VTE.
+   A slim trough on the terminal's dark background with a grabbable slider. */
+scrollbar.term-scroll {
+    background-color: #101016;
+    border-left: 1px solid #2c2c38;
+}
+scrollbar.term-scroll trough { background-color: transparent; border: none; }
+scrollbar.term-scroll slider {
+    background-color: #565f89;
+    border-radius: 7px;
+    min-width: 9px;
+    min-height: 40px;
+    margin: 2px;
+}
+scrollbar.term-scroll slider:hover { background-color: #7aa2f7; }
+scrollbar.term-scroll slider:active { background-color: #89b4ff; }
 """
 
 
@@ -709,17 +725,26 @@ class Tabit(Gtk.Window):
                             Gdk.DragAction.COPY)
         term.connect("drag-data-received", self._on_term_drag_data_received)
 
-        # VTE scrolls itself; do not wrap in ScrolledWindow.
+        # VTE handles its own scrolling; give it a real draggable scrollbar on
+        # the right — a Gtk.Scrollbar bound to the terminal's own vadjustment
+        # (the same approach gnome-terminal uses) rather than a ScrolledWindow,
+        # which would fight VTE's built-in scroll handling.
         row = self._make_sidebar_row(label, sub, icon_name, " ".join(argv))
         row.argv = argv
         row.kind = "term"
         row.term = term
         row.pid = None
         row.track_cwd = track_cwd  # shell tabs show live cwd in the subtitle
-        # terminal page = search bar (hidden) + VTE + quick-command bar
+        # terminal page = search bar (hidden) + [VTE | scrollbar] + quick-cmd bar
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         page.pack_start(self._build_term_search_bar(row, term), False, False, 0)
-        page.pack_start(term, True, True, 0)
+        term_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        term_row.pack_start(term, True, True, 0)
+        scrollbar = Gtk.Scrollbar(orientation=Gtk.Orientation.VERTICAL,
+                                  adjustment=term.get_vadjustment())
+        scrollbar.get_style_context().add_class("term-scroll")
+        term_row.pack_start(scrollbar, False, False, 0)
+        page.pack_start(term_row, True, True, 0)
         page.pack_start(self._build_cmd_bar(row), False, False, 0)
         self._place_tab_row(row, page)
 
