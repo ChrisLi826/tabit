@@ -275,36 +275,271 @@ COMMANDS_FILE = os.path.join(CONFIG_DIR, "commands.json")
 # by default — add your own from the bar's edit button)
 DEFAULT_COMMANDS = []
 # tab-group colors (names match the .group-bar.grp-* CSS classes)
-GROUP_COLORS = ["red", "orange", "yellow", "green", "cyan", "purple"]
-TERM_FG = "#c0c5d0"  # soft, lower-contrast body text (was harsher #d5d5df)
-TERM_BG = "#101016"
-# 16-color ANSI palette for VTE (indexes 0–15). Matches the Tokyo Night
-# accents used in the sidebar CSS. Blue (4 / 12) is a soft sky tone so
-# `ls` dirs stay readable without a harsh pure blue on TERM_BG.
-TERM_PALETTE = (
-    "#15151c",  # 0  black
-    "#f7768e",  # 1  red
-    "#9ece6a",  # 2  green
-    "#e0af68",  # 3  yellow
-    "#89dceb",  # 4  blue  (ls directories) — sky, less saturated than #7aa2f7
-    "#bb9af7",  # 5  magenta
-    "#7dcfff",  # 6  cyan
-    "#c0caf5",  # 7  white
-    "#565f89",  # 8  bright black
-    "#f7768e",  # 9  bright red
-    "#9ece6a",  # 10 bright green
-    "#e0af68",  # 11 bright yellow
-    "#89dceb",  # 12 bright blue
-    "#bb9af7",  # 13 bright magenta
-    "#7dcfff",  # 14 bright cyan
-    "#c0caf5",  # 15 bright white
-)
-DEFAULT_SETTINGS = {
-    "note_wrap": True,
-    "shell_inherit_cwd": False,  # new shell opens in the focused tab's path
-    "ai_fresh_on_restore": False,  # restored AI tabs start fresh (no continue)
-    "group_names": {},             # tab-group color -> display name
+GROUP_COLORS = [
+    "red", "orange", "yellow", "green", "teal", "cyan",
+    "blue", "indigo", "purple", "pink", "gray", "white"
+]
+COLOR_SCHEMES = {
+    "tokyo-night": {
+        "name": "Tokyo Night",
+        "bg": "#101016",
+        "fg": "#c0c5d0",
+        "sidebar_bg": "#15151c",
+        "border": "#2c2c38",
+        "accent": "#7aa2f7",
+        "selection": "rgba(122,162,247,0.18)",
+        "hover": "rgba(255,255,255,0.11)",
+        "text": "#d5d5df",
+        "subtext": "#7a7a88",
+        "slider_bg": "#565f89",
+        "slider_hover": "#7aa2f7",
+        "slider_active": "#89b4ff",
+        "adder_bg": "#0e0e14",
+        "palette": (
+            "#15151c", "#f7768e", "#9ece6a", "#e0af68",
+            "#89dceb", "#bb9af7", "#7dcfff", "#c0caf5",
+            "#565f89", "#f7768e", "#9ece6a", "#e0af68",
+            "#89dceb", "#bb9af7", "#7dcfff", "#c0caf5",
+        ),
+    },
+    "catppuccin-mocha": {
+        "name": "Catppuccin Mocha",
+        "bg": "#1e1e2e",
+        "fg": "#cdd6f4",
+        "sidebar_bg": "#181825",
+        "border": "#313244",
+        "accent": "#89b4fa",
+        "selection": "rgba(137,180,250,0.18)",
+        "hover": "rgba(255,255,255,0.11)",
+        "text": "#cdd6f4",
+        "subtext": "#a6adc8",
+        "slider_bg": "#45475a",
+        "slider_hover": "#89b4fa",
+        "slider_active": "#b4befe",
+        "adder_bg": "#11111b",
+        "palette": (
+            "#45475a", "#f38ba8", "#a6e3a1", "#f9e2af",
+            "#89b4fa", "#cba6f7", "#94e2d5", "#bac2de",
+            "#585b70", "#f38ba8", "#a6e3a1", "#f9e2af",
+            "#89b4fa", "#cba6f7", "#94e2d5", "#a6adc8",
+        ),
+    },
+    "gruvbox-dark": {
+        "name": "Gruvbox Dark",
+        "bg": "#282828",
+        "fg": "#ebdbb2",
+        "sidebar_bg": "#1d2021",
+        "border": "#3c3836",
+        "accent": "#fe8019",
+        "selection": "rgba(254,128,25,0.18)",
+        "hover": "rgba(255,255,255,0.11)",
+        "text": "#ebdbb2",
+        "subtext": "#a89984",
+        "slider_bg": "#504945",
+        "slider_hover": "#fe8019",
+        "slider_active": "#fabd2f",
+        "adder_bg": "#141617",
+        "palette": (
+            "#282828", "#cc241d", "#98971a", "#d79921",
+            "#458588", "#b16286", "#689d6a", "#a89984",
+            "#928374", "#fb4934", "#b8bb26", "#fabd2f",
+            "#83a598", "#d3869b", "#8ec07c", "#ebdbb2",
+        ),
+    },
+    "nord": {
+        "name": "Nord",
+        "bg": "#2e3440",
+        "fg": "#eceff4",
+        "sidebar_bg": "#242933",
+        "border": "#3b4252",
+        "accent": "#88c0d0",
+        "selection": "rgba(136,192,208,0.18)",
+        "hover": "rgba(255,255,255,0.11)",
+        "text": "#eceff4",
+        "subtext": "#d8dee9",
+        "slider_bg": "#4c566a",
+        "slider_hover": "#88c0d0",
+        "slider_active": "#81a1c1",
+        "adder_bg": "#1d212a",
+        "palette": (
+            "#3b4252", "#bf616a", "#a3be8c", "#ebcb8b",
+            "#81a1c1", "#b48ead", "#88c0d0", "#e5e9f0",
+            "#4c566a", "#bf616a", "#a3be8c", "#ebcb8b",
+            "#81a1c1", "#b48ead", "#8fbcbb", "#eceff4",
+        ),
+    },
+    "one-dark": {
+        "name": "One Dark",
+        "bg": "#21252b",
+        "fg": "#abb2bf",
+        "sidebar_bg": "#1e2227",
+        "border": "#181a1f",
+        "accent": "#61afef",
+        "selection": "rgba(97,175,239,0.18)",
+        "hover": "rgba(255,255,255,0.11)",
+        "text": "#abb2bf",
+        "subtext": "#5c6370",
+        "slider_bg": "#3e4451",
+        "slider_hover": "#61afef",
+        "slider_active": "#528bff",
+        "adder_bg": "#181a1f",
+        "palette": (
+            "#1e2227", "#e06c75", "#98c379", "#d19a66",
+            "#61afef", "#c678dd", "#56b6c2", "#abb2bf",
+            "#5c6370", "#e06c75", "#98c379", "#d19a66",
+            "#61afef", "#c678dd", "#56b6c2", "#ffffff",
+        ),
+    },
+    "solarized-dark": {
+        "name": "Solarized Dark",
+        "bg": "#002b36",
+        "fg": "#839496",
+        "sidebar_bg": "#00212b",
+        "border": "#073642",
+        "accent": "#268bd2",
+        "selection": "rgba(38,139,210,0.18)",
+        "hover": "rgba(255,255,255,0.11)",
+        "text": "#839496",
+        "subtext": "#586e75",
+        "slider_bg": "#073642",
+        "slider_hover": "#268bd2",
+        "slider_active": "#2aa198",
+        "adder_bg": "#001b22",
+        "palette": (
+            "#073642", "#dc322f", "#859900", "#b58900",
+            "#268bd2", "#d33682", "#2aa198", "#eee8d5",
+            "#002b36", "#cb4b16", "#586e75", "#657b83",
+            "#839496", "#6c71c4", "#93a1a1", "#fdf6e3",
+        ),
+    },
 }
+
+def get_theme_colors(theme_key):
+    return COLOR_SCHEMES.get(theme_key, COLOR_SCHEMES["tokyo-night"])
+
+def get_theme_css(theme_key):
+    s = get_theme_colors(theme_key)
+    css_text = f"""
+.sidebar {{ background-color: {s['sidebar_bg']}; border-right: 1px solid {s['border']}; }}
+.sidebar list {{ background: transparent; }}
+.sidebar row {{ border-radius: 6px; border-left: 3px solid transparent;
+               padding: 4px 6px 4px 4px; color: {s['text']}; }}
+.sidebar row:hover {{ background: {s['hover']}; }}
+.sidebar row:selected {{ background: {s['selection']};
+                        border-left-color: {s['accent']}; color: #ffffff; }}
+.sidebar row.dead label {{ color: {s['subtext']}; }}
+.sidebar row.drop-into {{ box-shadow: inset 0 0 0 2px {s['accent']}; }}
+.sidebar row.drop-above {{ box-shadow: inset 0 3px 0 0 {s['accent']}; }}
+.sidebar row.drop-below {{ box-shadow: inset 0 -3px 0 0 {s['accent']}; }}
+.sidebar row.marked {{ box-shadow: inset 0 0 0 2px {s['accent']}; }}
+.group-bar {{ background-color: transparent; border-radius: 2px; }}
+.group-bar.grp-red     {{ background-color: #f7768e; }}
+.group-bar.grp-orange  {{ background-color: #ff9e64; }}
+.group-bar.grp-yellow  {{ background-color: #e0af68; }}
+.group-bar.grp-green   {{ background-color: #9ece6a; }}
+.group-bar.grp-teal    {{ background-color: #1abc9c; }}
+.group-bar.grp-cyan    {{ background-color: #7dcfff; }}
+.group-bar.grp-blue    {{ background-color: #7aa2f7; }}
+.group-bar.grp-indigo  {{ background-color: #c0caf5; }}
+.group-bar.grp-purple  {{ background-color: #9d7cd8; }}
+.group-bar.grp-pink    {{ background-color: #f38ba8; }}
+.group-bar.grp-gray    {{ background-color: #a9b1d6; }}
+.group-bar.grp-white   {{ background-color: #ffffff; }}
+.group-header {{ padding: 5px 6px 1px 8px; }}
+.group-header label {{ font-size: 8pt; font-weight: 600; color: {s['subtext']}; }}
+.group-dot {{ border-radius: 50%; }}
+.group-dot.grp-red     {{ background-color: #f7768e; }}
+.group-dot.grp-orange  {{ background-color: #ff9e64; }}
+.group-dot.grp-yellow  {{ background-color: #e0af68; }}
+.group-dot.grp-green   {{ background-color: #9ece6a; }}
+.group-dot.grp-teal    {{ background-color: #1abc9c; }}
+.group-dot.grp-cyan    {{ background-color: #7dcfff; }}
+.group-dot.grp-blue    {{ background-color: #7aa2f7; }}
+.group-dot.grp-indigo  {{ background-color: #c0caf5; }}
+.group-dot.grp-purple  {{ background-color: #9d7cd8; }}
+.group-dot.grp-pink    {{ background-color: #f38ba8; }}
+.group-dot.grp-gray    {{ background-color: #a9b1d6; }}
+.group-dot.grp-white   {{ background-color: #ffffff; }}
+.sidebar row .close {{ opacity: 0; }}
+.sidebar row:hover .close, .sidebar row:selected .close {{ opacity: 1; }}
+.sidebar button {{ background: transparent; border: none; border-radius: 6px;
+                  padding: 3px 6px; color: {s['subtext']}; }}
+.sidebar button:hover {{ color: #ffffff; background: {s['hover']}; }}
+.ic-shell   {{ color: #9ece6a; }}
+.ic-serial  {{ color: #7dcfff; }}
+.ic-note    {{ color: #e0af68; }}
+.ic-command {{ color: #f7768e; }}
+.ic-tmux    {{ color: #bb9af7; }}
+.session-sub {{ color: {s['subtext']}; font-size: 8pt; }}
+.activity {{ color: {s['accent']}; font-size: 8pt; }}
+.adder {{ background-color: {s['adder_bg']}; border-top: 1px solid {s['border']};
+         padding-top: 4px; }}
+.adder button {{ padding: 4px 8px; font-size: 9pt; color: {s['subtext']}; }}
+.adder button:hover {{ color: #ffffff; background: {s['hover']}; }}
+.section {{ color: {s['subtext']}; font-size: 8pt; font-weight: 600;
+           padding: 12px 8px 3px 8px; }}
+.sidebar eventbox {{ background-color: transparent; }}
+.note-tools {{ background-color: {s['sidebar_bg']}; border-top: 1px solid {s['border']};
+              padding: 4px 6px; }}
+.note-tools button {{ padding: 2px 8px; font-size: 9pt; }}
+.cmd-bar {{ background-color: {s['sidebar_bg']}; border-top: 1px solid {s['border']};
+           padding: 4px 6px; }}
+.cmd-bar button {{ padding: 2px 10px; font-size: 9pt; }}
+paned > separator {{
+    min-width: 2px;
+    padding: 0;
+    margin: 0;
+    background-image: none;
+    background-color: transparent;
+}}
+scrollbar.term-scroll {{
+    background-color: {s['bg']};
+    border-left: 1px solid {s['border']};
+}}
+scrollbar.term-scroll trough {{ background-color: transparent; border: none; }}
+scrollbar.term-scroll slider {{
+    background-color: {s['slider_bg']};
+    border-radius: 7px;
+    min-width: 9px;
+    min-height: 40px;
+    margin: 2px;
+}}
+scrollbar.term-scroll slider:hover {{ background-color: {s['slider_hover']}; }}
+scrollbar.term-scroll slider:active {{ background-color: {s['slider_active']}; }}
+.color-swatch,
+.color-swatch:focus,
+.color-swatch:focus:active {{
+    background: transparent;
+    border: none;
+    border-radius: 50%;
+    padding: 0;
+    margin: 2px 4px;
+    outline: none;
+    outline-width: 0;
+    box-shadow: none;
+}}
+.color-swatch:hover {{
+    opacity: 0.8;
+}}
+.in-use-badge {{
+    background-color: #ffffff;
+    border: 1px solid #101016;
+    border-radius: 50%;
+    margin-top: -1px;
+    margin-right: -1px;
+}}
+.swatch-check {{
+    font-size: 10pt;
+    font-weight: 900;
+    color: #ffffff;
+    text-shadow: 0px 1px 2px rgba(0, 0, 0, 0.7);
+    margin: 0;
+    padding: 0;
+}}
+"""
+    return css_text.encode("utf-8")
+
+CSS_PROVIDER = Gtk.CssProvider()
 
 # (action_id, label, default GTK accelerator string)
 KEY_ACTIONS = (
@@ -337,95 +572,13 @@ MOD_MASK = (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK |
             Gdk.ModifierType.MOD1_MASK | Gdk.ModifierType.SUPER_MASK |
             Gdk.ModifierType.META_MASK)
 
-CSS = b"""
-.sidebar { background-color: #15151c; border-right: 1px solid #2c2c38; }
-.sidebar list { background: transparent; }
-.sidebar row { border-radius: 6px; border-left: 3px solid transparent;
-               padding: 4px 6px 4px 4px; color: #d5d5df; }
-.sidebar row:hover { background: rgba(255,255,255,0.11); }
-.sidebar row:selected { background: rgba(122,162,247,0.18);
-                        border-left-color: #7aa2f7; color: #ececf4; }
-.sidebar row.dead label { color: #6a6a78; }
-.sidebar row.drop-into { box-shadow: inset 0 0 0 2px #7aa2f7; }
-.sidebar row.drop-above { box-shadow: inset 0 3px 0 0 #7aa2f7; }
-.sidebar row.drop-below { box-shadow: inset 0 -3px 0 0 #7aa2f7; }
-/* Ctrl+clicked tabs pending a group action */
-.sidebar row.marked { box-shadow: inset 0 0 0 2px #7dcfff; }
-/* tab-group color stripe on the far left of a row */
-.group-bar { background-color: transparent; border-radius: 2px; }
-.group-bar.grp-red    { background-color: #f7768e; }
-.group-bar.grp-orange { background-color: #ff9e64; }
-.group-bar.grp-yellow { background-color: #e0af68; }
-.group-bar.grp-green  { background-color: #9ece6a; }
-.group-bar.grp-cyan   { background-color: #7dcfff; }
-.group-bar.grp-purple { background-color: #bb9af7; }
-/* group header row: a small color dot + the group name */
-.group-header { padding: 5px 6px 1px 8px; }
-.group-header label { font-size: 8pt; font-weight: 600; color: #b0b0bc; }
-.group-dot { border-radius: 50%; }
-.group-dot.grp-red    { background-color: #f7768e; }
-.group-dot.grp-orange { background-color: #ff9e64; }
-.group-dot.grp-yellow { background-color: #e0af68; }
-.group-dot.grp-green  { background-color: #9ece6a; }
-.group-dot.grp-cyan   { background-color: #7dcfff; }
-.group-dot.grp-purple { background-color: #bb9af7; }
-.sidebar row .close { opacity: 0; }
-.sidebar row:hover .close, .sidebar row:selected .close { opacity: 1; }
-.sidebar button { background: transparent; border: none; border-radius: 6px;
-                  padding: 3px 6px; color: #8a8a98; }
-.sidebar button:hover { color: #ececf4; background: rgba(255,255,255,0.11); }
-/* per-type icon colors (symbolic icons follow the CSS color property) */
-.ic-shell   { color: #9ece6a; }
-.ic-serial  { color: #7dcfff; }
-.ic-note    { color: #e0af68; }
-.ic-command { color: #f7768e; }
-.ic-tmux    { color: #bb9af7; }
-.session-sub { color: #7a7a88; font-size: 8pt; }
-.activity { color: #7aa2f7; font-size: 8pt; }
-/* actions strip: slightly different surface so it is not the tab list */
-.adder { background-color: #0e0e14; border-top: 1px solid #2c2c38;
-         padding-top: 4px; }
-.adder button { padding: 4px 8px; font-size: 9pt; color: #9a9aa8; }
-.adder button:hover { color: #ececf4; background: rgba(255,255,255,0.11); }
-.section { color: #7a7a88; font-size: 8pt; font-weight: 600;
-           padding: 12px 8px 3px 8px; }
-/* EventBox on each tab must have a window to receive double/right-click */
-.sidebar eventbox { background-color: transparent; }
-.note-tools { background-color: #15151c; border-top: 1px solid #2c2c38;
-              padding: 4px 6px; }
-.note-tools button { padding: 2px 8px; font-size: 9pt; }
-.cmd-bar { background-color: #15151c; border-top: 1px solid #2c2c38;
-           padding: 4px 6px; }
-.cmd-bar button { padding: 2px 10px; font-size: 9pt; }
-/* narrow the resize handle so it stops stealing clicks meant for the
-   terminal; the sidebar's border-right is the visible line. themes pad
-   the separator and add a grip image, which widens the grab zone, so
-   zero those out too.
-   ponytail: 2px hit zone, widen if it gets hard to grab on purpose */
-paned > separator {
-    min-width: 2px;
-    padding: 0;
-    margin: 0;
-    background-image: none;
-    background-color: transparent;
+DEFAULT_SETTINGS = {
+    "theme": "tokyo-night",
+    "note_wrap": True,
+    "shell_inherit_cwd": False,  # new shell opens in the focused tab's path
+    "ai_fresh_on_restore": False,  # restored AI tabs start fresh (no continue)
+    "group_names": {},             # tab-group color -> display name
 }
-/* terminal scrollbar: always visible, styled to match the Tokyo Night VTE.
-   A slim trough on the terminal's dark background with a grabbable slider. */
-scrollbar.term-scroll {
-    background-color: #101016;
-    border-left: 1px solid #2c2c38;
-}
-scrollbar.term-scroll trough { background-color: transparent; border: none; }
-scrollbar.term-scroll slider {
-    background-color: #565f89;
-    border-radius: 7px;
-    min-width: 9px;
-    min-height: 40px;
-    margin: 2px;
-}
-scrollbar.term-scroll slider:hover { background-color: #7aa2f7; }
-scrollbar.term-scroll slider:active { background-color: #89b4ff; }
-"""
 
 
 class Tabit(Gtk.Window):
@@ -440,6 +593,8 @@ class Tabit(Gtk.Window):
         self._order_seq = 0
         self._save_src = None  # debounced sessions.json write
         self._keys = self._load_keys()  # action -> (keyval, mods)
+        self.theme = self._load_settings().get("theme", "tokyo-night")
+        CSS_PROVIDER.load_from_data(get_theme_css(self.theme))
 
         self.stack = Gtk.Stack()
         self.listbox = Gtk.ListBox()
@@ -705,19 +860,32 @@ class Tabit(Gtk.Window):
         self.listbox.select_row(row)
         self._save_sessions()
 
-    def _add_session(self, label, argv, icon_name, sub=None, cwd=None,
-                     track_cwd=False):
-        term = Vte.Terminal()
-        term.set_scrollback_lines(10000)
+    def _apply_term_colors(self, term, theme_info=None):
+        if theme_info is None:
+            theme_info = get_theme_colors(getattr(self, "theme", "tokyo-night"))
         fg, bg = Gdk.RGBA(), Gdk.RGBA()
-        fg.parse(TERM_FG)
-        bg.parse(TERM_BG)
+        fg.parse(theme_info["fg"])
+        bg.parse(theme_info["bg"])
         palette = []
-        for hex_color in TERM_PALETTE:
+        for hex_color in theme_info["palette"]:
             c = Gdk.RGBA()
             c.parse(hex_color)
             palette.append(c)
         term.set_colors(fg, bg, palette)
+
+    def _apply_theme(self, theme_key):
+        self.theme = theme_key
+        theme_info = get_theme_colors(theme_key)
+        CSS_PROVIDER.load_from_data(get_theme_css(theme_key))
+        for row in self.listbox.get_children():
+            if getattr(row, "kind", None) == "term" and getattr(row, "term", None) is not None:
+                self._apply_term_colors(row.term, theme_info)
+
+    def _add_session(self, label, argv, icon_name, sub=None, cwd=None,
+                     track_cwd=False):
+        term = Vte.Terminal()
+        term.set_scrollback_lines(10000)
+        self._apply_term_colors(term)
         term.connect("key-press-event", self._on_term_key)
         term.connect("button-press-event", self._on_term_button)
         term.drag_dest_set(Gtk.DestDefaults.ALL,
@@ -1913,7 +2081,7 @@ class Tabit(Gtk.Window):
         box.pack_start(Gtk.Label(label=name.upper(), xalign=0), True, True, 0)
         hit = Gtk.EventBox()
         hit.add(box)
-        hit.connect("button-press-event", self._on_header_button, color)
+        hit.connect("button-press-event", self._on_header_button, row)
         # drag the header to move the whole group (source only; not a drop dest)
         target = Gtk.TargetEntry.new("TABIT_ROW", Gtk.TargetFlags.SAME_APP, 0)
         hit.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, [target],
@@ -1962,12 +2130,16 @@ class Tabit(Gtk.Window):
     def _save_group_names(self):
         self._save_settings({"group_names": self._group_names})
 
-    def _on_header_button(self, _hit, event, color):
+    def _on_header_button(self, _hit, event, row):
+        color = getattr(row, "group_color", "red")
+        if event.button == 1 and event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS:
+            GLib.idle_add(self._rename_group, row)
+            return True
         if event.button != 3 or event.type != Gdk.EventType.BUTTON_PRESS:
             return False
         menu = Gtk.Menu()
-        rn = Gtk.MenuItem(label="Rename group…")
-        rn.connect("activate", lambda *_: self._rename_group(color))
+        rn = Gtk.MenuItem(label="Edit group…")
+        rn.connect("activate", lambda *_: self._rename_group(row))
         up = Gtk.MenuItem(label="Move group up")
         up.connect("activate", lambda *_: self._move_group(color, -1))
         dn = Gtk.MenuItem(label="Move group down")
@@ -1980,26 +2152,145 @@ class Tabit(Gtk.Window):
         menu.popup_at_pointer(event)
         return True
 
-    def _rename_group(self, color):
-        dialog = Gtk.Dialog(title="Rename group", transient_for=self,
-                            modal=True)
-        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
-                           "Rename", Gtk.ResponseType.OK)
-        entry = Gtk.Entry(text=self._group_names.get(color, ""),
-                          margin=12, width_chars=24)
-        entry.set_activates_default(True)
-        dialog.set_default_response(Gtk.ResponseType.OK)
-        dialog.get_content_area().add(entry)
-        dialog.show_all()
-        if dialog.run() == Gtk.ResponseType.OK:
-            name = entry.get_text().strip()
-            if name:
-                self._group_names[color] = name
+    def _rename_group(self, row):
+        """Edit group name and color in a popover bubble anchored to the right of the header."""
+        color = getattr(row, "group_color", "red")
+        old = getattr(self, "_group_pop", None)
+        if old is not None:
+            old.popdown()
+
+        pop = Gtk.Popover.new(row)
+        pop.set_position(Gtk.PositionType.RIGHT)
+        pop.set_modal(True)
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=10)
+
+        # Name row (Entry + OK button)
+        name_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        entry = Gtk.Entry(text=self._group_names.get(color, ""), width_chars=16)
+        entry.set_placeholder_text(color.capitalize())
+        ok = Gtk.Button(label="OK")
+        ok.get_style_context().add_class("suggested-action")
+        name_box.pack_start(entry, True, True, 0)
+        name_box.pack_start(ok, False, False, 0)
+        vbox.pack_start(name_box, False, False, 0)
+
+        # Colors used by other groups in the sidebar
+        used_colors = {getattr(r, "group_color", None) for r in self._session_rows()
+                       if getattr(r, "group_color", None) and getattr(r, "group_color", None) != color}
+
+        # Color selector row (12 high-contrast colors: 6 on top row, 6 on bottom row)
+        color_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        row1 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        row2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        color_box.pack_start(row1, False, False, 0)
+        color_box.pack_start(row2, False, False, 0)
+
+        swatches = {}
+        active_color = [color]
+
+        half = 6  # 12 colors = 2 rows of 6
+        for idx, c in enumerate(GROUP_COLORS):
+            target_row = row1 if idx < half else row2
+            btn = Gtk.Button()
+            btn.set_can_focus(False)
+            btn.get_style_context().add_class("color-swatch")
+            if c in used_colors:
+                btn.set_tooltip_text(f"{c.capitalize()} (In use by another group)")
             else:
+                btn.set_tooltip_text(c.capitalize())
+
+            overlay = Gtk.Overlay()
+            dot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+            dot.set_size_request(20, 20)
+            dot.set_valign(Gtk.Align.CENTER)
+            dot.set_halign(Gtk.Align.CENTER)
+            dot.get_style_context().add_class("group-dot")
+            dot.get_style_context().add_class("grp-" + c)
+
+            check = Gtk.Label(label="✔" if c == color else "")
+            check.set_xalign(0.5)
+            check.set_yalign(0.5)
+            check.set_valign(Gtk.Align.CENTER)
+            check.set_halign(Gtk.Align.CENTER)
+            check.get_style_context().add_class("swatch-check")
+            dot.pack_start(check, True, True, 0)
+            overlay.add(dot)
+
+            if c in used_colors:
+                badge = Gtk.Box()
+                badge.set_size_request(6, 6)
+                badge.set_valign(Gtk.Align.START)
+                badge.set_halign(Gtk.Align.END)
+                badge.get_style_context().add_class("in-use-badge")
+                overlay.add_overlay(badge)
+
+            btn.add(overlay)
+
+            def make_handler(target_c):
+                def on_swatch_click(_b):
+                    active_color[0] = target_c
+                    for k, b_item in swatches.items():
+                        b_item.get_style_context().remove_class("selected")
+                        ov = b_item.get_child()
+                        if isinstance(ov, Gtk.Overlay):
+                            d_box = ov.get_children()[0]
+                            for child in d_box.get_children():
+                                if isinstance(child, Gtk.Label):
+                                    child.set_text("✔" if k == target_c else "")
+                    swatches[target_c].get_style_context().add_class("selected")
+                return on_swatch_click
+
+            btn.connect("clicked", make_handler(c))
+            if c == color:
+                btn.get_style_context().add_class("selected")
+            swatches[c] = btn
+            target_row.pack_start(btn, False, False, 0)
+
+        vbox.pack_start(color_box, False, False, 0)
+        pop.add(vbox)
+        vbox.show_all()
+        self._group_pop = pop
+
+        def apply(*_a):
+            name = entry.get_text().strip()
+            new_color = active_color[0]
+
+            if new_color != color:
+                for r in self._session_rows():
+                    if getattr(r, "group_color", None) == color:
+                        r.group_color = new_color
+                        self._apply_group(r, new_color)
+                if name:
+                    self._group_names[new_color] = name
+                elif color in self._group_names:
+                    self._group_names[new_color] = self._group_names[color]
                 self._group_names.pop(color, None)
+                self._save_sessions()
+            else:
+                if name:
+                    self._group_names[color] = name
+                else:
+                    self._group_names.pop(color, None)
+
             self._save_group_names()
             self._relayout()
-        dialog.destroy()
+            pop.popdown()
+
+        def on_key(_w, event):
+            key_name = (Gdk.keyval_name(event.keyval) or "").lower()
+            if key_name in ("return", "kp_enter"):
+                apply()
+                return True
+            elif key_name == "escape":
+                pop.popdown()
+                return True
+            return False
+
+        ok.connect("clicked", apply)
+        entry.connect("key-press-event", on_key)
+        pop.popup()
+        entry.grab_focus()
 
     def _ungroup(self, color):
         for r in self._session_rows():
@@ -3435,6 +3726,23 @@ class Tabit(Gtk.Window):
         box.set_spacing(10)
         for side in ("top", "bottom", "start", "end"):
             getattr(box, f"set_margin_{side}")(12)
+
+        app_head = Gtk.Label(xalign=0)
+        app_head.set_markup("<b>Appearance</b>")
+        theme_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        theme_lbl = Gtk.Label(label="Color theme template:", xalign=0)
+        theme_combo = Gtk.ComboBoxText()
+        theme_keys = list(COLOR_SCHEMES.keys())
+        cur_theme = s.get("theme", "tokyo-night")
+        active_idx = 0
+        for idx, k in enumerate(theme_keys):
+            theme_combo.append(k, COLOR_SCHEMES[k]["name"])
+            if k == cur_theme:
+                active_idx = idx
+        theme_combo.set_active(active_idx)
+        theme_box.pack_start(theme_lbl, False, False, 0)
+        theme_box.pack_start(theme_combo, True, True, 0)
+
         head = Gtk.Label(xalign=0)
         head.set_markup("<b>Notes</b>")
         wrap = Gtk.CheckButton(label="Word wrap notes (recommended)")
@@ -3464,6 +3772,8 @@ class Tabit(Gtk.Window):
             label="Stored in ~/.config/tabit/settings.json",
             xalign=0)
         hint.get_style_context().add_class("session-sub")
+        box.pack_start(app_head, False, False, 0)
+        box.pack_start(theme_box, False, False, 0)
         box.pack_start(head, False, False, 0)
         box.pack_start(wrap, False, False, 0)
         box.pack_start(term_head, False, False, 0)
@@ -3473,10 +3783,13 @@ class Tabit(Gtk.Window):
         box.pack_start(hint, False, False, 0)
         dialog.show_all()
         if dialog.run() == Gtk.ResponseType.OK:
-            self._save_settings({"note_wrap": wrap.get_active(),
+            selected_theme = theme_keys[theme_combo.get_active()]
+            self._save_settings({"theme": selected_theme,
+                                 "note_wrap": wrap.get_active(),
                                  "shell_inherit_cwd": inherit.get_active(),
                                  "ai_fresh_on_restore": ai_fresh.get_active()})
             self._apply_note_wrap_setting(wrap.get_active())
+            self._apply_theme(selected_theme)
         dialog.destroy()
 
     def _on_edit_keys(self, _btn):
@@ -3607,10 +3920,10 @@ def main():
     if settings is not None:
         settings.set_property("gtk-application-prefer-dark-theme", True)
 
-    provider = Gtk.CssProvider()
-    provider.load_from_data(CSS)
+    init_theme = Tabit._load_settings().get("theme", "tokyo-night")
+    CSS_PROVIDER.load_from_data(get_theme_css(init_theme))
     Gtk.StyleContext.add_provider_for_screen(
-        Gdk.Screen.get_default(), provider,
+        Gdk.Screen.get_default(), CSS_PROVIDER,
         Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
     Tabit().show_all()
