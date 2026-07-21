@@ -64,6 +64,7 @@ NOTE_SENTINEL = "__tabit_note__"
 ICON_NOTE = "text-x-generic-symbolic"
 ICON_COMMAND = "system-run-symbolic"
 ICON_TMUX = "view-grid-symbolic"
+ICON_CONNECT = "network-transmit-receive-symbolic"
 # per-type CSS class so each session icon gets its own color (see CSS)
 ICON_CLASS = {
     "utilities-terminal-symbolic": "ic-shell",
@@ -71,6 +72,7 @@ ICON_CLASS = {
     ICON_NOTE: "ic-note",
     ICON_COMMAND: "ic-command",
     ICON_TMUX: "ic-tmux",
+    ICON_CONNECT: "ic-connect",
 }
 # note performance: long lines / huge buffers can freeze GtkSourceView
 NOTE_BIG_CHARS = 200_000   # total characters
@@ -271,6 +273,11 @@ SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
 AI_LAST_FILE = os.path.join(CONFIG_DIR, "ai_last.json")
 AI_CLIS_FILE = os.path.join(CONFIG_DIR, "ai_clis.json")
 COMMANDS_FILE = os.path.join(CONFIG_DIR, "commands.json")
+CONNECT_LAST_FILE = os.path.join(CONFIG_DIR, "connect_last.json")
+SSH_TOOL_DIR = os.path.expanduser("~/senao-tools/tools/ssh_tool")
+SSH_TOOL_CONNECT_SH = os.path.join(SSH_TOOL_DIR, "connect.sh")
+SSH_TOOL_CONNECT_PY = os.path.join(SSH_TOOL_DIR, "connect.py")
+HAS_SSH_TOOL = os.path.isdir(SSH_TOOL_DIR) and (os.path.isfile(SSH_TOOL_CONNECT_SH) or os.path.isfile(SSH_TOOL_CONNECT_PY))
 # quick commands shown in the terminal bottom bar (user-editable; empty
 # by default — add your own from the bar's edit button)
 DEFAULT_COMMANDS = []
@@ -470,6 +477,7 @@ def get_theme_css(theme_key):
 .ic-note    {{ color: #e0af68; }}
 .ic-command {{ color: #f7768e; }}
 .ic-tmux    {{ color: #bb9af7; }}
+.ic-connect {{ color: #73daca; }}
 .session-sub {{ color: {s['subtext']}; font-size: 8pt; }}
 .activity {{ color: {s['accent']}; font-size: 8pt; }}
 .adder {{ background-color: {s['adder_bg']}; border-top: 1px solid {s['border']};
@@ -618,13 +626,19 @@ class Tabit(Gtk.Window):
         for side in ("start", "end", "bottom"):
             getattr(adders, f"set_margin_{side}")(4)
         # icons match the session tab icons
-        for text, icon, handler in (
-                ("+ Serial", "network-wired-symbolic", self._on_add_serial),
-                ("+ Shell", "utilities-terminal-symbolic", self._on_add_shell),
-                ("+ AI", ICON_AI, self._on_add_ai),
-                ("+ Note", ICON_NOTE, self._on_add_note),
-                ("+ Command", ICON_COMMAND, self._on_add_command),
-                ("+ tmux", ICON_TMUX, self._on_add_tmux)):
+        button_items = [
+            ("+ Serial", "network-wired-symbolic", self._on_add_serial),
+            ("+ Shell", "utilities-terminal-symbolic", self._on_add_shell),
+            ("+ AI", ICON_AI, self._on_add_ai),
+        ]
+        if HAS_SSH_TOOL:
+            button_items.append(("+ Connect", ICON_CONNECT, self._on_add_connect))
+        button_items.extend([
+            ("+ Note", ICON_NOTE, self._on_add_note),
+            ("+ Command", ICON_COMMAND, self._on_add_command),
+            ("+ tmux", ICON_TMUX, self._on_add_tmux),
+        ])
+        for text, icon, handler in button_items:
             btn = Gtk.Button(label=text)
             btn.set_image(self._session_icon(icon))
             btn.set_always_show_image(True)
@@ -2838,6 +2852,212 @@ class Tabit(Gtk.Window):
                                       self._serial_argv(tool, dev, rate),
                                       "network-wired-symbolic",
                                       sub=f"{tool} @{rate}")
+        dialog.destroy()
+
+    @staticmethod
+    def _load_connect_last():
+        try:
+            with open(CONNECT_LAST_FILE) as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except (OSError, ValueError):
+            pass
+        return {}
+
+    @staticmethod
+    def _save_connect_last(data):
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        try:
+            with open(CONNECT_LAST_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+        except OSError:
+            pass
+
+    def _on_add_connect(self, _btn):
+        if not HAS_SSH_TOOL:
+            return
+
+        last = self._load_connect_last()
+        dialog = Gtk.Dialog(title="New Cloud Connect session", transient_for=self, modal=True)
+        grid = Gtk.Grid(row_spacing=8, column_spacing=10, margin=12)
+
+        # 1. Device SN (required)
+        sn_entry = Gtk.Entry(text=last.get("sn", ""), width_chars=24)
+        sn_entry.set_placeholder_text("e.g. 2340X421DCGQ")
+        sn_entry.set_hexpand(True)
+
+        # 2. Target Environment
+        env_combo = Gtk.ComboBoxText()
+        envs = ["prod", "staging", "dev", "prod-jp", "staging-jp", "kokomo"]
+        cur_env = last.get("env", "prod")
+        active_env_idx = 0
+        for i, e in enumerate(envs):
+            env_combo.append_text(e)
+            if e == cur_env:
+                active_env_idx = i
+        env_combo.set_active(active_env_idx)
+        env_combo.set_hexpand(True)
+
+        # 3. Authentication: Email & Password (default fallback if empty)
+        email_entry = Gtk.Entry(text=last.get("email", ""), width_chars=24)
+        email_entry.set_placeholder_text("user@senao.com (default)")
+        email_entry.set_hexpand(True)
+
+        pwd_entry = Gtk.Entry(text=last.get("password", ""), width_chars=24)
+        pwd_entry.set_visibility(False)
+        pwd_entry.set_placeholder_text("•••••••• (default)")
+        pwd_entry.set_hexpand(True)
+
+        # 4. Ticket (optional)
+        ticket_entry = Gtk.Entry(text=last.get("ticket", ""), width_chars=24)
+        ticket_entry.set_placeholder_text("8 hex chars (optional)")
+        ticket_entry.set_hexpand(True)
+
+        # 5. Organization (optional)
+        org_entry = Gtk.Entry(text=last.get("org", ""), width_chars=24)
+        org_entry.set_placeholder_text("Org name or ID (optional)")
+        org_entry.set_hexpand(True)
+
+        # 6. Network (optional)
+        net_entry = Gtk.Entry(text=last.get("network", ""), width_chars=24)
+        net_entry.set_placeholder_text("Network name or ID (optional)")
+        net_entry.set_hexpand(True)
+
+        # 7. Device Type (auto / ap / gateway / camera)
+        dtype_combo = Gtk.ComboBoxText()
+        dtypes = ["auto", "ap", "gateway", "camera"]
+        cur_dtype = last.get("device_type", "auto")
+        active_dtype_idx = 0
+        for i, dt in enumerate(dtypes):
+            dtype_combo.append_text(dt)
+            if dt == cur_dtype:
+                active_dtype_idx = i
+        dtype_combo.set_active(active_dtype_idx)
+        dtype_combo.set_hexpand(True)
+
+        # 8. Bypass Cache (--no-cache)
+        nocache_chk = Gtk.CheckButton(label="Bypass device cache (--no-cache)")
+        nocache_chk.set_active(bool(last.get("no_cache", False)))
+        nocache_chk.set_tooltip_text("Bypass local device_cache.json and do a full cloud org scan")
+
+        # 9. Run inside tmux session (enables AI collaboration)
+        use_tmux_chk = Gtk.CheckButton(label="Run inside tmux session (AI collaboration)")
+        use_tmux_chk.set_active(bool(last.get("use_tmux", True)))
+
+        # Layout
+        grid.attach(Gtk.Label(label="Serial Number", xalign=0), 0, 0, 1, 1)
+        grid.attach(sn_entry, 1, 0, 1, 1)
+
+        grid.attach(Gtk.Label(label="Environment", xalign=0), 0, 1, 1, 1)
+        grid.attach(env_combo, 1, 1, 1, 1)
+
+        grid.attach(Gtk.Label(label="Email", xalign=0), 0, 2, 1, 1)
+        grid.attach(email_entry, 1, 2, 1, 1)
+
+        grid.attach(Gtk.Label(label="Password", xalign=0), 0, 3, 1, 1)
+        grid.attach(pwd_entry, 1, 3, 1, 1)
+
+        grid.attach(Gtk.Label(label="Ticket", xalign=0), 0, 4, 1, 1)
+        grid.attach(ticket_entry, 1, 4, 1, 1)
+
+        grid.attach(Gtk.Label(label="Organization", xalign=0), 0, 5, 1, 1)
+        grid.attach(org_entry, 1, 5, 1, 1)
+
+        grid.attach(Gtk.Label(label="Network", xalign=0), 0, 6, 1, 1)
+        grid.attach(net_entry, 1, 6, 1, 1)
+
+        grid.attach(Gtk.Label(label="Device Type", xalign=0), 0, 7, 1, 1)
+        grid.attach(dtype_combo, 1, 7, 1, 1)
+
+        grid.attach(nocache_chk, 1, 8, 1, 1)
+        grid.attach(use_tmux_chk, 1, 9, 1, 1)
+
+        # Buttons
+        btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        btns.set_halign(Gtk.Align.END)
+        btns.set_margin_top(6)
+        cancel_b = Gtk.Button(label="Cancel")
+        connect_b = Gtk.Button(label="Connect")
+        connect_b.get_style_context().add_class("suggested-action")
+        cancel_b.connect("clicked", lambda *_: dialog.response(Gtk.ResponseType.CANCEL))
+        connect_b.connect("clicked", lambda *_: dialog.response(Gtk.ResponseType.OK))
+        btns.pack_start(cancel_b, False, False, 0)
+        btns.pack_start(connect_b, False, False, 0)
+        grid.attach(btns, 0, 10, 2, 1)
+
+        dialog.get_content_area().add(grid)
+        dialog.show_all()
+
+        def on_key(_w, event):
+            key_name = (Gdk.keyval_name(event.keyval) or "").lower()
+            if key_name in ("return", "kp_enter"):
+                dialog.response(Gtk.ResponseType.OK)
+                return True
+            elif key_name == "escape":
+                dialog.response(Gtk.ResponseType.CANCEL)
+                return True
+            return False
+
+        dialog.connect("key-press-event", on_key)
+
+        if dialog.run() == Gtk.ResponseType.OK:
+            sn = sn_entry.get_text().strip()
+            if sn:
+                env_val = envs[env_combo.get_active()]
+                email_val = email_entry.get_text().strip() or "user@senao.com"
+                pwd_val = pwd_entry.get_text().strip() or "password_placeholder"
+                ticket_val = ticket_entry.get_text().strip()
+                org_val = org_entry.get_text().strip()
+                net_val = net_entry.get_text().strip()
+                dtype_val = dtypes[dtype_combo.get_active()]
+                nocache_val = nocache_chk.get_active()
+                use_tmux_val = use_tmux_chk.get_active()
+
+                # Save last used credentials/parameters
+                self._save_connect_last({
+                    "sn": sn,
+                    "env": env_val,
+                    "email": email_entry.get_text().strip(),
+                    "password": pwd_entry.get_text().strip(),
+                    "ticket": ticket_val,
+                    "org": org_val,
+                    "network": net_val,
+                    "device_type": dtype_val,
+                    "no_cache": nocache_val,
+                    "use_tmux": use_tmux_val,
+                })
+
+                # Build raw command args
+                raw_cmd = ["python3", SSH_TOOL_CONNECT_PY, "--sn", sn, "--email", email_val, "--password", pwd_val]
+                if env_val and env_val != "prod":
+                    raw_cmd.extend(["--env", env_val])
+                if ticket_val:
+                    raw_cmd.extend(["--ticket", ticket_val])
+                if org_val:
+                    raw_cmd.extend(["--org", org_val])
+                if net_val:
+                    raw_cmd.extend(["--network", net_val])
+                if dtype_val != "auto":
+                    raw_cmd.extend(["--device-type", dtype_val])
+                if nocache_val:
+                    raw_cmd.append("--no-cache")
+
+                if use_tmux_val:
+                    session_name = f"conn-{sn.lower()}"
+                    cmd_str = " ".join(shlex.quote(arg) for arg in raw_cmd)
+                    cmd = ["tmux", "new-session", "-A", "-s", session_name, f"{cmd_str}; exec bash"]
+                    icon_name = ICON_TMUX
+                    sub = f"cloud ({env_val}) [tmux]"
+                else:
+                    cmd = raw_cmd
+                    icon_name = ICON_CONNECT
+                    sub = f"cloud ({env_val})"
+
+                label = f"{sn} (connect)"
+                self._add_session(label=label, argv=cmd, icon_name=icon_name,
+                                  sub=sub, cwd=SSH_TOOL_DIR)
+
         dialog.destroy()
 
     @staticmethod
