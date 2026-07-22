@@ -2937,32 +2937,23 @@ class Tabit(Gtk.Window):
         dtype_combo.set_hexpand(True)
 
         # 8. Gateway Root Password (optional)
+        # 8. Gateway Root Password (optional)
         gw_pass_entry = Gtk.Entry(text=last.get("gateway_pass", ""), width_chars=24)
         gw_pass_entry.set_visibility(False)
         gw_pass_entry.set_placeholder_text("Gateway root password (optional)")
         gw_pass_entry.set_hexpand(True)
 
-        # 9. Fallback SSH Passwords (optional)
-        fb_passes_entry = Gtk.Entry(text=last.get("fallback_passes", ""), width_chars=24)
-        fb_passes_entry.set_placeholder_text("e.g. admin,password_placeholder (optional)")
-        fb_passes_entry.set_hexpand(True)
-
-        # 10. SSH Magic Words (optional)
+        # 9. SSH Magic Words (optional)
         magic_words_entry = Gtk.Entry(text=last.get("magic_words", ""), width_chars=24)
         magic_words_entry.set_placeholder_text("e.g. chall_calc (optional)")
         magic_words_entry.set_hexpand(True)
 
-        # 11. Challenge Response Binary Path (optional)
-        chall_bin_entry = Gtk.Entry(text=last.get("chall_bin", ""), width_chars=24)
-        chall_bin_entry.set_placeholder_text("Path to chall_bin binary (optional)")
-        chall_bin_entry.set_hexpand(True)
-
-        # 12. Bypass Cache (--no-cache)
+        # 10. Bypass Cache (--no-cache)
         nocache_chk = Gtk.CheckButton(label="Bypass device cache (--no-cache)")
         nocache_chk.set_active(bool(last.get("no_cache", False)))
         nocache_chk.set_tooltip_text("Bypass local device_cache.json and do a full cloud org scan")
 
-        # 13. Run inside tmux session (enables AI collaboration)
+        # 11. Run inside tmux session (enables AI collaboration)
         use_tmux_chk = Gtk.CheckButton(label="Run inside tmux session (AI collaboration)")
         use_tmux_chk.set_active(bool(last.get("use_tmux", True)))
 
@@ -2994,17 +2985,11 @@ class Tabit(Gtk.Window):
         grid.attach(Gtk.Label(label="Gateway Pass", xalign=0), 0, 8, 1, 1)
         grid.attach(gw_pass_entry, 1, 8, 1, 1)
 
-        grid.attach(Gtk.Label(label="Fallback Passes", xalign=0), 0, 9, 1, 1)
-        grid.attach(fb_passes_entry, 1, 9, 1, 1)
+        grid.attach(Gtk.Label(label="Magic Words", xalign=0), 0, 9, 1, 1)
+        grid.attach(magic_words_entry, 1, 9, 1, 1)
 
-        grid.attach(Gtk.Label(label="Magic Words", xalign=0), 0, 10, 1, 1)
-        grid.attach(magic_words_entry, 1, 10, 1, 1)
-
-        grid.attach(Gtk.Label(label="Chall Bin", xalign=0), 0, 11, 1, 1)
-        grid.attach(chall_bin_entry, 1, 11, 1, 1)
-
-        grid.attach(nocache_chk, 1, 12, 1, 1)
-        grid.attach(use_tmux_chk, 1, 13, 1, 1)
+        grid.attach(nocache_chk, 1, 10, 1, 1)
+        grid.attach(use_tmux_chk, 1, 11, 1, 1)
 
         # Buttons
         btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -3017,7 +3002,7 @@ class Tabit(Gtk.Window):
         connect_b.connect("clicked", lambda *_: dialog.response(Gtk.ResponseType.OK))
         btns.pack_start(cancel_b, False, False, 0)
         btns.pack_start(connect_b, False, False, 0)
-        grid.attach(btns, 0, 14, 2, 1)
+        grid.attach(btns, 0, 12, 2, 1)
 
         dialog.get_content_area().add(grid)
         dialog.show_all()
@@ -3047,9 +3032,7 @@ class Tabit(Gtk.Window):
                 nocache_val = nocache_chk.get_active()
                 use_tmux_val = use_tmux_chk.get_active()
                 gw_pass_val = gw_pass_entry.get_text().strip()
-                fb_passes_val = fb_passes_entry.get_text().strip()
                 magic_words_val = magic_words_entry.get_text().strip()
-                chall_bin_val = chall_bin_entry.get_text().strip()
 
                 # Save last used credentials/parameters
                 self._save_connect_last({
@@ -3064,9 +3047,7 @@ class Tabit(Gtk.Window):
                     "no_cache": nocache_val,
                     "use_tmux": use_tmux_val,
                     "gateway_pass": gw_pass_val,
-                    "fallback_passes": fb_passes_val,
                     "magic_words": magic_words_val,
-                    "chall_bin": chall_bin_val,
                 })
 
                 # Build raw command args
@@ -3085,12 +3066,8 @@ class Tabit(Gtk.Window):
                     raw_cmd.append("--no-cache")
                 if gw_pass_val:
                     raw_cmd.extend(["--gateway-pass", gw_pass_val])
-                if fb_passes_val:
-                    raw_cmd.extend(["--fallback-passes", fb_passes_val])
                 if magic_words_val:
                     raw_cmd.extend(["--magic-words", magic_words_val])
-                if chall_bin_val:
-                    raw_cmd.extend(["--chall-bin", chall_bin_val])
 
                 if use_tmux_val:
                     session_name = f"conn-{sn.lower()}"
