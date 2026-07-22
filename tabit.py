@@ -2945,7 +2945,7 @@ class Tabit(Gtk.Window):
 
         # 9. SSH Magic Words (optional)
         magic_words_entry = Gtk.Entry(text=last.get("magic_words", ""), width_chars=24)
-        magic_words_entry.set_placeholder_text("e.g. chall_calc (optional)")
+        magic_words_entry.set_placeholder_text("e.g. chall_calc,word2 (comma-separated)")
         magic_words_entry.set_hexpand(True)
 
         # 10. Bypass Cache (--no-cache)
