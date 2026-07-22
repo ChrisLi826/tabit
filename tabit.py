@@ -429,11 +429,26 @@ def get_theme_css(theme_key):
     css_text = f"""
 .sidebar {{ background-color: {s['sidebar_bg']}; border-right: 1px solid {s['border']}; }}
 .sidebar list {{ background: transparent; }}
+/* kill GTK/Yaru focus ring (often orange) on click; keep :selected style */
+.sidebar list:focus,
+.sidebar list:focus-within,
+.sidebar row:focus,
+.sidebar row:focus-within,
+.sidebar row:selected:focus,
+.sidebar eventbox:focus {{
+    outline: none;
+    outline-width: 0;
+    outline-offset: 0;
+    -gtk-outline-radius: 0;
+    box-shadow: none;
+}}
 .sidebar row {{ border-radius: 6px; border-left: 3px solid transparent;
-               padding: 4px 6px 4px 4px; color: {s['text']}; }}
+               padding: 4px 6px 4px 4px; color: {s['text']};
+               outline: none; outline-width: 0; }}
 .sidebar row:hover {{ background: {s['hover']}; }}
 .sidebar row:selected {{ background: {s['selection']};
-                        border-left-color: {s['accent']}; color: #ffffff; }}
+                        border-left-color: {s['accent']}; color: #ffffff;
+                        outline: none; box-shadow: none; }}
 .sidebar row.dead label {{ color: {s['subtext']}; }}
 .sidebar row.drop-into {{ box-shadow: inset 0 0 0 2px {s['accent']}; }}
 .sidebar row.drop-above {{ box-shadow: inset 0 3px 0 0 {s['accent']}; }}
@@ -454,6 +469,8 @@ def get_theme_css(theme_key):
 .group-bar.grp-white   {{ background-color: #ffffff; }}
 .group-header {{ padding: 5px 6px 1px 8px; }}
 .group-header label {{ font-size: 8pt; font-weight: 600; color: {s['subtext']}; }}
+.group-chevron {{ font-size: 8pt; color: {s['subtext']}; min-width: 12px; }}
+.group-count {{ font-size: 8pt; color: {s['subtext']}; }}
 .group-dot {{ border-radius: 50%; }}
 .group-dot.grp-red     {{ background-color: #f7768e; }}
 .group-dot.grp-orange  {{ background-color: #ff9e64; }}
@@ -572,6 +589,8 @@ KEY_ACTIONS = (
     ("move_tab_down", "Move tab down", "<Primary><Shift>Page_Down"),
     ("move_group_up", "Move group up", "<Primary><Alt><Shift>Page_Up"),
     ("move_group_down", "Move group down", "<Primary><Alt><Shift>Page_Down"),
+    # Ctrl+Alt+G: toggle fold of the focused tab's group (G = group)
+    ("toggle_group_collapse", "Toggle group collapse", "<Primary><Alt>g"),
     ("copy", "Copy", "<Primary><Shift>c"),
     ("paste", "Paste", "<Primary><Shift>v"),
 )
@@ -586,6 +605,7 @@ DEFAULT_SETTINGS = {
     "shell_inherit_cwd": False,  # new shell opens in the focused tab's path
     "ai_fresh_on_restore": False,  # restored AI tabs start fresh (no continue)
     "group_names": {},             # tab-group color -> display name
+    "collapsed_groups": [],        # group colors whose member tabs are hidden
 }
 
 
@@ -608,10 +628,15 @@ class Tabit(Gtk.Window):
         self.listbox = Gtk.ListBox()
         # sort by row._order so reorder is a swap, not remove/insert
         self.listbox.set_sort_func(lambda a, b, _d: a._order - b._order, None)
+        # click selects without grabbing keyboard focus (avoids theme focus ring flash)
+        self.listbox.set_focus_on_click(False)
         self.listbox.connect("row-selected", self._on_row_selected)
         self._marked = set()  # rows Ctrl+clicked for a group action
-        gn = self._load_settings().get("group_names", {})
+        settings = self._load_settings()
+        gn = settings.get("group_names", {})
         self._group_names = dict(gn) if isinstance(gn, dict) else {}
+        cg = settings.get("collapsed_groups", [])
+        self._collapsed_groups = set(cg) if isinstance(cg, list) else set()
 
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         sidebar.get_style_context().add_class("sidebar")
@@ -800,9 +825,12 @@ class Tabit(Gtk.Window):
     def _make_sidebar_row(self, label, sub, icon_name, tooltip):
         """Build the shared left-tab chrome; caller fills row.page / kind."""
         row = Gtk.ListBoxRow()
+        row.set_focus_on_click(False)
         hit = Gtk.EventBox()
         hit.set_visible_window(True)
         hit.set_above_child(False)
+        hit.set_can_focus(False)
+        hit.set_focus_on_click(False)
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         group_bar = Gtk.Box()
         group_bar.set_size_request(4, -1)
@@ -2075,16 +2103,28 @@ class Tabit(Gtk.Window):
             color = self._new_group_color()
             self._apply_group(target, color)
         self._apply_group(dragged, color)
+        # joining a collapsed group expands it so the new member is visible
+        if color in self._collapsed_groups:
+            self._collapsed_groups.discard(color)
+            self._save_collapsed_groups()
         self._relayout()
         self._save_sessions()
 
-    def _make_group_header(self, color):
+    def _make_group_header(self, color, member_count=0):
         row = Gtk.ListBoxRow()
         row.set_selectable(False)
+        row.set_can_focus(False)
+        row.set_focus_on_click(False)
         row.kind = "group_header"
         row.group_color = color
         row.get_style_context().add_class("group-header")
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        collapsed = color in self._collapsed_groups
+        chev = Gtk.Label(label="▶" if collapsed else "▼")
+        chev.get_style_context().add_class("group-chevron")
+        chev.set_xalign(0.5)
+        box.pack_start(chev, False, False, 0)
+        row.chevron = chev
         dot = Gtk.Box()
         dot.set_size_request(9, 9)
         dot.set_valign(Gtk.Align.CENTER)
@@ -2092,22 +2132,96 @@ class Tabit(Gtk.Window):
         dot.get_style_context().add_class("grp-" + color)
         box.pack_start(dot, False, False, 0)
         name = self._group_names.get(color) or color.capitalize()
-        box.pack_start(Gtk.Label(label=name.upper(), xalign=0), True, True, 0)
+        name_lbl = Gtk.Label(label=name.upper(), xalign=0)
+        box.pack_start(name_lbl, True, True, 0)
+        # member count shown when collapsed so you still know how many tabs hide
+        count_lbl = Gtk.Label(label=f"({member_count})" if collapsed else "")
+        count_lbl.get_style_context().add_class("group-count")
+        count_lbl.set_no_show_all(not collapsed)
+        if collapsed:
+            count_lbl.show()
+        box.pack_start(count_lbl, False, False, 0)
+        row.count_label = count_lbl
         hit = Gtk.EventBox()
+        hit.set_tooltip_text(
+            "Click to expand" if collapsed else "Click to collapse")
         hit.add(box)
         hit.connect("button-press-event", self._on_header_button, row)
+        hit.connect("button-release-event", self._on_header_release, row)
         # drag the header to move the whole group (source only; not a drop dest)
         target = Gtk.TargetEntry.new("TABIT_ROW", Gtk.TargetFlags.SAME_APP, 0)
         hit.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, [target],
                             Gdk.DragAction.MOVE)
-        hit.connect("drag-begin", self._on_row_drag_begin, row)
+        hit.connect("drag-begin", self._on_header_drag_begin, row)
         hit.connect("drag-data-get", self._on_row_drag_get)
+        row._hdr_did_drag = False
+        row._hdr_ignore_release = False
+        row._hdr_toggle_src = None
         row.add(hit)
         return row
 
+    def _cancel_header_toggle(self, row):
+        src = getattr(row, "_hdr_toggle_src", None)
+        if src is not None:
+            GLib.source_remove(src)
+            row._hdr_toggle_src = None
+
+    def _on_header_drag_begin(self, widget, context, row):
+        # dragging the header: do not treat the click as collapse/expand
+        row._hdr_did_drag = True
+        self._cancel_header_toggle(row)
+        self._on_row_drag_begin(widget, context, row)
+
+    def _on_header_release(self, _hit, event, row):
+        """Single-click (no drag / no double-click) toggles collapse."""
+        if event.button != 1:
+            return False
+        if getattr(row, "_hdr_ignore_release", False):
+            row._hdr_ignore_release = False
+            return False
+        if getattr(row, "_hdr_did_drag", False):
+            row._hdr_did_drag = False
+            return False
+        color = getattr(row, "group_color", None)
+        if not color:
+            return False
+        # delay so a double-click rename can cancel the pending toggle
+        self._cancel_header_toggle(row)
+
+        def fire():
+            row._hdr_toggle_src = None
+            self._toggle_group_collapsed(color)
+            return False
+
+        row._hdr_toggle_src = GLib.timeout_add(220, fire)
+        return False
+
+    def _set_group_collapsed(self, color, collapsed):
+        """Show or hide a group's member tabs; persist across restarts."""
+        if not color:
+            return
+        if collapsed:
+            self._collapsed_groups.add(color)
+        else:
+            self._collapsed_groups.discard(color)
+        self._save_collapsed_groups()
+        self._relayout()
+
+    def _toggle_group_collapsed(self, color):
+        self._set_group_collapsed(color, color not in self._collapsed_groups)
+
+    def _apply_group_collapse(self):
+        """Hide member rows of collapsed groups (after show_all)."""
+        for r in self._session_rows():
+            g = getattr(r, "group_color", None)
+            if g and g in self._collapsed_groups:
+                r.hide()
+            else:
+                r.show()
+
     def _relayout(self):
         """Rebuild the sidebar: each group's members cluster under a color
-        header, ungrouped tabs keep their place. No collapsing."""
+        header, ungrouped tabs keep their place. Collapsed groups hide members."""
         children = self.listbox.get_children()
         for h in children:
             if getattr(h, "kind", None) == "group_header":
@@ -2119,8 +2233,9 @@ class Tabit(Gtk.Window):
             if g:
                 if g in emitted:
                     continue
-                seq.append(self._make_group_header(g))
-                seq.extend(m for m in sessions if m.group_color == g)
+                members = [m for m in sessions if m.group_color == g]
+                seq.append(self._make_group_header(g, member_count=len(members)))
+                seq.extend(members)
                 emitted.add(g)
             else:
                 seq.append(r)
@@ -2131,27 +2246,49 @@ class Tabit(Gtk.Window):
         self._order_seq = len(seq)
         self.listbox.invalidate_sort()
         self.listbox.show_all()
-        # forget names of colors no longer in use; persist so a later reuse of
-        # that color can't inherit the deleted group's name after a restart
+        self._apply_group_collapse()
+        # forget names / collapse flags of colors no longer in use
         pruned = False
         for c in list(self._group_names):
             if c not in emitted:
                 del self._group_names[c]
                 pruned = True
+        collapsed_pruned = False
+        for c in list(self._collapsed_groups):
+            if c not in emitted:
+                self._collapsed_groups.discard(c)
+                collapsed_pruned = True
         if pruned:
             self._save_group_names()
+        if collapsed_pruned:
+            self._save_collapsed_groups()
 
     def _save_group_names(self):
         self._save_settings({"group_names": self._group_names})
 
+    def _save_collapsed_groups(self):
+        self._save_settings({"collapsed_groups": sorted(self._collapsed_groups)})
+
     def _on_header_button(self, _hit, event, row):
         color = getattr(row, "group_color", "red")
+        if event.button == 1 and event.type == Gdk.EventType.BUTTON_PRESS:
+            # start of a potential click; drag-begin will clear this
+            row._hdr_did_drag = False
+            return False
         if event.button == 1 and event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS:
+            # double-click renames; cancel any pending single-click toggle
+            self._cancel_header_toggle(row)
+            row._hdr_ignore_release = True
             GLib.idle_add(self._rename_group, row)
             return True
         if event.button != 3 or event.type != Gdk.EventType.BUTTON_PRESS:
             return False
+        self._cancel_header_toggle(row)
         menu = Gtk.Menu()
+        collapsed = color in self._collapsed_groups
+        ce = Gtk.MenuItem(label="Expand group" if collapsed else "Collapse group")
+        ce.connect("activate",
+                   lambda *_: self._set_group_collapsed(color, not collapsed))
         rn = Gtk.MenuItem(label="Edit group…")
         rn.connect("activate", lambda *_: self._rename_group(row))
         up = Gtk.MenuItem(label="Move group up")
@@ -2160,7 +2297,7 @@ class Tabit(Gtk.Window):
         dn.connect("activate", lambda *_: self._move_group(color, 1))
         ug = Gtk.MenuItem(label="Ungroup")
         ug.connect("activate", lambda *_: self._ungroup(color))
-        for it in (rn, up, dn, ug):
+        for it in (ce, rn, up, dn, ug):
             menu.append(it)
         menu.show_all()
         menu.popup_at_pointer(event)
@@ -2280,6 +2417,10 @@ class Tabit(Gtk.Window):
                 elif color in self._group_names:
                     self._group_names[new_color] = self._group_names[color]
                 self._group_names.pop(color, None)
+                if color in self._collapsed_groups:
+                    self._collapsed_groups.discard(color)
+                    self._collapsed_groups.add(new_color)
+                    self._save_collapsed_groups()
                 self._save_sessions()
             else:
                 if name:
@@ -2312,6 +2453,9 @@ class Tabit(Gtk.Window):
                 self._apply_group(r, None)
         self._group_names.pop(color, None)
         self._save_group_names()
+        if color in self._collapsed_groups:
+            self._collapsed_groups.discard(color)
+            self._save_collapsed_groups()
         self._relayout()
         self._save_sessions()
 
@@ -3847,8 +3991,17 @@ class Tabit(Gtk.Window):
                                  -1 if action == "move_group_up" else 1)
             else:
                 return False
+        elif action == "toggle_group_collapse":
+            # fold/unfold the group of the focused tab
+            if row is not None and getattr(row, "group_color", None):
+                self._toggle_group_collapsed(row.group_color)
+            else:
+                return False
         elif action in ("prev_session", "next_session"):
-            rows = self._session_rows()  # skip group headers
+            # skip hidden (collapsed) tabs; keep current even if it is collapsed
+            all_rows = self._session_rows()  # skip group headers
+            rows = [r for r in all_rows
+                    if r.get_visible() or r is row]
             if not rows:
                 return True
             current = row
