@@ -2949,7 +2949,7 @@ class Tabit(Gtk.Window):
 
         # 10. SSH Magic Words (optional)
         magic_words_entry = Gtk.Entry(text=last.get("magic_words", ""), width_chars=24)
-        magic_words_entry.set_placeholder_text("e.g. chall_calc,chall_calc (optional)")
+        magic_words_entry.set_placeholder_text("e.g. chall_calc (optional)")
         magic_words_entry.set_hexpand(True)
 
         # 11. Passcode Binary Path (optional)
