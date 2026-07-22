@@ -2909,9 +2909,9 @@ class Tabit(Gtk.Window):
         pwd_entry.set_placeholder_text("•••••••• (default)")
         pwd_entry.set_hexpand(True)
 
-        # 4. Ticket (optional)
+        # 4. Passcode (optional)
         ticket_entry = Gtk.Entry(text=last.get("ticket", ""), width_chars=24)
-        ticket_entry.set_placeholder_text("8 hex chars (optional)")
+        ticket_entry.set_placeholder_text("Passcode (optional)")
         ticket_entry.set_hexpand(True)
 
         # 5. Organization (optional)
@@ -2970,7 +2970,7 @@ class Tabit(Gtk.Window):
         grid.attach(Gtk.Label(label="Password", xalign=0), 0, 3, 1, 1)
         grid.attach(pwd_entry, 1, 3, 1, 1)
 
-        grid.attach(Gtk.Label(label="Ticket", xalign=0), 0, 4, 1, 1)
+        grid.attach(Gtk.Label(label="Passcode", xalign=0), 0, 4, 1, 1)
         grid.attach(ticket_entry, 1, 4, 1, 1)
 
         grid.attach(Gtk.Label(label="Organization", xalign=0), 0, 5, 1, 1)
