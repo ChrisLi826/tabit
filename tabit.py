@@ -2899,14 +2899,14 @@ class Tabit(Gtk.Window):
         env_combo.set_active(active_env_idx)
         env_combo.set_hexpand(True)
 
-        # 3. Authentication: Email & Password (default fallback if empty)
+        # 3. Authentication: Email & Password
         email_entry = Gtk.Entry(text=last.get("email", ""), width_chars=24)
-        email_entry.set_placeholder_text("user@senao.com (default)")
+        email_entry.set_placeholder_text("Email (e.g. user@senao.com)")
         email_entry.set_hexpand(True)
 
         pwd_entry = Gtk.Entry(text=last.get("password", ""), width_chars=24)
         pwd_entry.set_visibility(False)
-        pwd_entry.set_placeholder_text("•••••••• (default)")
+        pwd_entry.set_placeholder_text("Password")
         pwd_entry.set_hexpand(True)
 
         # 4. Passcode (optional)
@@ -3023,8 +3023,8 @@ class Tabit(Gtk.Window):
             sn = sn_entry.get_text().strip()
             if sn:
                 env_val = envs[env_combo.get_active()]
-                email_val = email_entry.get_text().strip() or "user@senao.com"
-                pwd_val = pwd_entry.get_text().strip() or "password_placeholder"
+                email_val = email_entry.get_text().strip()
+                pwd_val = pwd_entry.get_text().strip()
                 ticket_val = ticket_entry.get_text().strip()
                 org_val = org_entry.get_text().strip()
                 net_val = net_entry.get_text().strip()
