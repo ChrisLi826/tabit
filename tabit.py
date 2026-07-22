@@ -2952,10 +2952,10 @@ class Tabit(Gtk.Window):
         magic_words_entry.set_placeholder_text("e.g. chall_calc (optional)")
         magic_words_entry.set_hexpand(True)
 
-        # 11. Passcode Binary Path (optional)
-        chall_calc_bin_entry = Gtk.Entry(text=last.get("chall_calc_bin", ""), width_chars=24)
-        chall_calc_bin_entry.set_placeholder_text("Path to chall_calc binary (optional)")
-        chall_calc_bin_entry.set_hexpand(True)
+        # 11. Challenge Response Binary Path (optional)
+        chall_bin_entry = Gtk.Entry(text=last.get("chall_bin", ""), width_chars=24)
+        chall_bin_entry.set_placeholder_text("Path to chall_bin binary (optional)")
+        chall_bin_entry.set_hexpand(True)
 
         # 12. Bypass Cache (--no-cache)
         nocache_chk = Gtk.CheckButton(label="Bypass device cache (--no-cache)")
@@ -3000,8 +3000,8 @@ class Tabit(Gtk.Window):
         grid.attach(Gtk.Label(label="Magic Words", xalign=0), 0, 10, 1, 1)
         grid.attach(magic_words_entry, 1, 10, 1, 1)
 
-        grid.attach(Gtk.Label(label="Passcode Bin", xalign=0), 0, 11, 1, 1)
-        grid.attach(chall_calc_bin_entry, 1, 11, 1, 1)
+        grid.attach(Gtk.Label(label="Chall Bin", xalign=0), 0, 11, 1, 1)
+        grid.attach(chall_bin_entry, 1, 11, 1, 1)
 
         grid.attach(nocache_chk, 1, 12, 1, 1)
         grid.attach(use_tmux_chk, 1, 13, 1, 1)
@@ -3049,7 +3049,7 @@ class Tabit(Gtk.Window):
                 gw_pass_val = gw_pass_entry.get_text().strip()
                 fb_passes_val = fb_passes_entry.get_text().strip()
                 magic_words_val = magic_words_entry.get_text().strip()
-                chall_calc_bin_val = chall_calc_bin_entry.get_text().strip()
+                chall_bin_val = chall_bin_entry.get_text().strip()
 
                 # Save last used credentials/parameters
                 self._save_connect_last({
@@ -3066,7 +3066,7 @@ class Tabit(Gtk.Window):
                     "gateway_pass": gw_pass_val,
                     "fallback_passes": fb_passes_val,
                     "magic_words": magic_words_val,
-                    "chall_calc_bin": chall_calc_bin_val,
+                    "chall_bin": chall_bin_val,
                 })
 
                 # Build raw command args
@@ -3089,8 +3089,8 @@ class Tabit(Gtk.Window):
                     raw_cmd.extend(["--fallback-passes", fb_passes_val])
                 if magic_words_val:
                     raw_cmd.extend(["--magic-words", magic_words_val])
-                if chall_calc_bin_val:
-                    raw_cmd.extend(["--chall_calc-bin", chall_calc_bin_val])
+                if chall_bin_val:
+                    raw_cmd.extend(["--chall-bin", chall_bin_val])
 
                 if use_tmux_val:
                     session_name = f"conn-{sn.lower()}"
