@@ -700,20 +700,18 @@ class Tabit(Gtk.Window):
                     lab = s.get("label") or None
                     if lab and lab.endswith(" *"):
                         lab = lab[:-2]
-                    self._add_note_session(path=path, label=lab,
-                                           sub=s.get("sub"))
+                    r = self._add_note_session(path=path, label=lab,
+                                               sub=s.get("sub"))
                 else:
                     argv = s["argv"]
                     if ai_fresh and s.get("icon") == ICON_AI:
                         argv = self._ai_argv_plain(argv)  # no continue/resume
-                    self._add_session(s["label"], argv, s["icon"],
-                                      s.get("sub"), s.get("cwd"),
-                                      s.get("track_cwd", False))
+                    r = self._add_session(s["label"], argv, s["icon"],
+                                          s.get("sub"), s.get("cwd"),
+                                          s.get("track_cwd", False))
                 color = s.get("color")
-                if color:  # restore the tab-group stripe on the new row
-                    r = self.listbox.get_selected_row()
-                    if r is not None:
-                        self._apply_group(r, color)
+                if color and r is not None:  # restore the tab-group stripe on the new row
+                    self._apply_group(r, color)
             except (KeyError, TypeError, OSError):
                 continue  # skip broken entries in a hand-edited file
         self._relayout()  # build group headers + cluster restored members
@@ -964,6 +962,7 @@ class Tabit(Gtk.Window):
         term.spawn_async(Vte.PtyFlags.DEFAULT, workdir, argv,
                          None, GLib.SpawnFlags.SEARCH_PATH, None, None,
                          -1, None, self._on_term_spawned, row)
+        return row
 
     # --- quick command bar ------------------------------------------------
 
@@ -1270,6 +1269,7 @@ class Tabit(Gtk.Window):
         self._note_tune_perf(row)  # apply language only if not huge
         self._refresh_note_title(row)
         view.grab_focus()
+        return row
 
     def _note_buffer_stats(self, buf):
         start, end = buf.get_bounds()
@@ -2540,27 +2540,31 @@ class Tabit(Gtk.Window):
             return
         if getattr(row, "kind", None) == "group_header":
             self.listbox.grab_focus()
-            GLib.idle_add(self._scroll_to_row, row)
+            GLib.timeout_add(50, self._scroll_to_row, row)
             return
         row.dot.hide()
         self.stack.set_visible_child(row.page)
         self.set_title(f"{row.session_label} — tabit")
         self._focus_row_content(row)
-        GLib.idle_add(self._scroll_to_row, row)
+        GLib.timeout_add(50, self._scroll_to_row, row)
 
     def _scroll_to_row(self, row):
         if row is None or not hasattr(self, "sidebar_scroll"):
             return False
+        if row.get_parent() is None:
+            return False
         adj = self.sidebar_scroll.get_vadjustment()
         if not adj:
             return False
-        res = row.translate_coordinates(self.listbox, 0, 0)
-        if not res:
+        alloc = row.get_allocation()
+        row_y = alloc.y
+        row_h = alloc.height
+        if row_h <= 1:
             return False
-        _, _, row_y = res
-        row_h = row.get_allocated_height()
         value = adj.get_value()
         page_size = adj.get_page_size()
+        if page_size <= 1:
+            return False
         if row_y < value:
             adj.set_value(max(0, row_y - 4))
         elif row_y + row_h > value + page_size:
