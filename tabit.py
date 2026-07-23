@@ -2523,6 +2523,8 @@ class Tabit(Gtk.Window):
         self._clear_marks()  # a plain tab switch drops any Ctrl+click marks
         if row is None:
             return
+        if getattr(row, "kind", None) == "group_header":
+            return
         row.dot.hide()
         self.stack.set_visible_child(row.page)
         self.set_title(f"{row.session_label} — tabit")
@@ -3998,9 +4000,9 @@ class Tabit(Gtk.Window):
             else:
                 return False
         elif action in ("prev_session", "next_session"):
-            # skip hidden (collapsed) tabs; keep current even if it is collapsed
-            all_rows = self._session_rows()  # skip group headers
-            rows = [r for r in all_rows
+            all_items = self.listbox.get_children()
+            all_items.sort(key=lambda r: getattr(r, "_order", 9999))
+            rows = [r for r in all_items
                     if r.get_visible() or r is row]
             if not rows:
                 return True
@@ -4033,6 +4035,14 @@ class Tabit(Gtk.Window):
         """Shared by window, terminal, and note editor."""
         if event.type != Gdk.EventType.KEY_PRESS:
             return False
+
+        row = self.listbox.get_selected_row()
+        if row is not None and getattr(row, "kind", None) == "group_header":
+            key_name = (Gdk.keyval_name(event.keyval) or "").lower()
+            if key_name in ("space", "return", "kp_enter") and not (event.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK)):
+                self._toggle_group_collapsed(row.group_color)
+                return True
+
         action = self._match_action(event)
         if not action:
             return False
