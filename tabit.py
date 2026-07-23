@@ -2206,6 +2206,10 @@ class Tabit(Gtk.Window):
             self._collapsed_groups.discard(color)
         self._save_collapsed_groups()
         self._relayout()
+        header_row = next((r for r in self.listbox.get_children()
+                           if getattr(r, "kind", None) == "group_header" and getattr(r, "group_color", None) == color), None)
+        if header_row:
+            self.listbox.select_row(header_row)
 
     def _toggle_group_collapsed(self, color):
         self._set_group_collapsed(color, color not in self._collapsed_groups)
