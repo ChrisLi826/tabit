@@ -467,10 +467,88 @@ def get_theme_css(theme_key):
 .group-bar.grp-pink    {{ background-color: #f38ba8; }}
 .group-bar.grp-gray    {{ background-color: #a9b1d6; }}
 .group-bar.grp-white   {{ background-color: #ffffff; }}
-.group-header {{ padding: 5px 6px 1px 8px; }}
-.group-header label {{ font-size: 8pt; font-weight: 600; color: {s['subtext']}; }}
-.group-chevron {{ font-size: 8pt; color: {s['subtext']}; min-width: 12px; }}
-.group-count {{ font-size: 8pt; color: {s['subtext']}; }}
+.sidebar row.group-header {{ border-radius: 6px; padding: 4px 6px 4px 4px; margin-bottom: 2px; }}
+.sidebar row.group-header label,
+.sidebar row.group-header .group-chevron,
+.sidebar row.group-header .group-count {{ font-size: 8pt; font-weight: 600; }}
+
+.sidebar row.group-header.grp-red     {{ background: rgba(247, 118, 142, 0.08); }}
+.sidebar row.group-header.grp-red:hover {{ background: rgba(247, 118, 142, 0.15); }}
+.sidebar row.group-header.grp-red label,
+.sidebar row.group-header.grp-red .group-chevron,
+.sidebar row.group-header.grp-red .group-count {{ color: #f7768e; }}
+
+.sidebar row.group-header.grp-orange  {{ background: rgba(255, 158, 100, 0.08); }}
+.sidebar row.group-header.grp-orange:hover {{ background: rgba(255, 158, 100, 0.15); }}
+.sidebar row.group-header.grp-orange label,
+.sidebar row.group-header.grp-orange .group-chevron,
+.sidebar row.group-header.grp-orange .group-count {{ color: #ff9e64; }}
+
+.sidebar row.group-header.grp-yellow  {{ background: rgba(224, 175, 104, 0.08); }}
+.sidebar row.group-header.grp-yellow:hover {{ background: rgba(224, 175, 104, 0.15); }}
+.sidebar row.group-header.grp-yellow label,
+.sidebar row.group-header.grp-yellow .group-chevron,
+.sidebar row.group-header.grp-yellow .group-count {{ color: #e0af68; }}
+
+.sidebar row.group-header.grp-green   {{ background: rgba(158, 206, 106, 0.08); }}
+.sidebar row.group-header.grp-green:hover {{ background: rgba(158, 206, 106, 0.15); }}
+.sidebar row.group-header.grp-green label,
+.sidebar row.group-header.grp-green .group-chevron,
+.sidebar row.group-header.grp-green .group-count {{ color: #9ece6a; }}
+
+.sidebar row.group-header.grp-teal    {{ background: rgba(26, 188, 156, 0.08); }}
+.sidebar row.group-header.grp-teal:hover {{ background: rgba(26, 188, 156, 0.15); }}
+.sidebar row.group-header.grp-teal label,
+.sidebar row.group-header.grp-teal .group-chevron,
+.sidebar row.group-header.grp-teal .group-count {{ color: #1abc9c; }}
+
+.sidebar row.group-header.grp-cyan    {{ background: rgba(125, 207, 255, 0.08); }}
+.sidebar row.group-header.grp-cyan:hover {{ background: rgba(125, 207, 255, 0.15); }}
+.sidebar row.group-header.grp-cyan label,
+.sidebar row.group-header.grp-cyan .group-chevron,
+.sidebar row.group-header.grp-cyan .group-count {{ color: #7dcfff; }}
+
+.sidebar row.group-header.grp-blue    {{ background: rgba(122, 162, 247, 0.08); }}
+.sidebar row.group-header.grp-blue:hover {{ background: rgba(122, 162, 247, 0.15); }}
+.sidebar row.group-header.grp-blue label,
+.sidebar row.group-header.grp-blue .group-chevron,
+.sidebar row.group-header.grp-blue .group-count {{ color: #7aa2f7; }}
+
+.sidebar row.group-header.grp-indigo  {{ background: rgba(192, 202, 245, 0.08); }}
+.sidebar row.group-header.grp-indigo:hover {{ background: rgba(192, 202, 245, 0.15); }}
+.sidebar row.group-header.grp-indigo label,
+.sidebar row.group-header.grp-indigo .group-chevron,
+.sidebar row.group-header.grp-indigo .group-count {{ color: #c0caf5; }}
+
+.sidebar row.group-header.grp-purple  {{ background: rgba(157, 124, 216, 0.08); }}
+.sidebar row.group-header.grp-purple:hover {{ background: rgba(157, 124, 216, 0.15); }}
+.sidebar row.group-header.grp-purple label,
+.sidebar row.group-header.grp-purple .group-chevron,
+.sidebar row.group-header.grp-purple .group-count {{ color: #9d7cd8; }}
+
+.sidebar row.group-header.grp-pink    {{ background: rgba(243, 139, 168, 0.08); }}
+.sidebar row.group-header.grp-pink:hover {{ background: rgba(243, 139, 168, 0.15); }}
+.sidebar row.group-header.grp-pink label,
+.sidebar row.group-header.grp-pink .group-chevron,
+.sidebar row.group-header.grp-pink .group-count {{ color: #f38ba8; }}
+
+.sidebar row.group-header.grp-gray    {{ background: rgba(169, 177, 214, 0.08); }}
+.sidebar row.group-header.grp-gray:hover {{ background: rgba(169, 177, 214, 0.15); }}
+.sidebar row.group-header.grp-gray label,
+.sidebar row.group-header.grp-gray .group-chevron,
+.sidebar row.group-header.grp-gray .group-count {{ color: #a9b1d6; }}
+
+.sidebar row.group-header.grp-white   {{ background: rgba(255, 255, 255, 0.08); }}
+.sidebar row.group-header.grp-white:hover {{ background: rgba(255, 255, 255, 0.15); }}
+.sidebar row.group-header.grp-white label,
+.sidebar row.group-header.grp-white .group-chevron,
+.sidebar row.group-header.grp-white .group-count {{ color: #ffffff; }}
+
+.sidebar row:selected label,
+.sidebar row:selected .group-chevron,
+.sidebar row:selected .group-count {{
+    color: #ffffff !important;
+}}
 .group-dot {{ border-radius: 50%; }}
 .group-dot.grp-red     {{ background-color: #f7768e; }}
 .group-dot.grp-orange  {{ background-color: #ff9e64; }}
@@ -2125,6 +2203,7 @@ class Tabit(Gtk.Window):
         row.kind = "group_header"
         row.group_color = color
         row.get_style_context().add_class("group-header")
+        row.get_style_context().add_class("grp-" + color)
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         collapsed = color in self._collapsed_groups
         chev = Gtk.Label(label="▶" if collapsed else "▼")
