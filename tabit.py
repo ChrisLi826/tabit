@@ -2224,8 +2224,10 @@ class Tabit(Gtk.Window):
         for r in self._session_rows():
             g = getattr(r, "group_color", None)
             if g and g in self._collapsed_groups:
+                r.set_no_show_all(True)
                 r.hide()
             else:
+                r.set_no_show_all(False)
                 r.show()
 
     def _relayout(self):
