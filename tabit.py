@@ -589,8 +589,8 @@ KEY_ACTIONS = (
     ("move_tab_down", "Move tab down", "<Primary><Shift>Page_Down"),
     ("move_group_up", "Move group up", "<Primary><Alt><Shift>Page_Up"),
     ("move_group_down", "Move group down", "<Primary><Alt><Shift>Page_Down"),
-    # Ctrl+Alt+G: toggle fold of the focused tab's group (G = group)
-    ("toggle_group_collapse", "Toggle group collapse", "<Primary><Alt>g"),
+    # Return/Space: toggle fold of the focused group header
+    ("toggle_group_collapse", "Toggle group collapse", "Return"),
     ("copy", "Copy", "<Primary><Shift>c"),
     ("paste", "Paste", "<Primary><Shift>v"),
 )
@@ -4060,8 +4060,7 @@ class Tabit(Gtk.Window):
             else:
                 return False
         elif action == "toggle_group_collapse":
-            # fold/unfold the group of the focused tab
-            if row is not None and getattr(row, "group_color", None):
+            if row is not None and getattr(row, "kind", None) == "group_header":
                 self._toggle_group_collapsed(row.group_color)
             else:
                 return False
