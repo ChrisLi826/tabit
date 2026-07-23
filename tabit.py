@@ -2448,7 +2448,7 @@ class Tabit(Gtk.Window):
 
         def on_key(_w, event):
             key_name = (Gdk.keyval_name(event.keyval) or "").lower()
-            focused = pop.get_focus()
+            focused = _w
 
             if key_name == "escape":
                 pop.popdown()
