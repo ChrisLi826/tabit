@@ -426,6 +426,10 @@ def get_theme_colors(theme_key):
 
 def get_theme_css(theme_key):
     s = get_theme_colors(theme_key)
+    settings = Tabit._load_settings()
+    ui_sz = settings.get("ui_font_size", 10)
+    sz_sub = max(6, ui_sz - 2)
+    sz_btn = max(7, ui_sz - 1)
     css_text = f"""
 .sidebar {{ background-color: {s['sidebar_bg']}; border-right: 1px solid {s['border']}; }}
 .sidebar list {{ background: transparent; }}
@@ -445,6 +449,7 @@ def get_theme_css(theme_key):
 .sidebar row {{ border-radius: 6px; border-left: 3px solid transparent;
                padding: 4px 6px 4px 4px; color: {s['text']};
                outline: none; outline-width: 0; }}
+.sidebar row label {{ font-size: {ui_sz}pt; }}
 .sidebar row:hover {{ background: {s['hover']}; }}
 .sidebar row:selected {{ background: {s['selection']};
                         border-left-color: {s['accent']}; color: #ffffff;
@@ -470,7 +475,7 @@ def get_theme_css(theme_key):
 .sidebar row.group-header {{ border-radius: 6px; padding: 4px 6px 4px 4px; margin-bottom: 2px; }}
 .sidebar row.group-header label,
 .sidebar row.group-header .group-chevron,
-.sidebar row.group-header .group-count {{ font-size: 8pt; font-weight: 600; }}
+.sidebar row.group-header .group-count {{ font-size: {sz_sub}pt; font-weight: 600; }}
 
 .sidebar row.group-header.grp-red     {{ background: rgba(247, 118, 142, 0.08); }}
 .sidebar row.group-header.grp-red:hover {{ background: rgba(247, 118, 142, 0.15); }}
@@ -576,21 +581,21 @@ def get_theme_css(theme_key):
 .ic-command {{ color: #f7768e; }}
 .ic-tmux    {{ color: #bb9af7; }}
 .ic-connect {{ color: #73daca; }}
-.session-sub {{ color: {s['subtext']}; font-size: 8pt; }}
-.activity {{ color: {s['accent']}; font-size: 8pt; }}
+.session-sub {{ color: {s['subtext']}; font-size: {sz_sub}pt; }}
+.activity {{ color: {s['accent']}; font-size: {sz_sub}pt; }}
 .adder {{ background-color: {s['adder_bg']}; border-top: 1px solid {s['border']};
          padding-top: 4px; }}
-.adder button {{ padding: 4px 8px; font-size: 9pt; color: {s['subtext']}; }}
+.adder button {{ padding: 4px 8px; font-size: {sz_btn}pt; color: {s['subtext']}; }}
 .adder button:hover {{ color: #ffffff; background: {s['hover']}; }}
-.section {{ color: {s['subtext']}; font-size: 8pt; font-weight: 600;
+.section {{ color: {s['subtext']}; font-size: {sz_sub}pt; font-weight: 600;
            padding: 12px 8px 3px 8px; }}
 .sidebar eventbox {{ background-color: transparent; }}
 .note-tools {{ background-color: {s['sidebar_bg']}; border-top: 1px solid {s['border']};
               padding: 4px 6px; }}
-.note-tools button {{ padding: 2px 8px; font-size: 9pt; }}
+.note-tools button {{ padding: 2px 8px; font-size: {sz_btn}pt; }}
 .cmd-bar {{ background-color: {s['sidebar_bg']}; border-top: 1px solid {s['border']};
            padding: 4px 6px; }}
-.cmd-bar button {{ padding: 2px 10px; font-size: 9pt; }}
+.cmd-bar button {{ padding: 2px 10px; font-size: {sz_btn}pt; }}
 paned > separator {{
     min-width: 2px;
     padding: 0;
@@ -687,6 +692,9 @@ DEFAULT_SETTINGS = {
     "ai_fresh_on_restore": False,  # restored AI tabs start fresh (no continue)
     "group_names": {},             # tab-group color -> display name
     "collapsed_groups": [],        # group colors whose member tabs are hidden
+    "ui_font_size": 10,
+    "term_font": "Monospace",
+    "term_font_size": 12,
 }
 
 
@@ -721,7 +729,7 @@ class Tabit(Gtk.Window):
 
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         sidebar.get_style_context().add_class("sidebar")
-        sidebar.set_size_request(120, -1)  # min width; actual set by paned
+        sidebar.set_size_request(175, -1)  # min width; actual set by paned
         sidebar.pack_start(self._section("SESSIONS"), False, False, 0)
         self.sidebar_scroll = Gtk.ScrolledWindow()
         self.sidebar_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -731,7 +739,8 @@ class Tabit(Gtk.Window):
         adders.get_style_context().add_class("adder")
         for side in ("start", "end", "bottom"):
             getattr(adders, f"set_margin_{side}")(4)
-        # icons match the session tab icons
+
+        action_grid = Gtk.Grid(row_spacing=2, column_spacing=4)
         button_items = [
             ("+ Serial", "network-wired-symbolic", self._on_add_serial),
             ("+ Shell", "utilities-terminal-symbolic", self._on_add_shell),
@@ -744,13 +753,22 @@ class Tabit(Gtk.Window):
             ("+ Command", ICON_COMMAND, self._on_add_command),
             ("+ tmux", ICON_TMUX, self._on_add_tmux),
         ])
-        for text, icon, handler in button_items:
+
+        for i, (text, icon, handler) in enumerate(button_items):
             btn = Gtk.Button(label=text)
             btn.set_image(self._session_icon(icon))
             btn.set_always_show_image(True)
             btn.set_image_position(Gtk.PositionType.LEFT)
             btn.connect("clicked", handler)
-            adders.pack_start(btn, False, False, 0)
+            btn.set_hexpand(True)
+            col = i % 2
+            row_idx = i // 2
+            action_grid.attach(btn, col, row_idx, 1, 1)
+
+        adders.pack_start(action_grid, False, False, 0)
+
+        system_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        system_box.set_margin_top(6)
         for text, icon, handler in (
                 ("Settings…", "preferences-system-symbolic",
                  self._on_edit_settings),
@@ -762,7 +780,10 @@ class Tabit(Gtk.Window):
             btn.set_always_show_image(True)
             btn.set_image_position(Gtk.PositionType.LEFT)
             btn.connect("clicked", handler)
-            adders.pack_start(btn, False, False, 0)
+            btn.set_hexpand(True)
+            system_box.pack_start(btn, True, True, 0)
+
+        adders.pack_start(system_box, False, False, 0)
         sidebar.pack_start(adders, False, False, 0)
 
         self._paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -996,6 +1017,13 @@ class Tabit(Gtk.Window):
             palette.append(c)
         term.set_colors(fg, bg, palette)
 
+    def _apply_term_font(self, term):
+        settings = self._load_settings()
+        family = settings.get("term_font", "Monospace")
+        size = settings.get("term_font_size", 12)
+        font_desc = Pango.FontDescription.from_string(f"{family} {size}")
+        term.set_font(font_desc)
+
     def _apply_theme(self, theme_key):
         self.theme = theme_key
         theme_info = get_theme_colors(theme_key)
@@ -1003,12 +1031,14 @@ class Tabit(Gtk.Window):
         for row in self.listbox.get_children():
             if getattr(row, "kind", None) == "term" and getattr(row, "term", None) is not None:
                 self._apply_term_colors(row.term, theme_info)
+                self._apply_term_font(row.term)
 
     def _add_session(self, label, argv, icon_name, sub=None, cwd=None,
                      track_cwd=False):
         term = Vte.Terminal()
         term.set_scrollback_lines(10000)
         self._apply_term_colors(term)
+        self._apply_term_font(term)
         term.connect("key-press-event", self._on_term_key)
         term.connect("button-press-event", self._on_term_button)
         term.drag_dest_set(Gtk.DestDefaults.ALL,
@@ -1997,7 +2027,10 @@ class Tabit(Gtk.Window):
 
     def _move_session(self, delta):
         row = self.listbox.get_selected_row()
-        if row is None or getattr(row, "kind", None) == "group_header":
+        if row is None:
+            return
+        if getattr(row, "kind", None) == "group_header":
+            self._move_group(row.group_color, delta)
             return
         rows = self._session_rows()  # ignore group-header rows
         if row not in rows:
@@ -4306,6 +4339,8 @@ class Tabit(Gtk.Window):
             if getattr(row, "kind", None) == "note" and row.view is not None:
                 row.view.set_wrap_mode(mode)
 
+
+
     def _on_edit_settings(self, _btn):
         s = self._load_settings()
         dialog = Gtk.Dialog(title="Settings", transient_for=self, modal=True)
@@ -4316,6 +4351,74 @@ class Tabit(Gtk.Window):
         box.set_spacing(10)
         for side in ("top", "bottom", "start", "end"):
             getattr(box, f"set_margin_{side}")(12)
+
+        # 獲取系統等寬字型
+        context = self.get_pango_context()
+        mono_fonts = []
+        try:
+            for f in context.list_families():
+                if f.is_monospace():
+                    mono_fonts.append(f.get_name())
+        except Exception:
+            pass
+        if not mono_fonts:
+            mono_fonts = ["Monospace", "Courier New", "DejaVu Sans Mono", "Liberation Mono"]
+        mono_fonts.sort()
+
+        # 預覽 Demo Label 與 Frame
+        demo_frame = Gtk.Frame(label="Font Preview")
+        demo_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin=8)
+        demo_lbl = Gtk.Label(label="Tabit Font Preview — The quick brown fox jumps over 1234567890")
+        demo_box.pack_start(demo_lbl, True, True, 0)
+        demo_frame.add(demo_box)
+
+        # 更新預覽函數
+        def update_preview(*_a):
+            t_font = (term_font_combo.get_active_text() or term_font_combo.get_child().get_text() or "").strip() or "Monospace"
+            try:
+                t_sz = int(term_size_spin.entry.get_text() or "12")
+            except ValueError:
+                t_sz = 12
+            font_desc = Pango.FontDescription.from_string(f"{t_font} {t_sz}")
+            demo_lbl.override_font(font_desc)
+
+        # 客製化 [- 12 +] 微調按鈕
+        def make_custom_spin(initial_val, min_val, max_val):
+            sbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+            sbox.get_style_context().add_class("linked")
+            dec_btn = Gtk.Button(label="−")
+            entry = Gtk.Entry(text=str(initial_val), width_chars=4, xalign=0.5)
+            inc_btn = Gtk.Button(label="+")
+            
+            def on_changed(w):
+                text = w.get_text().strip()
+                clean = "".join(c for c in text if c.isdigit())
+                if clean:
+                    v = int(clean)
+                    if v < min_val: v = min_val
+                    if v > max_val: v = max_val
+                    if clean != text or str(v) != text:
+                        w.set_text(str(v))
+                update_preview()
+                
+            entry.connect("changed", on_changed)
+            
+            def adjust(delta):
+                try:
+                    v = int(entry.get_text() or min_val)
+                except ValueError:
+                    v = initial_val
+                v = max(min_val, min(max_val, v + delta))
+                entry.set_text(str(v))
+                update_preview()
+                
+            dec_btn.connect("clicked", lambda _: adjust(-1))
+            inc_btn.connect("clicked", lambda _: adjust(1))
+            sbox.pack_start(dec_btn, False, False, 0)
+            sbox.pack_start(entry, False, False, 0)
+            sbox.pack_start(inc_btn, False, False, 0)
+            sbox.entry = entry
+            return sbox
 
         app_head = Gtk.Label(xalign=0)
         app_head.set_markup("<b>Appearance</b>")
@@ -4332,6 +4435,35 @@ class Tabit(Gtk.Window):
         theme_combo.set_active(active_idx)
         theme_box.pack_start(theme_lbl, False, False, 0)
         theme_box.pack_start(theme_combo, True, True, 0)
+
+        ui_font_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        ui_font_lbl = Gtk.Label(label="UI font size (pt):", xalign=0)
+        ui_font_spin = make_custom_spin(s.get("ui_font_size", 10), 6, 24)
+        ui_font_box.pack_start(ui_font_lbl, False, False, 0)
+        ui_font_box.pack_start(ui_font_spin, False, False, 0)
+
+        term_font_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        term_font_lbl = Gtk.Label(label="Terminal font family:", xalign=0)
+        term_font_combo = Gtk.ComboBoxText.new_with_entry()
+        cur_font = s.get("term_font", "Monospace")
+        active_font_idx = -1
+        for idx, name in enumerate(mono_fonts):
+            term_font_combo.append_text(name)
+            if name == cur_font:
+                active_font_idx = idx
+        if active_font_idx != -1:
+            term_font_combo.set_active(active_font_idx)
+        else:
+            term_font_combo.get_child().set_text(cur_font)
+        term_font_combo.connect("changed", update_preview)
+        term_font_box.pack_start(term_font_lbl, False, False, 0)
+        term_font_box.pack_start(term_font_combo, True, True, 0)
+
+        term_size_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        term_size_lbl = Gtk.Label(label="Terminal font size (pt):", xalign=0)
+        term_size_spin = make_custom_spin(s.get("term_font_size", 12), 6, 28)
+        term_size_box.pack_start(term_size_lbl, False, False, 0)
+        term_size_box.pack_start(term_size_spin, False, False, 0)
 
         head = Gtk.Label(xalign=0)
         head.set_markup("<b>Notes</b>")
@@ -4364,6 +4496,10 @@ class Tabit(Gtk.Window):
         hint.get_style_context().add_class("session-sub")
         box.pack_start(app_head, False, False, 0)
         box.pack_start(theme_box, False, False, 0)
+        box.pack_start(ui_font_box, False, False, 0)
+        box.pack_start(term_font_box, False, False, 0)
+        box.pack_start(term_size_box, False, False, 0)
+        box.pack_start(demo_frame, False, False, 0)
         box.pack_start(head, False, False, 0)
         box.pack_start(wrap, False, False, 0)
         box.pack_start(term_head, False, False, 0)
@@ -4371,13 +4507,27 @@ class Tabit(Gtk.Window):
         box.pack_start(ai_head, False, False, 0)
         box.pack_start(ai_fresh, False, False, 0)
         box.pack_start(hint, False, False, 0)
+        update_preview()
         dialog.show_all()
         if dialog.run() == Gtk.ResponseType.OK:
             selected_theme = theme_keys[theme_combo.get_active()]
+            try:
+                ui_sz = int(ui_font_spin.entry.get_text() or "10")
+            except ValueError:
+                ui_sz = 10
+            t_font = (term_font_combo.get_active_text() or term_font_combo.get_child().get_text() or "").strip() or "Monospace"
+            try:
+                t_sz = int(term_size_spin.entry.get_text() or "12")
+            except ValueError:
+                t_sz = 12
+
             self._save_settings({"theme": selected_theme,
                                  "note_wrap": wrap.get_active(),
                                  "shell_inherit_cwd": inherit.get_active(),
-                                 "ai_fresh_on_restore": ai_fresh.get_active()})
+                                 "ai_fresh_on_restore": ai_fresh.get_active(),
+                                 "ui_font_size": ui_sz,
+                                 "term_font": t_font,
+                                 "term_font_size": t_sz})
             self._apply_note_wrap_setting(wrap.get_active())
             self._apply_theme(selected_theme)
         dialog.destroy()
