@@ -2133,15 +2133,18 @@ class Tabit(Gtk.Window):
         box.pack_start(dot, False, False, 0)
         name = self._group_names.get(color) or color.capitalize()
         name_lbl = Gtk.Label(label=name.upper(), xalign=0)
-        box.pack_start(name_lbl, True, True, 0)
+        box.pack_start(name_lbl, False, False, 0)
         # member count shown when collapsed so you still know how many tabs hide
         count_lbl = Gtk.Label(label=f"({member_count})" if collapsed else "")
         count_lbl.get_style_context().add_class("group-count")
+        count_lbl.set_margin_left(8)
         count_lbl.set_no_show_all(not collapsed)
         if collapsed:
             count_lbl.show()
         box.pack_start(count_lbl, False, False, 0)
         row.count_label = count_lbl
+        spacer = Gtk.Label()
+        box.pack_start(spacer, True, True, 0)
         hit = Gtk.EventBox()
         hit.set_tooltip_text(
             "Click to expand" if collapsed else "Click to collapse")
@@ -2348,7 +2351,7 @@ class Tabit(Gtk.Window):
         for idx, c in enumerate(GROUP_COLORS):
             target_row = row1 if idx < half else row2
             btn = Gtk.Button()
-            btn.set_can_focus(False)
+            btn.set_can_focus(True)
             btn.get_style_context().add_class("color-swatch")
             if c in used_colors:
                 btn.set_tooltip_text(f"{c.capitalize()} (In use by another group)")
@@ -2376,7 +2379,7 @@ class Tabit(Gtk.Window):
                 badge = Gtk.Box()
                 badge.set_size_request(6, 6)
                 badge.set_valign(Gtk.Align.START)
-                badge.set_halign(Gtk.Align.END)
+                badge.set_halign(Gdk.Align.END if hasattr(Gdk, "Align") else Gtk.Align.END)
                 badge.get_style_context().add_class("in-use-badge")
                 overlay.add_overlay(badge)
 
@@ -2434,20 +2437,72 @@ class Tabit(Gtk.Window):
 
             self._save_group_names()
             self._relayout()
+
+            # Reselect the renamed group header to keep keyboard focus
+            header_row = next((r for r in self.listbox.get_children()
+                               if getattr(r, "kind", None) == "group_header" and getattr(r, "group_color", None) == new_color), None)
+            if header_row:
+                self.listbox.select_row(header_row)
+
             pop.popdown()
 
         def on_key(_w, event):
             key_name = (Gdk.keyval_name(event.keyval) or "").lower()
+            focused = pop.get_focus()
+
+            if key_name == "escape":
+                pop.popdown()
+                return True
             if key_name in ("return", "kp_enter"):
                 apply()
                 return True
-            elif key_name == "escape":
-                pop.popdown()
-                return True
+
+            if focused == entry:
+                if key_name == "down":
+                    active_c = active_color[0]
+                    if active_c in swatches:
+                        swatches[active_c].grab_focus()
+                    else:
+                        swatches[GROUP_COLORS[0]].grab_focus()
+                    return True
+            elif focused in swatches.values():
+                focused_c = next((k for k, v in swatches.items() if v == focused), None)
+                if focused_c:
+                    idx = GROUP_COLORS.index(focused_c)
+                    if key_name == "left":
+                        swatches[GROUP_COLORS[(idx - 1) % 12]].grab_focus()
+                        return True
+                    elif key_name == "right":
+                        swatches[GROUP_COLORS[(idx + 1) % 12]].grab_focus()
+                        return True
+                    elif key_name == "up":
+                        if idx < 6:
+                            entry.grab_focus()
+                        else:
+                            swatches[GROUP_COLORS[idx - 6]].grab_focus()
+                        return True
+                    elif key_name == "down":
+                        if idx < 6:
+                            swatches[GROUP_COLORS[idx + 6]].grab_focus()
+                        else:
+                            ok.grab_focus()
+                        return True
+                    elif key_name == "space":
+                        make_handler(focused_c)(focused)
+                        return True
+            elif focused == ok:
+                if key_name == "up":
+                    active_c = active_color[0]
+                    active_idx = GROUP_COLORS.index(active_c)
+                    if active_idx >= 6:
+                        swatches[active_c].grab_focus()
+                    else:
+                        swatches[GROUP_COLORS[active_idx + 6]].grab_focus()
+                    return True
             return False
 
         ok.connect("clicked", apply)
-        entry.connect("key-press-event", on_key)
+        pop.connect("key-press-event", on_key)
         pop.popup()
         entry.grab_focus()
 
@@ -3986,7 +4041,10 @@ class Tabit(Gtk.Window):
             if row is not None:
                 self._close_session(row)
         elif action == "rename_session":
-            self._rename_session()
+            if row is not None and getattr(row, "kind", None) == "group_header":
+                self._rename_group(row)
+            else:
+                self._rename_session()
         elif action == "move_tab_up":
             self._move_session(-1)
         elif action == "move_tab_down":
