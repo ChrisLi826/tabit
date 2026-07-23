@@ -692,6 +692,7 @@ class Tabit(Gtk.Window):
         self.add(self._paned)
 
         ai_fresh = self._load_settings().get("ai_fresh_on_restore", False)
+        self._restoring_sessions = True
         for s in self._load_sessions():
             try:
                 argv = s.get("argv") or []
@@ -714,6 +715,7 @@ class Tabit(Gtk.Window):
                     self._apply_group(r, color)
             except (KeyError, TypeError, OSError):
                 continue  # skip broken entries in a hand-edited file
+        self._restoring_sessions = False
         self._relayout()  # build group headers + cluster restored members
         if not self.listbox.get_children():
             self._on_add_shell(None)
@@ -2255,20 +2257,22 @@ class Tabit(Gtk.Window):
         self.listbox.show_all()
         self._apply_group_collapse()
         # forget names / collapse flags of colors no longer in use
-        pruned = False
-        for c in list(self._group_names):
-            if c not in emitted:
-                del self._group_names[c]
-                pruned = True
-        collapsed_pruned = False
-        for c in list(self._collapsed_groups):
-            if c not in emitted:
-                self._collapsed_groups.discard(c)
-                collapsed_pruned = True
-        if pruned:
-            self._save_group_names()
-        if collapsed_pruned:
-            self._save_collapsed_groups()
+        if not getattr(self, "_restoring_sessions", False):
+            # forget names / collapse flags of colors no longer in use
+            pruned = False
+            for c in list(self._group_names):
+                if c not in emitted:
+                    del self._group_names[c]
+                    pruned = True
+            collapsed_pruned = False
+            for c in list(self._collapsed_groups):
+                if c not in emitted:
+                    self._collapsed_groups.discard(c)
+                    collapsed_pruned = True
+            if pruned:
+                self._save_group_names()
+            if collapsed_pruned:
+                self._save_collapsed_groups()
 
     def _save_group_names(self):
         self._save_settings({"group_names": self._group_names})
