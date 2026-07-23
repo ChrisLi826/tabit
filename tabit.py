@@ -2770,19 +2770,64 @@ class Tabit(Gtk.Window):
         pop = Gtk.Popover.new(row)
         pop.set_position(Gtk.PositionType.RIGHT)
         pop.set_modal(True)
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
-                      margin=8)
+
+        is_ai = (getattr(row, "icon_name", None) == ICON_AI)
+        has_resume = False
+        if is_ai and getattr(row, "argv", None) and len(row.argv) == 3:
+            cmd = row.argv[2]
+            if " || " in cmd:
+                has_resume = True
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=8)
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         entry = Gtk.Entry(text=initial, width_chars=18)
         ok = Gtk.Button(label="OK")
         ok.get_style_context().add_class("suggested-action")
-        box.pack_start(entry, True, True, 0)
-        box.pack_start(ok, False, False, 0)
-        pop.add(box)
-        box.show_all()
+        hbox.pack_start(entry, True, True, 0)
+        hbox.pack_start(ok, False, False, 0)
+        vbox.pack_start(hbox, True, True, 0)
+
+        resume_chk = None
+        if is_ai:
+            resume_chk = Gtk.CheckButton(label="Continue / resume previous session")
+            resume_chk.set_active(has_resume)
+            vbox.pack_start(resume_chk, False, False, 0)
+
+        pop.add(vbox)
+        vbox.show_all()
         self._rename_pop = pop
 
         def apply(*_a):
             name = entry.get_text().strip()
+            if is_ai and resume_chk is not None and getattr(row, "argv", None) and len(row.argv) == 3:
+                plain_argv = self._ai_argv_plain(row.argv)
+                plain_cmd = plain_argv[2]
+                split_marker = " || exit 1; exec "
+                if split_marker in plain_cmd:
+                    cd_part, cli_quoted = plain_cmd.split(split_marker, 1)
+                    path_quoted = cd_part[3:]
+                    try:
+                        path_val = shlex.split(path_quoted)[0]
+                    except Exception:
+                        path_val = path_quoted.strip("'\"")
+                    try:
+                        cli_val = shlex.split(cli_quoted)[0]
+                    except Exception:
+                        cli_val = cli_quoted.strip("'\"")
+                    
+                    if resume_chk.get_active():
+                        tries = None
+                        for e in self._load_ai_clis():
+                            if e["cli"] == cli_val:
+                                tries = e.get("try") or []
+                                break
+                        if tries is None:
+                            tries = list(DEFAULT_AI_TRY)
+                    else:
+                        tries = []
+                    
+                    row.argv = self._ai_argv(cli_val, path_val, tries)
+
             if name:
                 if getattr(row, "kind", None) == "note":
                     dirty = row.buffer.get_modified()
@@ -2796,7 +2841,7 @@ class Tabit(Gtk.Window):
                                      if row.sub_text else shown)
                 if self.listbox.get_selected_row() is row:
                     self.set_title(f"{row.session_label} — tabit")
-                self._save_sessions()
+            self._save_sessions()
             pop.popdown()
 
         def on_key(_w, event):
