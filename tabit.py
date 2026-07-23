@@ -2070,6 +2070,11 @@ class Tabit(Gtk.Window):
 
     def _move_group(self, color, delta):
         self._move_block(lambda b: b[0] == "group" and b[1] == color, delta)
+        header_row = next((r for r in self.listbox.get_children()
+                           if getattr(r, "kind", None) == "group_header" and getattr(r, "group_color", None) == color), None)
+        if header_row:
+            self.listbox.select_row(header_row)
+            self.listbox.grab_focus()
 
     def _drop_group(self, color, target_row, y):
         """Move a whole group (dragged by its header) next to target_row."""
