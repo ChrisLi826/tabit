@@ -642,10 +642,10 @@ class Tabit(Gtk.Window):
         sidebar.get_style_context().add_class("sidebar")
         sidebar.set_size_request(120, -1)  # min width; actual set by paned
         sidebar.pack_start(self._section("SESSIONS"), False, False, 0)
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroll.add(self.listbox)
-        sidebar.pack_start(scroll, True, True, 0)
+        self.sidebar_scroll = Gtk.ScrolledWindow()
+        self.sidebar_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.sidebar_scroll.add(self.listbox)
+        sidebar.pack_start(self.sidebar_scroll, True, True, 0)
         adders = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         adders.get_style_context().add_class("adder")
         for side in ("start", "end", "bottom"):
@@ -2351,7 +2351,7 @@ class Tabit(Gtk.Window):
         for idx, c in enumerate(GROUP_COLORS):
             target_row = row1 if idx < half else row2
             btn = Gtk.Button()
-            btn.set_can_focus(True)
+            btn.set_can_focus(False)
             btn.get_style_context().add_class("color-swatch")
             if c in used_colors:
                 btn.set_tooltip_text(f"{c.capitalize()} (In use by another group)")
@@ -2448,64 +2448,17 @@ class Tabit(Gtk.Window):
 
         def on_key(_w, event):
             key_name = (Gdk.keyval_name(event.keyval) or "").lower()
-            focused = _w
-
             if key_name == "escape":
                 pop.popdown()
                 return True
             if key_name in ("return", "kp_enter"):
                 apply()
                 return True
-
-            if focused == entry:
-                if key_name == "down":
-                    active_c = active_color[0]
-                    if active_c in swatches:
-                        swatches[active_c].grab_focus()
-                    else:
-                        swatches[GROUP_COLORS[0]].grab_focus()
-                    return True
-            elif focused in swatches.values():
-                focused_c = next((k for k, v in swatches.items() if v == focused), None)
-                if focused_c:
-                    idx = GROUP_COLORS.index(focused_c)
-                    if key_name == "left":
-                        swatches[GROUP_COLORS[(idx - 1) % 12]].grab_focus()
-                        return True
-                    elif key_name == "right":
-                        swatches[GROUP_COLORS[(idx + 1) % 12]].grab_focus()
-                        return True
-                    elif key_name == "up":
-                        if idx < 6:
-                            entry.grab_focus()
-                        else:
-                            swatches[GROUP_COLORS[idx - 6]].grab_focus()
-                        return True
-                    elif key_name == "down":
-                        if idx < 6:
-                            swatches[GROUP_COLORS[idx + 6]].grab_focus()
-                        else:
-                            ok.grab_focus()
-                        return True
-                    elif key_name == "space":
-                        make_handler(focused_c)(focused)
-                        return True
-            elif focused == ok:
-                if key_name == "up":
-                    active_c = active_color[0]
-                    active_idx = GROUP_COLORS.index(active_c)
-                    if active_idx >= 6:
-                        swatches[active_c].grab_focus()
-                    else:
-                        swatches[GROUP_COLORS[active_idx + 6]].grab_focus()
-                    return True
             return False
 
         ok.connect("clicked", apply)
         entry.connect("key-press-event", on_key)
         ok.connect("key-press-event", on_key)
-        for btn in swatches.values():
-            btn.connect("key-press-event", on_key)
         pop.popup()
         entry.grab_focus()
 
@@ -2587,11 +2540,32 @@ class Tabit(Gtk.Window):
             return
         if getattr(row, "kind", None) == "group_header":
             self.listbox.grab_focus()
+            GLib.idle_add(self._scroll_to_row, row)
             return
         row.dot.hide()
         self.stack.set_visible_child(row.page)
         self.set_title(f"{row.session_label} — tabit")
         self._focus_row_content(row)
+        GLib.idle_add(self._scroll_to_row, row)
+
+    def _scroll_to_row(self, row):
+        if row is None or not hasattr(self, "sidebar_scroll"):
+            return False
+        adj = self.sidebar_scroll.get_vadjustment()
+        if not adj:
+            return False
+        res = row.translate_coordinates(self.listbox, 0, 0)
+        if not res:
+            return False
+        _, _, row_y = res
+        row_h = row.get_allocated_height()
+        value = adj.get_value()
+        page_size = adj.get_page_size()
+        if row_y < value:
+            adj.set_value(max(0, row_y - 4))
+        elif row_y + row_h > value + page_size:
+            adj.set_value(min(adj.get_upper() - page_size, row_y + row_h - page_size + 4))
+        return False
 
     def _toggle_mark(self, row):
         ctx = row.get_style_context()
