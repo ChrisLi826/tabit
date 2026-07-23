@@ -2125,6 +2125,15 @@ class Tabit(Gtk.Window):
         chev.set_xalign(0.5)
         box.pack_start(chev, False, False, 0)
         row.chevron = chev
+        # member count shown when collapsed so you still know how many tabs hide
+        count_lbl = Gtk.Label(label=f"({member_count})" if collapsed else "")
+        count_lbl.get_style_context().add_class("group-count")
+        count_lbl.set_margin_right(6)
+        count_lbl.set_no_show_all(not collapsed)
+        if collapsed:
+            count_lbl.show()
+        box.pack_start(count_lbl, False, False, 0)
+        row.count_label = count_lbl
         dot = Gtk.Box()
         dot.set_size_request(9, 9)
         dot.set_valign(Gtk.Align.CENTER)
@@ -2134,15 +2143,6 @@ class Tabit(Gtk.Window):
         name = self._group_names.get(color) or color.capitalize()
         name_lbl = Gtk.Label(label=name.upper(), xalign=0)
         box.pack_start(name_lbl, False, False, 0)
-        # member count shown when collapsed so you still know how many tabs hide
-        count_lbl = Gtk.Label(label=f"({member_count})" if collapsed else "")
-        count_lbl.get_style_context().add_class("group-count")
-        count_lbl.set_margin_left(8)
-        count_lbl.set_no_show_all(not collapsed)
-        if collapsed:
-            count_lbl.show()
-        box.pack_start(count_lbl, False, False, 0)
-        row.count_label = count_lbl
         spacer = Gtk.Label()
         box.pack_start(spacer, True, True, 0)
         hit = Gtk.EventBox()
@@ -2502,7 +2502,10 @@ class Tabit(Gtk.Window):
             return False
 
         ok.connect("clicked", apply)
-        pop.connect("key-press-event", on_key)
+        entry.connect("key-press-event", on_key)
+        ok.connect("key-press-event", on_key)
+        for btn in swatches.values():
+            btn.connect("key-press-event", on_key)
         pop.popup()
         entry.grab_focus()
 
