@@ -546,8 +546,11 @@ def get_theme_css(theme_key):
 
 .sidebar row:selected label,
 .sidebar row:selected .group-chevron,
-.sidebar row:selected .group-count {{
-    color: #ffffff !important;
+.sidebar row:selected .group-count,
+.sidebar row:selected.group-header label,
+.sidebar row:selected.group-header .group-chevron,
+.sidebar row:selected.group-header .group-count {{
+    color: #ffffff;
 }}
 .group-dot {{ border-radius: 50%; }}
 .group-dot.grp-red     {{ background-color: #f7768e; }}
