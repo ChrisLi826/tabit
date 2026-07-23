@@ -2112,8 +2112,8 @@ class Tabit(Gtk.Window):
 
     def _make_group_header(self, color, member_count=0):
         row = Gtk.ListBoxRow()
-        row.set_selectable(False)
-        row.set_can_focus(False)
+        row.set_selectable(True)
+        row.set_can_focus(True)
         row.set_focus_on_click(False)
         row.kind = "group_header"
         row.group_color = color
@@ -2524,6 +2524,7 @@ class Tabit(Gtk.Window):
         if row is None:
             return
         if getattr(row, "kind", None) == "group_header":
+            self.listbox.grab_focus()
             return
         row.dot.hide()
         self.stack.set_visible_child(row.page)
