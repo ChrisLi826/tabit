@@ -274,7 +274,7 @@ AI_LAST_FILE = os.path.join(CONFIG_DIR, "ai_last.json")
 AI_CLIS_FILE = os.path.join(CONFIG_DIR, "ai_clis.json")
 COMMANDS_FILE = os.path.join(CONFIG_DIR, "commands.json")
 CONNECT_LAST_FILE = os.path.join(CONFIG_DIR, "connect_last.json")
-SSH_TOOL_DIR = os.path.expanduser("~/senao-tools/tools/ssh_tool")
+SSH_TOOL_DIR = os.path.expanduser("~/senao-tools/ssh_tool")
 SSH_TOOL_CONNECT_SH = os.path.join(SSH_TOOL_DIR, "connect.sh")
 SSH_TOOL_CONNECT_PY = os.path.join(SSH_TOOL_DIR, "connect.py")
 HAS_SSH_TOOL = os.path.isdir(SSH_TOOL_DIR) and (os.path.isfile(SSH_TOOL_CONNECT_SH) or os.path.isfile(SSH_TOOL_CONNECT_PY))
@@ -3315,6 +3315,10 @@ class Tabit(Gtk.Window):
         use_tmux_chk = Gtk.CheckButton(label="Run inside tmux session (AI collaboration)")
         use_tmux_chk.set_active(bool(last.get("use_tmux", True)))
 
+        # 12. Force reconnect (kills existing tmux session)
+        reconnect_chk = Gtk.CheckButton(label="Force reconnect (kills existing tmux session)")
+        reconnect_chk.set_active(bool(last.get("reconnect", False)))
+
         # Layout
         grid.attach(Gtk.Label(label="Serial Number", xalign=0), 0, 0, 1, 1)
         grid.attach(sn_entry, 1, 0, 1, 1)
@@ -3348,6 +3352,7 @@ class Tabit(Gtk.Window):
 
         grid.attach(nocache_chk, 1, 10, 1, 1)
         grid.attach(use_tmux_chk, 1, 11, 1, 1)
+        grid.attach(reconnect_chk, 1, 12, 1, 1)
 
         # Buttons
         btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -3360,7 +3365,7 @@ class Tabit(Gtk.Window):
         connect_b.connect("clicked", lambda *_: dialog.response(Gtk.ResponseType.OK))
         btns.pack_start(cancel_b, False, False, 0)
         btns.pack_start(connect_b, False, False, 0)
-        grid.attach(btns, 0, 12, 2, 1)
+        grid.attach(btns, 0, 13, 2, 1)
 
         dialog.get_content_area().add(grid)
         dialog.show_all()
@@ -3389,6 +3394,7 @@ class Tabit(Gtk.Window):
                 dtype_val = dtypes[dtype_combo.get_active()]
                 nocache_val = nocache_chk.get_active()
                 use_tmux_val = use_tmux_chk.get_active()
+                reconnect_val = reconnect_chk.get_active()
                 gw_pass_val = gw_pass_entry.get_text().strip()
                 magic_words_val = magic_words_entry.get_text().strip()
 
@@ -3404,6 +3410,7 @@ class Tabit(Gtk.Window):
                     "device_type": dtype_val,
                     "no_cache": nocache_val,
                     "use_tmux": use_tmux_val,
+                    "reconnect": reconnect_val,
                     "gateway_pass": gw_pass_val,
                     "magic_words": magic_words_val,
                 })
@@ -3430,7 +3437,10 @@ class Tabit(Gtk.Window):
                 if use_tmux_val:
                     session_name = f"conn-{sn.lower()}"
                     cmd_str = " ".join(shlex.quote(arg) for arg in raw_cmd)
-                    cmd = ["tmux", "new-session", "-A", "-s", session_name, f"{cmd_str}; exec bash"]
+                    if reconnect_val:
+                        cmd = ["sh", "-c", f"tmux kill-session -t {shlex.quote(session_name)} 2>/dev/null; exec tmux new-session -s {shlex.quote(session_name)} {shlex.quote(cmd_str + '; exec bash')}"]
+                    else:
+                        cmd = ["tmux", "new-session", "-A", "-s", session_name, f"{cmd_str}; exec bash"]
                     icon_name = ICON_TMUX
                     sub = f"cloud ({env_val}) [tmux]"
                 else:
