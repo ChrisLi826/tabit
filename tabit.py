@@ -685,6 +685,7 @@ KEY_ACTIONS = (
     ("note_b64_dec", "Note: Base64 decode", "<Primary><Alt><Shift>b"),
     ("note_json_fmt", "Note: JSON format", "<Primary><Alt>j"),
     ("note_preview", "Note: Markdown preview", "<Primary><Alt>m"),
+    ("note_yaml_browser", "Note: YAML browser", "<Primary><Alt>y"),
     ("note_find", "Note: Find text", "<Primary>f"),
     ("note_find_next", "Note: Find next", "F3"),
     ("note_find_prev", "Note: Find previous", "<Shift>F3"),
@@ -1317,7 +1318,7 @@ class Tabit(Gtk.Window):
         if HAS_WEBKIT:
             webview = WebKit2.WebView()
             wset = webview.get_settings()
-            wset.set_enable_javascript(False)
+            wset.set_enable_javascript(True)
             wset.set_allow_file_access_from_file_urls(True)
             content = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
             content.pack1(scroll, resize=True, shrink=False)
@@ -1336,6 +1337,7 @@ class Tabit(Gtk.Window):
         row.webview = webview
         row.content_paned = content if HAS_WEBKIT else None
         row.preview_on = False
+        row.yaml_on = False
         row._preview_src = None       # debounced live re-render
         row._preview_pos_set = False  # split divider placed once
         row._wanted_lang = wanted_lang  # restore after heavy-mode ends
@@ -1363,6 +1365,22 @@ class Tabit(Gtk.Window):
                 self._note_set_preview(row, btn.get_active())
 
             preview_btn.connect("toggled", on_preview_toggle)
+
+            acc_y = self._action_accel_label("note_yaml_browser")
+            ylab = f"YAML Browser  ({acc_y})" if acc_y else "YAML Browser"
+            yaml_btn = Gtk.ToggleButton(label=ylab)
+            yaml_btn.set_tooltip_text(
+                "YAML interactive tree browser" + (f" — {acc_y}" if acc_y else ""))
+            tools.pack_start(yaml_btn, False, False, 0)
+            row.yaml_btn = yaml_btn
+            row._yaml_syncing = False
+
+            def on_yaml_toggle(btn):
+                if getattr(row, "_yaml_syncing", False):
+                    return
+                self._note_set_yaml_browser(row, btn.get_active())
+
+            yaml_btn.connect("toggled", on_yaml_toggle)
         tool_specs = (
             ("Base64 Enc", "note_b64_enc", self._note_b64_encode),
             ("Base64 Dec", "note_b64_dec", self._note_b64_decode),
@@ -1506,20 +1524,327 @@ class Tabit(Gtk.Window):
             base = "file://" + os.path.dirname(row.file_path) + "/"
         row.webview.load_html(doc, base)
 
+    def _note_render_yaml(self, row):
+        import yaml
+        start, end = row.buffer.get_bounds()
+        text = row.buffer.get_text(start, end, True)
+        
+        line_map = {}
+        for idx, line_str in enumerate(text.splitlines()):
+            ln = idx + 1
+            st = line_str.strip()
+            if st and not st.startswith("#") and ":" in st:
+                kp = st.split(":", 1)[0].strip().strip("'\"")
+                if kp and not kp.startswith("-"):
+                    if kp not in line_map:
+                        line_map[kp] = ln
+        line_map_json = json.dumps(line_map)
+
+        try:
+            parsed = yaml.safe_load(text)
+            json_str = json.dumps(parsed if parsed is not None else {}, default=str)
+            err_msg = None
+        except Exception as e:
+            json_str = "{}"
+            err_msg = str(e)
+
+        if err_msg:
+            doc = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>
+  body {{ background-color: #1a1b26; color: #a9b1d6; font-family: monospace; padding: 16px; }}
+  .err-box {{ background: rgba(247, 118, 142, 0.15); border-left: 4px solid #f7768e; color: #f7768e; padding: 12px; border-radius: 4px; white-space: pre-wrap; }}
+</style></head><body>
+<div class="err-box"><b>YAML Syntax Error:</b><br><br>{html.escape(err_msg)}</div>
+</body></html>"""
+        else:
+            doc = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>
+  body {{
+    background-color: #1a1b26;
+    color: #a9b1d6;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 13px;
+    margin: 0;
+    padding: 14px 16px;
+    line-height: 1.6;
+  }}
+  .toolbar {{
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    gap: 10px;
+    margin-bottom: 14px;
+    padding: 8px 12px;
+    background: rgba(26, 27, 38, 0.88);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(65, 72, 104, 0.5);
+    border-radius: 8px;
+    align-items: center;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+  }}
+  .search-input {{
+    background: #24283b;
+    border: 1px solid #414868;
+    color: #c0caf5;
+    padding: 5px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    flex-grow: 1;
+    outline: none;
+    transition: all 0.2s;
+  }}
+  .search-input:focus {{
+    border-color: #7aa2f7;
+    box-shadow: 0 0 8px rgba(122, 162, 247, 0.3);
+  }}
+  .btn {{
+    background: #2ac3de;
+    color: #15161e;
+    border: none;
+    padding: 5px 12px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }}
+  .btn:hover {{
+    opacity: 0.9;
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(42, 195, 222, 0.3);
+  }}
+  .tree-node {{
+    margin-left: 18px;
+    padding-left: 10px;
+    border-left: 1px dashed rgba(65, 72, 104, 0.4);
+    transition: border-color 0.2s;
+  }}
+  .tree-node:hover {{
+    border-left-color: rgba(125, 207, 255, 0.6);
+  }}
+  .tree-line {{
+    margin: 2px 0;
+    line-height: 1.6;
+  }}
+  .collapsible {{
+    cursor: pointer;
+    user-select: none;
+    color: #7dcfff;
+    font-weight: bold;
+    padding: 0 4px;
+    border-radius: 4px;
+    transition: background 0.15s;
+  }}
+  .collapsible:hover {{
+    background: rgba(125, 207, 255, 0.15);
+  }}
+  .collapsible::before {{
+    content: "▼ ";
+    font-size: 10px;
+    display: inline-block;
+    color: #7dcfff;
+  }}
+  .collapsed::before {{
+    content: "▶ ";
+    color: #e0af68;
+  }}
+  .collapsed ~ .content {{
+    display: none !important;
+  }}
+  .bracket {{
+    color: #7dcfff;
+    font-weight: bold;
+  }}
+  .key {{
+    color: #7aa2f7;
+    font-weight: bold;
+    cursor: pointer;
+    padding: 1px 5px;
+    border-radius: 4px;
+    transition: all 0.15s;
+  }}
+  .key:hover {{
+    text-decoration: underline;
+    background: rgba(122, 162, 247, 0.18);
+    color: #89ddff;
+  }}
+  .active-node {{
+    background: rgba(122, 162, 247, 0.25) !important;
+    border-radius: 4px;
+    box-shadow: 0 0 8px rgba(122, 162, 247, 0.3);
+    transition: background 0.2s;
+  }}
+  .str {{ color: #9ece6a; }}
+  .num {{ color: #ff9e64; font-weight: 600; }}
+  .bool {{
+    color: #bb9af7;
+    font-weight: bold;
+    background: rgba(187, 154, 247, 0.12);
+    border: 1px solid rgba(187, 154, 247, 0.25);
+    padding: 0 5px;
+    border-radius: 4px;
+    font-size: 11px;
+  }}
+  .null-val {{
+    color: #565f89;
+    font-style: italic;
+    background: rgba(86, 95, 137, 0.12);
+    padding: 0 5px;
+    border-radius: 4px;
+    font-size: 11px;
+  }}
+  .item-count {{
+    background: rgba(125, 207, 255, 0.08);
+    color: #7dcfff;
+    border: 1px solid rgba(125, 207, 255, 0.2);
+    border-radius: 10px;
+    padding: 1px 7px;
+    font-size: 10px;
+    font-weight: bold;
+    margin-left: 8px;
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.2s;
+  }}
+  .item-count:hover {{
+    background: rgba(125, 207, 255, 0.25);
+    border-color: #7dcfff;
+    box-shadow: 0 0 6px rgba(125, 207, 255, 0.3);
+  }}
+  .toast {{
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: #7aa2f7;
+    color: #15161e;
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-weight: 700;
+    display: none;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    z-index: 200;
+  }}
+  .err-box {{ background: rgba(247, 118, 142, 0.15); border-left: 4px solid #f7768e; color: #f7768e; padding: 12px; border-radius: 4px; white-space: pre-wrap; }}
+</style></head><body>
+<div class="toolbar">
+  <input type="text" id="search" class="search-input" placeholder="🔍 Filter key or value...">
+  <button class="btn" onclick="expandAll()">Expand All</button>
+  <button class="btn" onclick="collapseAll()">Collapse All</button>
+</div>
+<div id="tree"></div>
+<div id="toast" class="toast">Copied Path!</div>
+<script id="yaml-data" type="application/json">
+{json_str}
+</script>
+<script id="yaml-lines" type="application/json">
+{line_map_json}
+</script>
+<script>
+let data = null;
+let lineMap = {{}};
+try {{
+  data = JSON.parse(document.getElementById("yaml-data").textContent);
+  lineMap = JSON.parse(document.getElementById("yaml-lines").textContent);
+}} catch (err) {{
+  document.getElementById("tree").innerHTML = '<div class="err-box">JSON Parse Error: ' + escapeHtml(err.message) + '</div>';
+}}
+
+function renderTree(obj, path = "", keyName = "") {{
+  if (obj === null || obj === undefined) return '<span class="null-val">null</span>';
+  const type = typeof obj;
+  if (type === "number") return `<span class="num">${{obj}}</span>`;
+  if (type === "boolean") return `<span class="bool">${{obj}}</span>`;
+  if (type === "string") return `<span class="str">"${{escapeHtml(obj)}}"</span>`;
+
+  if (Array.isArray(obj)) {{
+    if (obj.length === 0) return '<span class="bracket">[]</span>';
+    let html = `<span class="collapsible" onclick="toggle(this)">[</span><span class="item-count" onclick="toggle(this)">${{obj.length}} items</span><div class="content tree-node">`;
+    obj.forEach((item, idx) => {{
+      const currentPath = path ? `${{path}}[${{idx}}]` : `[${{idx}}]`;
+      html += `<div class="tree-line"><span class="key" title="Click to copy path: ${{currentPath}}" onclick="copyPath('${{currentPath}}')">[${{idx}}]</span><span style="margin: 0 4px; color: #565f89;">:</span> ${{renderTree(item, currentPath, '')}}</div>`;
+    }});
+    html += `</div><span class="bracket">]</span>`;
+    return html;
+  }}
+
+  if (type === "object") {{
+    const keys = Object.keys(obj);
+    if (keys.length === 0) return '<span class="bracket">{{}}</span>';
+    let html = `<span class="collapsible" onclick="toggle(this)">{{</span><span class="item-count" onclick="toggle(this)">${{keys.length}} keys</span><div class="content tree-node">`;
+    keys.forEach(k => {{
+      const currentPath = path ? `${{path}}.${{k}}` : k;
+      const kLineAttr = (lineMap[k]) ? `data-line="${{lineMap[k]}}"` : '';
+      html += `<div class="tree-line" ${{kLineAttr}}><span class="key" title="Click to copy path: ${{currentPath}}" onclick="copyPath('${{currentPath}}')">${{escapeHtml(k)}}</span><span style="margin: 0 4px; color: #565f89;">:</span> ${{renderTree(obj[k], currentPath, k)}}</div>`;
+    }});
+    html += `</div><span class="bracket">}}</span>`;
+    return html;
+  }}
+
+  return escapeHtml(String(obj));
+}}
+
+function escapeHtml(str) {{
+  if (typeof str !== "string") str = String(str);
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}}
+function toggle(el) {{
+  if (!el) return;
+  if (!el.classList.contains("collapsible")) {{
+    el = el.parentElement.querySelector(".collapsible");
+  }}
+  if (el) {{
+    el.classList.toggle("collapsed");
+  }}
+}}
+function expandAll() {{ document.querySelectorAll(".collapsible").forEach(el => el.classList.remove("collapsed")); }}
+function collapseAll() {{ document.querySelectorAll(".collapsible").forEach(el => el.classList.add("collapsed")); }}
+function copyPath(p) {{
+  navigator.clipboard.writeText(p);
+  const t = document.getElementById("toast");
+  t.innerText = "Copied: " + p;
+  t.style.display = "block";
+  setTimeout(() => t.style.display = "none", 1500);
+}}
+
+document.getElementById("search").addEventListener("input", function(e) {{
+  const q = e.target.value.toLowerCase();
+  const nodes = document.querySelectorAll("#tree .tree-node > div");
+  if (!q) {{ nodes.forEach(n => n.style.display = ""); return; }}
+  nodes.forEach(n => {{
+    const text = n.innerText.toLowerCase();
+    n.style.display = text.includes(q) ? "" : "none";
+  }});
+}});
+
+if (data !== null) {{
+  document.getElementById("tree").innerHTML = renderTree(data);
+}}
+
+</script>
+</body></html>"""
+
+        row.webview.load_html(doc, "file:///")
+
     def _note_schedule_preview(self, row):
-        # live re-render while the split reader is open (debounced)
-        if not getattr(row, "preview_on", False):
-            return
-        if getattr(row, "_preview_src", None):
-            GLib.source_remove(row._preview_src)
-
-        def run():
-            row._preview_src = None
-            if row.preview_on:
-                self._note_render_preview(row)
-            return False
-
-        row._preview_src = GLib.timeout_add(300, run)
+        if getattr(row, "preview_on", False):
+            if getattr(row, "_preview_src", None):
+                GLib.source_remove(row._preview_src)
+            def run():
+                row._preview_src = None
+                if getattr(row, "preview_on", False):
+                    self._note_render_preview(row)
+                return False
+            row._preview_src = GLib.timeout_add(300, run)
+        elif getattr(row, "yaml_on", False):
+            if getattr(row, "_yaml_src", None):
+                GLib.source_remove(row._yaml_src)
+            def run_y():
+                row._yaml_src = None
+                if getattr(row, "yaml_on", False):
+                    self._note_render_yaml(row)
+                return False
+            row._yaml_src = GLib.timeout_add(300, run_y)
 
     def _note_set_preview(self, row, on):
         if not HAS_WEBKIT or getattr(row, "webview", None) is None:
@@ -1548,6 +1873,38 @@ class Tabit(Gtk.Window):
             row.webview.hide()
         row.view.grab_focus()
 
+    def _note_set_yaml_browser(self, row, on):
+        if not HAS_WEBKIT or getattr(row, "webview", None) is None:
+            return
+        on = bool(on)
+        row.yaml_on = on
+        if on and getattr(row, "preview_on", False):
+            self._note_set_preview(row, False)
+
+        btn = getattr(row, "yaml_btn", None)
+        if btn is not None and btn.get_active() != on:
+            row._yaml_syncing = True
+            try:
+                btn.set_active(on)
+            finally:
+                row._yaml_syncing = False
+
+        if on:
+            wset = row.webview.get_settings()
+            wset.set_enable_javascript(True)
+            row.webview.set_settings(wset)
+            self._note_render_yaml(row)
+            row.webview.set_no_show_all(False)
+            row.webview.show_all()
+            if not row._preview_pos_set:
+                w = row.content_paned.get_allocated_width()
+                if w > 0:
+                    row.content_paned.set_position(w // 2)
+                    row._preview_pos_set = True
+        else:
+            row.webview.hide()
+        row.view.grab_focus()
+
     def _note_toggle_preview(self, row=None):
         row = row or self.listbox.get_selected_row()
         if row is None or getattr(row, "kind", None) != "note":
@@ -1558,7 +1915,49 @@ class Tabit(Gtk.Window):
                 "Markdown preview needs WebKit2",
                 "Install gir1.2-webkit2-4.0 and python3-markdown.")
             return False
+
+        start, end = row.buffer.get_bounds()
+        text = row.buffer.get_text(start, end, True).strip()
+        if not text:
+            self._note_msg(
+                Gtk.MessageType.WARNING,
+                "Empty Note Content",
+                "Cannot render Markdown preview for an empty note. Please type or paste some Markdown content first.")
+            return False
+
         self._note_set_preview(row, not getattr(row, "preview_on", False))
+        return True
+
+    def _note_toggle_yaml_browser(self, row=None):
+        import yaml
+        row = row or self.listbox.get_selected_row()
+        if row is None or getattr(row, "kind", None) != "note":
+            return False
+        if not HAS_WEBKIT:
+            self._note_msg(
+                Gtk.MessageType.WARNING,
+                "YAML browser needs WebKit2",
+                "Install gir1.2-webkit2-4.0.")
+            return False
+
+        start, end = row.buffer.get_bounds()
+        text = row.buffer.get_text(start, end, True).strip()
+        if not text:
+            self._note_msg(
+                Gtk.MessageType.WARNING,
+                "Empty Note Content",
+                "Cannot render YAML tree for an empty note. Please type or paste YAML content first.")
+            return False
+
+        try:
+            yaml.safe_load(text)
+        except Exception as e:
+            self._note_msg(
+                Gtk.MessageType.WARNING,
+                "Invalid YAML Syntax Warning",
+                f"The note content contains invalid YAML syntax:\n\n{e}\n\nOpening tree browser with syntax error view.")
+
+        self._note_set_yaml_browser(row, not getattr(row, "yaml_on", False))
         return True
 
     def _note_get_range(self, row):
@@ -4309,6 +4708,8 @@ class Tabit(Gtk.Window):
                 return False
         elif action == "note_preview":
             return self._note_toggle_preview(row)
+        elif action == "note_yaml_browser":
+            return self._note_toggle_yaml_browser(row)
         elif action == "note_find":
             if row is not None and getattr(row, "kind", None) == "note":
                 self._note_find_trigger(row)
