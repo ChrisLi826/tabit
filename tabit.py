@@ -284,7 +284,7 @@ DEFAULT_COMMANDS = []
 # tab-group colors (names match the .group-bar.grp-* CSS classes)
 GROUP_COLORS = [
     "red", "orange", "yellow", "green", "teal", "cyan",
-    "blue", "indigo", "purple", "pink", "gray", "white"
+    "blue", "indigo", "purple", "pink", "gray", "white", "brown"
 ]
 COLOR_SCHEMES = {
     "tokyo-night": {
@@ -549,6 +549,12 @@ def get_theme_css(theme_key):
 .sidebar row.group-header.grp-white .group-chevron,
 .sidebar row.group-header.grp-white .group-count {{ color: #ffffff; }}
 
+.sidebar row.group-header.grp-brown   {{ background: rgba(209, 154, 102, 0.08); }}
+.sidebar row.group-header.grp-brown:hover {{ background: rgba(209, 154, 102, 0.15); }}
+.sidebar row.group-header.grp-brown label,
+.sidebar row.group-header.grp-brown .group-chevron,
+.sidebar row.group-header.grp-brown .group-count {{ color: #d19a66; }}
+
 .sidebar row:selected label,
 .sidebar row:selected .group-chevron,
 .sidebar row:selected .group-count,
@@ -570,6 +576,7 @@ def get_theme_css(theme_key):
 .group-dot.grp-pink    {{ background-color: #f38ba8; }}
 .group-dot.grp-gray    {{ background-color: #a9b1d6; }}
 .group-dot.grp-white   {{ background-color: #ffffff; }}
+.group-dot.grp-brown   {{ background-color: #d19a66; }}
 .sidebar row .close {{ opacity: 0; }}
 .sidebar row:hover .close, .sidebar row:selected .close {{ opacity: 1; }}
 .sidebar button {{ background: transparent; border: none; border-radius: 6px;
@@ -647,6 +654,21 @@ scrollbar.term-scroll slider:active {{ background-color: {s['slider_active']}; }
     margin: 0;
     padding: 0;
 }}
+menuitem.grp-menu-item.grp-red {{ background-color: rgba(247, 118, 142, 0.08); color: #f7768e; }}
+menuitem.grp-menu-item.grp-orange {{ background-color: rgba(255, 158, 100, 0.08); color: #ff9e64; }}
+menuitem.grp-menu-item.grp-yellow {{ background-color: rgba(224, 175, 104, 0.08); color: #e0af68; }}
+menuitem.grp-menu-item.grp-green {{ background-color: rgba(158, 206, 106, 0.08); color: #9ece6a; }}
+menuitem.grp-menu-item.grp-teal {{ background-color: rgba(26, 188, 156, 0.08); color: #1abc9c; }}
+menuitem.grp-menu-item.grp-cyan {{ background-color: rgba(125, 207, 255, 0.08); color: #7dcfff; }}
+menuitem.grp-menu-item.grp-blue {{ background-color: rgba(122, 162, 247, 0.08); color: #7aa2f7; }}
+menuitem.grp-menu-item.grp-indigo {{ background-color: rgba(192, 202, 245, 0.08); color: #c0caf5; }}
+menuitem.grp-menu-item.grp-purple {{ background-color: rgba(157, 124, 216, 0.08); color: #9d7cd8; }}
+menuitem.grp-menu-item.grp-pink {{ background-color: rgba(243, 139, 168, 0.08); color: #f38ba8; }}
+menuitem.grp-menu-item.grp-gray {{ background-color: rgba(169, 177, 214, 0.08); color: #a9b1d6; }}
+menuitem.grp-menu-item.grp-white {{ background-color: rgba(255, 255, 255, 0.08); color: #ffffff; }}
+menuitem.grp-menu-item.grp-brown {{ background-color: rgba(209, 154, 102, 0.08); color: #d19a66; }}
+menuitem.grp-menu-item:hover {{ background-color: {s['selection']}; color: #ffffff; }}
+.group-dot.grp-none {{ background-color: rgba(255, 255, 255, 0.12); border: 1px dashed rgba(255, 255, 255, 0.4); }}
 """
     return css_text.encode("utf-8")
 
@@ -677,6 +699,8 @@ KEY_ACTIONS = (
     ("move_group_down", "Move group down", "<Primary><Alt><Shift>Page_Down"),
     # Return/Space: toggle fold of the focused group header
     ("toggle_group_collapse", "Toggle group collapse", "Return"),
+    ("group_session", "Group session", "<Primary>g"),
+    ("ungroup_session", "Ungroup session", "<Primary><Shift>g"),
     ("copy", "Copy", "<Primary><Shift>c"),
     ("paste", "Paste", "<Primary><Shift>v"),
 )
@@ -2422,7 +2446,7 @@ class Tabit(Gtk.Window):
         ce = Gtk.MenuItem(label="Expand group" if collapsed else "Collapse group")
         ce.connect("activate",
                    lambda *_: self._set_group_collapsed(color, not collapsed))
-        rn = Gtk.MenuItem(label="Edit group…")
+        rn = Gtk.MenuItem(label="Rename group…")
         rn.connect("activate", lambda *_: self._rename_group(row))
         up = Gtk.MenuItem(label="Move group up")
         up.connect("activate", lambda *_: self._move_group(color, -1))
@@ -2435,6 +2459,102 @@ class Tabit(Gtk.Window):
         menu.show_all()
         menu.popup_at_pointer(event)
         return True
+
+    def _build_color_swatch_grid(self, current_color, on_select=None, include_none=False):
+        """Build a unified, spacious 2-row circular color swatch grid with in-use badges and checkmarks."""
+        used_colors = {getattr(r, "group_color", None) for r in self._session_rows()
+                       if getattr(r, "group_color", None) and getattr(r, "group_color", None) != current_color}
+
+        color_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=6, margin_bottom=4)
+        row1 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        color_box.pack_start(row1, False, False, 0)
+        color_box.pack_start(row2, False, False, 0)
+
+        colors_to_show = list(GROUP_COLORS)
+        if include_none:
+            colors_to_show.insert(0, None)
+
+        swatches = {}
+        active_color = [current_color]
+
+        half = (len(colors_to_show) + 1) // 2
+        for idx, c in enumerate(colors_to_show):
+            target_row = row1 if idx < half else row2
+            btn = Gtk.Button()
+            btn.set_can_focus(False)
+            btn.get_style_context().add_class("color-swatch")
+
+            if c is None:
+                btn.set_tooltip_text("None (Ungrouped)")
+            elif c in used_colors:
+                name = self._group_names.get(c, c.capitalize())
+                btn.set_tooltip_text(f"{name} (In use)")
+            else:
+                name = self._group_names.get(c, c.capitalize())
+                btn.set_tooltip_text(name)
+
+            overlay = Gtk.Overlay()
+            dot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+            dot.set_size_request(22, 22)
+            dot.set_valign(Gtk.Align.CENTER)
+            dot.set_halign(Gtk.Align.CENTER)
+            dot.get_style_context().add_class("group-dot")
+            if c is None:
+                dot.get_style_context().add_class("grp-none")
+            else:
+                dot.get_style_context().add_class("grp-" + c)
+
+            is_selected = (current_color == c)
+            symbol = ""
+            if c is None:
+                symbol = "✕" if is_selected else ""
+            else:
+                symbol = "✔" if is_selected else ""
+
+            check = Gtk.Label(label=symbol)
+            check.set_xalign(0.5)
+            check.set_yalign(0.5)
+            check.set_valign(Gtk.Align.CENTER)
+            check.set_halign(Gtk.Align.CENTER)
+            check.get_style_context().add_class("swatch-check")
+            if c == "white":
+                check.get_style_context().add_class("dark-text")
+            dot.pack_start(check, True, True, 0)
+            overlay.add(dot)
+
+            if c is not None and c in used_colors:
+                badge = Gtk.Box()
+                badge.set_size_request(6, 6)
+                badge.set_valign(Gtk.Align.START)
+                badge.set_halign(Gdk.Align.END if hasattr(Gdk, "Align") else Gtk.Align.END)
+                badge.get_style_context().add_class("in-use-badge")
+                overlay.add_overlay(badge)
+
+            btn.add(overlay)
+
+            def make_click_handler(target_c):
+                def on_click(_b):
+                    active_color[0] = target_c
+                    for k, b_item in swatches.items():
+                        ov = b_item.get_child()
+                        if isinstance(ov, Gtk.Overlay):
+                            d_box = ov.get_children()[0]
+                            for child in d_box.get_children():
+                                if isinstance(child, Gtk.Label):
+                                    if k is None:
+                                        child.set_text("✕" if k == target_c else "")
+                                    else:
+                                        child.set_text("✔" if k == target_c else "")
+                    if on_select:
+                        on_select(target_c)
+                return on_click
+
+            btn.connect("clicked", make_click_handler(c))
+            swatches[c] = btn
+            target_row.pack_start(btn, False, False, 0)
+
+        return color_box, active_color
 
     def _rename_group(self, row):
         """Edit group name and color in a popover bubble anchored to the right of the header."""
@@ -2459,78 +2579,7 @@ class Tabit(Gtk.Window):
         name_box.pack_start(ok, False, False, 0)
         vbox.pack_start(name_box, False, False, 0)
 
-        # Colors used by other groups in the sidebar
-        used_colors = {getattr(r, "group_color", None) for r in self._session_rows()
-                       if getattr(r, "group_color", None) and getattr(r, "group_color", None) != color}
-
-        # Color selector row (12 high-contrast colors: 6 on top row, 6 on bottom row)
-        color_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        row1 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        row2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        color_box.pack_start(row1, False, False, 0)
-        color_box.pack_start(row2, False, False, 0)
-
-        swatches = {}
-        active_color = [color]
-
-        half = 6  # 12 colors = 2 rows of 6
-        for idx, c in enumerate(GROUP_COLORS):
-            target_row = row1 if idx < half else row2
-            btn = Gtk.Button()
-            btn.set_can_focus(False)
-            btn.get_style_context().add_class("color-swatch")
-            if c in used_colors:
-                btn.set_tooltip_text(f"{c.capitalize()} (In use by another group)")
-            else:
-                btn.set_tooltip_text(c.capitalize())
-
-            overlay = Gtk.Overlay()
-            dot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-            dot.set_size_request(20, 20)
-            dot.set_valign(Gtk.Align.CENTER)
-            dot.set_halign(Gtk.Align.CENTER)
-            dot.get_style_context().add_class("group-dot")
-            dot.get_style_context().add_class("grp-" + c)
-
-            check = Gtk.Label(label="✔" if c == color else "")
-            check.set_xalign(0.5)
-            check.set_yalign(0.5)
-            check.set_valign(Gtk.Align.CENTER)
-            check.set_halign(Gtk.Align.CENTER)
-            check.get_style_context().add_class("swatch-check")
-            dot.pack_start(check, True, True, 0)
-            overlay.add(dot)
-
-            if c in used_colors:
-                badge = Gtk.Box()
-                badge.set_size_request(6, 6)
-                badge.set_valign(Gtk.Align.START)
-                badge.set_halign(Gdk.Align.END if hasattr(Gdk, "Align") else Gtk.Align.END)
-                badge.get_style_context().add_class("in-use-badge")
-                overlay.add_overlay(badge)
-
-            btn.add(overlay)
-
-            def make_handler(target_c):
-                def on_swatch_click(_b):
-                    active_color[0] = target_c
-                    for k, b_item in swatches.items():
-                        b_item.get_style_context().remove_class("selected")
-                        ov = b_item.get_child()
-                        if isinstance(ov, Gtk.Overlay):
-                            d_box = ov.get_children()[0]
-                            for child in d_box.get_children():
-                                if isinstance(child, Gtk.Label):
-                                    child.set_text("✔" if k == target_c else "")
-                    swatches[target_c].get_style_context().add_class("selected")
-                return on_swatch_click
-
-            btn.connect("clicked", make_handler(c))
-            if c == color:
-                btn.get_style_context().add_class("selected")
-            swatches[c] = btn
-            target_row.pack_start(btn, False, False, 0)
-
+        color_box, active_color = self._build_color_swatch_grid(color, include_none=True)
         vbox.pack_start(color_box, False, False, 0)
         pop.add(vbox)
         vbox.show_all()
@@ -2539,6 +2588,11 @@ class Tabit(Gtk.Window):
         def apply(*_a):
             name = entry.get_text().strip()
             new_color = active_color[0]
+
+            if new_color is None:
+                self._ungroup(color)
+                pop.popdown()
+                return
 
             if new_color != color:
                 for r in self._session_rows():
@@ -2757,12 +2811,29 @@ class Tabit(Gtk.Window):
                 menu.append(item)
                 group_item = Gtk.MenuItem(label="Group color")
                 submenu = Gtk.Menu()
-                none_it = Gtk.MenuItem(label="None")
+                used_colors = {getattr(r, "group_color", None) for r in self._session_rows()
+                               if getattr(r, "group_color", None)}
+
+                none_label = "✓ None" if getattr(row, "group_color", None) is None else "None"
+                none_it = Gtk.MenuItem(label=none_label)
                 none_it.connect("activate",
                                 lambda *_: self._set_group(row, None))
                 submenu.append(none_it)
+
+                cur_color = getattr(row, "group_color", None)
                 for color in GROUP_COLORS:
-                    it = Gtk.MenuItem(label=color.capitalize())
+                    gname = self._group_names.get(color, "")
+                    label_text = color.capitalize()
+                    if gname and gname.lower() != color.lower():
+                        label_text = f"{color.capitalize()} ({gname})"
+                    if color in used_colors:
+                        label_text += "  [In use]"
+                    if color == cur_color:
+                        label_text = "✓ " + label_text
+
+                    it = Gtk.MenuItem(label=label_text)
+                    it.get_style_context().add_class("grp-menu-item")
+                    it.get_style_context().add_class("grp-" + color)
                     it.connect("activate",
                                lambda _i, c=color: self._set_group(row, c))
                     submenu.append(it)
@@ -2786,6 +2857,69 @@ class Tabit(Gtk.Window):
         self._apply_group(row, color)
         self._relayout()
         self._save_sessions()
+
+    def _cycle_group_color(self, row):
+        """Cycle/change group color for either a tab or an entire group header while preserving group names."""
+        if row is None:
+            return
+
+        kind = getattr(row, "kind", None)
+        if kind == "group_header":
+            old_color = getattr(row, "group_color", "red")
+            new_color = self._new_group_color()
+            if new_color == old_color:
+                idx = GROUP_COLORS.index(old_color) if old_color in GROUP_COLORS else 0
+                new_color = GROUP_COLORS[(idx + 1) % len(GROUP_COLORS)]
+
+            # Preserve user-defined custom group name across color change
+            if old_color in self._group_names:
+                name = self._group_names.pop(old_color)
+                self._group_names[new_color] = name
+                self._save_group_names()
+
+            # Preserve collapse state
+            if old_color in self._collapsed_groups:
+                self._collapsed_groups.remove(old_color)
+                self._collapsed_groups.add(new_color)
+                self._save_collapsed_groups()
+
+            # Update color for all tab members of this group
+            for r in self._session_rows():
+                if getattr(r, "group_color", None) == old_color:
+                    self._apply_group(r, new_color)
+
+            self._relayout()
+            self._save_sessions()
+
+            # Refocus the updated group header row
+            new_hdr = next((r for r in self.listbox.get_children()
+                            if getattr(r, "kind", None) == "group_header" and getattr(r, "group_color", None) == new_color), None)
+            if new_hdr:
+                self.listbox.select_row(new_hdr)
+                self._focus_row_content(new_hdr)
+        else:
+            old_color = getattr(row, "group_color", None)
+            new_color = self._new_group_color()
+            if new_color == old_color and old_color is not None:
+                idx = GROUP_COLORS.index(old_color) if old_color in GROUP_COLORS else 0
+                new_color = GROUP_COLORS[(idx + 1) % len(GROUP_COLORS)]
+
+            # If this tab is the sole member of a named group, carry the name & collapse state over to the new color
+            if old_color and old_color in self._group_names:
+                old_members = [r for r in self._session_rows() if getattr(r, "group_color", None) == old_color]
+                if len(old_members) == 1 and old_members[0] is row:
+                    name = self._group_names.pop(old_color)
+                    self._group_names[new_color] = name
+                    self._save_group_names()
+
+                    if old_color in self._collapsed_groups:
+                        self._collapsed_groups.remove(old_color)
+                        self._collapsed_groups.add(new_color)
+                        self._save_collapsed_groups()
+
+            self._set_group(row, new_color)
+            self.listbox.select_row(row)
+            self._focus_row_content(row)
 
     def _rename_session(self, row=None):
         """Rename in a popover bubble anchored to the right of the tab."""
@@ -2826,12 +2960,20 @@ class Tabit(Gtk.Window):
             resume_chk.set_active(has_resume)
             vbox.pack_start(resume_chk, False, False, 0)
 
+        # Group assignment inside Rename Popover
+        cur_c = getattr(row, "group_color", None)
+        color_box, selected_group = self._build_color_swatch_grid(cur_c, include_none=True)
+        vbox.pack_start(color_box, False, False, 0)
+
         pop.add(vbox)
         vbox.show_all()
         self._rename_pop = pop
 
         def apply(*_a):
             name = entry.get_text().strip()
+            target_color = selected_group[0]
+            if getattr(row, "group_color", None) != target_color:
+                self._set_group(row, target_color)
             if is_ai and resume_chk is not None and getattr(row, "argv", None) and len(row.argv) == 3:
                 plain_argv = self._ai_argv_plain(row.argv)
                 plain_cmd = plain_argv[2]
@@ -4207,6 +4349,16 @@ class Tabit(Gtk.Window):
                 self._rename_group(row)
             else:
                 self._rename_session()
+        elif action == "group_session":
+            if row is not None:
+                self._cycle_group_color(row)
+            else:
+                return False
+        elif action == "ungroup_session":
+            if row is not None and getattr(row, "kind", None) != "group_header":
+                self._set_group(row, None)
+            else:
+                return False
         elif action == "move_tab_up":
             self._move_session(-1)
         elif action == "move_tab_down":

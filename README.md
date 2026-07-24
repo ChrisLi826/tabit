@@ -1,6 +1,6 @@
 # tabit
 
-**v1.5.2** — a terminal built around a **left tab sidebar**.
+**v1.5.3** — a terminal built around a **left tab sidebar**.
 
 <p align="center">
   <img src="banner.svg" alt="tabit — color-coded session tabs down the left edge of one window" width="820">
