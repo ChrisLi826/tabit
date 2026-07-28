@@ -27,6 +27,10 @@ import signal
 import subprocess
 import sys
 
+import threading
+import time
+import urllib.request
+
 import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
@@ -263,6 +267,23 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
+APP_VERSION = "v1.5.5"
+
+def _get_current_version():
+    try:
+        tabit_dir = os.path.dirname(os.path.abspath(__file__))
+        if os.path.exists(os.path.join(tabit_dir, ".git")):
+            out = subprocess.check_output(
+                ["git", "describe", "--tags", "--always"],
+                cwd=tabit_dir,
+                stderr=subprocess.DEVNULL
+            ).decode("utf-8").strip()
+            if out:
+                return out
+    except Exception:
+        pass
+    return APP_VERSION
+
 DEFAULT_AI_TRY = ["--continue", "resume --last", "--resume latest"]
 KERMRC = os.path.expanduser("~/senaoenv/kermrc")
 CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "tabit")
@@ -733,6 +754,7 @@ class Tabit(Gtk.Window):
         self.connect("key-press-event", self._on_window_key)
         self._counter = 0
         self._order_seq = 0
+        self._open_dialogs = set()
         self._save_src = None  # debounced sessions.json write
         self._keys = self._load_keys()  # action -> (keyval, mods)
         self.theme = self._load_settings().get("theme", "tokyo-night")
@@ -846,6 +868,7 @@ class Tabit(Gtk.Window):
         self._relayout()  # build group headers + cluster restored members
         if not self.listbox.get_children():
             self._on_add_shell(None)
+        GLib.idle_add(self._check_weekly_auto_update)
 
     # --- sessions ---------------------------------------------------------
 
@@ -1175,7 +1198,8 @@ class Tabit(Gtk.Window):
 
     def _on_edit_commands(self):
         dialog = Gtk.Dialog(title="Quick commands", transient_for=self,
-                            modal=True)
+                            modal=False)
+        self._open_dialogs.add(dialog)
         dialog.add_button("Close", Gtk.ResponseType.CLOSE)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
                       margin=12)
@@ -2017,16 +2041,21 @@ if (data !== null) {{
                           ["/bin/sh", "-c", f"exec {editor} {q}"],
                           "utilities-terminal-symbolic", sub=editor)
 
-    def _note_msg(self, kind, text, secondary=None):
+    def _note_msg(self, kind, text, secondary=None, parent=None):
+        parent_win = parent or self
         dialog = Gtk.MessageDialog(
-            transient_for=self, modal=True,
+            transient_for=parent_win, modal=False,
             message_type=kind,
             buttons=Gtk.ButtonsType.OK,
             text=text)
         if secondary:
             dialog.format_secondary_text(secondary)
-        dialog.run()
-        dialog.destroy()
+        self._open_dialogs.add(dialog)
+        def _on_msg_response(dlg, _r):
+            self._open_dialogs.discard(dlg)
+            dlg.destroy()
+        dialog.connect("response", _on_msg_response)
+        dialog.show_all()
 
     def _note_b64_encode(self, row):
         text, start, end = self._note_get_range(row)
@@ -2379,13 +2408,7 @@ if (data !== null) {{
             with open(path, "w", encoding="utf-8") as f:
                 f.write(text)
         except OSError as e:
-            err = Gtk.MessageDialog(
-                transient_for=self, modal=True,
-                message_type=Gtk.MessageType.ERROR,
-                buttons=Gtk.ButtonsType.OK,
-                text=f"Could not save:\n{e}")
-            err.run()
-            err.destroy()
+            self._note_msg(Gtk.MessageType.ERROR, "Could not save", str(e))
             return False
         row.file_path = os.path.abspath(path)
         row.argv = [NOTE_SENTINEL, row.file_path]
@@ -2441,6 +2464,14 @@ if (data !== null) {{
         self.set_icon_name("tabit")
 
     def _on_delete_event(self, *_a):
+        for d in list(getattr(self, "_open_dialogs", [])):
+            try:
+                d.response(Gtk.ResponseType.CANCEL)
+                d.destroy()
+            except Exception:
+                pass
+        self._open_dialogs.clear()
+
         for row in list(self.listbox.get_children()):
             if not self._confirm_close_row(row):
                 return True  # abort window close
@@ -3465,7 +3496,8 @@ if (data !== null) {{
                           track_cwd=True)
 
     def _on_add_note(self, _btn):
-        dialog = Gtk.Dialog(title="New note", transient_for=self, modal=True)
+        dialog = Gtk.Dialog(title="New note", transient_for=self, modal=False)
+        self._open_dialogs.add(dialog)
         dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                            "Blank note", Gtk.ResponseType.YES,
                            "Open file…", Gtk.ResponseType.OK)
@@ -3474,24 +3506,32 @@ if (data !== null) {{
             label="GtkSourceView note: blank buffer or open a file.",
             margin=12, xalign=0)
         dialog.get_content_area().add(lab)
+        def _on_note_choice_resp(dlg, resp):
+            self._open_dialogs.discard(dlg)
+            dlg.destroy()
+            if resp == Gtk.ResponseType.YES:
+                self._add_note_session()
+            elif resp == Gtk.ResponseType.OK:
+                chooser = Gtk.FileChooserDialog(
+                    title="Open note", parent=self,
+                    action=Gtk.FileChooserAction.OPEN,
+                    modal=False)
+                self._open_dialogs.add(chooser)
+                chooser.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                                    "Open", Gtk.ResponseType.OK)
+                def _on_chooser_resp(ch, ch_resp):
+                    self._open_dialogs.discard(ch)
+                    fn = ch.get_filename() if ch_resp == Gtk.ResponseType.OK else None
+                    ch.destroy()
+                    if fn and os.path.isfile(fn) and self._note_file_too_big(fn):
+                        self._open_big_file(fn)
+                    elif fn is not None:
+                        self._add_note_session(path=fn)
+                chooser.connect("response", _on_chooser_resp)
+                chooser.show_all()
+
+        dialog.connect("response", _on_note_choice_resp)
         dialog.show_all()
-        resp = dialog.run()
-        dialog.destroy()
-        if resp == Gtk.ResponseType.YES:
-            self._add_note_session()
-        elif resp == Gtk.ResponseType.OK:
-            chooser = Gtk.FileChooserDialog(
-                title="Open note", parent=self,
-                action=Gtk.FileChooserAction.OPEN)
-            chooser.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
-                                "Open", Gtk.ResponseType.OK)
-            ok = chooser.run() == Gtk.ResponseType.OK
-            fn = chooser.get_filename() if ok else None
-            chooser.destroy()
-            if fn and os.path.isfile(fn) and self._note_file_too_big(fn):
-                self._open_big_file(fn)  # GtkSourceView would freeze
-            elif fn is not None:
-                self._add_note_session(path=fn)
 
     @staticmethod
     def _note_file_too_big(path):
@@ -3528,11 +3568,12 @@ if (data !== null) {{
         editor = os.environ.get("EDITOR") or "vi"
         decoded = self._b64_decode_file(path)
         dialog = Gtk.MessageDialog(
-            transient_for=self, modal=True,
+            transient_for=self, modal=False,
             message_type=Gtk.MessageType.QUESTION,
             buttons=Gtk.ButtonsType.NONE,
             text=f"“{os.path.basename(path)}” is large "
                  f"({size_mb:.1f} MB) or has very long lines.")
+        self._open_dialogs.add(dialog)
         dialog.format_secondary_text(
             f"The note editor would freeze on it. Open it in {editor} "
             "(terminal)" + (", or decode it?" if decoded is not None
@@ -3543,17 +3584,22 @@ if (data !== null) {{
             dialog.add_button("Base64 decode", 2)
         dialog.add_button(f"Open in {editor}", Gtk.ResponseType.OK)
         dialog.set_default_response(Gtk.ResponseType.OK)
-        resp = dialog.run()
-        dialog.destroy()
-        if resp == Gtk.ResponseType.OK:            # edit with $EDITOR
-            q = shlex.quote(path)
-            self._add_session(os.path.basename(path),
-                              ["/bin/sh", "-c", f"exec {editor} {q}"],
-                              "utilities-terminal-symbolic", sub=editor)
-        elif resp == Gtk.ResponseType.REJECT:      # force into the note editor
-            self._add_note_session(path=path)
-        elif resp == 2 and decoded is not None:    # base64 decode
-            self._open_decoded(decoded, os.path.basename(path))
+
+        def _on_big_file_resp(dlg, resp):
+            self._open_dialogs.discard(dlg)
+            dlg.destroy()
+            if resp == Gtk.ResponseType.OK:            # edit with $EDITOR
+                q = shlex.quote(path)
+                self._add_session(os.path.basename(path),
+                                  ["/bin/sh", "-c", f"exec {editor} {q}"],
+                                  "utilities-terminal-symbolic", sub=editor)
+            elif resp == Gtk.ResponseType.REJECT:      # force into the note editor
+                self._add_note_session(path=path)
+            elif resp == 2 and decoded is not None:    # base64 decode
+                self._open_decoded(decoded, os.path.basename(path))
+
+        dialog.connect("response", _on_big_file_resp)
+        dialog.show_all()
 
     def _open_decoded(self, data, name):
         try:
@@ -3626,7 +3672,8 @@ if (data !== null) {{
 
     def _on_add_serial(self, _btn):
         dialog = Gtk.Dialog(title="New serial session", transient_for=self,
-                            modal=True)
+                            modal=False)
+        self._open_dialogs.add(dialog)
         grid = Gtk.Grid(row_spacing=6, column_spacing=6, margin=12)
         # serial: a /dev dropdown; ssh/telnet: a plain host entry (no dropdown)
         combo = Gtk.ComboBoxText.new_with_entry()
@@ -3729,29 +3776,35 @@ if (data !== null) {{
 
         backend.connect("changed", on_backend_changed)
         self._dialog_enter_is_ok(dialog)
+
+        def _on_serial_response(dlg, resp):
+            if resp == Gtk.ResponseType.OK:
+                tool = backend.get_active_text() or SERIAL_BACKENDS[0]
+                net = tool in SERIAL_NET_BACKENDS
+                if net:
+                    dev = (host.get_text() or "").strip()
+                    prt = (port.get_text() or "").strip()
+                    if dev:
+                        label = (dev.split() or [dev])[0]
+                        sub = f"{tool}:{prt}" if prt else tool
+                        self._add_session(
+                            label, self._serial_argv(tool, dev, "", prt),
+                            "network-transmit-receive-symbolic", sub=sub)
+                else:
+                    dev = (combo.get_active_text() or combo.get_child().get_text() or "").strip()
+                    bd = (baud.get_text() or "").strip() or DEFAULT_BAUD
+                    if dev:
+                        label = os.path.basename(dev)
+                        sub = f"{tool}:{bd}" if tool != "screen" else bd
+                        self._add_session(
+                            label, self._serial_argv(tool, dev, bd),
+                            "utilities-terminal-symbolic", sub=sub)
+            self._open_dialogs.discard(dlg)
+            dlg.destroy()
+
+        dialog.connect("response", _on_serial_response)
         dialog.show_all()
         on_backend_changed()  # after show_all so hide() sticks
-        if dialog.run() == Gtk.ResponseType.OK:
-            tool = backend.get_active_text() or SERIAL_BACKENDS[0]
-            net = tool in SERIAL_NET_BACKENDS
-            if net:
-                dev = (host.get_text() or "").strip()
-                prt = (port.get_text() or "").strip()
-                if dev:
-                    label = (dev.split() or [dev])[0]
-                    sub = f"{tool}:{prt}" if prt else tool
-                    self._add_session(
-                        label, self._serial_argv(tool, dev, "", prt),
-                        "network-wired-symbolic", sub=sub)
-            else:
-                dev = (combo.get_active_text() or "").strip()
-                rate = baud.get_text().strip() or DEFAULT_BAUD
-                if dev:
-                    self._add_session(os.path.basename(dev),
-                                      self._serial_argv(tool, dev, rate),
-                                      "network-wired-symbolic",
-                                      sub=f"{tool} @{rate}")
-        dialog.destroy()
 
     @staticmethod
     def _load_connect_last():
@@ -3778,7 +3831,8 @@ if (data !== null) {{
             return
 
         last = self._load_connect_last()
-        dialog = Gtk.Dialog(title="New Cloud Connect session", transient_for=self, modal=True)
+        dialog = Gtk.Dialog(title="New Cloud Connect session", transient_for=self, modal=False)
+        self._open_dialogs.add(dialog)
         grid = Gtk.Grid(row_spacing=8, column_spacing=10, margin=12)
 
         # 1. Device SN (required)
@@ -3923,77 +3977,82 @@ if (data !== null) {{
 
         dialog.connect("key-press-event", on_key)
 
-        if dialog.run() == Gtk.ResponseType.OK:
-            sn = sn_entry.get_text().strip()
-            if sn:
-                env_val = envs[env_combo.get_active()]
-                email_val = email_entry.get_text().strip()
-                pwd_val = pwd_entry.get_text().strip()
-                ticket_val = ticket_entry.get_text().strip()
-                org_val = org_entry.get_text().strip()
-                net_val = net_entry.get_text().strip()
-                dtype_val = dtypes[dtype_combo.get_active()]
-                nocache_val = nocache_chk.get_active()
-                use_tmux_val = use_tmux_chk.get_active()
-                reconnect_val = reconnect_chk.get_active()
-                gw_pass_val = gw_pass_entry.get_text().strip()
-                magic_words_val = magic_words_entry.get_text().strip()
+        def _on_connect_response(dlg, resp):
+            if resp == Gtk.ResponseType.OK:
+                sn = sn_entry.get_text().strip()
+                if sn:
+                    env_val = envs[env_combo.get_active()]
+                    email_val = email_entry.get_text().strip()
+                    pwd_val = pwd_entry.get_text().strip()
+                    ticket_val = ticket_entry.get_text().strip()
+                    org_val = org_entry.get_text().strip()
+                    net_val = net_entry.get_text().strip()
+                    dtype_val = dtypes[dtype_combo.get_active()]
+                    nocache_val = nocache_chk.get_active()
+                    use_tmux_val = use_tmux_chk.get_active()
+                    reconnect_val = reconnect_chk.get_active()
+                    gw_pass_val = gw_pass_entry.get_text().strip()
+                    magic_words_val = magic_words_entry.get_text().strip()
 
-                # Save last used credentials/parameters
-                self._save_connect_last({
-                    "sn": sn,
-                    "env": env_val,
-                    "email": email_entry.get_text().strip(),
-                    "password": pwd_entry.get_text().strip(),
-                    "ticket": ticket_val,
-                    "org": org_val,
-                    "network": net_val,
-                    "device_type": dtype_val,
-                    "no_cache": nocache_val,
-                    "use_tmux": use_tmux_val,
-                    "reconnect": reconnect_val,
-                    "gateway_pass": gw_pass_val,
-                    "magic_words": magic_words_val,
-                })
+                    # Save last used credentials/parameters
+                    self._save_connect_last({
+                        "sn": sn,
+                        "env": env_val,
+                        "email": email_entry.get_text().strip(),
+                        "password": pwd_entry.get_text().strip(),
+                        "ticket": ticket_val,
+                        "org": org_val,
+                        "network": net_val,
+                        "device_type": dtype_val,
+                        "no_cache": nocache_val,
+                        "use_tmux": use_tmux_val,
+                        "reconnect": reconnect_val,
+                        "gateway_pass": gw_pass_val,
+                        "magic_words": magic_words_val,
+                    })
 
-                # Build raw command args
-                raw_cmd = ["python3", SSH_TOOL_CONNECT_PY, "--sn", sn, "--email", email_val, "--password", pwd_val]
-                if env_val and env_val != "prod":
-                    raw_cmd.extend(["--env", env_val])
-                if ticket_val:
-                    raw_cmd.extend(["--ticket", ticket_val])
-                if org_val:
-                    raw_cmd.extend(["--org", org_val])
-                if net_val:
-                    raw_cmd.extend(["--network", net_val])
-                if dtype_val != "auto":
-                    raw_cmd.extend(["--device-type", dtype_val])
-                if nocache_val:
-                    raw_cmd.append("--no-cache")
-                if gw_pass_val:
-                    raw_cmd.extend(["--gateway-pass", gw_pass_val])
-                if magic_words_val:
-                    raw_cmd.extend(["--magic-words", magic_words_val])
+                    # Build raw command args
+                    raw_cmd = ["python3", SSH_TOOL_CONNECT_PY, "--sn", sn, "--email", email_val, "--password", pwd_val]
+                    if env_val and env_val != "prod":
+                        raw_cmd.extend(["--env", env_val])
+                    if ticket_val:
+                        raw_cmd.extend(["--ticket", ticket_val])
+                    if org_val:
+                        raw_cmd.extend(["--org", org_val])
+                    if net_val:
+                        raw_cmd.extend(["--network", net_val])
+                    if dtype_val != "auto":
+                        raw_cmd.extend(["--device-type", dtype_val])
+                    if nocache_val:
+                        raw_cmd.append("--no-cache")
+                    if gw_pass_val:
+                        raw_cmd.extend(["--gateway-pass", gw_pass_val])
+                    if magic_words_val:
+                        raw_cmd.extend(["--magic-words", magic_words_val])
 
-                if use_tmux_val:
-                    session_name = f"conn-{sn.lower()}"
-                    cmd_str = " ".join(shlex.quote(arg) for arg in raw_cmd)
-                    if reconnect_val:
-                        cmd = ["sh", "-c", f"tmux kill-session -t {shlex.quote(session_name)} 2>/dev/null; exec tmux new-session -s {shlex.quote(session_name)} {shlex.quote(cmd_str + '; exec bash')}"]
+                    if use_tmux_val:
+                        session_name = f"conn-{sn.lower()}"
+                        cmd_str = " ".join(shlex.quote(arg) for arg in raw_cmd)
+                        if reconnect_val:
+                            cmd = ["sh", "-c", f"tmux kill-session -t {shlex.quote(session_name)} 2>/dev/null; exec tmux new-session -s {shlex.quote(session_name)} {shlex.quote(cmd_str + '; exec bash')}"]
+                        else:
+                            cmd = ["tmux", "new-session", "-A", "-s", session_name, f"{cmd_str}; exec bash"]
+                        icon_name = ICON_TMUX
+                        sub = f"cloud ({env_val}) [tmux]"
                     else:
-                        cmd = ["tmux", "new-session", "-A", "-s", session_name, f"{cmd_str}; exec bash"]
-                    icon_name = ICON_TMUX
-                    sub = f"cloud ({env_val}) [tmux]"
-                else:
-                    cmd = raw_cmd
-                    icon_name = ICON_CONNECT
-                    sub = f"cloud ({env_val})"
+                        cmd = raw_cmd
+                        icon_name = ICON_CONNECT
+                        sub = f"cloud ({env_val})"
 
-                label = f"{sn} (connect)"
-                self._add_session(label=label, argv=cmd, icon_name=icon_name,
-                                  sub=sub, cwd=SSH_TOOL_DIR)
+                    label = f"{sn} (connect)"
+                    self._add_session(label=label, argv=cmd, icon_name=icon_name,
+                                      sub=sub, cwd=SSH_TOOL_DIR)
 
-        dialog.destroy()
+            self._open_dialogs.discard(dlg)
+            dlg.destroy()
+
+        dialog.connect("response", _on_connect_response)
+        dialog.show_all()
 
     @staticmethod
     def _screen_sessions():
@@ -4510,7 +4569,8 @@ if (data !== null) {{
         last = self._load_ai_last()
         entries = self._load_ai_clis()
         dialog = Gtk.Dialog(title="New AI session", transient_for=self,
-                            modal=True)
+                            modal=False)
+        self._open_dialogs.add(dialog)
         dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                            "Open", Gtk.ResponseType.OK)
         grid = Gtk.Grid(row_spacing=6, column_spacing=6, margin=12)
@@ -4535,14 +4595,20 @@ if (data !== null) {{
         def on_browse(_b):
             chooser = Gtk.FileChooserDialog(
                 title="Working directory", parent=dialog,
-                action=Gtk.FileChooserAction.SELECT_FOLDER)
+                action=Gtk.FileChooserAction.SELECT_FOLDER,
+                modal=False)
+            self._open_dialogs.add(chooser)
             chooser.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                                 "Select", Gtk.ResponseType.OK)
             if os.path.isdir(path.get_text()):
                 chooser.set_current_folder(path.get_text())
-            if chooser.run() == Gtk.ResponseType.OK:
-                path.set_text(chooser.get_filename())
-            chooser.destroy()
+            def _on_folder_resp(ch, ch_resp):
+                if ch_resp == Gtk.ResponseType.OK:
+                    path.set_text(ch.get_filename())
+                self._open_dialogs.discard(ch)
+                ch.destroy()
+            chooser.connect("response", _on_folder_resp)
+            chooser.show_all()
 
         browse.connect("clicked", on_browse)
         path_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
@@ -4586,26 +4652,31 @@ if (data !== null) {{
         grid.attach(try_hint, 0, 3, 2, 1)
         dialog.get_content_area().add(grid)
         self._dialog_enter_is_ok(dialog)
+
+        def _on_ai_response(dlg, resp):
+            if resp == Gtk.ResponseType.OK:
+                tool = (cli.get_active_text() or "").strip()
+                cwd = (path.get_text() or "").strip() or GLib.get_home_dir()
+                cwd = os.path.expanduser(cwd)
+                if tool:
+                    tries = []
+                    if resume_chk.get_active():
+                        tries = None
+                        for e in self._load_ai_clis():
+                            if e["cli"] == tool:
+                                tries = e.get("try") or []
+                                break
+                        if tries is None:
+                            tries = list(DEFAULT_AI_TRY)
+                    short = cwd if len(cwd) <= 28 else "…" + cwd[-27:]
+                    self._add_session(tool, self._ai_argv(tool, cwd, tries),
+                                      ICON_AI, sub=short)
+                    self._save_ai_last(tool, cwd)
+            self._open_dialogs.discard(dlg)
+            dlg.destroy()
+
+        dialog.connect("response", _on_ai_response)
         dialog.show_all()
-        if dialog.run() == Gtk.ResponseType.OK:
-            tool = (cli.get_active_text() or "").strip()
-            cwd = (path.get_text() or "").strip() or GLib.get_home_dir()
-            cwd = os.path.expanduser(cwd)
-            if tool:
-                tries = []
-                if resume_chk.get_active():
-                    tries = None
-                    for e in self._load_ai_clis():
-                        if e["cli"] == tool:
-                            tries = e.get("try") or []
-                            break
-                    if tries is None:
-                        tries = list(DEFAULT_AI_TRY)
-                short = cwd if len(cwd) <= 28 else "…" + cwd[-27:]
-                self._add_session(tool, self._ai_argv(tool, cwd, tries),
-                                  ICON_AI, sub=short)
-                self._save_ai_last(tool, cwd)
-        dialog.destroy()
 
     # --- keyboard -----------------------------------------------------------
 
@@ -4902,18 +4973,232 @@ if (data !== null) {{
             if getattr(row, "kind", None) == "note" and row.view is not None:
                 row.view.set_wrap_mode(mode)
 
+    def _fetch_latest_release_info(self, cur_ver="v1.5.4"):
+        url = "https://api.github.com/repos/ChrisLi826/tabit/releases?per_page=30"
+        req = urllib.request.Request(url, headers={"User-Agent": "tabit-app"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            if resp.status == 200:
+                releases = json.loads(resp.read().decode("utf-8"))
+                if not isinstance(releases, list) or not releases:
+                    return "", "", ""
+                
+                latest_tag = releases[0].get("tag_name", "")
+                
+                def parse_v(v_str):
+                    return [int(x) for x in v_str.lstrip("v").split("-")[0].split(".") if x.isdigit()]
 
+                cur_v_parsed = parse_v(cur_ver)
+                
+                combined_notes = []
+                for rel in releases:
+                    tag = rel.get("tag_name", "")
+                    body = rel.get("body", "").strip()
+                    rel_v_parsed = parse_v(tag)
+                    
+                    if rel_v_parsed > cur_v_parsed:
+                        header = f"========================================\n📦 Release {tag}\n========================================"
+                        combined_notes.append(f"{header}\n\n{body}")
+                    elif rel_v_parsed == cur_v_parsed and not combined_notes:
+                        header = f"========================================\n📦 Release {tag} (Current)\n========================================"
+                        combined_notes.append(f"{header}\n\n{body}")
+                        break
 
-    def _on_edit_settings(self, _btn):
-        s = self._load_settings()
-        dialog = Gtk.Dialog(title="Settings", transient_for=self, modal=True)
-        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
-                           "Save", Gtk.ResponseType.OK)
+                final_body = "\n\n\n".join(combined_notes) if combined_notes else (releases[0].get("body", "") or "")
+                return latest_tag, final_body, releases[0].get("html_url", "")
+        return "", "", ""
+
+    def _trigger_update_check(self, manual=True, status_label=None, notes_btn=None, parent_dialog=None):
+        if status_label:
+            status_label.set_markup("<span color='#7dcfff'>Checking for updates...</span>")
+        if notes_btn:
+            notes_btn.set_visible(False)
+
+        def thread_fn():
+            try:
+                cur_ver = _get_current_version()
+                latest_tag, body, html_url = self._fetch_latest_release_info(cur_ver)
+                is_newer = False
+                if latest_tag:
+                    clean_latest = latest_tag.lstrip("v")
+                    clean_cur = cur_ver.lstrip("v").split("-")[0]
+                    def parse_v(v_str):
+                        return [int(x) for x in v_str.split(".") if x.isdigit()]
+                    if parse_v(clean_latest) > parse_v(clean_cur):
+                        is_newer = True
+
+                def on_done():
+                    if status_label:
+                        if is_newer:
+                            status_label.set_markup(f"<span color='#ff9e64'>New version <b>{latest_tag}</b> available!</span>")
+                        elif latest_tag:
+                            status_label.set_markup("<span color='#9ece6a'>✓ You are using the latest version.</span>")
+                        else:
+                            status_label.set_text("Failed to check for updates.")
+
+                    if notes_btn and body:
+                        notes_btn.set_visible(True)
+                        notes_btn.set_tooltip_text(f"View release notes for {latest_tag or cur_ver}")
+                        if hasattr(notes_btn, "_notes_handler_id"):
+                            notes_btn.disconnect(notes_btn._notes_handler_id)
+                        notes_btn._notes_handler_id = notes_btn.connect(
+                            "clicked", lambda _b, t=latest_tag or cur_ver, b=body: self._show_release_notes_dialog(t, b, parent=parent_dialog))
+
+                    if is_newer:
+                        self._show_update_dialog(latest_tag, body, parent=parent_dialog)
+                    elif manual and not is_newer and latest_tag:
+                        self._note_msg(
+                            Gtk.MessageType.INFO,
+                            "Already Up to Date",
+                            f"You are currently using {cur_ver}, which is the latest version.",
+                            parent=parent_dialog)
+
+                GLib.idle_add(on_done)
+            except Exception as e:
+                def on_err():
+                    if status_label:
+                        status_label.set_text("Check failed (network error).")
+                    if manual:
+                        self._note_msg(Gtk.MessageType.ERROR, "Update Check Failed", str(e), parent=parent_dialog)
+                GLib.idle_add(on_err)
+
+        threading.Thread(target=thread_fn, daemon=True).start()
+
+    def _show_release_notes_dialog(self, title, notes_body, parent=None):
+        win = parent or self
+        dialog = Gtk.Dialog(title=f"Release Notes — {title}", transient_for=win, modal=False)
+        self._open_dialogs.add(dialog)
+        dialog.set_default_size(620, 440)
+        dialog.add_button("Close", Gtk.ResponseType.CLOSE)
+        box = dialog.get_content_area()
+        box.set_spacing(10)
+        for side in ("top", "bottom", "start", "end"):
+            getattr(box, f"set_margin_{side}")(14)
+
+        head = Gtk.Label(xalign=0)
+        head.set_markup(f"<big><b>Release Notes for {title}</b></big>")
+        box.pack_start(head, False, False, 0)
+
+        frame = Gtk.Frame()
+        sc = Gtk.ScrolledWindow()
+        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sc.set_min_content_height(320)
+        sc.set_min_content_width(580)
+
+        lbl = Gtk.Label(label=notes_body or "No release notes provided.", xalign=0, yalign=0, selectable=True)
+        lbl.set_line_wrap(True)
+        lbl.set_margin_top(10)
+        lbl.set_margin_bottom(10)
+        lbl.set_margin_start(12)
+        lbl.set_margin_end(12)
+        sc.add(lbl)
+        frame.add(sc)
+        box.pack_start(frame, True, True, 0)
+
+        def _on_rel_notes_resp(dlg, _r):
+            self._open_dialogs.discard(dlg)
+            dlg.destroy()
+        dialog.connect("response", _on_rel_notes_resp)
+        dialog.show_all()
+
+    def _show_update_dialog(self, new_ver, notes_body, parent=None):
+        win = parent or self
+        dialog = Gtk.Dialog(title=f"Update Available — {new_ver}", transient_for=win, modal=False)
+        self._open_dialogs.add(dialog)
+        dialog.set_default_size(620, 450)
+        dialog.add_buttons("Later", Gtk.ResponseType.CANCEL, "🚀 Update Now", Gtk.ResponseType.OK)
         dialog.set_default_response(Gtk.ResponseType.OK)
         box = dialog.get_content_area()
         box.set_spacing(10)
         for side in ("top", "bottom", "start", "end"):
-            getattr(box, f"set_margin_{side}")(12)
+            getattr(box, f"set_margin_{side}")(14)
+
+        head = Gtk.Label(xalign=0)
+        head.set_markup(f"<big><b>A new version of tabit is available!</b></big>\nNew version: <b>{new_ver}</b> (Current: {_get_current_version()})")
+        box.pack_start(head, False, False, 0)
+
+        if notes_body:
+            frame = Gtk.Frame(label="Release Notes")
+            sc = Gtk.ScrolledWindow()
+            sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            sc.set_min_content_height(260)
+            sc.set_min_content_width(580)
+            lbl = Gtk.Label(label=notes_body, xalign=0, yalign=0, selectable=True)
+            lbl.set_line_wrap(True)
+            lbl.set_margin_top(10)
+            lbl.set_margin_bottom(10)
+            lbl.set_margin_start(12)
+            lbl.set_margin_end(12)
+            sc.add(lbl)
+            frame.add(sc)
+            box.pack_start(frame, True, True, 0)
+
+        def _on_update_resp(dlg, res):
+            self._open_dialogs.discard(dlg)
+            dlg.destroy()
+            if res == Gtk.ResponseType.OK:
+                self._perform_update()
+        dialog.connect("response", _on_update_resp)
+        dialog.show_all()
+
+    def _perform_update(self):
+        progress_dialog = Gtk.MessageDialog(
+            transient_for=self, modal=True,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.NONE,
+            text="Updating tabit...",
+            secondary_text="Executing git pull & ./install.sh. Please wait a moment.")
+        progress_dialog.show_all()
+
+        def do_bg_update():
+            tabit_dir = os.path.dirname(os.path.abspath(__file__))
+            try:
+                sub1 = subprocess.run(["git", "pull", "origin", "main"], cwd=tabit_dir, capture_output=True, text=True)
+                if sub1.returncode != 0:
+                    raise RuntimeError(f"git pull failed:\n{sub1.stderr}")
+                sub2 = subprocess.run(["./install.sh"], cwd=tabit_dir, capture_output=True, text=True)
+                if sub2.returncode != 0:
+                    raise RuntimeError(f"install.sh failed:\n{sub2.stderr}")
+
+                def on_success():
+                    progress_dialog.destroy()
+                    self._note_msg(
+                        Gtk.MessageType.INFO,
+                        "Update Completed Successfully!",
+                        "tabit has been updated to the latest version.\nPlease restart tabit to apply changes.")
+                GLib.idle_add(on_success)
+            except Exception as ex:
+                def on_fail():
+                    progress_dialog.destroy()
+                    self._note_msg(
+                        Gtk.MessageType.ERROR,
+                        "Update Failed",
+                        str(ex))
+                GLib.idle_add(on_fail)
+
+        threading.Thread(target=do_bg_update, daemon=True).start()
+
+    def _check_weekly_auto_update(self):
+        s = self._load_settings()
+        last_check = s.get("last_update_check_time", 0)
+        now = time.time()
+        # 604800 seconds = 7 days
+        if now - last_check >= 604800:
+            self._save_settings({"last_update_check_time": now})
+            self._trigger_update_check(manual=False)
+
+    def _on_edit_settings(self, _btn):
+        s = self._load_settings()
+        dialog = Gtk.Dialog(title="Settings", transient_for=self, modal=False)
+        self._open_dialogs.add(dialog)
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                           "Save", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        box = dialog.get_content_area()
+        box.set_spacing(8)
+        box.set_margin_top(4)
+        box.set_margin_bottom(12)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
 
         # 獲取系統等寬字型
         context = self.get_pango_context()
@@ -5053,10 +5338,32 @@ if (data !== null) {{
             "When tabit reopens, restored AI tabs launch the CLI without "
             "--continue / resume. Default is off (they continue).")
 
+        ver_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        
+        cur_v = _get_current_version()
+        ver_lbl = Gtk.Label(xalign=0)
+        ver_lbl.set_markup(f"Version: <b>{cur_v}</b>")
+        
+        chk_btn = Gtk.Button(label="Check for Updates")
+        chk_btn.set_tooltip_text("Check GitHub releases for the latest version")
+        
+        notes_btn = Gtk.Button(label="📜 Release Notes")
+        notes_btn.set_no_show_all(True)
+        notes_btn.set_visible(False)
+        
+        status_lbl = Gtk.Label(label="", xalign=0)
+        chk_btn.connect("clicked", lambda _b: self._trigger_update_check(manual=True, status_label=status_lbl, notes_btn=notes_btn, parent_dialog=dialog))
+        
+        ver_box.pack_start(ver_lbl, False, False, 0)
+        ver_box.pack_start(chk_btn, False, False, 0)
+        ver_box.pack_start(notes_btn, False, False, 0)
+        ver_box.pack_start(status_lbl, False, False, 0)
+
         hint = Gtk.Label(
             label="Stored in ~/.config/tabit/settings.json",
             xalign=0)
         hint.get_style_context().add_class("session-sub")
+        box.pack_start(ver_box, False, False, 0)
         box.pack_start(app_head, False, False, 0)
         box.pack_start(theme_box, False, False, 0)
         box.pack_start(ui_font_box, False, False, 0)
@@ -5071,33 +5378,39 @@ if (data !== null) {{
         box.pack_start(ai_fresh, False, False, 0)
         box.pack_start(hint, False, False, 0)
         update_preview()
-        dialog.show_all()
-        if dialog.run() == Gtk.ResponseType.OK:
-            selected_theme = theme_keys[theme_combo.get_active()]
-            try:
-                ui_sz = int(ui_font_spin.entry.get_text() or "10")
-            except ValueError:
-                ui_sz = 10
-            t_font = (term_font_combo.get_active_text() or term_font_combo.get_child().get_text() or "").strip() or "Monospace"
-            try:
-                t_sz = int(term_size_spin.entry.get_text() or "12")
-            except ValueError:
-                t_sz = 12
 
-            self._save_settings({"theme": selected_theme,
-                                 "note_wrap": wrap.get_active(),
-                                 "shell_inherit_cwd": inherit.get_active(),
-                                 "ai_fresh_on_restore": ai_fresh.get_active(),
-                                 "ui_font_size": ui_sz,
-                                 "term_font": t_font,
-                                 "term_font_size": t_sz})
-            self._apply_note_wrap_setting(wrap.get_active())
-            self._apply_theme(selected_theme)
-        dialog.destroy()
+        def _on_settings_response(dlg, resp):
+            if resp == Gtk.ResponseType.OK:
+                selected_theme = theme_keys[theme_combo.get_active()]
+                try:
+                    ui_sz = int(ui_font_spin.entry.get_text() or "10")
+                except ValueError:
+                    ui_sz = 10
+                t_font = (term_font_combo.get_active_text() or term_font_combo.get_child().get_text() or "").strip() or "Monospace"
+                try:
+                    t_sz = int(term_size_spin.entry.get_text() or "12")
+                except ValueError:
+                    t_sz = 12
+
+                self._save_settings({"theme": selected_theme,
+                                     "note_wrap": wrap.get_active(),
+                                     "shell_inherit_cwd": inherit.get_active(),
+                                     "ai_fresh_on_restore": ai_fresh.get_active(),
+                                     "ui_font_size": ui_sz,
+                                     "term_font": t_font,
+                                     "term_font_size": t_sz})
+                self._apply_note_wrap_setting(wrap.get_active())
+                self._apply_theme(selected_theme)
+            self._open_dialogs.discard(dlg)
+            dlg.destroy()
+
+        dialog.connect("response", _on_settings_response)
+        dialog.show_all()
 
     def _on_edit_keys(self, _btn):
         dialog = Gtk.Dialog(title="Keyboard shortcuts", transient_for=self,
-                            modal=True)
+                            modal=False)
+        self._open_dialogs.add(dialog)
         dialog.add_buttons("Reset defaults", Gtk.ResponseType.APPLY,
                            "Cancel", Gtk.ResponseType.CANCEL,
                            "Save", Gtk.ResponseType.OK)
@@ -5155,19 +5468,19 @@ if (data !== null) {{
         box = dialog.get_content_area()
         box.add(grid)
         box.add(hint)
-        dialog.show_all()
-
-        while True:
-            resp = dialog.run()
+        def _on_keys_response(dlg, resp):
             if resp == Gtk.ResponseType.APPLY:
                 for action, _label, default in KEY_ACTIONS:
                     accels[action] = default
                     buttons[action].set_label(self._accel_label_from_name(default))
-                continue
+                return  # Keep dialog open for further edits
             if resp == Gtk.ResponseType.OK:
                 self._save_keys({a: accels[a] for a, _l, _d in KEY_ACTIONS})
-            break
-        dialog.destroy()
+            self._open_dialogs.discard(dlg)
+            dlg.destroy()
+
+        dialog.connect("response", _on_keys_response)
+        dialog.show_all()
 
     # --- misc ---------------------------------------------------------------
 
