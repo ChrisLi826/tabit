@@ -267,11 +267,24 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v1.5.5"
+APP_VERSION = "v1.5.6"
+
+def _get_tabit_repo_dir():
+    try:
+        real_file = os.path.realpath(os.path.abspath(__file__))
+        repo_dir = os.path.dirname(real_file)
+        if os.path.exists(os.path.join(repo_dir, ".git")):
+            return repo_dir
+    except Exception:
+        pass
+    home_tabit = os.path.expanduser("~/tabit")
+    if os.path.exists(os.path.join(home_tabit, ".git")):
+        return home_tabit
+    return os.path.dirname(os.path.abspath(__file__))
 
 def _get_current_version():
     try:
-        tabit_dir = os.path.dirname(os.path.abspath(__file__))
+        tabit_dir = _get_tabit_repo_dir()
         if os.path.exists(os.path.join(tabit_dir, ".git")):
             out = subprocess.check_output(
                 ["git", "describe", "--tags", "--always"],
@@ -5136,45 +5149,136 @@ if (data !== null) {{
             self._open_dialogs.discard(dlg)
             dlg.destroy()
             if res == Gtk.ResponseType.OK:
-                self._perform_update()
+                self._perform_update(parent=parent)
         dialog.connect("response", _on_update_resp)
         dialog.show_all()
 
-    def _perform_update(self):
-        progress_dialog = Gtk.MessageDialog(
-            transient_for=self, modal=True,
-            message_type=Gtk.MessageType.INFO,
-            buttons=Gtk.ButtonsType.NONE,
-            text="Updating tabit...",
-            secondary_text="Executing git pull & ./install.sh. Please wait a moment.")
-        progress_dialog.show_all()
+    def _perform_update(self, parent=None):
+        win = parent or self
+        dialog = Gtk.Dialog(title="Updating tabit...", transient_for=win, modal=False)
+        dialog.set_default_size(540, 340)
+        self._open_dialogs.add(dialog)
+
+        box = dialog.get_content_area()
+        box.set_spacing(10)
+        for side in ("top", "bottom", "start", "end"):
+            getattr(box, f"set_margin_{side}")(14)
+
+        head = Gtk.Label(xalign=0)
+        head.set_markup("<big><b>Updating tabit...</b></big>")
+        box.pack_start(head, False, False, 0)
+
+        status_lbl = Gtk.Label(label="Initializing update...", xalign=0)
+        box.pack_start(status_lbl, False, False, 0)
+
+        progress = Gtk.ProgressBar()
+        progress.set_fraction(0.1)
+        progress.set_show_text(True)
+        progress.set_text("10% - Initializing")
+        box.pack_start(progress, False, False, 0)
+
+        # Log Terminal View
+        log_frame = Gtk.Frame(label="Output Log")
+        sc = Gtk.ScrolledWindow()
+        sc.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        sc.set_min_content_height(150)
+
+        text_view = Gtk.TextView()
+        text_view.set_editable(False)
+        text_view.set_cursor_visible(False)
+        text_view.set_monospace(True)
+        buf = text_view.get_buffer()
+
+        sc.add(text_view)
+        log_frame.add(sc)
+        box.pack_start(log_frame, True, True, 0)
+
+        restart_btn = Gtk.Button(label="🚀 Restart tabit Now")
+        restart_btn.get_style_context().add_class("suggested-action")
+        restart_btn.set_no_show_all(True)
+        restart_btn.hide()
+
+        close_btn = Gtk.Button(label="Close")
+        close_btn.set_sensitive(False)
+
+        dialog.add_action_widget(restart_btn, Gtk.ResponseType.OK)
+        dialog.add_action_widget(close_btn, Gtk.ResponseType.CLOSE)
+
+        def append_log(msg):
+            end_iter = buf.get_end_iter()
+            buf.insert(end_iter, msg + "\n")
+            mark = buf.create_mark(None, buf.get_end_iter(), False)
+            text_view.scroll_to_mark(mark, 0.0, True, 0.0, 1.0)
 
         def do_bg_update():
-            tabit_dir = os.path.dirname(os.path.abspath(__file__))
+            tabit_dir = _get_tabit_repo_dir()
+            if not os.path.exists(os.path.join(tabit_dir, ".git")):
+                def on_no_git():
+                    status_lbl.set_markup("<span color='#f7768e'><b>❌ Update Failed: Not a git repository.</b></span>")
+                    append_log(f"[ERROR] '{tabit_dir}' is not a git repository.")
+                    close_btn.set_sensitive(True)
+                    restart_btn.hide()
+                GLib.idle_add(on_no_git)
+                return
+
             try:
-                sub1 = subprocess.run(["git", "pull", "origin", "main"], cwd=tabit_dir, capture_output=True, text=True)
-                if sub1.returncode != 0:
-                    raise RuntimeError(f"git pull failed:\n{sub1.stderr}")
-                sub2 = subprocess.run(["./install.sh"], cwd=tabit_dir, capture_output=True, text=True)
-                if sub2.returncode != 0:
-                    raise RuntimeError(f"install.sh failed:\n{sub2.stderr}")
+                # Step 1: git pull
+                GLib.idle_add(lambda: status_lbl.set_markup("<b>Step 1/2:</b> Pulling latest changes from GitHub..."))
+                GLib.idle_add(lambda: progress.set_fraction(0.35))
+                GLib.idle_add(lambda: progress.set_text("35% - git pull"))
+                GLib.idle_add(append_log, f">>> git pull origin main (in {tabit_dir})")
+
+                p1 = subprocess.Popen(["git", "pull", "origin", "main"], cwd=tabit_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                for line in p1.stdout:
+                    line_str = line.strip()
+                    if line_str:
+                        GLib.idle_add(append_log, line_str)
+                p1.wait()
+                if p1.returncode != 0:
+                    raise RuntimeError("git pull failed with exit code " + str(p1.returncode))
+
+                # Step 2: install.sh
+                GLib.idle_add(lambda: status_lbl.set_markup("<b>Step 2/2:</b> Installing dependencies & updating binary..."))
+                GLib.idle_add(lambda: progress.set_fraction(0.75))
+                GLib.idle_add(lambda: progress.set_text("75% - ./install.sh"))
+                GLib.idle_add(append_log, "\n>>> ./install.sh")
+
+                p2 = subprocess.Popen(["./install.sh"], cwd=tabit_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                for line in p2.stdout:
+                    line_str = line.strip()
+                    if line_str:
+                        GLib.idle_add(append_log, line_str)
+                p2.wait()
+                if p2.returncode != 0:
+                    raise RuntimeError("install.sh failed with exit code " + str(p2.returncode))
 
                 def on_success():
-                    progress_dialog.destroy()
-                    self._note_msg(
-                        Gtk.MessageType.INFO,
-                        "Update Completed Successfully!",
-                        "tabit has been updated to the latest version.\nPlease restart tabit to apply changes.")
+                    status_lbl.set_markup("<span color='#9ece6a'><b>✓ Update Completed Successfully!</b></span>")
+                    progress.set_fraction(1.0)
+                    progress.set_text("100% - Done")
+                    append_log("\n>>> Success! tabit has been updated to the latest version.")
+                    close_btn.set_sensitive(True)
+                    restart_btn.show()
+
                 GLib.idle_add(on_success)
             except Exception as ex:
                 def on_fail():
-                    progress_dialog.destroy()
-                    self._note_msg(
-                        Gtk.MessageType.ERROR,
-                        "Update Failed",
-                        str(ex))
+                    status_lbl.set_markup(f"<span color='#f7768e'><b>❌ Update Failed:</b> {ex}</span>")
+                    append_log(f"\n[ERROR] {ex}")
+                    close_btn.set_sensitive(True)
+                    restart_btn.hide()
+
                 GLib.idle_add(on_fail)
 
+        def _on_update_progress_resp(dlg, resp):
+            self._open_dialogs.discard(dlg)
+            dlg.destroy()
+            if resp == Gtk.ResponseType.OK:
+                # Restart tabit process
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+
+        dialog.connect("response", _on_update_progress_resp)
+        dialog.show_all()
         threading.Thread(target=do_bg_update, daemon=True).start()
 
     def _check_weekly_auto_update(self):
