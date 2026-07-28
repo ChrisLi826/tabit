@@ -267,7 +267,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v1.5.6"
+APP_VERSION = "v1.5.7"
 
 def _get_tabit_repo_dir():
     try:
@@ -809,7 +809,7 @@ class Tabit(Gtk.Window):
         if HAS_SSH_TOOL:
             button_items.append(("+ Connect", ICON_CONNECT, self._on_add_connect))
         button_items.extend([
-            ("+ Note", ICON_NOTE, self._on_add_note),
+            ("+ File", ICON_NOTE, self._on_add_note),
             ("+ Command", ICON_COMMAND, self._on_add_command),
             ("+ tmux", ICON_TMUX, self._on_add_tmux),
         ])
@@ -1085,6 +1085,16 @@ class Tabit(Gtk.Window):
         font_desc = Pango.FontDescription.from_string(f"{family} {size}")
         term.set_font(font_desc)
 
+    def _apply_editor_font(self, font_family=None, font_size=None):
+        if font_family is None or font_size is None:
+            settings = self._load_settings()
+            font_family = settings.get("term_font", "Monospace")
+            font_size = settings.get("term_font_size", 12)
+        font_desc = Pango.FontDescription.from_string(f"{font_family} {font_size}")
+        for row in self.listbox.get_children():
+            if getattr(row, "kind", None) == "note" and getattr(row, "view", None) is not None:
+                row.view.override_font(font_desc)
+
     def _apply_theme(self, theme_key):
         self.theme = theme_key
         theme_info = get_theme_colors(theme_key)
@@ -1093,6 +1103,7 @@ class Tabit(Gtk.Window):
             if getattr(row, "kind", None) == "term" and getattr(row, "term", None) is not None:
                 self._apply_term_colors(row.term, theme_info)
                 self._apply_term_font(row.term)
+        self._apply_editor_font()
 
     def _add_session(self, label, argv, icon_name, sub=None, cwd=None,
                      track_cwd=False):
@@ -1299,6 +1310,7 @@ class Tabit(Gtk.Window):
         view.set_highlight_current_line(True)
         view.set_tab_width(4)
         view.set_insert_spaces_instead_of_tabs(True)
+        self._apply_editor_font()
         view.drag_dest_set(Gtk.DestDefaults.ALL,
                             [Gtk.TargetEntry.new("text/uri-list", 0, 0)],
                             Gdk.DragAction.COPY)
@@ -5317,11 +5329,13 @@ if (data !== null) {{
             mono_fonts = ["Monospace", "Courier New", "DejaVu Sans Mono", "Liberation Mono"]
         mono_fonts.sort()
 
-        # 預覽 Demo Label 與 Frame
+        # 預覽 Demo Entry 與 Frame (使用 Entry 確保與 Note 編輯器字型比例 100% 一致)
         demo_frame = Gtk.Frame(label="Font Preview")
         demo_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin=8)
-        demo_lbl = Gtk.Label(label="Tabit Font Preview — The quick brown fox jumps over 1234567890")
-        demo_box.pack_start(demo_lbl, True, True, 0)
+        demo_entry = Gtk.Entry(text="Tabit Font Preview — The quick brown fox jumps over 1234567890")
+        demo_entry.set_editable(False)
+        demo_entry.set_can_focus(False)
+        demo_box.pack_start(demo_entry, True, True, 0)
         demo_frame.add(demo_box)
 
         # 更新預覽函數
@@ -5332,7 +5346,7 @@ if (data !== null) {{
             except ValueError:
                 t_sz = 12
             font_desc = Pango.FontDescription.from_string(f"{t_font} {t_sz}")
-            demo_lbl.override_font(font_desc)
+            demo_entry.override_font(font_desc)
 
         # 客製化 [- 12 +] 微調按鈕
         def make_custom_spin(initial_val, min_val, max_val):
@@ -5372,21 +5386,42 @@ if (data !== null) {{
             sbox.entry = entry
             return sbox
 
+        orig_theme = s.get("theme", "tokyo-night")
+        orig_font = s.get("term_font", "Monospace")
+        orig_sz = s.get("term_font_size", 12)
+
         app_head = Gtk.Label(xalign=0)
         app_head.set_markup("<b>Appearance</b>")
         theme_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         theme_lbl = Gtk.Label(label="Color theme template:", xalign=0)
         theme_combo = Gtk.ComboBoxText()
         theme_keys = list(COLOR_SCHEMES.keys())
-        cur_theme = s.get("theme", "tokyo-night")
+        cur_theme = orig_theme
         active_idx = 0
         for idx, k in enumerate(theme_keys):
             theme_combo.append(k, COLOR_SCHEMES[k]["name"])
             if k == cur_theme:
                 active_idx = idx
         theme_combo.set_active(active_idx)
+        
+        preview_theme_btn = Gtk.Button(label="🎨 Preview Theme")
+        preview_theme_btn.set_tooltip_text("Temporarily apply theme to terminals, notes, and UI for preview. Click Save to keep changes.")
+        
+        def on_preview_theme(_b):
+            sel_theme = theme_keys[theme_combo.get_active()]
+            t_font = (term_font_combo.get_active_text() or term_font_combo.get_child().get_text() or "").strip() or "Monospace"
+            try:
+                t_sz = int(term_size_spin.entry.get_text() or "12")
+            except ValueError:
+                t_sz = 12
+            self._apply_theme(sel_theme)
+            self._apply_editor_font(t_font, t_sz)
+
+        preview_theme_btn.connect("clicked", on_preview_theme)
+
         theme_box.pack_start(theme_lbl, False, False, 0)
         theme_box.pack_start(theme_combo, True, True, 0)
+        theme_box.pack_start(preview_theme_btn, False, False, 0)
 
         ui_font_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         ui_font_lbl = Gtk.Label(label="UI font size (pt):", xalign=0)
@@ -5505,6 +5540,11 @@ if (data !== null) {{
                                      "term_font_size": t_sz})
                 self._apply_note_wrap_setting(wrap.get_active())
                 self._apply_theme(selected_theme)
+                self._apply_editor_font(t_font, t_sz)
+            else:
+                # Revert theme and font preview if user cancels
+                self._apply_theme(orig_theme)
+                self._apply_editor_font(orig_font, orig_sz)
             self._open_dialogs.discard(dlg)
             dlg.destroy()
 
