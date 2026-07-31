@@ -527,6 +527,7 @@ def get_theme_css(theme_key):
 .group-bar.grp-pink    {{ background-color: #f38ba8; }}
 .group-bar.grp-gray    {{ background-color: #a9b1d6; }}
 .group-bar.grp-white   {{ background-color: #ffffff; }}
+.group-bar.grp-brown   {{ background-color: #d19a66; }}
 .sidebar row.group-header {{ border-radius: 6px; padding: 4px 6px 4px 4px; margin-bottom: 2px; }}
 .sidebar row.group-header label,
 .sidebar row.group-header .group-chevron,
