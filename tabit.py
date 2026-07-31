@@ -271,7 +271,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v1.5.8"
+APP_VERSION = "v1.5.9"
 
 def _get_tabit_repo_dir():
     try:
@@ -501,10 +501,19 @@ def get_theme_css(theme_key):
                         border-left-color: {s['accent']}; color: #ffffff;
                         outline: none; box-shadow: none; }}
 .sidebar row.dead label {{ color: {s['subtext']}; }}
+.sidebar row.dragging {{ opacity: 0.35; }}
 .sidebar row.drop-into {{ box-shadow: inset 0 0 0 2px {s['accent']}; }}
 .sidebar row.drop-above {{ box-shadow: inset 0 3px 0 0 {s['accent']}; }}
 .sidebar row.drop-below {{ box-shadow: inset 0 -3px 0 0 {s['accent']}; }}
 .sidebar row.marked {{ box-shadow: inset 0 0 0 2px {s['accent']}; }}
+.drag-ghost {{
+    background-color: {s['sidebar_bg']};
+    border: 1px solid {s['accent']};
+    border-radius: 6px;
+    padding: 4px 10px 4px 4px;
+    opacity: 0.92;
+}}
+.drag-ghost label {{ font-size: {ui_sz}pt; color: {s['text']}; }}
 .group-bar {{ background-color: transparent; border-radius: 2px; }}
 .group-bar.grp-red     {{ background-color: #f7768e; }}
 .group-bar.grp-orange  {{ background-color: #ff9e64; }}
@@ -2647,6 +2656,7 @@ if (data !== null) {{
         hit.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, [target],
                             Gdk.DragAction.MOVE)
         hit.connect("drag-begin", self._on_row_drag_begin, row)
+        hit.connect("drag-end", self._on_row_drag_end, row)
         hit.connect("drag-data-get", self._on_row_drag_get)
         # MOTION|DROP keep auto accept + finish; drop HIGHLIGHT so we can
         # draw our own themed drop frame instead of the default green box
@@ -2656,8 +2666,108 @@ if (data !== null) {{
         row.connect("drag-motion", self._on_row_drag_motion)
         row.connect("drag-leave", self._on_row_drag_leave)
 
-    def _on_row_drag_begin(self, _hit, _ctx, row):
+    def _snapshot_widget_pixbuf(self, widget):
+        """Best-effort screenshot of a mapped widget (for drag ghost)."""
+        try:
+            win = widget.get_window()
+            if win is None:
+                return None
+            alloc = widget.get_allocation()
+            w, h = alloc.width, alloc.height
+            if w < 8 or h < 8:
+                return None
+            # ListBox rows share the parent window; use allocation offsets
+            return Gdk.pixbuf_get_from_window(win, alloc.x, alloc.y, w, h)
+        except Exception:
+            return None
+
+    def _build_drag_ghost_pixbuf(self, row):
+        """Floating drag icon: prefer a live snapshot, else a built mini-row."""
+        pb = self._snapshot_widget_pixbuf(row)
+        if pb is not None:
+            return self._pixbuf_with_alpha(pb, 0.88)
+
+        # Fallback: synthesize a small row (icon + title + group stripe)
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box.get_style_context().add_class("drag-ghost")
+        bar = Gtk.Box()
+        bar.set_size_request(4, 22)
+        bar.get_style_context().add_class("group-bar")
+        g = getattr(row, "group_color", None)
+        if g:
+            bar.get_style_context().add_class("grp-" + g)
+        box.pack_start(bar, False, False, 0)
+        if getattr(row, "kind", None) == "group_header":
+            name = (self._group_names.get(g) or (g or "group")).upper()
+            box.pack_start(Gtk.Label(label=f"▾ {name}"), False, False, 0)
+        else:
+            icon_name = getattr(row, "icon_name", None) or "utilities-terminal-symbolic"
+            box.pack_start(self._session_icon(icon_name), False, False, 0)
+            title = getattr(row, "title_text", None) or getattr(row, "session_label", "tab")
+            lbl = Gtk.Label(label=title)
+            lbl.set_ellipsize(Pango.EllipsizeMode.END)
+            lbl.set_max_width_chars(28)
+            box.pack_start(lbl, False, False, 0)
+
+        off = Gtk.OffscreenWindow()
+        # match sidebar width-ish so ghost is readable
+        side_w = 0
+        try:
+            side_w = self.listbox.get_allocated_width()
+        except Exception:
+            pass
+        off.set_default_size(max(side_w - 8, 160), 1)
+        off.add(box)
+        off.show_all()
+        # let GTK realize/layout the offscreen tree
+        while Gtk.events_pending():
+            Gtk.main_iteration_do(False)
+        try:
+            pb = off.get_pixbuf()
+        except Exception:
+            pb = None
+        off.destroy()
+        if pb is None:
+            return None
+        return self._pixbuf_with_alpha(pb, 0.92)
+
+    @staticmethod
+    def _pixbuf_with_alpha(pixbuf, alpha):
+        """Return a copy of pixbuf with overall opacity (0..1)."""
+        try:
+            import cairo
+            w, h = pixbuf.get_width(), pixbuf.get_height()
+            surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
+            cr = cairo.Context(surface)
+            Gdk.cairo_set_source_pixbuf(cr, pixbuf, 0, 0)
+            cr.paint_with_alpha(max(0.0, min(1.0, alpha)))
+            return Gdk.pixbuf_get_from_surface(surface, 0, 0, w, h)
+        except Exception:
+            return pixbuf
+
+    def _on_row_drag_begin(self, _hit, context, row):
         self._drag_row = row
+        row.get_style_context().add_class("dragging")
+        # clear leftover drop highlights from a previous drag
+        for r in self.listbox.get_children():
+            self._clear_drop_classes(r)
+        pb = self._build_drag_ghost_pixbuf(row)
+        if pb is not None:
+            # hot spot near left-center so the stripe stays under the cursor
+            hot_x = min(16, max(4, pb.get_width() // 8))
+            hot_y = max(4, pb.get_height() // 2)
+            Gtk.drag_set_icon_pixbuf(context, pb, hot_x, hot_y)
+        else:
+            Gtk.drag_set_icon_default(context)
+
+    def _on_row_drag_end(self, _hit, _ctx, row):
+        row.get_style_context().remove_class("dragging")
+        for r in self.listbox.get_children():
+            self._clear_drop_classes(r)
+            r.get_style_context().remove_class("dragging")
+        # drop handler usually clears this first; keep end-path safe on cancel
+        if getattr(self, "_drag_row", None) is row:
+            self._drag_row = None
 
     _DROP_CLASSES = ("drop-into", "drop-above", "drop-below")
 
@@ -2892,6 +3002,7 @@ if (data !== null) {{
         hit.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, [target],
                             Gdk.DragAction.MOVE)
         hit.connect("drag-begin", self._on_header_drag_begin, row)
+        hit.connect("drag-end", self._on_row_drag_end, row)
         hit.connect("drag-data-get", self._on_row_drag_get)
         row._hdr_did_drag = False
         row._hdr_ignore_release = False
