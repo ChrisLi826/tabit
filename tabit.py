@@ -254,9 +254,13 @@ RC="$LOG_DIR/tabit-screenrc"
     echo "defscrollback 10000"
     echo "termcapinfo xterm* ti@:te@"
     echo "termcapinfo linux* ti@:te@"
+    echo "termcapinfo vte* ti@:te@"
+    echo "autodetach on"
+    echo "caption splitonly"
+    echo "fit"
 } > "$RC" 2>/dev/null
 
-exec screen -c "$RC" -S "$SESSION" -L -Logfile "$LOG" "$DEV" "$BAUD"
+exec screen -c "$RC" -A -S "$SESSION" -L -Logfile "$LOG" "$DEV" "$BAUD"
 '''
 # default AI CLI list for +AI (user-editable → ~/.config/tabit/ai_clis.json)
 # Each entry: {"cli": name, "try": ["args after cli", ...]} then plain cli.
@@ -267,7 +271,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v1.5.7"
+APP_VERSION = "v1.5.8"
 
 def _get_tabit_repo_dir():
     try:
@@ -283,12 +287,20 @@ def _get_tabit_repo_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 def _get_current_version():
+    """Version of the *running* binary.
+
+    Use git describe only when this script lives inside a git checkout
+    (dev). The installed copy under ~/.local/bin has no .git next to it —
+    return APP_VERSION so update-check can see a newer GitHub release
+    without reinstalling.
+    """
     try:
-        tabit_dir = _get_tabit_repo_dir()
-        if os.path.exists(os.path.join(tabit_dir, ".git")):
+        real_file = os.path.realpath(os.path.abspath(__file__))
+        script_dir = os.path.dirname(real_file)
+        if os.path.isdir(os.path.join(script_dir, ".git")):
             out = subprocess.check_output(
                 ["git", "describe", "--tags", "--always"],
-                cwd=tabit_dir,
+                cwd=script_dir,
                 stderr=subprocess.DEVNULL
             ).decode("utf-8").strip()
             if out:
@@ -732,8 +744,8 @@ KEY_ACTIONS = (
     ("move_tab_down", "Move tab down", "<Primary><Shift>Page_Down"),
     ("move_group_up", "Move group up", "<Primary><Alt><Shift>Page_Up"),
     ("move_group_down", "Move group down", "<Primary><Alt><Shift>Page_Down"),
-    # Return/Space: toggle fold of the focused group header
-    ("toggle_group_collapse", "Toggle group collapse", "Return"),
+    # Ctrl+Alt+G: fold/unfold the group of the focused tab or header
+    ("toggle_group_collapse", "Toggle group collapse", "<Primary><Alt>g"),
     ("group_session", "Group session", "<Primary>g"),
     ("ungroup_session", "Ungroup session", "<Primary><Shift>g"),
     ("copy", "Copy", "<Primary><Shift>c"),
@@ -854,7 +866,9 @@ class Tabit(Gtk.Window):
         self.add(self._paned)
 
         ai_fresh = self._load_settings().get("ai_fresh_on_restore", False)
+        # Keep collapsed_groups from settings; do not expand while replaying sessions.
         self._restoring_sessions = True
+        last_row = None
         for s in self._load_sessions():
             try:
                 argv = s.get("argv") or []
@@ -875,10 +889,21 @@ class Tabit(Gtk.Window):
                 color = s.get("color")
                 if color and r is not None:  # restore the tab-group stripe on the new row
                     self._apply_group(r, color)
+                if r is not None:
+                    last_row = r
             except (KeyError, TypeError, OSError):
                 continue  # skip broken entries in a hand-edited file
         self._restoring_sessions = False
-        self._relayout()  # build group headers + cluster restored members
+        self._relayout()  # build group headers + cluster + apply collapse
+        # Prefer a visible (non-collapsed-member) row so we do not auto-expand
+        if last_row is not None:
+            pick = last_row
+            if (getattr(pick, "group_color", None) in self._collapsed_groups
+                    and getattr(pick, "kind", None) != "group_header"):
+                hdr = self._group_header_row(pick.group_color)
+                if hdr is not None:
+                    pick = hdr
+            self.listbox.select_row(pick)
         if not self.listbox.get_children():
             self._on_add_shell(None)
         GLib.idle_add(self._check_weekly_auto_update)
@@ -1045,11 +1070,39 @@ class Tabit(Gtk.Window):
         row.cmd_bar = None
         return row
 
+    def _get_active_group_color(self):
+        selected = self.listbox.get_selected_row()
+        if selected is not None:
+            g = getattr(selected, "group_color", None)
+            if g:
+                return g
+        vis_page = self.stack.get_visible_child()
+        if vis_page is not None:
+            for r in self._session_rows():
+                if getattr(r, "page", None) is vis_page:
+                    return getattr(r, "group_color", None)
+        return None
+
     def _place_tab_row(self, row, page):
-        """Insert row under selection, show, select, persist."""
+        """Insert row under selection, show, select, persist.
+
+        New tabs inherit the focused group (any kind). During restore from
+        sessions.json we skip auto-join (saved color is applied by the restore
+        loop) and skip select — selecting members was expanding groups and
+        wiping collapsed_groups on every restart.
+        """
         self._counter += 1
         self.stack.add_named(page, f"session-{self._counter}")
         row.page = page
+        restoring = getattr(self, "_restoring_sessions", False)
+        if not restoring:
+            cur_group = self._get_active_group_color()
+            if cur_group:
+                row.group_color = cur_group
+                self._apply_group(row, cur_group)
+                if cur_group in self._collapsed_groups:
+                    self._collapsed_groups.discard(cur_group)
+                    self._save_collapsed_groups()
         selected = self.listbox.get_selected_row()
         if selected is not None:
             row._order = selected._order + 1
@@ -1062,8 +1115,9 @@ class Tabit(Gtk.Window):
         self.listbox.add(row)
         self.stack.show_all()
         self._relayout()  # keep group members clustered under their header
-        self.listbox.select_row(row)
-        self._save_sessions()
+        if not restoring:
+            self.listbox.select_row(row)
+            self._save_sessions()
 
     def _apply_term_colors(self, term, theme_info=None):
         if theme_info is None:
@@ -1108,6 +1162,8 @@ class Tabit(Gtk.Window):
     def _add_session(self, label, argv, icon_name, sub=None, cwd=None,
                      track_cwd=False):
         term = Vte.Terminal()
+        term.set_hexpand(True)
+        term.set_vexpand(True)
         term.set_scrollback_lines(10000)
         self._apply_term_colors(term)
         self._apply_term_font(term)
@@ -2505,6 +2561,12 @@ if (data !== null) {{
         return False
 
     def _move_session(self, delta):
+        """Reorder the focused tab (Ctrl+Shift+PageUp/Down).
+
+        Collapsed groups are atomic: an ungrouped tab jumps over them and
+        never joins. Internal reorder only happens in expanded groups; if the
+        tab is somehow inside a collapsed group, expand first then move.
+        """
         row = self.listbox.get_selected_row()
         if row is None:
             return
@@ -2517,31 +2579,63 @@ if (data !== null) {{
         blocks = self._blocks()
         g = row.group_color
         if g:
-            gb = next(b for b in blocks if b[0] == "group" and b[1] == g)
+            # already in a group — if collapsed, expand so the move is visible
+            if g in self._collapsed_groups:
+                self._set_group_collapsed(g, False)
+                if self.listbox.get_selected_row() is not row:
+                    self.listbox.select_row(row)
+                blocks = self._blocks()
+            gb = next((b for b in blocks if b[0] == "group" and b[1] == g), None)
+            if gb is None or row not in gb[2]:
+                return
             members = gb[2]
             gi = members.index(row)
             if (delta < 0 and gi == 0) or (delta > 0 and gi == len(members) - 1):
-                self._apply_group(row, None)  # at an edge → leave the group
-                self._relayout()
-                self._save_sessions_soon()
-            else:                             # reorder within the group
+                # leave group and park the tab just outside the group block
+                self._apply_group(row, None)
+                blocks = self._blocks()
+                # row is now its own top-level block; place it before/after the group
+                gi_b = next((i for i, b in enumerate(blocks)
+                             if b[0] == "group" and b[1] == g), None)
+                bi = next((i for i, b in enumerate(blocks)
+                           if b[0] == "tab" and b[1] is row), None)
+                if gi_b is not None and bi is not None:
+                    blocks.pop(bi)
+                    if bi < gi_b:
+                        gi_b -= 1
+                    # delta < 0 was leaving past the top → sit above group
+                    # delta > 0 was leaving past the bottom → sit below group
+                    insert_at = gi_b if delta < 0 else gi_b + 1
+                    blocks.insert(insert_at, ("tab", row))
+                    self._apply_block_order(blocks)
+                else:
+                    self._relayout()
+                self._save_sessions()  # immediate: soon() can be lost on quick restart
+            else:                             # reorder within the (expanded) group
                 members[gi], members[gi + delta] = \
                     members[gi + delta], members[gi]
                 self._apply_block_order(blocks)
             return
-        # ungrouped tab
+        # ungrouped tab: move among top-level blocks
         bi = next(i for i, b in enumerate(blocks)
                   if b[0] == "tab" and b[1] is row)
         j = bi + delta
         if j < 0 or j >= len(blocks):
             return
         neighbor = blocks[j]
-        if neighbor[0] == "group":            # entering a group → join its edge
-            self._apply_group(row, neighbor[1])
-            blocks.pop(bi)
-            members = neighbor[2]
-            members.insert(0, row) if delta > 0 else members.append(row)
-            self._apply_block_order(blocks)
+        if neighbor[0] == "group":
+            color = neighbor[1]
+            if color in self._collapsed_groups:
+                # collapsed = one block: jump past the whole group, do not join
+                blocks[bi], blocks[j] = blocks[j], blocks[bi]
+                self._apply_block_order(blocks)
+            else:
+                # expanded group: join at the near edge (existing behavior)
+                self._apply_group(row, color)
+                blocks.pop(bi)
+                members = neighbor[2]
+                members.insert(0, row) if delta > 0 else members.append(row)
+                self._apply_block_order(blocks)
         else:                                 # swap with the adjacent tab
             blocks[bi], blocks[j] = blocks[j], blocks[bi]
             self._apply_block_order(blocks)
@@ -2601,22 +2695,63 @@ if (data !== null) {{
         self._drag_row = None
         if dragged is None or dragged is row:
             return
+
+        # 1. Move whole group if dragging a group header
         if getattr(dragged, "kind", None) == "group_header":
-            self._drop_group(dragged.group_color, row, y)  # move whole group
+            self._drop_group(dragged.group_color, row, y)
             return
+
+        # 2. Drop single tab onto a group header
+        if getattr(row, "kind", None) == "group_header":
+            target_color = row.group_color
+            if target_color:
+                self._apply_group(dragged, target_color)
+                if target_color in self._collapsed_groups:
+                    self._collapsed_groups.discard(target_color)
+                    self._save_collapsed_groups()
+                rows = self._session_rows()
+                if dragged in rows:
+                    rows.remove(dragged)
+                group_members = [r for r in rows if getattr(r, "group_color", None) == target_color]
+                idx = rows.index(group_members[0]) if group_members else len(rows)
+                rows.insert(idx, dragged)
+                for i, r in enumerate(rows):
+                    r._order = i
+                self._order_seq = len(rows)
+                self._relayout()
+                self.listbox.select_row(dragged)
+                self._save_sessions()
+            return
+
+        # 3. Drop single tab onto another session tab
         zone = self._row_drop_zone(row, y)
-        if zone == "into":                 # drop on the middle → join the group
+        if zone == "into":
             self._group_with(dragged, row)
             return
-        before = (zone == "above")         # top/bottom edge → reorder
+
+        target_group = getattr(row, "group_color", None)
+        if target_group:
+            self._apply_group(dragged, target_group)
+            if target_group in self._collapsed_groups:
+                self._collapsed_groups.discard(target_group)
+                self._save_collapsed_groups()
+        else:
+            # reorder next to an ungrouped tab → leave any previous group
+            # (previously color was kept, so restart put the tab back in group)
+            if getattr(dragged, "group_color", None):
+                self._apply_group(dragged, None)
+
+        before = (zone == "above")
         rows = self._session_rows()
-        rows.remove(dragged)
-        idx = rows.index(row) + (0 if before else 1)
-        rows.insert(idx, dragged)
-        for i, r in enumerate(rows):
-            r._order = i
-        self._order_seq = len(rows)
-        self._relayout()                   # re-cluster groups + headers
+        if dragged in rows:
+            rows.remove(dragged)
+        if row in rows:
+            idx = rows.index(row) + (0 if before else 1)
+            rows.insert(idx, dragged)
+            for i, r in enumerate(rows):
+                r._order = i
+            self._order_seq = len(rows)
+        self._relayout()
         self.listbox.select_row(dragged)
         self._save_sessions()
 
@@ -2800,27 +2935,76 @@ if (data !== null) {{
         row._hdr_toggle_src = GLib.timeout_add(220, fire)
         return False
 
+    def _group_header_row(self, color):
+        """Current listbox row for a group header (headers are rebuilt on relayout)."""
+        return next(
+            (r for r in self.listbox.get_children()
+             if getattr(r, "kind", None) == "group_header"
+             and getattr(r, "group_color", None) == color),
+            None)
+
     def _set_group_collapsed(self, color, collapsed):
-        """Show or hide a group's member tabs; persist across restarts."""
+        """Show or hide a group's member tabs; persist across restarts.
+
+        Collapse always hides members. If a member was selected, selection
+        moves to the group header (stack keeps the last terminal page).
+        """
         if not color:
             return
+        prev_selected = self.listbox.get_selected_row()
+        prev_kind = getattr(prev_selected, "kind", None) if prev_selected else None
+        prev_color = getattr(prev_selected, "group_color", None) if prev_selected else None
+        # session rows survive relayout; headers do not
+        prev_session = (
+            prev_selected if prev_selected is not None
+            and prev_kind != "group_header"
+            and prev_selected.get_parent() is not None
+            else None)
+
         if collapsed:
             self._collapsed_groups.add(color)
         else:
             self._collapsed_groups.discard(color)
         self._save_collapsed_groups()
         self._relayout()
-        header_row = next((r for r in self.listbox.get_children()
-                           if getattr(r, "kind", None) == "group_header" and getattr(r, "group_color", None) == color), None)
-        if header_row:
+
+        header_row = self._group_header_row(color)
+        if collapsed:
+            # always land on header so a hidden member is not left "selected"
+            if header_row is not None:
+                self.listbox.select_row(header_row)
+            return
+
+        # expand: restore previous selection when possible
+        if (prev_session is not None
+                and prev_session.get_parent() is not None
+                and prev_session.get_visible()
+                and getattr(prev_session, "group_color", None) == color):
+            self.listbox.select_row(prev_session)
+        elif header_row is not None and prev_color == color:
+            self.listbox.select_row(header_row)
+        elif (prev_session is not None
+              and prev_session.get_parent() is not None
+              and prev_session.get_visible()):
+            self.listbox.select_row(prev_session)
+        elif header_row is not None:
             self.listbox.select_row(header_row)
 
     def _toggle_group_collapsed(self, color):
+        if not color:
+            return
         self._set_group_collapsed(color, color not in self._collapsed_groups)
 
     def _apply_group_collapse(self):
-        """Hide member rows of collapsed groups (after show_all)."""
-        for r in self._session_rows():
+        """Hide members of collapsed groups. State and UI always match."""
+        sessions = self._session_rows()
+        group_members = {}
+        for r in sessions:
+            g = getattr(r, "group_color", None)
+            if g:
+                group_members.setdefault(g, []).append(r)
+
+        for r in sessions:
             g = getattr(r, "group_color", None)
             if g and g in self._collapsed_groups:
                 r.set_no_show_all(True)
@@ -2828,6 +3012,17 @@ if (data !== null) {{
             else:
                 r.set_no_show_all(False)
                 r.show()
+
+        for header in (r for r in self.listbox.get_children()
+                       if getattr(r, "kind", None) == "group_header"):
+            g = header.group_color
+            members = group_members.get(g, [])
+            is_collapsed = g in self._collapsed_groups
+            if hasattr(header, "chevron"):
+                header.chevron.set_text("▶" if is_collapsed else "▼")
+            if hasattr(header, "count_label"):
+                header.count_label.set_text(f"({len(members)})" if is_collapsed else "")
+                header.count_label.set_visible(is_collapsed)
 
     def _relayout(self):
         """Rebuild the sidebar: each group's members cluster under a color
@@ -3177,6 +3372,16 @@ if (data !== null) {{
             self.listbox.grab_focus()
             GLib.timeout_add(50, self._scroll_to_row, row)
             return
+        g = getattr(row, "group_color", None)
+        # User-driven select into a collapsed group expands it. Never do this
+        # during session restore (that was clearing collapsed_groups on disk).
+        if (g and g in self._collapsed_groups
+                and not getattr(self, "_restoring_sessions", False)):
+            self._collapsed_groups.discard(g)
+            self._save_collapsed_groups()
+            self._apply_group_collapse()
+        else:
+            self._apply_group_collapse()
         row.dot.hide()
         self.stack.set_visible_child(row.page)
         self.set_title(f"{row.session_label} — tabit")
@@ -3310,6 +3515,9 @@ if (data !== null) {{
 
     def _set_group(self, row, color):
         self._apply_group(row, color)
+        if color in self._collapsed_groups:
+            self._collapsed_groups.discard(color)
+            self._save_collapsed_groups()
         self._relayout()
         self._save_sessions()
 
@@ -3823,7 +4031,7 @@ if (data !== null) {{
                         sub = f"{tool}:{bd}" if tool != "screen" else bd
                         self._add_session(
                             label, self._serial_argv(tool, dev, bd),
-                            "utilities-terminal-symbolic", sub=sub)
+                            "network-wired-symbolic", sub=sub)
             self._open_dialogs.discard(dlg)
             dlg.destroy()
 
@@ -4868,10 +5076,11 @@ if (data !== null) {{
             else:
                 return False
         elif action == "toggle_group_collapse":
-            if row is not None and getattr(row, "kind", None) == "group_header":
-                self._toggle_group_collapsed(row.group_color)
-            else:
+            # header or any session tab that belongs to a group
+            color = getattr(row, "group_color", None) if row is not None else None
+            if not color:
                 return False
+            self._toggle_group_collapsed(color)
         elif action in ("prev_session", "next_session"):
             all_items = self.listbox.get_children()
             all_items.sort(key=lambda r: getattr(r, "_order", 9999))
