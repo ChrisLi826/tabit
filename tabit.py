@@ -271,7 +271,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v1.5.9"
+APP_VERSION = "v1.5.10"
 
 def _get_tabit_repo_dir():
     try:
@@ -646,6 +646,22 @@ def get_theme_css(theme_key):
 .ic-connect {{ color: #73daca; }}
 .session-sub {{ color: {s['subtext']}; font-size: {sz_sub}pt; }}
 .activity {{ color: {s['accent']}; font-size: {sz_sub}pt; }}
+/* herdr-like agent state icons on AI tabs (screen-heuristic) */
+.agent-status {{ margin-left: 2px; -gtk-icon-style: symbolic; }}
+/* bold glyphs for ? / check / cross — match play/pause visual weight */
+.agent-status-glyph {{
+    margin-left: 2px;
+    font-size: 12pt;
+    font-weight: 800;
+    min-width: 1.1em;
+}}
+.agent-status.working, .agent-status-glyph.working {{ color: #7aa2f7; }}
+.agent-status.blocked, .agent-status-glyph.blocked {{ color: #f7768e; }}
+.agent-status.idle, .agent-status-glyph.idle {{ color: #9ece6a; }}
+/* turn finished while you were elsewhere — until you open the tab */
+.agent-status.ready, .agent-status-glyph.ready {{ color: #e0af68; }}
+.agent-status.done, .agent-status-glyph.done {{ color: #a9b1d6; }}
+.agent-status.unknown, .agent-status-glyph.unknown {{ color: {s['subtext']}; }}
 .adder {{ background-color: {s['adder_bg']}; border-top: 1px solid {s['border']};
          padding-top: 4px; }}
 .adder button {{ padding: 4px 8px; font-size: {sz_btn}pt; color: {s['subtext']}; }}
@@ -916,6 +932,8 @@ class Tabit(Gtk.Window):
             self.listbox.select_row(pick)
         if not self.listbox.get_children():
             self._on_add_shell(None)
+        # poll AI tab screens for herdr-like working/blocked/idle badges
+        GLib.timeout_add_seconds(2, self._poll_ai_agent_statuses)
         GLib.idle_add(self._check_weekly_auto_update)
 
     # --- sessions ---------------------------------------------------------
@@ -1047,6 +1065,17 @@ class Tabit(Gtk.Window):
         subtitle.set_no_show_all(not sub)
         titles.pack_start(subtitle, False, False, 0)
         box.pack_start(titles, True, True, 0)
+        # AI agent status: media icons (play/pause) or bold glyphs (? ✓ ✕)
+        agent_status = Gtk.Image()
+        agent_status.set_pixel_size(15)
+        agent_status.get_style_context().add_class("agent-status")
+        agent_status.set_no_show_all(True)
+        box.pack_start(agent_status, False, False, 0)
+        agent_glyph = Gtk.Label(label="")
+        agent_glyph.set_xalign(0.5)
+        agent_glyph.get_style_context().add_class("agent-status-glyph")
+        agent_glyph.set_no_show_all(True)
+        box.pack_start(agent_glyph, False, False, 0)
         dot = Gtk.Label(label="●")
         dot.get_style_context().add_class("activity")
         dot.set_no_show_all(True)
@@ -1069,6 +1098,10 @@ class Tabit(Gtk.Window):
         row.icon_name = icon_name
         row.subtitle = subtitle
         row.dot = dot
+        row.agent_status_lbl = agent_status
+        row.agent_status_glyph = agent_glyph
+        row.agent_status = None
+        row._agent_status_src = None
         row.group_bar = group_bar
         row.group_color = None
         row.dead = False
@@ -1210,6 +1243,15 @@ class Tabit(Gtk.Window):
         workdir = cwd if cwd and os.path.isdir(cwd) else GLib.get_home_dir()
         term.connect("child-exited", self._on_child_exited, row)
         term.connect("contents-changed", self._on_activity, row)
+        if icon_name == ICON_AI:
+            # initial badge; real status after first screen paint
+            self._set_agent_status(row, "unknown")
+
+            def _kick(r=row):
+                self._update_agent_status(r)
+                return False
+
+            GLib.timeout_add(800, _kick)
         term.spawn_async(Vte.PtyFlags.DEFAULT, workdir, argv,
                          None, GLib.SpawnFlags.SEARCH_PATH, None, None,
                          -1, None, self._on_term_spawned, row)
@@ -3164,6 +3206,8 @@ if (data !== null) {{
         self.listbox.invalidate_sort()
         self.listbox.show_all()
         self._apply_group_collapse()
+        # show_all would re-show hidden agent icons; re-apply visibility
+        self._refresh_ai_status_widgets()
         # forget names / collapse flags of colors no longer in use
         if not getattr(self, "_restoring_sessions", False):
             # forget names / collapse flags of colors no longer in use
@@ -3424,11 +3468,326 @@ if (data !== null) {{
         row.subtitle.set_text("exited")
         row.subtitle.set_no_show_all(False)
         row.subtitle.show()
+        if getattr(row, "icon_name", None) == ICON_AI:
+            self._set_agent_status(row, "exited")
 
     def _on_activity(self, _term, row):
-        if not row.dead and self.listbox.get_selected_row() is not row:
-            row.dot.show()
+        # Only AI tabs show status chrome; no orange activity dots on
+        # serial / shell / command / tmux / connect.
+        if getattr(row, "icon_name", None) == ICON_AI:
+            self._schedule_agent_status(row)
         self._refresh_term_cwd(row)
+
+    # --- AI agent status (herdr-like screen heuristics) --------------------
+
+    # Priority: blocked > working > idle. Strict blocked, like herdr docs.
+    _AGENT_BLOCKED_RE = re.compile(
+        r"(?is)"
+        r"do you want to proceed"
+        r"|do you want to"
+        r"|allow this"
+        r"|permission request"
+        r"|waiting for (your )?(input|approval|permission|confirmation)"
+        r"|needs? your (input|approval|permission)"
+        r"|approve\b"
+        r"|press enter to continue"
+        r"|\[y/n\]|\(y/n\)|\[Y/n\]|\(Y/n\)"
+        r"|❯\s*1\.\s*Yes"
+        r"|\b1\.\s*Yes\b.*\b2\.\s*No\b"
+        r"|run this command\?"
+        r"|Accept edits"
+        r"|Always allow"
+    )
+    _AGENT_WORKING_RE = re.compile(
+        r"(?is)"
+        r"esc to interrupt"
+        r"|thinking…"
+        r"|thinking\.\.\."
+        r"|\bthinking\b"
+        r"|\bbaking\b"
+        r"|\bworking\b"
+        r"|running tool"
+        r"|tool use"
+        r"|generating"
+        r"|compacting"
+        r"|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]"  # braille spinners
+        r"|[◐◓◑◒]"
+        r"|ing…\s*\("
+        r"|tokens"
+        r"|ctx\s+\d+%"
+    )
+    _AGENT_IDLE_RE = re.compile(
+        r"(?m)"
+        r"(?:^|\n)\s*[❯›]\s*$"
+        r"|(?:^|\n)\s*[❯›]\s+"
+        r"|(?:^|\n)Human:\s*$"
+        r"|(?:^|\n)>\s*$"
+    )
+
+    def _poll_ai_agent_statuses(self):
+        """Periodic backup; contents-changed already schedules updates."""
+        for r in self._session_rows():
+            if (getattr(r, "icon_name", None) == ICON_AI
+                    and not getattr(r, "dead", False)
+                    and getattr(r, "term", None) is not None):
+                self._update_agent_status(r)
+        return True  # keep timer
+
+    def _refresh_ai_status_widgets(self):
+        """After show_all/relayout: re-apply which status widget is visible."""
+        for r in self._session_rows():
+            if getattr(r, "icon_name", None) != ICON_AI:
+                continue
+            st = getattr(r, "agent_status", None)
+            if not st:
+                # ensure neither badge shows for un-initialized AI rows
+                img = getattr(r, "agent_status_lbl", None)
+                glyph = getattr(r, "agent_status_glyph", None)
+                if img is not None:
+                    img.set_no_show_all(True)
+                    img.hide()
+                if glyph is not None:
+                    glyph.set_no_show_all(True)
+                    glyph.hide()
+                continue
+            # force re-apply even if status string unchanged
+            r.agent_status = None
+            self._set_agent_status(r, st)
+
+    def _schedule_agent_status(self, row):
+        src = getattr(row, "_agent_status_src", None)
+        if src is not None:
+            GLib.source_remove(src)
+            row._agent_status_src = None
+
+        def fire():
+            row._agent_status_src = None
+            self._update_agent_status(row)
+            return False
+
+        row._agent_status_src = GLib.timeout_add(350, fire)
+
+    def _term_tail_text(self, term, max_lines=50):
+        """Recent VTE screen text (bottom of buffer) for status heuristics."""
+        if term is None:
+            return ""
+        try:
+            text, _attrs = term.get_text(None)
+        except (TypeError, GLib.Error):
+            try:
+                text, _attrs = term.get_text(lambda *_a: False)
+            except Exception:
+                return ""
+        if not text:
+            return ""
+        # strip trailing blank lines for cleaner end-of-screen matching
+        lines = text.splitlines()
+        while lines and not lines[-1].strip():
+            lines.pop()
+        return "\n".join(lines[-max_lines:])
+
+    def _detect_agent_status(self, text, argv=None):
+        """Classify agent UI from screen tail. blocked > working > idle."""
+        if not text or not text.strip():
+            return "unknown"
+        tail = text[-4000:]  # focus on recent region
+        # blocked first (strict)
+        if self._AGENT_BLOCKED_RE.search(tail):
+            return "blocked"
+        if self._AGENT_WORKING_RE.search(tail):
+            return "working"
+        # idle: look at last few non-empty lines
+        last_chunk = "\n".join(tail.splitlines()[-8:])
+        if self._AGENT_IDLE_RE.search(last_chunk):
+            return "idle"
+        # soft idle: ends with a prompt-like short line
+        last = next((ln for ln in reversed(tail.splitlines()) if ln.strip()), "")
+        if re.match(r"^\s*[❯›$%#]\s*$", last) or re.match(r"^\s*[❯›]\s+\S", last):
+            return "idle"
+        # default for known AI CLIs with no match: idle (herdr-like fallback)
+        cli = ""
+        if argv:
+            # argv is often ["/bin/sh", "-c", "cd … && (claude …)"]
+            blob = " ".join(str(a) for a in argv).lower()
+            for name in ("claude", "codex", "grok", "cursor", "opencode",
+                         "gemini", "agy", "pi ", "copilot"):
+                if name.strip() in blob:
+                    cli = name.strip()
+                    break
+        if cli:
+            return "idle"
+        return "unknown"
+
+    def _update_agent_status(self, row):
+        if row is None or row.get_parent() is None:
+            return
+        if getattr(row, "icon_name", None) != ICON_AI:
+            return
+        if getattr(row, "dead", False):
+            self._set_agent_status(row, "exited")
+            return
+        term = getattr(row, "term", None)
+        text = self._term_tail_text(term)
+        detected = self._detect_agent_status(text, getattr(row, "argv", None))
+        prev = getattr(row, "agent_status", None)
+        selected = self.listbox.get_selected_row() is row
+
+        # working → idle while you're on another tab: sticky "done" until viewed
+        # (herdr-like: finished turn stays visible until you open the pane)
+        if detected == "idle":
+            if selected:
+                status = "idle"
+            elif prev in ("working", "ready"):
+                status = "ready"
+            else:
+                status = "idle"
+        elif detected == "working":
+            status = "working"
+        elif detected == "blocked":
+            status = "blocked"
+        else:
+            # unknown: keep sticky ready if still unviewed
+            if prev == "ready" and not selected:
+                status = "ready"
+            else:
+                status = detected
+
+        self._set_agent_status(row, status)
+
+    # Status icons (user mapping):
+    #   working→play, idle→pause, blocked→stop, ready→check, exited→cross
+    _AGENT_STATUS_ICONS = {
+        "working": (
+            "media-playback-start-symbolic",
+            "media-playback-start",
+        ),
+        "idle": (
+            "media-playback-pause-symbolic",
+            "media-playback-pause",
+        ),
+        # needs your input / approval
+        "blocked": (
+            "dialog-question-symbolic",
+            "help-faq-symbolic",
+            "dialog-warning-symbolic",
+        ),
+        "ready": (
+            "emblem-ok-symbolic",
+            "object-select-symbolic",
+            "emblem-default-symbolic",
+        ),
+        "exited": (
+            "window-close-symbolic",
+            "edit-delete-symbolic",
+            "process-stop-symbolic",
+        ),
+        "done": (  # legacy alias → same as exited
+            "window-close-symbolic",
+            "edit-delete-symbolic",
+            "process-stop-symbolic",
+        ),
+        "unknown": (
+            "dialog-question-symbolic",
+            "media-optical-symbolic",
+        ),
+    }
+
+    @staticmethod
+    def _icon_theme_has(name):
+        theme = Gtk.IconTheme.get_default()
+        try:
+            return theme.has_icon(name)
+        except Exception:
+            return False
+
+    def _agent_status_icon_name(self, status):
+        for name in self._AGENT_STATUS_ICONS.get(status, ()):
+            if self._icon_theme_has(name):
+                return name
+        # last resort: always try first candidate even if has_icon is wrong
+        cands = self._AGENT_STATUS_ICONS.get(status) or ("dialog-question-symbolic",)
+        return cands[0]
+
+    # Bold unicode glyphs — denser stroke than thin symbolic ? / check / x
+    _AGENT_STATUS_GLYPHS = {
+        "blocked": "?",
+        "ready": "✔",   # heavy check mark (U+2714)
+        "exited": "✕",  # heavy multiplication X (U+2715)
+        "done": "✕",
+        "unknown": "·",
+    }
+
+    def _set_agent_status(self, row, status):
+        """Update sidebar status icon/glyph for an AI tab."""
+        img = getattr(row, "agent_status_lbl", None)
+        glyph = getattr(row, "agent_status_glyph", None)
+        if img is None:
+            return
+        status = status or "unknown"
+        visible_now = (
+            (img.get_visible() if img is not None else False)
+            or (glyph.get_visible() if glyph is not None else False)
+        )
+        if getattr(row, "agent_status", None) == status and visible_now:
+            return
+        row.agent_status = status
+        css_class = "done" if status in ("done", "exited") else status
+        tips = {
+            "working": "▶ Working",
+            "idle": "⏸ Idle — waiting for prompt",
+            "blocked": "? Needs input / approval",
+            "ready": "✓ Done — open tab to review",
+            "exited": "✕ Process exited",
+            "done": "✕ Process exited",
+            "unknown": "Status unknown",
+        }
+        tip = tips.get(status, status)
+
+        # play/pause: themed media icons; ?/check/cross: bold glyphs.
+        # Only ONE may be visible — keep the other no_show_all so listbox
+        # show_all() / relayout cannot revive both at once.
+        use_glyph = status in self._AGENT_STATUS_GLYPHS and glyph is not None
+        if use_glyph:
+            img.set_no_show_all(True)
+            img.hide()
+            gctx = glyph.get_style_context()
+            for s in ("working", "blocked", "idle", "ready", "done", "exited",
+                      "unknown"):
+                gctx.remove_class(s)
+            gctx.add_class(css_class)
+            glyph.set_markup(
+                f'<span font_weight="ultrabold" size="large">'
+                f'{GLib.markup_escape_text(self._AGENT_STATUS_GLYPHS[status])}'
+                f'</span>'
+            )
+            glyph.set_tooltip_text(tip)
+            glyph.set_no_show_all(False)
+            glyph.show()
+        else:
+            if glyph is not None:
+                glyph.set_no_show_all(True)
+                glyph.hide()
+            ctx = img.get_style_context()
+            for s in ("working", "blocked", "idle", "ready", "done", "exited",
+                      "unknown"):
+                ctx.remove_class(s)
+            ctx.add_class(css_class)
+            icon = self._agent_status_icon_name(
+                "exited" if status == "done" else status)
+            img.set_from_icon_name(icon, Gtk.IconSize.MENU)
+            img.set_pixel_size(15)
+            img.set_tooltip_text(tip)
+            img.set_no_show_all(False)
+            img.show()
+
+        # generic unread dot is redundant for AI status
+        if getattr(row, "dot", None) is not None:
+            row.dot.set_no_show_all(True)
+            row.dot.hide()
+        base = row.get_tooltip_text() or row.session_label or ""
+        if " · agent:" in base:
+            base = base.split(" · agent:")[0]
+        row.set_tooltip_text(f"{base} · agent: {tip}")
 
     def _close_session(self, row):
         if row.get_parent() is None:
@@ -3497,6 +3856,9 @@ if (data !== null) {{
         row.dot.hide()
         self.stack.set_visible_child(row.page)
         self.set_title(f"{row.session_label} — tabit")
+        # viewing an AI tab clears sticky "done" (ready) → idle
+        if getattr(row, "icon_name", None) == ICON_AI:
+            self._update_agent_status(row)
         self._focus_row_content(row)
         GLib.timeout_add(50, self._scroll_to_row, row)
 
