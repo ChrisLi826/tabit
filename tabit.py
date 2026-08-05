@@ -271,7 +271,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v1.6.0"
+APP_VERSION = "v1.6.1"
 
 def _get_tabit_repo_dir():
     try:
@@ -6069,6 +6069,55 @@ if (data !== null) {{
         dialog.connect("response", _on_update_resp)
         dialog.show_all()
 
+    @staticmethod
+    def _sudo_askpass_path(tabit_dir=None):
+        """Locate an executable SUDO_ASKPASS helper (GUI password dialog).
+
+        sudo -A requires an executable path. Prefer sudo_askpass.py with +x;
+        otherwise write a tiny wrapper that runs it via python3.
+        """
+        candidates = []
+        if tabit_dir:
+            candidates.append(os.path.join(tabit_dir, "sudo_askpass.py"))
+        candidates.extend([
+            os.path.expanduser("~/.local/share/tabit/sudo_askpass.py"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "sudo_askpass.py"),
+            os.path.expanduser("~/tabit/sudo_askpass.py"),
+        ])
+        py = None
+        for path in candidates:
+            if path and os.path.isfile(path):
+                py = path
+                break
+        if not py:
+            return None
+        try:
+            os.chmod(py, 0o755)
+        except OSError:
+            pass
+        if os.access(py, os.X_OK):
+            return py
+        # Not executable (noexec mount, etc.) — shell wrapper via python3
+        wrap = os.path.join(
+            GLib.get_user_cache_dir() if hasattr(GLib, "get_user_cache_dir")
+            else os.path.expanduser("~/.cache"),
+            "tabit-sudo-askpass",
+        )
+        try:
+            os.makedirs(os.path.dirname(wrap), exist_ok=True)
+            with open(wrap, "w") as f:
+                f.write(
+                    "#!/bin/sh\n"
+                    f'exec {shlex.quote(sys.executable)} {shlex.quote(py)} "$@"\n'
+                )
+            os.chmod(wrap, 0o755)
+            if os.access(wrap, os.X_OK):
+                return wrap
+        except OSError:
+            pass
+        return None
+
     def _perform_update(self, parent=None):
         win = parent or self
         dialog = Gtk.Dialog(title="Updating tabit...", transient_for=win, modal=False)
@@ -6153,20 +6202,53 @@ if (data !== null) {{
                 if p1.returncode != 0:
                     raise RuntimeError("git pull failed with exit code " + str(p1.returncode))
 
-                # Step 2: install.sh
-                GLib.idle_add(lambda: status_lbl.set_markup("<b>Step 2/2:</b> Installing dependencies & updating binary..."))
+                # Step 2: install.sh (sudo via GUI askpass when needed)
+                GLib.idle_add(lambda: status_lbl.set_markup(
+                    "<b>Step 2/2:</b> Installing… "
+                    "(a password dialog may appear for apt)"))
                 GLib.idle_add(lambda: progress.set_fraction(0.75))
                 GLib.idle_add(lambda: progress.set_text("75% - ./install.sh"))
                 GLib.idle_add(append_log, "\n>>> ./install.sh")
+                GLib.idle_add(
+                    append_log,
+                    "    (if apt needs root, a password window will open)")
 
-                p2 = subprocess.Popen(["./install.sh"], cwd=tabit_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                env = os.environ.copy()
+                env["DEBIAN_FRONTEND"] = "noninteractive"
+                askpass = self._sudo_askpass_path(tabit_dir)
+                if askpass:
+                    env["SUDO_ASKPASS"] = askpass
+                    # Some sudo builds also honor this for -A
+                    env["SUDO_ASKPASS_REQUIRE"] = "force"
+                    GLib.idle_add(
+                        append_log, f"    SUDO_ASKPASS={askpass}")
+                else:
+                    GLib.idle_add(
+                        append_log,
+                        "    [warn] sudo_askpass.py not found; "
+                        "sudo may fail without a TTY")
+
+                p2 = subprocess.Popen(
+                    ["./install.sh"],
+                    cwd=tabit_dir,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env=env,
+                    # Leave stdin closed so sudo cannot hang on a dead TTY;
+                    # password comes only via SUDO_ASKPASS.
+                    stdin=subprocess.DEVNULL,
+                )
                 for line in p2.stdout:
                     line_str = line.strip()
                     if line_str:
                         GLib.idle_add(append_log, line_str)
                 p2.wait()
                 if p2.returncode != 0:
-                    raise RuntimeError("install.sh failed with exit code " + str(p2.returncode))
+                    raise RuntimeError(
+                        "install.sh failed with exit code "
+                        + str(p2.returncode)
+                        + " (password cancelled or apt error?)")
 
                 def on_success():
                     status_lbl.set_markup("<span color='#9ece6a'><b>✓ Update Completed Successfully!</b></span>")

@@ -13,13 +13,23 @@ if [ "$1" = "--uninstall" ]; then
     exit 0
 fi
 
-sudo apt-get install -y python3-gi gir1.2-gtk-3.0 gir1.2-vte-2.91 \
+# Prefer sudo -A when SUDO_ASKPASS is set (GUI password from tabit update).
+if [ -n "${SUDO_ASKPASS:-}" ]; then
+    SUDO="sudo -A"
+else
+    SUDO="sudo"
+fi
+
+# Non-interactive apt (no more config prompts during GUI update).
+export DEBIAN_FRONTEND=noninteractive
+
+$SUDO apt-get install -y python3-gi gir1.2-gtk-3.0 gir1.2-vte-2.91 \
     gir1.2-gtksource-4 python3-markdown picocom screen
 
 # WebKit for the note Markdown preview: 4.0 on older Ubuntu, 4.1 on 24.04+.
 # Optional - if neither is available the app just runs without the preview.
-sudo apt-get install -y gir1.2-webkit2-4.0 \
-    || sudo apt-get install -y gir1.2-webkit2-4.1 \
+$SUDO apt-get install -y gir1.2-webkit2-4.0 \
+    || $SUDO apt-get install -y gir1.2-webkit2-4.1 \
     || echo "WebKit not found; note Markdown preview will be disabled"
 
 mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications" \
@@ -31,6 +41,7 @@ install -m 644 tabit.svg "$HOME/.local/share/icons/hicolor/scalable/apps/tabit.s
 install -m 644 agent_detect.py "$HOME/.local/share/tabit/agent_detect.py"
 install -m 644 agent_status.py "$HOME/.local/share/tabit/agent_status.py"
 install -m 644 tabit_chrome.toml "$HOME/.local/share/tabit/tabit_chrome.toml"
+install -m 755 sudo_askpass.py "$HOME/.local/share/tabit/sudo_askpass.py"
 rm -rf "$HOME/.local/share/tabit/agent-detection" "$HOME/.local/share/tabit/vendor"
 cp -a agent-detection "$HOME/.local/share/tabit/agent-detection"
 cp -a vendor "$HOME/.local/share/tabit/vendor"
