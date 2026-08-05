@@ -271,7 +271,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v1.6.1"
+APP_VERSION = "v1.6.2"
 
 def _get_tabit_repo_dir():
     try:
@@ -662,6 +662,40 @@ def get_theme_css(theme_key):
 .agent-status.ready, .agent-status-glyph.ready {{ color: #e0af68; }}
 .agent-status.done, .agent-status-glyph.done {{ color: #a9b1d6; }}
 .agent-status.unknown, .agent-status-glyph.unknown {{ color: {s['subtext']}; }}
+/* off-viewport AI peeks (overlay) + collapsed group header aggregates.
+   Right-aligned like per-tab agent status icons. */
+.ai-peek {{
+    background-color: {s['sidebar_bg']};
+    padding: 2px 6px 2px 8px;
+    min-height: 20px;
+    border-radius: 4px;
+    margin: 2px 4px;
+}}
+.ai-peek-top {{
+    border: 1px solid {s['border']};
+}}
+.ai-peek-bottom {{
+    border: 1px solid {s['border']};
+}}
+.ai-peek-arrow {{
+    color: {s['subtext']};
+    font-size: {sz_sub}pt;
+    margin-right: 2px;
+}}
+.ai-peek-slot {{
+    margin-left: 4px;
+    font-size: 11pt;
+    font-weight: 800;
+}}
+.ai-peek-slot:hover {{ opacity: 0.85; }}
+.group-ai-summary {{
+    margin-left: 4px;
+    margin-right: 2px;
+}}
+.group-ai-summary .agent-status-glyph {{
+    margin-left: 3px;
+    font-size: 10pt;
+}}
 .adder {{ background-color: {s['adder_bg']}; border-top: 1px solid {s['border']};
          padding-top: 4px; }}
 .adder button {{ padding: 4px 8px; font-size: {sz_btn}pt; color: {s['subtext']}; }}
@@ -834,7 +868,26 @@ class Tabit(Gtk.Window):
         self.sidebar_scroll = Gtk.ScrolledWindow()
         self.sidebar_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.sidebar_scroll.add(self.listbox)
-        sidebar.pack_start(self.sidebar_scroll, True, True, 0)
+        # Overlay peeks: AI attention status for tabs outside the viewport
+        # (float over list edges — no layout reflow when shown/hidden).
+        self._sidebar_overlay = Gtk.Overlay()
+        self._sidebar_overlay.add(self.sidebar_scroll)
+        self.ai_peek_top = self._make_ai_peek_bar("top")
+        self.ai_peek_bottom = self._make_ai_peek_bar("bottom")
+        self._sidebar_overlay.add_overlay(self.ai_peek_top)
+        self._sidebar_overlay.add_overlay(self.ai_peek_bottom)
+        sidebar.pack_start(self._sidebar_overlay, True, True, 0)
+        self._ai_summary_src = None
+        self._ai_peek_targets = {"above": {}, "below": {}}
+        self._ai_peek_cycle = {}
+        adj = self.sidebar_scroll.get_vadjustment()
+        adj.connect("value-changed",
+                    lambda *_: self._schedule_ai_summary_refresh(from_scroll=True))
+        adj.connect("changed",
+                    lambda *_: self._schedule_ai_summary_refresh(from_scroll=True))
+        self.listbox.connect(
+            "size-allocate",
+            lambda *_a: self._schedule_ai_summary_refresh())
         adders = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         adders.get_style_context().add_class("adder")
         for side in ("start", "end", "bottom"):
@@ -3049,8 +3102,23 @@ if (data !== null) {{
         name = self._group_names.get(color) or color.capitalize()
         name_lbl = Gtk.Label(label=name.upper(), xalign=0)
         box.pack_start(name_lbl, False, False, 0)
+        # Spacer pushes AI summary to the right (same side as tab status icons)
         spacer = Gtk.Label()
         box.pack_start(spacer, True, True, 0)
+        # AI status summary (collapsed only; not clickable — whole header
+        # EventBox owns expand/collapse + drag)
+        ai_sum = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        ai_sum.get_style_context().add_class("group-ai-summary")
+        ai_sum.set_halign(Gtk.Align.END)
+        ai_sum.set_no_show_all(True)
+        ai_sum.hide()
+        row.ai_summary_box = ai_sum
+        row.ai_summary_slots = {}
+        for st in self._AI_ATTENTION_ORDER:
+            slot_box, pack = self._ai_agg_slot_widgets(st, for_click=None)
+            ai_sum.pack_start(slot_box, False, False, 0)
+            row.ai_summary_slots[st] = pack
+        box.pack_start(ai_sum, False, False, 0)
         hit = Gtk.EventBox()
         hit.set_tooltip_text(
             "Click to expand" if collapsed else "Click to collapse")
@@ -3194,6 +3262,7 @@ if (data !== null) {{
             if hasattr(header, "count_label"):
                 header.count_label.set_text(f"({len(members)})" if is_collapsed else "")
                 header.count_label.set_visible(is_collapsed)
+        self._schedule_ai_summary_refresh()
 
     def _relayout(self):
         """Rebuild the sidebar: each group's members cluster under a color
@@ -3225,6 +3294,8 @@ if (data !== null) {{
         self._apply_group_collapse()
         # show_all would re-show hidden agent icons; re-apply visibility
         self._refresh_ai_status_widgets()
+        # peeks/header aggregates (also scheduled from _refresh_ai_status_widgets)
+        self._schedule_ai_summary_refresh()
         # forget names / collapse flags of colors no longer in use
         if not getattr(self, "_restoring_sessions", False):
             # forget names / collapse flags of colors no longer in use
@@ -3556,6 +3627,385 @@ if (data !== null) {{
                 continue
             r.agent_status = None
             self._set_agent_status(r, st)
+        self._schedule_ai_summary_refresh()
+
+    # --- AI attention summaries (viewport peeks + collapsed headers) -------
+    # Fixed slot order (severity → quieter). working/idle use themed media
+    # icons (same as tab rows) — never emoji ⏸/▶ which draw yellow/blue buttons.
+    _AI_ATTENTION_ORDER = ("blocked", "ready", "working", "idle")
+    _AI_AGG_GLYPHS = {
+        "blocked": "?",
+        "ready": "✓",  # U+2713 text check, not emoji
+    }
+    _AI_AGG_MEDIA = {
+        "working": ("media-playback-start-symbolic", "media-playback-start"),
+        "idle": ("media-playback-pause-symbolic", "media-playback-pause"),
+    }
+    _AI_AGG_TIPS = {
+        "blocked": "Needs input",
+        "ready": "Done — review",
+        "working": "Working",
+        "idle": "Idle",
+    }
+
+    def _ai_agg_slot_widgets(self, st, for_click=None):
+        """Build one aggregate slot: (icon|glyph) + count.
+
+        Returns (container, pack). container is EventBox when for_click is set
+        (peek bars), otherwise the inner Box (header — not clickable).
+        pack: glyph, img, count for _ai_agg_set_slot.
+        """
+        inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        inner.set_can_focus(False)
+        glyph = Gtk.Label(label="")
+        glyph.set_xalign(0.5)
+        glyph.get_style_context().add_class("agent-status-glyph")
+        glyph.get_style_context().add_class("ai-peek-slot")
+        glyph.get_style_context().add_class(st)
+        glyph.set_no_show_all(True)
+        glyph.hide()
+        img = Gtk.Image()
+        img.set_pixel_size(14)
+        img.get_style_context().add_class("agent-status")
+        img.get_style_context().add_class(st)
+        img.set_no_show_all(True)
+        img.hide()
+        count = Gtk.Label(label="")
+        count.set_xalign(0)
+        count.get_style_context().add_class("agent-status-glyph")
+        count.get_style_context().add_class("ai-peek-slot")
+        count.get_style_context().add_class(st)
+        count.set_no_show_all(True)
+        count.hide()
+        inner.pack_start(img, False, False, 0)
+        inner.pack_start(glyph, False, False, 0)
+        inner.pack_start(count, False, False, 0)
+        pack = {"glyph": glyph, "img": img, "count": count, "inner": inner}
+        if for_click is None:
+            inner.set_no_show_all(True)
+            inner.hide()
+            return inner, pack
+        hit = Gtk.EventBox()
+        hit.set_can_focus(False)
+        hit.set_visible_window(False)
+        hit.add(inner)
+        edge, status = for_click
+        hit.connect(
+            "button-press-event", self._on_ai_peek_click, edge, status)
+        hit.set_no_show_all(True)
+        hit.hide()
+        return hit, pack
+
+    def _ai_agg_set_slot(self, pack, st, n, tip):
+        """Show/hide one aggregate slot for status st with count n."""
+        glyph = pack["glyph"]
+        img = pack["img"]
+        count = pack["count"]
+        inner = pack.get("inner")
+        if n <= 0:
+            glyph.hide()
+            img.hide()
+            count.hide()
+            if inner is not None:
+                inner.set_no_show_all(True)
+                inner.hide()
+            return False
+        if st in self._AI_AGG_MEDIA:
+            icon = self._agent_status_icon_name(st)
+            img.set_from_icon_name(icon, Gtk.IconSize.MENU)
+            img.set_pixel_size(14)
+            img.set_tooltip_text(tip)
+            img.set_no_show_all(False)
+            img.show()
+            glyph.set_no_show_all(True)
+            glyph.hide()
+        else:
+            g = self._AI_AGG_GLYPHS.get(st, "?")
+            glyph.set_markup(
+                f'<span font_weight="ultrabold">'
+                f'{GLib.markup_escape_text(g)}</span>')
+            glyph.set_tooltip_text(tip)
+            glyph.set_no_show_all(False)
+            glyph.show()
+            img.set_no_show_all(True)
+            img.hide()
+        count.set_markup(
+            f'<span font_weight="ultrabold">'
+            f'{GLib.markup_escape_text(str(n))}</span>')
+        count.set_tooltip_text(tip)
+        count.set_no_show_all(False)
+        count.show()
+        if inner is not None:
+            inner.set_no_show_all(False)
+            inner.show()
+        return True
+
+    def _make_ai_peek_bar(self, edge):
+        """Right-aligned overlay: ▲ ?2 ✓1 ▶3 ⏸1  (media icons for play/pause)."""
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        box.get_style_context().add_class("ai-peek")
+        box.get_style_context().add_class(
+            "ai-peek-top" if edge == "top" else "ai-peek-bottom")
+        box.set_can_focus(False)
+        # Same side as per-tab agent status (right edge of sidebar list)
+        box.set_halign(Gtk.Align.END)
+        box.set_valign(
+            Gtk.Align.START if edge == "top" else Gtk.Align.END)
+        box.set_hexpand(False)
+        box.set_vexpand(False)
+        box.set_no_show_all(True)
+        box.hide()
+        arrow = Gtk.Label(label="▲" if edge == "top" else "▼")
+        arrow.get_style_context().add_class("ai-peek-arrow")
+        arrow.set_can_focus(False)
+        box.pack_start(arrow, False, False, 0)
+        slots = {}
+        for st in self._AI_ATTENTION_ORDER:
+            hit, pack = self._ai_agg_slot_widgets(st, for_click=(edge, st))
+            box.pack_start(hit, False, False, 0)
+            slots[st] = (hit, pack)
+        box._peek_edge = edge
+        box._peek_slots = slots
+        return box
+
+    def _schedule_ai_summary_refresh(self, from_scroll=False):
+        """Coalesce: idle for layout/status; short debounce for scroll."""
+        src = getattr(self, "_ai_summary_src", None)
+        if src is not None:
+            GLib.source_remove(src)
+            self._ai_summary_src = None
+
+        def fire():
+            self._ai_summary_src = None
+            try:
+                self._refresh_ai_summaries()
+            except Exception:
+                pass
+            return False
+
+        if from_scroll:
+            self._ai_summary_src = GLib.timeout_add(100, fire)
+        else:
+            self._ai_summary_src = GLib.idle_add(fire)
+
+    def _ai_viewport_band(self, row):
+        """Classify row vs sidebar scroll: above | visible | below | hidden."""
+        if row is None or row.get_parent() is None:
+            return "hidden"
+        try:
+            if not row.get_visible() or not row.get_mapped():
+                return "hidden"
+        except Exception:
+            return "hidden"
+        adj = self.sidebar_scroll.get_vadjustment()
+        if adj is None:
+            return "visible"
+        try:
+            alloc = row.get_allocation()
+        except Exception:
+            return "hidden"
+        if alloc.height <= 1:
+            return "hidden"
+        mid = alloc.y + alloc.height / 2.0
+        value = float(adj.get_value())
+        page = float(adj.get_page_size())
+        if page <= 1:
+            return "visible"
+        if mid < value:
+            return "above"
+        if mid > value + page:
+            return "below"
+        return "visible"
+
+    def _ai_empty_buckets(self):
+        return {st: [] for st in self._AI_ATTENTION_ORDER}
+
+    def _refresh_ai_summaries(self):
+        """One pass → top peek, bottom peek, collapsed header clusters."""
+        if not getattr(self, "ai_peek_top", None):
+            return
+        above = self._ai_empty_buckets()
+        below = self._ai_empty_buckets()
+        by_group = {}  # color -> status -> [rows]
+
+        for r in self._session_rows():
+            if getattr(r, "icon_name", None) != ICON_AI:
+                continue
+            st = getattr(r, "agent_status", None)
+            if st not in self._AI_ATTENTION_ORDER:
+                continue
+            g = getattr(r, "group_color", None)
+            if g and g in self._collapsed_groups:
+                by_group.setdefault(g, self._ai_empty_buckets())
+                by_group[g][st].append(r)
+                continue
+            band = self._ai_viewport_band(r)
+            if band == "above":
+                above[st].append(r)
+            elif band == "below":
+                below[st].append(r)
+
+        # Collapsed header scrolled away → roll group into that edge peek
+        for color, buckets in by_group.items():
+            hdr = self._group_header_row(color)
+            if hdr is None:
+                continue
+            band = self._ai_viewport_band(hdr)
+            if band == "above":
+                for st, rows in buckets.items():
+                    above[st].extend(rows)
+            elif band == "below":
+                for st, rows in buckets.items():
+                    below[st].extend(rows)
+
+        self._ai_peek_targets = {"above": above, "below": below}
+        self._fill_ai_peek_bar(self.ai_peek_top, above, "above")
+        self._fill_ai_peek_bar(self.ai_peek_bottom, below, "below")
+        self._fill_group_header_ai_summaries(by_group)
+
+    def _fill_ai_peek_bar(self, bar, buckets, direction):
+        if bar is None:
+            return
+        slots = getattr(bar, "_peek_slots", None) or {}
+        any_shown = False
+        tip_parts = []
+        for st in self._AI_ATTENTION_ORDER:
+            entry = slots.get(st)
+            if not entry:
+                continue
+            hit, pack = entry
+            rows = buckets.get(st) or []
+            n = len(rows)
+            if n <= 0:
+                hit.set_no_show_all(True)
+                hit.hide()
+                self._ai_agg_set_slot(pack, st, 0, "")
+                continue
+            names = []
+            for r in rows[:12]:
+                names.append(
+                    getattr(r, "title_text", None)
+                    or getattr(r, "session_label", None)
+                    or "?")
+            more = f" (+{n - 12} more)" if n > 12 else ""
+            tip = (
+                f"{self._AI_AGG_TIPS.get(st, st)} ({n}): "
+                + ", ".join(names) + more
+                + "\nClick to jump (repeat to cycle)"
+            )
+            self._ai_agg_set_slot(pack, st, n, tip)
+            hit.set_tooltip_text(tip)
+            hit.set_no_show_all(False)
+            hit.show_all()
+            # ensure only the active face (img vs glyph) stays visible
+            self._ai_agg_set_slot(pack, st, n, tip)
+            any_shown = True
+            if st in self._AI_AGG_MEDIA:
+                tip_parts.append(f"{st[0]}{n}")
+            else:
+                tip_parts.append(f"{self._AI_AGG_GLYPHS.get(st, '?')}{n}")
+        if any_shown:
+            bar.set_tooltip_text(
+                ("Above view: " if direction == "above" else "Below view: ")
+                + "  ".join(tip_parts))
+            bar.set_no_show_all(False)
+            bar.show_all()
+            for st in self._AI_ATTENTION_ORDER:
+                entry = slots.get(st)
+                if not entry:
+                    continue
+                hit, pack = entry
+                rows = buckets.get(st) or []
+                if not rows:
+                    hit.hide()
+                    self._ai_agg_set_slot(pack, st, 0, "")
+                else:
+                    self._ai_agg_set_slot(pack, st, len(rows), hit.get_tooltip_text() or "")
+        else:
+            bar.set_no_show_all(True)
+            bar.hide()
+
+    def _fill_group_header_ai_summaries(self, by_group):
+        for header in self.listbox.get_children():
+            if getattr(header, "kind", None) != "group_header":
+                continue
+            box = getattr(header, "ai_summary_box", None)
+            slots = getattr(header, "ai_summary_slots", None)
+            if box is None or not slots:
+                continue
+            color = getattr(header, "group_color", None)
+            collapsed = color in self._collapsed_groups
+            buckets = by_group.get(color) if collapsed else None
+            if not collapsed or not buckets:
+                box.set_no_show_all(True)
+                box.hide()
+                continue
+            any_shown = False
+            tip_bits = []
+            for st in self._AI_ATTENTION_ORDER:
+                pack = slots.get(st)
+                rows = buckets.get(st) or []
+                n = len(rows)
+                if pack is None:
+                    continue
+                if n <= 0:
+                    self._ai_agg_set_slot(pack, st, 0, "")
+                    continue
+                names = [
+                    getattr(r, "title_text", None)
+                    or getattr(r, "session_label", None)
+                    or "?"
+                    for r in rows[:8]
+                ]
+                tip = f"{self._AI_AGG_TIPS.get(st, st)}: " + ", ".join(names)
+                self._ai_agg_set_slot(pack, st, n, tip)
+                any_shown = True
+                tip_bits.append(
+                    f"{self._AI_AGG_TIPS.get(st, st)}×{n}: "
+                    + ", ".join(names[:4]))
+            if any_shown:
+                box.set_tooltip_text(" · ".join(tip_bits))
+                box.set_no_show_all(False)
+                box.show_all()
+                for st in self._AI_ATTENTION_ORDER:
+                    pack = slots.get(st)
+                    rows = buckets.get(st) or []
+                    if pack is None:
+                        continue
+                    if not rows:
+                        self._ai_agg_set_slot(pack, st, 0, "")
+                    else:
+                        self._ai_agg_set_slot(
+                            pack, st, len(rows),
+                            f"{self._AI_AGG_TIPS.get(st, st)}")
+            else:
+                box.set_no_show_all(True)
+                box.hide()
+
+    def _on_ai_peek_click(self, _widget, event, edge, status):
+        """Jump to next off-screen AI tab of this status in that direction."""
+        if getattr(event, "button", 1) != 1:
+            return False
+        direction = "above" if edge == "top" else "below"
+        buckets = (getattr(self, "_ai_peek_targets", None) or {}).get(
+            direction) or {}
+        rows = list(buckets.get(status) or [])
+        if not rows:
+            return True
+        key = (direction, status)
+        cycle = getattr(self, "_ai_peek_cycle", None)
+        if cycle is None:
+            self._ai_peek_cycle = {}
+            cycle = self._ai_peek_cycle
+        idx = (cycle.get(key, -1) + 1) % len(rows)
+        cycle[key] = idx
+        row = rows[idx]
+        if row is None or row.get_parent() is None:
+            return True
+        # Selecting expands collapsed groups and scrolls (see _on_row_selected)
+        self.listbox.select_row(row)
+        GLib.timeout_add(50, self._scroll_to_row, row)
+        return True
 
     def _schedule_agent_status(self, row):
         src = getattr(row, "_agent_status_src", None)
@@ -4002,6 +4452,7 @@ if (data !== null) {{
         if " · agent:" in base:
             base = base.split(" · agent:")[0]
         row.set_tooltip_text(f"{base} · agent: {tip}")
+        self._schedule_ai_summary_refresh()
 
     def _close_session(self, row):
         if row.get_parent() is None:
