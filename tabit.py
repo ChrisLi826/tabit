@@ -271,7 +271,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v1.6.2"
+APP_VERSION = "v1.6.3"
 
 def _get_tabit_repo_dir():
     try:
@@ -529,92 +529,94 @@ def get_theme_css(theme_key):
 .group-bar.grp-white   {{ background-color: #ffffff; }}
 .group-bar.grp-brown   {{ background-color: #d19a66; }}
 .sidebar row.group-header {{ border-radius: 6px; padding: 4px 6px 4px 4px; margin-bottom: 2px; }}
-.sidebar row.group-header label,
+/* Only name/chevron/count use group tint — never AI status glyphs/numbers */
+.sidebar row.group-header .group-name,
 .sidebar row.group-header .group-chevron,
 .sidebar row.group-header .group-count {{ font-size: {sz_sub}pt; font-weight: 600; }}
 
 .sidebar row.group-header.grp-red     {{ background: rgba(247, 118, 142, 0.08); }}
 .sidebar row.group-header.grp-red:hover {{ background: rgba(247, 118, 142, 0.15); }}
-.sidebar row.group-header.grp-red label,
+.sidebar row.group-header.grp-red .group-name,
 .sidebar row.group-header.grp-red .group-chevron,
 .sidebar row.group-header.grp-red .group-count {{ color: #f7768e; }}
 
 .sidebar row.group-header.grp-orange  {{ background: rgba(255, 158, 100, 0.08); }}
 .sidebar row.group-header.grp-orange:hover {{ background: rgba(255, 158, 100, 0.15); }}
-.sidebar row.group-header.grp-orange label,
+.sidebar row.group-header.grp-orange .group-name,
 .sidebar row.group-header.grp-orange .group-chevron,
 .sidebar row.group-header.grp-orange .group-count {{ color: #ff9e64; }}
 
 .sidebar row.group-header.grp-yellow  {{ background: rgba(224, 175, 104, 0.08); }}
 .sidebar row.group-header.grp-yellow:hover {{ background: rgba(224, 175, 104, 0.15); }}
-.sidebar row.group-header.grp-yellow label,
+.sidebar row.group-header.grp-yellow .group-name,
 .sidebar row.group-header.grp-yellow .group-chevron,
 .sidebar row.group-header.grp-yellow .group-count {{ color: #e0af68; }}
 
 .sidebar row.group-header.grp-green   {{ background: rgba(158, 206, 106, 0.08); }}
 .sidebar row.group-header.grp-green:hover {{ background: rgba(158, 206, 106, 0.15); }}
-.sidebar row.group-header.grp-green label,
+.sidebar row.group-header.grp-green .group-name,
 .sidebar row.group-header.grp-green .group-chevron,
 .sidebar row.group-header.grp-green .group-count {{ color: #9ece6a; }}
 
 .sidebar row.group-header.grp-teal    {{ background: rgba(26, 188, 156, 0.08); }}
 .sidebar row.group-header.grp-teal:hover {{ background: rgba(26, 188, 156, 0.15); }}
-.sidebar row.group-header.grp-teal label,
+.sidebar row.group-header.grp-teal .group-name,
 .sidebar row.group-header.grp-teal .group-chevron,
 .sidebar row.group-header.grp-teal .group-count {{ color: #1abc9c; }}
 
 .sidebar row.group-header.grp-cyan    {{ background: rgba(125, 207, 255, 0.08); }}
 .sidebar row.group-header.grp-cyan:hover {{ background: rgba(125, 207, 255, 0.15); }}
-.sidebar row.group-header.grp-cyan label,
+.sidebar row.group-header.grp-cyan .group-name,
 .sidebar row.group-header.grp-cyan .group-chevron,
 .sidebar row.group-header.grp-cyan .group-count {{ color: #7dcfff; }}
 
 .sidebar row.group-header.grp-blue    {{ background: rgba(122, 162, 247, 0.08); }}
 .sidebar row.group-header.grp-blue:hover {{ background: rgba(122, 162, 247, 0.15); }}
-.sidebar row.group-header.grp-blue label,
+.sidebar row.group-header.grp-blue .group-name,
 .sidebar row.group-header.grp-blue .group-chevron,
 .sidebar row.group-header.grp-blue .group-count {{ color: #7aa2f7; }}
 
 .sidebar row.group-header.grp-indigo  {{ background: rgba(192, 202, 245, 0.08); }}
 .sidebar row.group-header.grp-indigo:hover {{ background: rgba(192, 202, 245, 0.15); }}
-.sidebar row.group-header.grp-indigo label,
+.sidebar row.group-header.grp-indigo .group-name,
 .sidebar row.group-header.grp-indigo .group-chevron,
 .sidebar row.group-header.grp-indigo .group-count {{ color: #c0caf5; }}
 
 .sidebar row.group-header.grp-purple  {{ background: rgba(157, 124, 216, 0.08); }}
 .sidebar row.group-header.grp-purple:hover {{ background: rgba(157, 124, 216, 0.15); }}
-.sidebar row.group-header.grp-purple label,
+.sidebar row.group-header.grp-purple .group-name,
 .sidebar row.group-header.grp-purple .group-chevron,
 .sidebar row.group-header.grp-purple .group-count {{ color: #9d7cd8; }}
 
 .sidebar row.group-header.grp-pink    {{ background: rgba(243, 139, 168, 0.08); }}
 .sidebar row.group-header.grp-pink:hover {{ background: rgba(243, 139, 168, 0.15); }}
-.sidebar row.group-header.grp-pink label,
+.sidebar row.group-header.grp-pink .group-name,
 .sidebar row.group-header.grp-pink .group-chevron,
 .sidebar row.group-header.grp-pink .group-count {{ color: #f38ba8; }}
 
 .sidebar row.group-header.grp-gray    {{ background: rgba(169, 177, 214, 0.08); }}
 .sidebar row.group-header.grp-gray:hover {{ background: rgba(169, 177, 214, 0.15); }}
-.sidebar row.group-header.grp-gray label,
+.sidebar row.group-header.grp-gray .group-name,
 .sidebar row.group-header.grp-gray .group-chevron,
 .sidebar row.group-header.grp-gray .group-count {{ color: #a9b1d6; }}
 
 .sidebar row.group-header.grp-white   {{ background: rgba(255, 255, 255, 0.08); }}
 .sidebar row.group-header.grp-white:hover {{ background: rgba(255, 255, 255, 0.15); }}
-.sidebar row.group-header.grp-white label,
+.sidebar row.group-header.grp-white .group-name,
 .sidebar row.group-header.grp-white .group-chevron,
 .sidebar row.group-header.grp-white .group-count {{ color: #ffffff; }}
 
 .sidebar row.group-header.grp-brown   {{ background: rgba(209, 154, 102, 0.08); }}
 .sidebar row.group-header.grp-brown:hover {{ background: rgba(209, 154, 102, 0.15); }}
-.sidebar row.group-header.grp-brown label,
+.sidebar row.group-header.grp-brown .group-name,
 .sidebar row.group-header.grp-brown .group-chevron,
 .sidebar row.group-header.grp-brown .group-count {{ color: #d19a66; }}
 
+/* Selected row: title chrome → white; agent status keeps status colors below */
 .sidebar row:selected label,
 .sidebar row:selected .group-chevron,
 .sidebar row:selected .group-count,
-.sidebar row:selected.group-header label,
+.sidebar row:selected.group-header .group-name,
 .sidebar row:selected.group-header .group-chevron,
 .sidebar row:selected.group-header .group-count {{
     color: #ffffff;
@@ -655,12 +657,58 @@ def get_theme_css(theme_key):
     font-weight: 800;
     min-width: 1.1em;
 }}
-.agent-status.working, .agent-status-glyph.working {{ color: #7aa2f7; }}
-.agent-status.blocked, .agent-status-glyph.blocked {{ color: #f7768e; }}
-.agent-status.idle, .agent-status-glyph.idle {{ color: #9ece6a; }}
-/* turn finished while you were elsewhere — until you open the tab */
-.agent-status.ready, .agent-status-glyph.ready {{ color: #e0af68; }}
-.agent-status.done, .agent-status-glyph.done {{ color: #a9b1d6; }}
+/* Status palette — same on tab rows, peeks, and group-header aggregates.
+   High specificity so group tint / :selected white do not override. */
+.agent-status.working, .agent-status-glyph.working,
+.sidebar row .agent-status.working, .sidebar row .agent-status-glyph.working,
+.sidebar row:selected .agent-status.working,
+.sidebar row:selected .agent-status-glyph.working,
+.sidebar row.group-header .agent-status.working,
+.sidebar row.group-header .agent-status-glyph.working,
+.sidebar row:selected.group-header .agent-status.working,
+.sidebar row:selected.group-header .agent-status-glyph.working,
+.ai-peek .agent-status.working, .ai-peek .agent-status-glyph.working {{
+    color: #7aa2f7;
+}}
+.agent-status.blocked, .agent-status-glyph.blocked,
+.sidebar row .agent-status.blocked, .sidebar row .agent-status-glyph.blocked,
+.sidebar row:selected .agent-status.blocked,
+.sidebar row:selected .agent-status-glyph.blocked,
+.sidebar row.group-header .agent-status.blocked,
+.sidebar row.group-header .agent-status-glyph.blocked,
+.sidebar row:selected.group-header .agent-status.blocked,
+.sidebar row:selected.group-header .agent-status-glyph.blocked,
+.ai-peek .agent-status.blocked, .ai-peek .agent-status-glyph.blocked {{
+    color: #f7768e;
+}}
+.agent-status.idle, .agent-status-glyph.idle,
+.sidebar row .agent-status.idle, .sidebar row .agent-status-glyph.idle,
+.sidebar row:selected .agent-status.idle,
+.sidebar row:selected .agent-status-glyph.idle,
+.sidebar row.group-header .agent-status.idle,
+.sidebar row.group-header .agent-status-glyph.idle,
+.sidebar row:selected.group-header .agent-status.idle,
+.sidebar row:selected.group-header .agent-status-glyph.idle,
+.ai-peek .agent-status.idle, .ai-peek .agent-status-glyph.idle {{
+    color: #9ece6a;
+}}
+.agent-status.ready, .agent-status-glyph.ready,
+.sidebar row .agent-status.ready, .sidebar row .agent-status-glyph.ready,
+.sidebar row:selected .agent-status.ready,
+.sidebar row:selected .agent-status-glyph.ready,
+.sidebar row.group-header .agent-status.ready,
+.sidebar row.group-header .agent-status-glyph.ready,
+.sidebar row:selected.group-header .agent-status.ready,
+.sidebar row:selected.group-header .agent-status-glyph.ready,
+.ai-peek .agent-status.ready, .ai-peek .agent-status-glyph.ready {{
+    color: #e0af68;
+}}
+.agent-status.done, .agent-status-glyph.done,
+.agent-status.exited, .agent-status-glyph.exited,
+.sidebar row .agent-status.done, .sidebar row .agent-status-glyph.done,
+.sidebar row .agent-status.exited, .sidebar row .agent-status-glyph.exited {{
+    color: #a9b1d6;
+}}
 .agent-status.unknown, .agent-status-glyph.unknown {{ color: {s['subtext']}; }}
 /* off-viewport AI peeks (overlay) + collapsed group header aggregates.
    Right-aligned like per-tab agent status icons. */
@@ -683,7 +731,7 @@ def get_theme_css(theme_key):
     margin-right: 2px;
 }}
 .ai-peek-slot {{
-    margin-left: 4px;
+    margin-left: 2px;
     font-size: 11pt;
     font-weight: 800;
 }}
@@ -693,8 +741,12 @@ def get_theme_css(theme_key):
     margin-right: 2px;
 }}
 .group-ai-summary .agent-status-glyph {{
-    margin-left: 3px;
-    font-size: 10pt;
+    margin-left: 2px;
+    font-size: 11pt;
+    font-weight: 800;
+}}
+.group-ai-summary .agent-status {{
+    margin-left: 2px;
 }}
 .adder {{ background-color: {s['adder_bg']}; border-top: 1px solid {s['border']};
          padding-top: 4px; }}
@@ -3101,6 +3153,7 @@ if (data !== null) {{
         box.pack_start(dot, False, False, 0)
         name = self._group_names.get(color) or color.capitalize()
         name_lbl = Gtk.Label(label=name.upper(), xalign=0)
+        name_lbl.get_style_context().add_class("group-name")
         box.pack_start(name_lbl, False, False, 0)
         # Spacer pushes AI summary to the right (same side as tab status icons)
         spacer = Gtk.Label()
