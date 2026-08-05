@@ -1,6 +1,6 @@
 # tabit
 
-**v1.5.10** — a terminal built around a **left tab sidebar**.
+**v1.6.0** — a terminal built around a **left tab sidebar**.
 
 <p align="center">
   <img src="banner.svg" alt="tabit — color-coded session tabs down the left edge of one window" width="820">
@@ -12,8 +12,9 @@ Markdown preview), an arbitrary command, or a tmux session. Click to switch,
 drag to reorder, double-click to rename. Real terminals throughout, powered
 by the VTE engine.
 
-One small Python file. No pip packages, no compiling — everything comes
-from the Ubuntu archive.
+Small Python app (GTK + VTE). No pip packages, no compiling — deps from
+the Ubuntu archive. AI tab status uses vendored herdr-compatible TOML
+patterns plus a small pure detector (`agent_status.py`).
 
 ## Requirements
 

@@ -1,0 +1,84 @@
+# Tabit VTE chrome patterns (not from herdr).
+# Wording changes for AI CLIs: edit this file, then add/update fixtures under
+# tests/fixtures/agent_status/ and run: python3 tests/test_agent_status.py
+#
+# These supplement herdr agent-detection/*.toml for bottom-of-screen heuristics
+# (VTE often lacks reliable OSC while the spinner is only in the window title).
+
+version = "1"
+
+# Live busy chrome at the bottom of the screen (present-tense UI).
+working = [
+  "esc to interrupt",
+  "\\bactioning\\b",
+  "\\brecombobulating\\b",
+  "\\bthinking…|\\bthinking\\.\\.\\.",
+  "\\bbaking…|\\bbaking\\.\\.\\.",
+  "\\brun(?:ning)?\\.\\.\\.",
+  "running tool",
+  "\\bgenerating…|\\bgenerating\\.\\.\\.",
+  "\\bcompacting…|\\bcompacting\\.\\.\\.",
+  "[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]",
+  "[◐◓◑◒]",
+  # live counters: "… (50s · ↓ 2.2k tokens)" not "Baked for 3m 40s"
+  "[a-z]{4,}ing\\.\\.\\.\\s*\\(\\d+s\\b",
+  "\\(\\d+s\\s*[·•]",
+  "ctrl\\+b to run in background",
+]
+
+# Needs user input / approval (match bottom only at call site).
+blocked = [
+  "do you want to proceed",
+  "do you want to\\b",
+  "allow this (action|command|edit|tool)",
+  "permission request",
+  "waiting for (your )?(input|approval|confirmation)\\b",
+  "needs? your (input|approval)\\b",
+  "press enter to continue",
+  "\\[y/n\\]|\\(y/n\\)|\\[Y/n\\]|\\(Y/n\\)",
+  "❯\\s*1\\.\\s*Yes",
+  "\\b1\\.\\s*Yes\\b.*\\b2\\.\\s*No\\b",
+  "run this command\\?",
+  "Accept edits\\??",
+  "\\bAlways allow\\b",
+  "Do you want to make this edit",
+  # Claude multi-select / form chrome (footer under the list cursor)
+  "enter to select",
+  "tab/arrow keys to navigate",
+  "arrow keys to navigate",
+  # Claude workspace trust / folder safety
+  "accessing workspace:",
+  "is this a project you created or one you trust",
+  "i trust this folder",
+  "enter to confirm\\b",
+  "esc to cancel\\b",
+  "no, exit",
+]
+
+# Finished-turn banners → idle, not working
+turn_done = [
+  "\\bcrunched for\\b",
+  "\\bsautéed for\\b",
+  "\\bsauteed for\\b",
+  "\\bbrewed for\\b",
+  "\\bbaked for\\b",
+  "\\brecap:",
+]
+
+# Trust / confirm menu helpers (used with numbered choices)
+trust_confirm = [
+  "enter to confirm|esc to cancel|i trust this folder|accessing workspace:",
+]
+trust_choice = [
+  "(❯|›|>)\\s*1\\.\\s*|^\\s*1\\.\\s*Yes|^\\s*2\\.\\s*No",
+]
+
+# Strong blocked menus (heuristic fallback)
+blocked_strong = [
+  "❯\\s*1\\.\\s*Yes|\\b1\\.\\s*Yes\\b.*\\b2\\.\\s*No\\b|\\[y/n\\]|do you want to proceed|Accept edits",
+]
+
+# Live busy without relying on full working list
+busy_quick = [
+  "\\bactioning\\b|\\brecombobulating\\b|esc to interrupt|[a-z]{4,}ing\\.\\.\\.\\s*\\(\\d+s\\b",
+]

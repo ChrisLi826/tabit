@@ -1,0 +1,14 @@
+# expect_raw: blocked
+# agent: claude
+# ---
+你 可以 隨 便 提 出 幾 個 問 題 選 項 然 後 讓 我 選 嗎？
+
+今天想從哪件事開始？
+› 1. 整理 knowledge-base
+  2. 寫點程式
+  3. 查東西
+  4. 純聊天
+  5. 不做事，先聊聊想法或方向
+  6. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

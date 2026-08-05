@@ -1,0 +1,6 @@
+# expect_raw: working
+# agent: claude
+# ---
+Thinking about the request…
+
+esc to interrupt

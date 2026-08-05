@@ -1,0 +1,8 @@
+# expect_raw: idle
+# agent: claude
+# ---
+Baked for 3m 40s
+
+Here is the summary of what changed.
+
+❯ 

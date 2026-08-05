@@ -1,0 +1,8 @@
+# expect_raw: idle
+# agent: claude
+# ---
+※ Crunched for 1m 12s
+
+Some finished answer text here.
+
+❯ 

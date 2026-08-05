@@ -8,6 +8,7 @@ if [ "$1" = "--uninstall" ]; then
           "$HOME/.local/share/applications/tabit.desktop" \
           "$HOME/.local/share/icons/hicolor/scalable/apps/tabit.svg" \
           "$HOME/.config/autostart/tabit.desktop"
+    rm -rf "$HOME/.local/share/tabit"
     echo "tabit removed"
     exit 0
 fi
@@ -22,9 +23,17 @@ sudo apt-get install -y gir1.2-webkit2-4.0 \
     || echo "WebKit not found; note Markdown preview will be disabled"
 
 mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications" \
-         "$HOME/.local/share/icons/hicolor/scalable/apps"
+         "$HOME/.local/share/icons/hicolor/scalable/apps" \
+         "$HOME/.local/share/tabit"
 install -m 755 tabit.py "$HOME/.local/bin/tabit"
 install -m 644 tabit.svg "$HOME/.local/share/icons/hicolor/scalable/apps/tabit.svg"
+# agent status: pure detector + herdr manifests (no herdr binary)
+install -m 644 agent_detect.py "$HOME/.local/share/tabit/agent_detect.py"
+install -m 644 agent_status.py "$HOME/.local/share/tabit/agent_status.py"
+install -m 644 tabit_chrome.toml "$HOME/.local/share/tabit/tabit_chrome.toml"
+rm -rf "$HOME/.local/share/tabit/agent-detection" "$HOME/.local/share/tabit/vendor"
+cp -a agent-detection "$HOME/.local/share/tabit/agent-detection"
+cp -a vendor "$HOME/.local/share/tabit/vendor"
 gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 
 # leftover from the pre-v2 window-tab version

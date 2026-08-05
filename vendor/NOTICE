@@ -1,0 +1,2 @@
+tomli (https://github.com/hukkin/tomli) is vendored under vendor/tomli/
+for Python 3.10 TOML parsing. License: MIT.

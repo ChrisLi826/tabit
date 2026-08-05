@@ -271,7 +271,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v1.5.10"
+APP_VERSION = "v1.6.0"
 
 def _get_tabit_repo_dir():
     try:
@@ -789,6 +789,8 @@ DEFAULT_SETTINGS = {
     "ai_fresh_on_restore": False,  # restored AI tabs start fresh (no continue)
     "group_names": {},             # tab-group color -> display name
     "collapsed_groups": [],        # group colors whose member tabs are hidden
+    # refresh herdr agent-detection TOMLs from herdr.dev (~daily)
+    "agent_manifest_check": True,
     "ui_font_size": 10,
     "term_font": "Monospace",
     "term_font_size": 12,
@@ -932,8 +934,10 @@ class Tabit(Gtk.Window):
             self.listbox.select_row(pick)
         if not self.listbox.get_children():
             self._on_add_shell(None)
-        # poll AI tab screens for herdr-like working/blocked/idle badges
-        GLib.timeout_add_seconds(2, self._poll_ai_agent_statuses)
+        # AI status: load manifests after first paint (avoid startup freeze)
+        self._agent_store = None
+        GLib.idle_add(self._deferred_init_agent_store)
+        GLib.timeout_add_seconds(self._AGENT_POLL_SEC, self._poll_ai_agent_statuses)
         GLib.idle_add(self._check_weekly_auto_update)
 
     # --- sessions ---------------------------------------------------------
@@ -1244,7 +1248,20 @@ class Tabit(Gtk.Window):
         term.connect("child-exited", self._on_child_exited, row)
         term.connect("contents-changed", self._on_activity, row)
         if icon_name == ICON_AI:
-            # initial badge; real status after first screen paint
+            # Episode + display state live in agent_status (pure module).
+            as_ = self._agent_status_mod()
+            row._agent_window_title = ""
+            if as_ is not None:
+                row._agent_episode = as_.Episode()
+                row._agent_display = as_.Display(ui="unknown")
+            else:
+                row._agent_episode = None
+                row._agent_display = None
+            try:
+                term.connect("window-title-changed",
+                             self._on_ai_term_title_changed, row)
+            except TypeError:
+                pass
             self._set_agent_status(row, "unknown")
 
             def _kick(r=row):
@@ -3475,62 +3492,50 @@ if (data !== null) {{
         # Only AI tabs show status chrome; no orange activity dots on
         # serial / shell / command / tmux / connect.
         if getattr(row, "icon_name", None) == ICON_AI:
+            # PTY timestamp only — does NOT enter working by itself (user
+            # keystrokes also fire contents-changed on VTE).
+            ep = getattr(row, "_agent_episode", None)
+            if ep is not None:
+                ep.last_pty = time.time()
+            else:
+                row._agent_last_pty_activity = time.time()
+            # PTY alone does not arm sticky ✔ (that was pause→check spam).
+            # Ready requires a real working/blocked episode in display_step.
             self._schedule_agent_status(row)
         self._refresh_term_cwd(row)
 
-    # --- AI agent status (herdr-like screen heuristics) --------------------
+    def _on_ai_term_title_changed(self, term, row):
+        """OSC 0/2 window title — herdr osc_title region (e.g. braille spinner)."""
+        try:
+            row._agent_window_title = term.get_window_title() or ""
+        except Exception:
+            row._agent_window_title = ""
+        if getattr(row, "icon_name", None) == ICON_AI:
+            self._schedule_agent_status(row)
 
-    # Priority: blocked > working > idle. Strict blocked, like herdr docs.
-    _AGENT_BLOCKED_RE = re.compile(
-        r"(?is)"
-        r"do you want to proceed"
-        r"|do you want to"
-        r"|allow this"
-        r"|permission request"
-        r"|waiting for (your )?(input|approval|permission|confirmation)"
-        r"|needs? your (input|approval|permission)"
-        r"|approve\b"
-        r"|press enter to continue"
-        r"|\[y/n\]|\(y/n\)|\[Y/n\]|\(Y/n\)"
-        r"|❯\s*1\.\s*Yes"
-        r"|\b1\.\s*Yes\b.*\b2\.\s*No\b"
-        r"|run this command\?"
-        r"|Accept edits"
-        r"|Always allow"
-    )
-    _AGENT_WORKING_RE = re.compile(
-        r"(?is)"
-        r"esc to interrupt"
-        r"|thinking…"
-        r"|thinking\.\.\."
-        r"|\bthinking\b"
-        r"|\bbaking\b"
-        r"|\bworking\b"
-        r"|running tool"
-        r"|tool use"
-        r"|generating"
-        r"|compacting"
-        r"|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]"  # braille spinners
-        r"|[◐◓◑◒]"
-        r"|ing…\s*\("
-        r"|tokens"
-        r"|ctx\s+\d+%"
-    )
-    _AGENT_IDLE_RE = re.compile(
-        r"(?m)"
-        r"(?:^|\n)\s*[❯›]\s*$"
-        r"|(?:^|\n)\s*[❯›]\s+"
-        r"|(?:^|\n)Human:\s*$"
-        r"|(?:^|\n)>\s*$"
-    )
+    # --- AI agent status --------------------------------------------------
+    # Pure logic lives in agent_status.py (evidence → raw → display FSM).
+    # Wording: tabit_chrome.toml + agent-detection/*.toml
+    # Tests: tests/test_agent_status.py + tests/fixtures/agent_status/
+    _AGENT_DEBOUNCE_MS = 400
+    _AGENT_POLL_SEC = 3
+    _AGENT_TAIL_LINES = 40
+    _AGENT_READY_STABLE_S = 1.0      # stable idle before sticky ✔
+    _agent_status_module = None      # lazy-loaded agent_status
 
     def _poll_ai_agent_statuses(self):
         """Periodic backup; contents-changed already schedules updates."""
-        for r in self._session_rows():
-            if (getattr(r, "icon_name", None) == ICON_AI
-                    and not getattr(r, "dead", False)
-                    and getattr(r, "term", None) is not None):
-                self._update_agent_status(r)
+        if getattr(self, "_agent_status_busy", False):
+            return True
+        self._agent_status_busy = True
+        try:
+            for r in self._session_rows():
+                if (getattr(r, "icon_name", None) == ICON_AI
+                        and not getattr(r, "dead", False)
+                        and getattr(r, "term", None) is not None):
+                    self._update_agent_status(r)
+        finally:
+            self._agent_status_busy = False
         return True  # keep timer
 
     def _refresh_ai_status_widgets(self):
@@ -3540,7 +3545,6 @@ if (data !== null) {{
                 continue
             st = getattr(r, "agent_status", None)
             if not st:
-                # ensure neither badge shows for un-initialized AI rows
                 img = getattr(r, "agent_status_lbl", None)
                 glyph = getattr(r, "agent_status_glyph", None)
                 if img is not None:
@@ -3550,7 +3554,6 @@ if (data !== null) {{
                     glyph.set_no_show_all(True)
                     glyph.hide()
                 continue
-            # force re-apply even if status string unchanged
             r.agent_status = None
             self._set_agent_status(r, st)
 
@@ -3565,94 +3568,305 @@ if (data !== null) {{
             self._update_agent_status(row)
             return False
 
-        row._agent_status_src = GLib.timeout_add(350, fire)
+        row._agent_status_src = GLib.timeout_add(self._AGENT_DEBOUNCE_MS, fire)
 
-    def _term_tail_text(self, term, max_lines=50):
-        """Recent VTE screen text (bottom of buffer) for status heuristics."""
+    def _term_tail_text(self, term, max_lines=40):
+        """Recent VTE text only — never dump full scrollback (freezes UI).
+
+        Must include rows *below* the cursor: Claude multi-select puts the
+        highlight on an option while "Enter to select / Esc to cancel" sits
+        on the footer under the cursor. Ending the range at crow alone made
+        that chrome invisible → false idle (pause) instead of blocked (?).
+        """
         if term is None:
             return ""
+        text = None
         try:
-            text, _attrs = term.get_text(None)
-        except (TypeError, GLib.Error):
+            _col, crow = term.get_cursor_position()
+            crow = int(crow)
+            # Visible height: footer chrome is often 1–3 rows under the list
+            # cursor; take a full screen below when available.
             try:
-                text, _attrs = term.get_text(lambda *_a: False)
+                vis = max(1, int(term.get_row_count()))
             except Exception:
-                return ""
+                vis = 24
+            below = max(vis, 16)
+            start_row = max(0, crow - max_lines + 1)
+            end_row = crow + below
+            try:
+                text, _attrs = term.get_text_range(
+                    start_row, 0, end_row, -1, None)
+            except TypeError:
+                text, _attrs = term.get_text_range(
+                    start_row, 0, end_row, 500, lambda *_a: False)
+            except GLib.Error:
+                text = None
+        except Exception:
+            text = None
+        if not text:
+            # Bounded fallback: still never feed 10k lines into the matcher
+            try:
+                text, _attrs = term.get_text(None)
+            except (TypeError, GLib.Error, Exception):
+                try:
+                    text, _attrs = term.get_text(lambda *_a: False)
+                except Exception:
+                    return ""
+            if text and len(text) > 6000:
+                text = text[-6000:]
         if not text:
             return ""
-        # strip trailing blank lines for cleaner end-of-screen matching
         lines = text.splitlines()
         while lines and not lines[-1].strip():
             lines.pop()
         return "\n".join(lines[-max_lines:])
 
-    def _detect_agent_status(self, text, argv=None):
-        """Classify agent UI from screen tail. blocked > working > idle."""
-        if not text or not text.strip():
+    # Map argv / CLI names → herdr agent-detection ids
+    _HERDR_AGENT_ALIASES = (
+        ("claude", "claude"),
+        ("codex", "codex"),
+        ("grok", "grok"),
+        ("cursor-agent", "cursor"),
+        ("cursor", "cursor"),
+        ("gemini", "gemini"),
+        ("opencode", "opencode"),
+        ("open-code", "opencode"),
+        ("agy", "agy"),
+        ("copilot", "copilot"),
+        ("devin", "devin"),
+        ("hermes", "hermes"),
+        ("amp", "amp"),
+        ("kimi", "kimi"),
+        ("kilo", "kilo"),
+        ("droid", "droid"),
+        ("cline", "cline"),
+        ("pi ", "pi"),
+        ("/pi", "pi"),
+    )
+
+    @staticmethod
+    def _agent_detect_roots():
+        """Dirs that may hold agent_detect / agent_status / manifests / vendor."""
+        return [
+            os.path.expanduser("~/.local/share/tabit"),
+            os.path.dirname(os.path.abspath(__file__)),
+            os.path.expanduser("~/tabit"),
+        ]
+
+    def _agent_status_mod(self):
+        """Lazy-import agent_status (pure detection + display FSM)."""
+        mod = getattr(Tabit, "_agent_status_module", None)
+        if mod is not None and mod is not False:
+            return mod
+        if mod is False:
+            return None
+        for d in self._agent_detect_roots():
+            if os.path.isfile(os.path.join(d, "agent_status.py")):
+                if d not in sys.path:
+                    sys.path.insert(0, d)
+                break
+        try:
+            import agent_status as as_
+            as_.reload_patterns_from_disk()
+            Tabit._agent_status_module = as_
+            return as_
+        except ImportError:
+            Tabit._agent_status_module = False
+            return None
+
+    def _deferred_init_agent_store(self):
+        """Init after first frame so TOML load does not block window map."""
+        self._agent_status_mod()  # warm patterns early
+        try:
+            self._agent_store = self._init_agent_manifest_store()
+        except Exception:
+            self._agent_store = None
+        # network update off the GTK thread
+        if self._agent_store is not None:
+            store = self._agent_store
+
+            def work():
+                try:
+                    store.maybe_update_remote(force=False)
+                except Exception:
+                    pass
+
+            threading.Thread(target=work, daemon=True).start()
+        return False
+
+    def _init_agent_manifest_store(self):
+        """Load herdr-compatible TOML manifests (no herdr binary)."""
+        for d in self._agent_detect_roots():
+            if os.path.isfile(os.path.join(d, "agent_detect.py")):
+                if d not in sys.path:
+                    sys.path.insert(0, d)
+                break
+        try:
+            import agent_detect as ad
+        except ImportError:
+            self._agent_detect = None
+            return None
+        self._agent_detect = ad
+        vendored = None
+        for d in self._agent_detect_roots():
+            cand = os.path.join(d, "agent-detection")
+            if os.path.isdir(cand):
+                vendored = cand
+                break
+        cache = os.path.join(CONFIG_DIR, "agent-detection")
+        settings = self._load_settings()
+        remote = bool(settings.get("agent_manifest_check", True))
+        try:
+            return ad.ManifestStore(
+                vendored_dir=vendored or cache,
+                cache_dir=cache,
+                check_interval_sec=24 * 3600,
+                remote_check=remote,
+            )
+        except Exception:
+            return None
+
+    def _ai_agent_kind(self, argv):
+        """Best-effort herdr agent id from spawn argv."""
+        blob = " ".join(str(a) for a in (argv or [])).lower()
+        for needle, kind in self._HERDR_AGENT_ALIASES:
+            if needle in blob:
+                return kind
+        return "claude"  # most common for +AI tabs
+
+    def _manifest_evaluate(self, text, argv, osc_title=""):
+        """Optional herdr store → (state, rule_id, flags)."""
+        store = getattr(self, "_agent_store", None)
+        if store is None or not (text or osc_title):
+            return None, None, {}
+        kind = self._ai_agent_kind(argv)
+        try:
+            state, matched_rule, _mid, flags = store.evaluate(
+                text or "", kind, osc_title=osc_title, osc_progress="")
+            return state, matched_rule, flags or {}
+        except TypeError:
+            try:
+                out = store.evaluate(text or "", kind)
+                if len(out) >= 2:
+                    return out[0], out[1], {}
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return None, None, {}
+
+    def _detect_agent_status(self, text, argv=None, row=None):
+        """Evidence + episode → raw. See agent_status.py invariants."""
+        as_ = self._agent_status_mod()
+        now = time.time()
+        osc_title = ""
+        if row is not None:
+            osc_title = getattr(row, "_agent_window_title", "") or ""
+            if not osc_title:
+                term = getattr(row, "term", None)
+                if term is not None:
+                    try:
+                        osc_title = term.get_window_title() or ""
+                        row._agent_window_title = osc_title
+                    except Exception:
+                        pass
+
+        state, matched_rule, flags = self._manifest_evaluate(
+            text, argv, osc_title=osc_title)
+
+        if as_ is None:
+            # Minimal fallback if agent_status.py missing from install
+            if state in ("working", "idle", "blocked", "unknown"):
+                return state
             return "unknown"
-        tail = text[-4000:]  # focus on recent region
-        # blocked first (strict)
-        if self._AGENT_BLOCKED_RE.search(tail):
-            return "blocked"
-        if self._AGENT_WORKING_RE.search(tail):
-            return "working"
-        # idle: look at last few non-empty lines
-        last_chunk = "\n".join(tail.splitlines()[-8:])
-        if self._AGENT_IDLE_RE.search(last_chunk):
-            return "idle"
-        # soft idle: ends with a prompt-like short line
-        last = next((ln for ln in reversed(tail.splitlines()) if ln.strip()), "")
-        if re.match(r"^\s*[❯›$%#]\s*$", last) or re.match(r"^\s*[❯›]\s+\S", last):
-            return "idle"
-        # default for known AI CLIs with no match: idle (herdr-like fallback)
-        cli = ""
-        if argv:
-            # argv is often ["/bin/sh", "-c", "cd … && (claude …)"]
-            blob = " ".join(str(a) for a in argv).lower()
-            for name in ("claude", "codex", "grok", "cursor", "opencode",
-                         "gemini", "agy", "pi ", "copilot"):
-                if name.strip() in blob:
-                    cli = name.strip()
-                    break
-        if cli:
-            return "idle"
-        return "unknown"
+
+        ep = None
+        if row is not None:
+            ep = getattr(row, "_agent_episode", None)
+            if ep is None:
+                ep = as_.Episode(
+                    prev_raw=getattr(row, "_agent_raw_status", None),
+                    working_since=float(
+                        getattr(row, "_agent_working_since", 0) or 0),
+                    last_pty=float(
+                        getattr(row, "_agent_last_pty_activity", 0) or 0),
+                )
+                row._agent_episode = ep
+
+        ev = as_.gather_evidence(
+            text or "",
+            osc_title=osc_title,
+            manifest_state=state,
+            matched_rule=matched_rule,
+            flags=flags,
+        )
+        return as_.detect_raw(
+            ev, ep or as_.Episode(), now, argv=argv, text=text or "",
+        )
 
     def _update_agent_status(self, row):
         if row is None or row.get_parent() is None:
             return
         if getattr(row, "icon_name", None) != ICON_AI:
             return
+        as_ = self._agent_status_mod()
         if getattr(row, "dead", False):
+            if as_ is not None:
+                disp = getattr(row, "_agent_display", None) or as_.Display()
+                row._agent_display = as_.display_step(
+                    "exited", disp, selected=False, now=time.time(),
+                    dead=True,
+                )
+                ep = getattr(row, "_agent_episode", None)
+                if ep is not None:
+                    ep.prev_raw = "exited"
             self._set_agent_status(row, "exited")
             return
+
         term = getattr(row, "term", None)
-        text = self._term_tail_text(term)
-        detected = self._detect_agent_status(text, getattr(row, "argv", None))
-        prev = getattr(row, "agent_status", None)
+        text = self._term_tail_text(term, max_lines=self._AGENT_TAIL_LINES)
+        now = time.time()
         selected = self.listbox.get_selected_row() is row
 
-        # working → idle while you're on another tab: sticky "done" until viewed
-        # (herdr-like: finished turn stays visible until you open the pane)
-        if detected == "idle":
-            if selected:
-                status = "idle"
-            elif prev in ("working", "ready"):
-                status = "ready"
-            else:
-                status = "idle"
-        elif detected == "working":
-            status = "working"
-        elif detected == "blocked":
-            status = "blocked"
-        else:
-            # unknown: keep sticky ready if still unviewed
-            if prev == "ready" and not selected:
-                status = "ready"
-            else:
-                status = detected
+        if as_ is None:
+            raw = self._detect_agent_status(
+                text, getattr(row, "argv", None), row=row)
+            self._set_agent_status(row, raw if raw != "unknown" else "unknown")
+            return
 
-        self._set_agent_status(row, status)
+        ep = getattr(row, "_agent_episode", None) or as_.Episode()
+        disp = getattr(row, "_agent_display", None)
+        if disp is None:
+            disp = as_.Display(ui=getattr(row, "agent_status", None))
+        elif getattr(row, "agent_status", None) and disp.ui != row.agent_status:
+            from dataclasses import replace as _dc_replace
+            disp = _dc_replace(disp, ui=row.agent_status)
+
+        osc_title = getattr(row, "_agent_window_title", "") or ""
+        state, matched_rule, flags = self._manifest_evaluate(
+            text, getattr(row, "argv", None), osc_title=osc_title)
+        ev = as_.gather_evidence(
+            text or "",
+            osc_title=osc_title,
+            manifest_state=state,
+            matched_rule=matched_rule,
+            flags=flags,
+        )
+        prev_raw = ep.prev_raw
+        raw = as_.detect_raw(
+            ev, ep, now, argv=getattr(row, "argv", None), text=text or "",
+        )
+        ep = as_.apply_raw_to_episode(ep, raw, now)
+        row._agent_episode = ep
+        disp = as_.display_step(
+            raw, disp,
+            selected=selected,
+            now=now,
+            ready_stable_s=self._AGENT_READY_STABLE_S,
+            prev_raw=prev_raw,
+        )
+        row._agent_display = disp
+        self._set_agent_status(row, disp.ui or "unknown")
 
     # Status icons (user mapping):
     #   working→play, idle→pause, blocked→stop, ready→check, exited→cross
@@ -3856,8 +4070,15 @@ if (data !== null) {{
         row.dot.hide()
         self.stack.set_visible_child(row.page)
         self.set_title(f"{row.session_label} — tabit")
-        # viewing an AI tab clears sticky "done" (ready) → idle
+        # viewing an AI tab clears sticky ✔ and re-evaluates → idle/working
         if getattr(row, "icon_name", None) == ICON_AI:
+            as_ = self._agent_status_mod()
+            disp = getattr(row, "_agent_display", None)
+            if as_ is not None and disp is not None:
+                row._agent_display = as_.note_tab_selected(disp)
+            else:
+                row._agent_had_busy_turn = False
+                row._agent_unseen_output = False
             self._update_agent_status(row)
         self._focus_row_content(row)
         GLib.timeout_add(50, self._scroll_to_row, row)

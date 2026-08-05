@@ -1,0 +1,8 @@
+# expect_raw: working
+# agent: claude
+# ---
+Earlier conversation text about permissions and tips.
+
+● Actioning… (12s · ↓ 1.2k tokens)
+  ⎿  Running tool…
+esc to interrupt · ctrl+b to run in background

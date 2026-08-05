@@ -1,0 +1,10 @@
+# expect_raw: idle
+# agent: claude
+# ---
+Tips: you can review permissions in settings.
+Also "working" appears in this old message.
+Bash(some old command) finished earlier.
+
+※ Crunched for 20s
+
+❯ 

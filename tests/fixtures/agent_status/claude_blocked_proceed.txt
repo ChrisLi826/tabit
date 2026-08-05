@@ -1,0 +1,9 @@
+# expect_raw: blocked
+# agent: claude
+# ---
+Bash command
+rm -rf /tmp/foo
+
+Do you want to proceed?
+❯ 1. Yes
+  2. No
