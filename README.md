@@ -13,8 +13,9 @@ of one window.
 
 - **Serial consoles** — USB-serial, `screen` multi-attach, kermit, picocom;
   group devices by project color and collapse what you are not using
-- **Multi-AI status** — Claude / Codex / Grok (and more): ▶ working · ⏸ idle ·
-  ? needs input · ✔ done; off-viewport peeks and collapsed-group summaries
+- **Multi-AI status** — Claude / Codex / Grok (and more): play = working ·
+  pause = idle · ? = needs input · check = done; off-viewport peeks and
+  collapsed-group summaries
 - **Native GTK + VTE** — no Electron, no pip; install from the Ubuntu archive
   with one script
 
