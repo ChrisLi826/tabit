@@ -1,20 +1,36 @@
 # tabit
 
-**v1.6.3** — a terminal built around a **left tab sidebar**.
+[![Release](https://img.shields.io/github/v/release/ChrisLi826/tabit?display_name=tag&sort=semver)](https://github.com/ChrisLi826/tabit/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+**tabit** is a Linux GTK terminal where every session — a shell, a serial
+console, an AI CLI, or a note — is a **color-coded tab down the left edge**
+of one window.
 
 <p align="center">
-  <img src="banner.svg" alt="tabit — color-coded session tabs down the left edge of one window" width="820">
+  <img src="assets/hero.png" alt="tabit — left session sidebar with color groups, AI status icons, serial and shell tabs" width="900">
 </p>
 
-Every session lives as a **color-coded tab down the left edge** of a single
-window — a shell, a serial console, an AI CLI, a note (GtkSourceView +
-Markdown preview), an arbitrary command, or a tmux session. Click to switch,
-drag to reorder, double-click to rename. Real terminals throughout, powered
-by the VTE engine.
+- **Serial consoles** — USB-serial, `screen` multi-attach, kermit, picocom;
+  group devices by project color and collapse what you are not using
+- **Multi-AI status** — Claude / Codex / Grok (and more): ▶ working · ⏸ idle ·
+  ? needs input · ✔ done; off-viewport peeks and collapsed-group summaries
+- **Native GTK + VTE** — no Electron, no pip; install from the Ubuntu archive
+  with one script
 
-Small Python app (GTK + VTE). No pip packages, no compiling — deps from
-the Ubuntu archive. AI tab status uses vendored herdr-compatible TOML
-patterns plus a small pure detector (`agent_status.py`).
+## Install
+
+```sh
+git clone https://github.com/ChrisLi826/tabit.git
+cd tabit
+./install.sh      # apt deps + ~/.local/bin/tabit + app menu entry
+~/.local/bin/tabit &
+```
+
+To remove: `./install.sh --uninstall`
+
+In-app **Check for updates** can pull and reinstall (may ask for your sudo
+password for apt).
 
 ## Requirements
 
@@ -22,17 +38,6 @@ patterns plus a small pure detector (`agent_status.py`).
 - WebKit2 + `python3-markdown` for note Markdown preview
 - `picocom` for serial sessions
 - Tested on Ubuntu / Xubuntu
-
-## Install
-
-```sh
-git clone https://github.com/ChrisLi826/tabit.git
-cd tabit
-./install.sh      # installs deps via apt, copies to ~/.local/bin, adds app menu entry
-~/.local/bin/tabit &
-```
-
-To remove: `./install.sh --uninstall`
 
 ## Usage
 
@@ -76,6 +81,14 @@ scrollback is not kept). Stored in `~/.config/tabit/sessions.json`.
 Keyboard shortcuts are editable via **Shortcuts…** in the sidebar
 (or hand-edit `~/.config/tabit/keys.json`). Defaults match the table
 above; **Reset defaults** in the dialog restores them.
+
+## Where tabit fits
+
+If you already use **tmux** or **Tilix**, keep them for split panes and
+session persistence inside a host. tabit is a **session dock**: many
+independent VTE terminals (and notes) as a left tab list — especially when
+you juggle **serial boards**, **SSH consoles**, and **several AI CLIs** and
+want at-a-glance status without tiling windows by hand.
 
 ## Roadmap
 
