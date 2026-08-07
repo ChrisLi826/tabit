@@ -271,7 +271,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v1.7.0"
+APP_VERSION = "v1.7.1"
 
 def _get_tabit_repo_dir():
     try:
@@ -769,6 +769,10 @@ def get_theme_css(theme_key):
 .cmd-bar {{ background-color: {s['sidebar_bg']}; border-top: 1px solid {s['border']};
            padding: 4px 6px; }}
 .cmd-bar button {{ padding: 2px 10px; font-size: {sz_btn}pt; }}
+/* scrollers that let the two button bars shrink below their natural width */
+.cmd-bar-scroll, .cmd-bar-scroll viewport,
+.note-tools-scroll, .note-tools-scroll viewport {{
+    background-color: {s['sidebar_bg']}; }}
 paned > separator {{
     min-width: 2px;
     padding: 0;
@@ -983,6 +987,8 @@ class Tabit(Gtk.Window):
         self._right_row = None          # session pinned to right pane
         self._split_on = False
         self._focus_pane = "left"       # "left" | "right"
+        self._clamping = False          # re-entry guard for _clamp_center_split
+        self._grip_drag = None          # live middle-column drag, see _slide_middle
         # Legacy alias: some code still says self.stack; unused for display.
         self.stack = None
         self.stack_left = None
@@ -1003,7 +1009,8 @@ class Tabit(Gtk.Window):
         self.sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         self.sidebar.get_style_context().add_class("sidebar")
         self.sidebar.set_size_request(175, -1)  # min width; actual set by paned
-        self.sidebar.pack_start(self._section("SESSIONS"), False, False, 0)
+        self.sidebar.pack_start(self._make_list_header("SESSIONS"),
+                                False, False, 0)
         self.sidebar_scroll = Gtk.ScrolledWindow()
         self.sidebar_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.sidebar_scroll.add(self.listbox)
@@ -1103,7 +1110,7 @@ class Tabit(Gtk.Window):
         self._right_frame.hide()
         self._left_row = None  # session shown in left pane (may differ from list sel)
         # Nested paneds: outer = self._paned; content L|R = split_paned;
-        # when tab list is centered: center_paned = sidebar | R
+        # when tab list is centered: center_paned = L | sidebar
         self.split_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self.split_paned.get_style_context().add_class("content-split")
         self.split_paned.set_wide_handle(True)
@@ -1116,12 +1123,15 @@ class Tabit(Gtk.Window):
         self._center_paned.set_wide_handle(True)
         self._center_paned.connect(
             "button-release-event", self._on_sidebar_paned_released)
+        self._center_paned.connect(
+            "notify::position", lambda *_a: self._schedule_term_resize())
         self._term_resize_src = None
         self.connect("set-focus", self._on_window_set_focus)
 
         self._paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self._paned.connect(
             "button-release-event", self._on_sidebar_paned_released)
+        self._paned.connect("notify::position", self._on_outer_position)
         self.add(self._paned)
         self._sidebar_position = self._load_settings().get(
             "sidebar_position", "left") or "left"
@@ -1574,12 +1584,29 @@ class Tabit(Gtk.Window):
         with open(COMMANDS_FILE, "w") as f:
             json.dump(data, f, indent=2)
 
+    @staticmethod
+    def _scrollable_bar(bar, css_class):
+        """Let a button bar shrink with its pane instead of widening it.
+
+        A row of buttons asks for the sum of all button widths as its minimum.
+        Inside a Gtk.Paned that minimum wins over the divider and pushes the
+        pane content sideways out of view, so keep the buttons full size but
+        give the bar no minimum width — a narrow pane scrolls it instead.
+        """
+        sc = Gtk.ScrolledWindow()
+        sc.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        sc.set_propagate_natural_height(True)
+        sc.set_overlay_scrolling(True)
+        sc.get_style_context().add_class(css_class)
+        sc.add(bar)
+        return sc
+
     def _build_cmd_bar(self, row):
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         bar.get_style_context().add_class("cmd-bar")
         row.cmd_bar = bar
         self._populate_cmd_bar(row)
-        return bar
+        return self._scrollable_bar(bar, "cmd-bar-scroll")
 
     def _populate_cmd_bar(self, row):
         bar = row.cmd_bar
@@ -1861,7 +1888,8 @@ class Tabit(Gtk.Window):
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         page.pack_start(search_bar, False, False, 0)
         page.pack_start(content, True, True, 0)
-        page.pack_start(tools, False, False, 0)
+        page.pack_start(self._scrollable_bar(tools, "note-tools-scroll"),
+                        False, False, 0)
         self._place_tab_row(row, page)
 
         buf.connect("modified-changed",
@@ -4807,11 +4835,20 @@ if (data !== null) {{
     # --- left | right content split ---------------------------------------
 
     def _make_pane_header(self, side_tag, tip_name):
-        """Compact bar: 'R · tab' [x] — tag on the left, close on the right."""
+        """Compact bar: 'R · tab' [x] — tag on the left, close on the right.
+
+        When this pane is the middle column (the tab list parked on an edge),
+        the bar is also the grip that nudges the pane sideways — see
+        _make_list_header for the same job on the list itself.
+        """
+        # EventBox to take button and motion events; the CSS class stays on
+        # this node, so `.pane-header` styling is unchanged.
+        hdr = Gtk.EventBox()
+        hdr.get_style_context().add_class("pane-header")
+        hdr.set_no_show_all(True)
+        hdr.hide()
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        box.get_style_context().add_class("pane-header")
-        box.set_no_show_all(True)
-        box.hide()
+        hdr.add(box)
         lbl = Gtk.Label(xalign=0)
         lbl.set_ellipsize(Pango.EllipsizeMode.END)
         lbl.set_markup(
@@ -4829,11 +4866,12 @@ if (data !== null) {{
         pane = "left" if side_tag == "L" else "right"
         close.connect("clicked", lambda *_a, p=pane: self._close_content_pane(p))
         box.pack_end(close, False, False, 0)
-        box._side_name = side_tag
-        box._tip_name = tip_name
-        box._close_btn = close
-        box.set_tooltip_text(tip_name)
-        return box, lbl
+        self._connect_grip(hdr, pane)
+        hdr._side_name = side_tag
+        hdr._tip_name = tip_name
+        hdr._close_btn = close
+        hdr.set_tooltip_text(tip_name)
+        return hdr, lbl
 
     def _pane_header_widgets(self, pane):
         if pane == "right":
@@ -5397,6 +5435,26 @@ if (data !== null) {{
         return pos
 
     @staticmethod
+    def _handle_size(paned):
+        """Width of a paned divider, so positions can be added up exactly.
+
+        Measure the real gap when the paned is already on screen — the
+        handle-size style property reports the thin default and would make
+        every re-apply lose a pixel off the tab list.
+        """
+        try:
+            gap = paned.get_allocated_width() - sum(
+                c.get_allocated_width() for c in paned.get_children())
+            if 0 < gap < 40:
+                return gap
+        except Exception:
+            pass
+        try:
+            return int(paned.style_get_property("handle-size") or 5)
+        except Exception:
+            return 5
+
+    @staticmethod
     def _clear_paned(paned):
         if paned is None:
             return
@@ -5457,31 +5515,37 @@ if (data !== null) {{
             self._right_frame.set_no_show_all(False)
             self._right_frame.show()
             if pos == "center":
-                # L | (sidebar | R)
-                self._center_paned.pack1(self.sidebar, False, False)
-                self._center_paned.pack2(self._right_frame, True, True)
-                self._paned.pack1(self._left_frame, True, True)
-                self._paned.pack2(self._center_paned, True, True)
+                # (L | list) | R. Nesting matters: a Gtk.Paned keeps child1's
+                # width and lets child2 take the change, so the tab list (child2
+                # of the inner paned, child1 side of the outer handle) is the
+                # only column both handles touch. Dragging one handle then moves
+                # that boundary alone — the far pane keeps its width, and the L
+                # and R window edges never move.
+                self._center_paned.pack1(self._left_frame, False, False)
+                self._center_paned.pack2(self.sidebar, True, False)
+                self._paned.pack1(self._center_paned, False, False)
+                self._paned.pack2(self._right_frame, True, False)
             elif pos == "right":
-                # (L | R) | list
-                self.split_paned.pack1(self._left_frame, True, True)
-                self.split_paned.pack2(self._right_frame, True, True)
-                self._paned.pack1(self.split_paned, True, True)
+                # (L | R) | list — the list edge is R's boundary, so R takes
+                # the change and L keeps its width (same rule as center).
+                self.split_paned.pack1(self._left_frame, False, False)
+                self.split_paned.pack2(self._right_frame, True, False)
+                self._paned.pack1(self.split_paned, True, False)
                 self._paned.pack2(self.sidebar, False, False)
             else:
-                # list | (L | R)
-                self.split_paned.pack1(self._left_frame, True, True)
-                self.split_paned.pack2(self._right_frame, True, True)
+                # list | (L | R) — here the list edge is L's boundary
+                self.split_paned.pack1(self._left_frame, True, False)
+                self.split_paned.pack2(self._right_frame, False, False)
                 self._paned.pack1(self.sidebar, False, False)
-                self._paned.pack2(self.split_paned, True, True)
+                self._paned.pack2(self.split_paned, True, False)
         else:
             # single content: only left frame
             if pos == "right":
-                self._paned.pack1(self._left_frame, True, True)
+                self._paned.pack1(self._left_frame, True, False)
                 self._paned.pack2(self.sidebar, False, False)
             else:
                 self._paned.pack1(self.sidebar, False, False)
-                self._paned.pack2(self._left_frame, True, True)
+                self._paned.pack2(self._left_frame, True, False)
 
         self._paned.show_all()
         if self._split_on:
@@ -5495,11 +5559,12 @@ if (data !== null) {{
             except Exception:
                 total = 1100
             if self._split_on and pos == "center":
-                # outer: left content width ≈ half of remaining after sidebar
+                # (L | list) | R: inner divider = left width, outer = L + list
                 content = max(200, total - sw)
                 left_w = split_pos if 40 < split_pos < content - 40 else content // 2
-                self._paned.set_position(left_w)
-                self._center_paned.set_position(sw)
+                self._center_paned.set_position(left_w)
+                self._paned.set_position(
+                    left_w + sw + self._handle_size(self._center_paned))
             elif self._split_on and pos == "right":
                 content = max(200, total - sw)
                 self._paned.set_position(content)
@@ -5520,6 +5585,211 @@ if (data !== null) {{
         GLib.idle_add(place)
         GLib.timeout_add(80, place)
 
+    def _on_outer_position(self, *_a):
+        self._clamp_center_split()
+        self._schedule_term_resize()
+
+    def _make_list_header(self, text):
+        """The tab list title, doubling as the grip for moving the list."""
+        hdr = Gtk.EventBox()
+        hdr.add(self._section(text))
+        self._connect_grip(hdr, "list")
+        self._list_header = hdr
+        return hdr
+
+    def _connect_grip(self, widget, which):
+        """Make a header bar drag its column sideways when it is the middle one."""
+        widget.add_events(Gdk.EventMask.BUTTON_PRESS_MASK
+                          | Gdk.EventMask.BUTTON_RELEASE_MASK
+                          | Gdk.EventMask.BUTTON1_MOTION_MASK
+                          | Gdk.EventMask.ENTER_NOTIFY_MASK
+                          | Gdk.EventMask.LEAVE_NOTIFY_MASK)
+        widget.connect("button-press-event", self._on_grip_press, which)
+        widget.connect("motion-notify-event", self._on_grip_motion, which)
+        widget.connect("button-release-event", self._on_grip_release, which)
+        widget.connect("enter-notify-event", self._on_grip_cross, which, True)
+        widget.connect("leave-notify-event", self._on_grip_cross, which, False)
+
+    def _middle_column(self):
+        """Which of the three columns sits between the other two.
+
+        Only that one can be nudged sideways — the outer two are pinned to the
+        window edges. Returns "list", "left", "right", or None when the split
+        is off and there is no middle at all.
+        """
+        if not self._split_on or self._right_row is None:
+            return None
+        pos = self._effective_sidebar_position()
+        if pos == "center":
+            return "list"          # left pane | list | right pane
+        if pos == "left":
+            return "left"          # list | left pane | right pane
+        return "right"             # left pane | right pane | list
+
+    def _on_grip_press(self, _w, event, which):
+        if event.button != 1 or self._middle_column() != which:
+            return False
+        width = (self.sidebar if which == "list"
+                 else self._left_frame if which == "left"
+                 else self._right_frame).get_allocated_width()
+        self._grip_drag = {
+            "which": which, "x0": event.x_root, "moved": False, "width": width,
+            "outer0": self._paned.get_position(),
+            "inner0": self._center_paned.get_position(),
+            "split0": self.split_paned.get_position(),
+            "flags": None,
+        }
+        if which != "list":
+            # A sliding pane sets the split position on every step, so stop the
+            # paned from re-distributing that value when its own width changes
+            # — with child1 resizable GTK adds the delta on top and the middle
+            # pane drifts instead of keeping its width.
+            self._grip_drag["flags"] = self._split_resize_flags()
+            self._split_resize_flags(False, True)
+        return False
+
+    def _split_resize_flags(self, c1=None, c2=None):
+        """Read (no args) or set which content-split child follows a width change."""
+        kids = self.split_paned.get_children()
+        if len(kids) != 2:
+            return None
+        if c1 is None:
+            return (self.split_paned.child_get_property(kids[0], "resize"),
+                    self.split_paned.child_get_property(kids[1], "resize"))
+        self.split_paned.child_set_property(kids[0], "resize", c1)
+        self.split_paned.child_set_property(kids[1], "resize", c2)
+        return None
+
+    def _on_grip_motion(self, _w, event, which):
+        d = getattr(self, "_grip_drag", None)
+        if not d or d["which"] != which:
+            return False
+        dx = int(event.x_root - d["x0"])
+        if not d["moved"]:
+            if abs(dx) < 3:  # let a plain click stay a click
+                return False
+            d["moved"] = True
+        self._slide_middle(d, dx)
+        return True
+
+    def _on_grip_release(self, _w, _event, which):
+        d = getattr(self, "_grip_drag", None)
+        self._grip_drag = None
+        if not d:
+            return False
+        if d["flags"]:
+            self._split_resize_flags(*d["flags"])
+        if d["which"] != which or not d["moved"]:
+            return False
+        self._save_sidebar_geometry()
+        self._save_split_settings()
+        self._schedule_term_resize()
+        return True
+
+    def _on_grip_cross(self, widget, _event, which, entering):
+        """Resize cursor only while this header really is the middle column."""
+        active = bool(entering) and self._middle_column() == which
+        gwin = widget.get_window()
+        if gwin is not None:
+            cursor = None
+            if active:
+                try:
+                    cursor = Gdk.Cursor.new_from_name(gwin.get_display(),
+                                                      "col-resize")
+                except Exception:
+                    cursor = None
+            gwin.set_cursor(cursor)
+        if which == "list":
+            widget.set_tooltip_text(
+                "Drag sideways to move the tab list" if active else None)
+        return False
+
+    def _slide_middle(self, d, dx):
+        """Move the middle column by dx, keeping its width.
+
+        Both of its dividers move together, so the two neighbours trade width
+        and the outer edges stay put. Stops as soon as either neighbour is at
+        its minimum — the same rule the divider drags follow.
+        """
+        total = self._paned.get_allocated_width()
+        ho = self._handle_size(self._paned)
+        left_min = self._left_frame.get_preferred_width()[0]
+        right_min = self._right_frame.get_preferred_width()[0]
+        list_min = self.sidebar.get_preferred_width()[0]
+        if d["which"] == "list":
+            # left pane | [list] | right pane — inner divider is the left width
+            hi = self._handle_size(self._center_paned)
+            room = total - ho - hi - d["width"] - right_min
+            if room < left_min:
+                return
+            left = max(left_min, min(d["inner0"] + dx, room))
+            # Inner first: the outer clamp reads the new left width from it.
+            self._center_paned.set_position(left)
+            self._paned.set_position(left + hi + d["width"])
+            return
+        hs = self._handle_size(self.split_paned)
+        if d["which"] == "left":
+            # list | [left pane] | right pane — outer divider is the list width
+            room = total - ho - hs - d["width"] - right_min
+            if room < list_min:
+                return
+            list_w = max(list_min, min(d["outer0"] + dx, room))
+            self._paned.set_position(list_w)
+            self.split_paned.set_position(d["split0"])   # keep the pane width
+        else:
+            # left pane | [right pane] | list — split divider is the left width
+            room = total - ho - hs - d["width"] - list_min
+            if room < left_min:
+                return
+            left = max(left_min, min(d["split0"] + dx, room))
+            self.split_paned.set_position(left)
+            self._paned.set_position(left + hs + d["width"])
+
+    def _clamp_center_split(self):
+        """Stop the list|right handle where the tab list reaches its minimum.
+
+        Gtk.Paned would keep going and take the rest out of the left pane, so
+        hold the divider at the point where the list can shrink no further —
+        a handle never moves the boundary on the far side of the list.
+        """
+        if self._clamping or not self._split_on:
+            return
+        if self._effective_sidebar_position() != "center":
+            return
+        try:
+            left_w = self._center_paned.get_position()
+            list_min = self.sidebar.get_preferred_width()[0]
+            floor = left_w + self._handle_size(self._center_paned) + list_min
+            if self._paned.get_position() >= floor:
+                return
+            # A window too narrow for the whole floor is GTK's call, not ours
+            room = (self._paned.get_allocated_width()
+                    - self._handle_size(self._paned)
+                    - self._right_frame.get_preferred_width()[0])
+            if floor > room:
+                return
+        except Exception:
+            return
+        self._clamping = True
+        try:
+            self._paned.set_position(floor)
+        finally:
+            self._clamping = False
+
+    def _center_widths(self):
+        """Left pane and tab list widths for the centered split, from the real
+        allocation. Reading the paned position instead would save whatever it
+        held before the first layout pass — the split can be switched on before
+        the panes are placed, and that stale number came back as the width."""
+        try:
+            lw = self._left_frame.get_allocated_width()
+            sb = self.sidebar.get_allocated_width()
+        except Exception:
+            return {}
+        if lw < 40 or sb < 40:
+            return {}  # not laid out yet; keep what is on disk
+        return {"split_pos": lw, "sidebar_width": max(140, sb)}
+
     def _save_sidebar_geometry(self):
         """Persist sidebar width depending on list placement."""
         try:
@@ -5534,12 +5804,7 @@ if (data !== null) {{
         elif layout == "right":
             data["sidebar_width"] = max(140, total - pos)
         elif layout == "center":
-            try:
-                data["sidebar_width"] = max(
-                    140, self._center_paned.get_position())
-                data["split_pos"] = max(80, pos)  # left content width
-            except Exception:
-                data["sidebar_width"] = max(140, SIDEBAR_WIDTH)
+            data.update(self._center_widths())
         if self._split_on and layout in ("left", "right"):
             try:
                 data["split_pos"] = max(80, self.split_paned.get_position())
@@ -5562,14 +5827,8 @@ if (data !== null) {{
             "split_right_icon": (
                 getattr(right, "icon_name", "") or "") if right else "",
         }
-        # When center, outer paned position is left width (= split_pos)
         if self._split_on and self._effective_sidebar_position() == "center":
-            try:
-                data["split_pos"] = max(80, self._paned.get_position())
-                data["sidebar_width"] = max(
-                    140, self._center_paned.get_position())
-            except Exception:
-                pass
+            data.update(self._center_widths())
         self._save_settings(data)
 
     def _restore_split_from_settings(self):
