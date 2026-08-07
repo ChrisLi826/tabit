@@ -62,6 +62,10 @@ password for apt).
 | `Ctrl+Shift+W` | Close current session |
 | `Ctrl+PageUp` / `Ctrl+PageDown` | Previous / next session |
 | `Ctrl+Shift+PageUp` / `Ctrl+Shift+PageDown` | Move current tab up / down |
+| `Ctrl+Alt+R` | Toggle the right content pane (two sessions side by side) |
+| `Ctrl+Alt+P` | Pin the selected session to the right pane |
+| `Ctrl+Tab` | Move focus between the left and right pane |
+| `Ctrl+Alt+W` | Swap what the left and right panes show |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |
 | `Shortcuts…` (sidebar) | Edit any of the shortcuts above |
 
@@ -79,17 +83,32 @@ Tabs are remembered: the next start restores the same set of sessions
 as fresh processes (serial consoles reconnect, shells start clean —
 scrollback is not kept). Stored in `~/.config/tabit/sessions.json`.
 
+Two sessions can share the window: `Ctrl+Alt+R` opens a **right content
+pane**, `Ctrl+Alt+P` pins the selected tab there. Drag the divider to
+resize; the split and the pinned session come back on the next start. Each
+pane has a small header with an `L` / `R` badge and an `x` that closes only
+that pane — closing the right pane keeps the left one full width, closing
+the left one promotes the right session. The tab list can sit **left,
+right, or between the two panes** (**Settings… → Tab list position**).
+
+With three columns on screen, the middle one can be nudged sideways: drag
+its header — the tab list's **SESSIONS** bar when the list is centered, or
+the `L` / `R` bar when the list is parked on an edge. The middle column
+keeps its width and the two outer ones trade. Every drag stops where a
+neighbour hits its minimum, so the left and right window edges stay put.
+
 Keyboard shortcuts are editable via **Shortcuts…** in the sidebar
 (or hand-edit `~/.config/tabit/keys.json`). Defaults match the table
 above; **Reset defaults** in the dialog restores them.
 
 ## Where tabit fits
 
-If you already use **tmux** or **Tilix**, keep them for split panes and
-session persistence inside a host. tabit is a **session dock**: many
-independent VTE terminals (and notes) as a left tab list — especially when
-you juggle **serial boards**, **SSH consoles**, and **several AI CLIs** and
-want at-a-glance status without tiling windows by hand.
+If you already use **tmux** or **Tilix**, keep them for session persistence
+inside a host and for many-way tiling. tabit is a **session dock**: many
+independent VTE terminals (and notes) as one tab list, with any two of them
+side by side when you need it — especially when you juggle **serial
+boards**, **SSH consoles**, and **several AI CLIs** and want at-a-glance
+status without tiling windows by hand.
 
 ## Roadmap
 
