@@ -271,7 +271,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v1.6.3"
+APP_VERSION = "v1.7.0"
 
 def _get_tabit_repo_dir():
     try:
@@ -478,6 +478,14 @@ def get_theme_css(theme_key):
     sz_btn = max(7, ui_sz - 1)
     css_text = f"""
 .sidebar {{ background-color: {s['sidebar_bg']}; border-right: 1px solid {s['border']}; }}
+.sidebar.sidebar-on-right {{
+    border-right: none;
+    border-left: 1px solid {s['border']};
+}}
+.sidebar.sidebar-on-center {{
+    border-left: 1px solid {s['border']};
+    border-right: 1px solid {s['border']};
+}}
 .sidebar list {{ background: transparent; }}
 /* kill GTK/Yaru focus ring (often orange) on click; keep :selected style */
 .sidebar list:focus,
@@ -768,6 +776,60 @@ paned > separator {{
     background-image: none;
     background-color: transparent;
 }}
+/* content L|R split: drag handle between panes */
+paned.content-split > separator {{
+    min-width: 6px;
+    background-color: {s['border']};
+}}
+paned.content-split > separator:hover {{
+    background-color: {s['accent']};
+}}
+/* Inset ring so focus chrome does not steal allocation from VTE */
+.pane-frame {{
+    border: none;
+    box-shadow: inset 0 0 0 1px transparent;
+}}
+/* When split is on, both panes show a dim edge; focused is bright accent */
+.pane-frame.pane-split {{
+    box-shadow: inset 0 0 0 1px {s['border']};
+}}
+.pane-frame.pane-focused {{
+    box-shadow: inset 0 0 0 3px {s['accent']};
+}}
+.pane-header {{
+    background-color: {s['sidebar_bg']};
+    border-bottom: 1px solid {s['border']};
+    padding: 0 4px 0 6px;
+    min-height: 16px;
+}}
+.pane-header label {{
+    font-size: 8pt;
+    font-weight: 600;
+    color: {s['subtext']};
+}}
+.pane-header.pane-header-focused {{
+    background-color: {s['selection']};
+    border-bottom-color: {s['accent']};
+}}
+.pane-header.pane-header-focused label {{
+    color: #ffffff;
+}}
+.pane-close {{
+    padding: 0 1px;
+    min-width: 16px;
+    min-height: 16px;
+}}
+/* Compact L/R after the tab icon when content split is on */
+.pin-badge {{
+    font-size: 7pt;
+    font-weight: 700;
+    margin: 0 1px 0 0;
+    padding: 0;
+    min-width: 0.85em;
+    opacity: 0.95;
+}}
+.pin-badge.pin-L {{ color: {s['subtext']}; }}
+.pin-badge.pin-R {{ color: {s['accent']}; }}
 scrollbar.term-scroll {{
     background-color: {s['bg']};
     border-left: 1px solid {s['border']};
@@ -860,6 +922,14 @@ KEY_ACTIONS = (
     ("toggle_group_collapse", "Toggle group collapse", "<Primary><Alt>g"),
     ("group_session", "Group session", "<Primary>g"),
     ("ungroup_session", "Ungroup session", "<Primary><Shift>g"),
+    # Left|right content split (primary list selection | pinned right)
+    ("toggle_split", "Toggle right pane", "<Primary><Alt>r"),
+    # Ctrl+Tab: free in tabit; not a desktop-wide Linux shortcut (Alt+Tab is).
+    # Browsers use it only when focused; VTE does not reserve it.
+    ("focus_other_pane", "Focus other pane", "<Primary>Tab"),
+    # Swap left/right content. Avoid Ctrl+Shift+Tab (Claude Code and many IDEs).
+    ("swap_panes", "Swap left/right panes", "<Primary><Alt>w"),
+    ("pin_right_pane", "Pin session to right pane", "<Primary><Alt>p"),
     ("copy", "Copy", "<Primary><Shift>c"),
     ("paste", "Paste", "<Primary><Shift>v"),
 )
@@ -877,6 +947,14 @@ DEFAULT_SETTINGS = {
     "collapsed_groups": [],        # group colors whose member tabs are hidden
     # refresh herdr agent-detection TOMLs from herdr.dev (~daily)
     "agent_manifest_check": True,
+    # content split: primary (left) + pinned secondary (right)
+    "split_enabled": False,
+    "split_pos": 0,                # content paned divider; 0 = half
+    "split_right_label": "",       # match restored session title_text
+    "split_right_sub": "",
+    "split_right_icon": "",
+    # tab list placement: left | right | center (center only when split on)
+    "sidebar_position": "left",
     "ui_font_size": 10,
     "term_font": "Monospace",
     "term_font_size": 12,
@@ -899,7 +977,16 @@ class Tabit(Gtk.Window):
         self.theme = self._load_settings().get("theme", "tokyo-night")
         CSS_PROVIDER.load_from_data(get_theme_css(self.theme))
 
-        self.stack = Gtk.Stack()
+        # Content panes hold at most one page each (direct child of frame).
+        # Inactive pages stay unparented and alive via row.page — avoids
+        # Gtk.Stack+VTE preferred-width clipping (left half of pane empty).
+        self._right_row = None          # session pinned to right pane
+        self._split_on = False
+        self._focus_pane = "left"       # "left" | "right"
+        # Legacy alias: some code still says self.stack; unused for display.
+        self.stack = None
+        self.stack_left = None
+        self.stack_right = None
         self.listbox = Gtk.ListBox()
         # sort by row._order so reorder is a swap, not remove/insert
         self.listbox.set_sort_func(lambda a, b, _d: a._order - b._order, None)
@@ -913,10 +1000,10 @@ class Tabit(Gtk.Window):
         cg = settings.get("collapsed_groups", [])
         self._collapsed_groups = set(cg) if isinstance(cg, list) else set()
 
-        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        sidebar.get_style_context().add_class("sidebar")
-        sidebar.set_size_request(175, -1)  # min width; actual set by paned
-        sidebar.pack_start(self._section("SESSIONS"), False, False, 0)
+        self.sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.sidebar.get_style_context().add_class("sidebar")
+        self.sidebar.set_size_request(175, -1)  # min width; actual set by paned
+        self.sidebar.pack_start(self._section("SESSIONS"), False, False, 0)
         self.sidebar_scroll = Gtk.ScrolledWindow()
         self.sidebar_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.sidebar_scroll.add(self.listbox)
@@ -928,7 +1015,7 @@ class Tabit(Gtk.Window):
         self.ai_peek_bottom = self._make_ai_peek_bar("bottom")
         self._sidebar_overlay.add_overlay(self.ai_peek_top)
         self._sidebar_overlay.add_overlay(self.ai_peek_bottom)
-        sidebar.pack_start(self._sidebar_overlay, True, True, 0)
+        self.sidebar.pack_start(self._sidebar_overlay, True, True, 0)
         self._ai_summary_src = None
         self._ai_peek_targets = {"above": {}, "below": {}}
         self._ai_peek_cycle = {}
@@ -989,14 +1076,56 @@ class Tabit(Gtk.Window):
             system_box.pack_start(btn, True, True, 0)
 
         adders.pack_start(system_box, False, False, 0)
-        sidebar.pack_start(adders, False, False, 0)
+        self.sidebar.pack_start(adders, False, False, 0)
+
+        # Content area: optional left|right split. Each frame packs a header
+        # (when split) + exactly one session page. Drag the paned handle.
+        self._left_frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._left_frame.set_hexpand(True)
+        self._left_frame.set_vexpand(True)
+        self._left_frame.set_halign(Gtk.Align.FILL)
+        self._left_frame.set_valign(Gtk.Align.FILL)
+        self._left_frame.get_style_context().add_class("pane-frame")
+        self._left_frame.get_style_context().add_class("pane-focused")
+        self._left_pane_header, self._left_pane_label = self._make_pane_header(
+            "L", "Left pane")
+        self._left_frame.pack_start(self._left_pane_header, False, False, 0)
+        self._right_frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._right_frame.set_hexpand(True)
+        self._right_frame.set_vexpand(True)
+        self._right_frame.set_halign(Gtk.Align.FILL)
+        self._right_frame.set_valign(Gtk.Align.FILL)
+        self._right_frame.get_style_context().add_class("pane-frame")
+        self._right_pane_header, self._right_pane_label = self._make_pane_header(
+            "R", "Right pane")
+        self._right_frame.pack_start(self._right_pane_header, False, False, 0)
+        self._right_frame.set_no_show_all(True)
+        self._right_frame.hide()
+        self._left_row = None  # session shown in left pane (may differ from list sel)
+        # Nested paneds: outer = self._paned; content L|R = split_paned;
+        # when tab list is centered: center_paned = sidebar | R
+        self.split_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        self.split_paned.get_style_context().add_class("content-split")
+        self.split_paned.set_wide_handle(True)
+        self.split_paned.connect(
+            "button-release-event", self._on_split_paned_released)
+        self.split_paned.connect(
+            "notify::position", lambda *_a: self._schedule_term_resize())
+        self._center_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        self._center_paned.get_style_context().add_class("content-split")
+        self._center_paned.set_wide_handle(True)
+        self._center_paned.connect(
+            "button-release-event", self._on_sidebar_paned_released)
+        self._term_resize_src = None
+        self.connect("set-focus", self._on_window_set_focus)
 
         self._paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        self._paned.pack1(sidebar, resize=False, shrink=False)
-        self._paned.pack2(self.stack, resize=True, shrink=True)
-        width = self._load_settings().get("sidebar_width", SIDEBAR_WIDTH)
-        self._paned.set_position(width)
+        self._paned.connect(
+            "button-release-event", self._on_sidebar_paned_released)
         self.add(self._paned)
+        self._sidebar_position = self._load_settings().get(
+            "sidebar_position", "left") or "left"
+        self._apply_sidebar_layout()
 
         ai_fresh = self._load_settings().get("ai_fresh_on_restore", False)
         # Keep collapsed_groups from settings; do not expand while replaying sessions.
@@ -1039,11 +1168,39 @@ class Tabit(Gtk.Window):
             self.listbox.select_row(pick)
         if not self.listbox.get_children():
             self._on_add_shell(None)
+        # Restore L|R pin after sessions exist (deferred so allocation is ready)
+        GLib.idle_add(self._restore_split_from_settings)
         # AI status: load manifests after first paint (avoid startup freeze)
         self._agent_store = None
         GLib.idle_add(self._deferred_init_agent_store)
         GLib.timeout_add_seconds(self._AGENT_POLL_SEC, self._poll_ai_agent_statuses)
         GLib.idle_add(self._check_weekly_auto_update)
+        # Second launcher click writes tabit.raise — present this window
+        GLib.timeout_add(400, self._poll_raise_request)
+
+    def _poll_raise_request(self):
+        """Respond to a second app launch: bring this window to the front."""
+        path = _raise_request_path()
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            try:
+                self.present()
+                self.set_keep_above(True)
+
+                def _drop_above():
+                    try:
+                        self.set_keep_above(False)
+                    except Exception:
+                        pass
+                    return False
+
+                GLib.timeout_add(300, _drop_above)
+            except Exception:
+                pass
+        return True  # keep polling
 
     # --- sessions ---------------------------------------------------------
 
@@ -1162,6 +1319,12 @@ class Tabit(Gtk.Window):
         group_bar.get_style_context().add_class("group-bar")
         box.pack_start(group_bar, False, False, 0)
         box.pack_start(self._session_icon(icon_name), False, False, 0)
+        # L/R after icon when this session is in a content pane (split mode)
+        pin_badge = Gtk.Label(label="")
+        pin_badge.get_style_context().add_class("pin-badge")
+        pin_badge.set_no_show_all(True)
+        pin_badge.hide()
+        box.pack_start(pin_badge, False, False, 0)
         titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         title = Gtk.Label(label=label)
         title.set_ellipsize(Pango.EllipsizeMode.END)
@@ -1207,6 +1370,7 @@ class Tabit(Gtk.Window):
         row.icon_name = icon_name
         row.subtitle = subtitle
         row.dot = dot
+        row.pin_badge = pin_badge
         row.agent_status_lbl = agent_status
         row.agent_status_glyph = agent_glyph
         row.agent_status = None
@@ -1228,11 +1392,9 @@ class Tabit(Gtk.Window):
             g = getattr(selected, "group_color", None)
             if g:
                 return g
-        vis_page = self.stack.get_visible_child()
-        if vis_page is not None:
-            for r in self._session_rows():
-                if getattr(r, "page", None) is vis_page:
-                    return getattr(r, "group_color", None)
+        left = getattr(self, "_left_row", None)
+        if left is not None:
+            return getattr(left, "group_color", None)
         return None
 
     def _place_tab_row(self, row, page):
@@ -1244,8 +1406,11 @@ class Tabit(Gtk.Window):
         wiping collapsed_groups on every restart.
         """
         self._counter += 1
-        self.stack.add_named(page, f"session-{self._counter}")
+        row._stack_name = f"session-{self._counter}"
+        page.set_hexpand(True)
+        page.set_vexpand(True)
         row.page = page
+        row._pane = None  # attached on select / pin
         restoring = getattr(self, "_restoring_sessions", False)
         if not restoring:
             cur_group = self._get_active_group_color()
@@ -1265,7 +1430,6 @@ class Tabit(Gtk.Window):
             row._order = self._order_seq
         self._order_seq = max(self._order_seq, row._order) + 1
         self.listbox.add(row)
-        self.stack.show_all()
         self._relayout()  # keep group members clustered under their header
         if not restoring:
             self.listbox.select_row(row)
@@ -1316,6 +1480,8 @@ class Tabit(Gtk.Window):
         term = Vte.Terminal()
         term.set_hexpand(True)
         term.set_vexpand(True)
+        # Allow paned to shrink below geometry-hints width (else left half clips)
+        term.set_size_request(1, 1)
         term.set_scrollback_lines(10000)
         self._apply_term_colors(term)
         self._apply_term_font(term)
@@ -1338,8 +1504,12 @@ class Tabit(Gtk.Window):
         row.track_cwd = track_cwd  # shell tabs show live cwd in the subtitle
         # terminal page = search bar (hidden) + [VTE | scrollbar] + quick-cmd bar
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        page.set_hexpand(True)
+        page.set_vexpand(True)
         page.pack_start(self._build_term_search_bar(row, term), False, False, 0)
         term_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        term_row.set_hexpand(True)
+        term_row.set_vexpand(True)
         term_row.pack_start(term, True, True, 0)
         scrollbar = Gtk.Scrollbar(orientation=Gtk.Orientation.VERTICAL,
                                   adjustment=term.get_vadjustment())
@@ -2731,7 +2901,7 @@ if (data !== null) {{
             if not self._confirm_close_row(row):
                 return True  # abort window close
         self._save_sessions()  # capture each shell's current cwd before exit
-        self._save_settings({"sidebar_width": self._paned.get_position()})
+        self._save_sidebar_geometry()
         return False
 
     def _move_session(self, delta):
@@ -4513,6 +4683,7 @@ if (data !== null) {{
         if not self._confirm_close_row(row):
             return
         was_selected = self.listbox.get_selected_row() is row
+        was_right = self._right_row is row
         rows = self._session_rows()
         idx = rows.index(row)
         # drop pending note timers so they don't fire on a destroyed widget
@@ -4524,8 +4695,17 @@ if (data !== null) {{
         row.preview_on = False
         self._marked.discard(row)
         self.listbox.remove(row)
-        self.stack.remove(row.page)
-        row.page.destroy()  # term: SIGHUP child; note: destroys view
+        page = getattr(row, "page", None)
+        if page is not None:
+            parent = page.get_parent()
+            if parent is not None:
+                parent.remove(page)
+            page.destroy()  # term: SIGHUP child; note: destroys view
+        if was_right:
+            self._right_row = None
+            self._hide_right_pane()
+            self._refresh_pane_badges()
+            self._save_split_settings()
         self._relayout()  # drop empty group headers, re-cluster
         self._save_sessions()
         rows = self._session_rows()
@@ -4534,13 +4714,20 @@ if (data !== null) {{
         elif was_selected:
             # focus the next tab (same index after remove); if we closed
             # the last one, fall back to the new last
-            self.listbox.select_row(rows[min(idx, len(rows) - 1)])
+            nxt = rows[min(idx, len(rows) - 1)]
+            if nxt is self._right_row and len(rows) > 1:
+                # left must not be empty of a primary; pick another
+                for cand in rows:
+                    if cand is not self._right_row:
+                        nxt = cand
+                        break
+            self.listbox.select_row(nxt)
 
     def _focus_row_content(self, row):
         # defer to idle: a mouse click grabs focus to the row afterwards, so
         # grabbing now would not stick. Skip while a rename popover is open.
         def grab():
-            if row.get_parent() is None:  # row closed meanwhile
+            if row is None or row.get_parent() is None:
                 return False
             if getattr(self, "_rename_pop", None) is not None:
                 return False  # renaming: keep focus in the rename entry
@@ -4554,16 +4741,32 @@ if (data !== null) {{
         GLib.idle_add(grab)
 
     def _on_row_selected(self, _listbox, row):
+        # Sync list highlight only (e.g. after Ctrl+Tab pane switch)
+        if getattr(self, "_list_sync_only", False):
+            if row is not None:
+                GLib.timeout_add(50, self._scroll_to_row, row)
+            return
         self._clear_marks()  # a plain tab switch drops any Ctrl+click marks
         if row is None:
             return
         if getattr(row, "kind", None) == "group_header":
+            # Focus header for rename / Enter expand — do not open group here
             self.listbox.grab_focus()
             GLib.timeout_add(50, self._scroll_to_row, row)
             return
+        # Which pane receives this tab: keyboard nav sets _nav_pane; otherwise
+        # follow current focus when split (right focus → update right, etc.).
+        nav_pane = getattr(self, "_nav_pane", None)
+        if nav_pane in ("left", "right"):
+            pane = nav_pane
+        elif self._split_on and self._focus_pane == "right":
+            pane = "right"
+        else:
+            pane = "left"
+
         g = getattr(row, "group_color", None)
-        # User-driven select into a collapsed group expands it. Never do this
-        # during session restore (that was clearing collapsed_groups on disk).
+        # Only expand collapsed groups when the user actually selects a member
+        # (click / Page nav onto a session — never when landing on the header)
         if (g and g in self._collapsed_groups
                 and not getattr(self, "_restoring_sessions", False)):
             self._collapsed_groups.discard(g)
@@ -4572,20 +4775,831 @@ if (data !== null) {{
         else:
             self._apply_group_collapse()
         row.dot.hide()
-        self.stack.set_visible_child(row.page)
-        self.set_title(f"{row.session_label} — tabit")
-        # viewing an AI tab clears sticky ✔ and re-evaluates → idle/working
-        if getattr(row, "icon_name", None) == ICON_AI:
-            as_ = self._agent_status_mod()
-            disp = getattr(row, "_agent_display", None)
-            if as_ is not None and disp is not None:
-                row._agent_display = as_.note_tab_selected(disp)
+
+        if pane == "right" and self._split_on:
+            if self._right_row is row:
+                self._mark_ai_viewed(row)
+                self.set_title(f"{row.session_label} — tabit")
+                self._set_focus_pane("right")
+                self._focus_row_content(row)
             else:
-                row._agent_had_busy_turn = False
-                row._agent_unseen_output = False
-            self._update_agent_status(row)
+                self._pin_row_to_right(row)
+            GLib.timeout_add(50, self._scroll_to_row, row)
+            return
+
+        # Left-focused click on the right-pinned tab: focus right, keep split
+        if (self._right_row is row and self._split_on
+                and not getattr(self, "_nav_pane", None)):
+            self._mark_ai_viewed(row)
+            self.set_title(f"{row.session_label} — tabit")
+            self._set_focus_pane("right")
+            self._focus_row_content(row)
+            GLib.timeout_add(50, self._scroll_to_row, row)
+            return
+
+        self._show_row_in_pane(row, "left")
+        self.set_title(f"{row.session_label} — tabit")
+        self._mark_ai_viewed(row)
+        self._set_focus_pane("left")
         self._focus_row_content(row)
         GLib.timeout_add(50, self._scroll_to_row, row)
+
+    # --- left | right content split ---------------------------------------
+
+    def _make_pane_header(self, side_tag, tip_name):
+        """Compact bar: 'R · tab' [x] — tag on the left, close on the right."""
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        box.get_style_context().add_class("pane-header")
+        box.set_no_show_all(True)
+        box.hide()
+        lbl = Gtk.Label(xalign=0)
+        lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        lbl.set_markup(
+            f"<b>{GLib.markup_escape_text(side_tag)}</b>")
+        box.pack_start(lbl, True, True, 0)
+        close = Gtk.Button.new_from_icon_name(
+            "window-close-symbolic", Gtk.IconSize.MENU)
+        close.set_relief(Gtk.ReliefStyle.NONE)
+        close.set_focus_on_click(False)
+        close.set_tooltip_text(
+            "Close left pane (keep right fullscreen)"
+            if side_tag == "L"
+            else "Close right pane (keep left fullscreen)")
+        close.get_style_context().add_class("pane-close")
+        pane = "left" if side_tag == "L" else "right"
+        close.connect("clicked", lambda *_a, p=pane: self._close_content_pane(p))
+        box.pack_end(close, False, False, 0)
+        box._side_name = side_tag
+        box._tip_name = tip_name
+        box._close_btn = close
+        box.set_tooltip_text(tip_name)
+        return box, lbl
+
+    def _pane_header_widgets(self, pane):
+        if pane == "right":
+            return self._right_pane_header, self._right_pane_label
+        return self._left_pane_header, self._left_pane_label
+
+    def _pane_session_title(self, row):
+        if row is None:
+            return ""
+        return (getattr(row, "title_text", None)
+                or getattr(row, "session_label", None)
+                or "")
+
+    def _update_pane_headers(self):
+        """Show Left/Right chrome when split; highlight the focused side."""
+        split = bool(self._split_on and self._right_row is not None)
+        for pane, row in (
+                ("left", getattr(self, "_left_row", None)),
+                ("right", self._right_row)):
+            hdr, lbl = self._pane_header_widgets(pane)
+            if hdr is None:
+                continue
+            side = getattr(hdr, "_side_name", pane.capitalize())
+            if not split:
+                hdr.set_no_show_all(True)
+                hdr.hide()
+                continue
+            title = self._pane_session_title(row)
+            focus = (self._focus_pane == pane)
+            mark = " ●" if focus else ""
+            text = f"{side}{mark}"
+            if title:
+                text = f"{text}  ·  {title}"
+            lbl.set_markup(
+                f"<b>{GLib.markup_escape_text(text)}</b>")
+            ctx = hdr.get_style_context()
+            if focus:
+                ctx.add_class("pane-header-focused")
+            else:
+                ctx.remove_class("pane-header-focused")
+            hdr.set_no_show_all(False)
+            hdr.show_all()
+        # Frame edge: dim ring when split, bright when focused
+        for pane, frame in (
+                ("left", self._left_frame), ("right", self._right_frame)):
+            if frame is None:
+                continue
+            ctx = frame.get_style_context()
+            if split:
+                ctx.add_class("pane-split")
+            else:
+                ctx.remove_class("pane-split")
+
+    def _set_row_pane_badge(self, row, side):
+        """Show L/R after the tab icon, or hide. side is 'L', 'R', or None."""
+        badge = getattr(row, "pin_badge", None) if row is not None else None
+        if badge is None:
+            return
+        ctx = badge.get_style_context()
+        for c in ("pin-L", "pin-R"):
+            ctx.remove_class(c)
+        if side not in ("L", "R"):
+            badge.set_text("")
+            badge.set_tooltip_text("")
+            badge.set_no_show_all(True)
+            badge.hide()
+            return
+        badge.set_text(side)
+        badge.set_tooltip_text(
+            "In left pane" if side == "L" else "In right pane")
+        ctx.add_class("pin-" + side)
+        badge.set_no_show_all(False)
+        badge.show()
+
+    def _refresh_pane_badges(self):
+        """Mark list rows with L/R for the sessions currently in each pane."""
+        left = getattr(self, "_left_row", None) if self._split_on else None
+        right = self._right_row if self._split_on else None
+        # When not split, only left content is shown — no L/R chrome on list
+        for r in self._session_rows():
+            if self._split_on and r is right:
+                self._set_row_pane_badge(r, "R")
+            elif self._split_on and r is left:
+                self._set_row_pane_badge(r, "L")
+            else:
+                self._set_row_pane_badge(r, None)
+
+    def _set_row_pin_badge(self, row, on):
+        """Legacy no-op name; always recompute L/R from pane state."""
+        self._refresh_pane_badges()
+
+    def _frame_for_pane(self, pane):
+        return self._right_frame if pane == "right" else self._left_frame
+
+    def _frame_page_children(self, frame):
+        """Session pages in a frame (skip pane header bars)."""
+        headers = {
+            getattr(self, "_left_pane_header", None),
+            getattr(self, "_right_pane_header", None),
+        }
+        return [c for c in frame.get_children() if c not in headers]
+
+    def _detach_page(self, page):
+        if page is None:
+            return
+        parent = page.get_parent()
+        if parent is not None:
+            parent.remove(page)
+
+    def _show_row_in_pane(self, row, pane):
+        """Put row.page as the content child of left or right frame."""
+        if row is None or getattr(row, "page", None) is None:
+            return
+        if pane not in ("left", "right"):
+            pane = "left"
+        frame = self._frame_for_pane(pane)
+        page = row.page
+        page.set_hexpand(True)
+        page.set_vexpand(True)
+        page.set_halign(Gtk.Align.FILL)
+        page.set_valign(Gtk.Align.FILL)
+        # Clear other *pages* out of this frame (keep header)
+        for child in self._frame_page_children(frame):
+            if child is not page:
+                frame.remove(child)
+        parent = page.get_parent()
+        if parent is frame:
+            row._pane = pane
+            if pane == "left":
+                self._left_row = row
+            elif pane == "right":
+                self._right_row = row
+            self._update_pane_headers()
+            self._refresh_pane_badges()
+            self._schedule_term_resize()
+            return
+        if parent is not None:
+            parent.remove(page)
+        # If this page was the other pane's content, clear that pointer
+        if pane == "left" and self._right_row is row:
+            self._right_row = None
+        if pane == "right" and getattr(self, "_left_row", None) is row:
+            self._left_row = None
+        frame.pack_start(page, True, True, 0)
+        page.show_all()
+        frame.show_all()
+        row._pane = pane
+        if pane == "left":
+            self._left_row = row
+        elif pane == "right":
+            self._right_row = row
+        self._update_pane_headers()
+        self._refresh_pane_badges()
+        self._schedule_term_resize()
+
+    def _swap_panes(self):
+        """Exchange the sessions shown in left and right panes."""
+        if not self._split_on:
+            return False
+        left = getattr(self, "_left_row", None)
+        right = self._right_row
+        if left is None or right is None:
+            return False
+        if getattr(left, "page", None) is None or getattr(right, "page", None) is None:
+            return False
+        # Detach both first so reparent never sees dual occupancy
+        self._detach_page(left.page)
+        self._detach_page(right.page)
+        self._left_row = None
+        self._right_row = None
+        # Swap: old right → left, old left → right
+        self._show_row_in_pane(right, "left")
+        self._show_row_in_pane(left, "right")
+        # Keep focus on the same physical side (content under the cursor swaps)
+        if self._focus_pane == "right":
+            self._set_focus_pane("right")
+            self._focus_row_content(self._right_row)
+            self._sync_list_selection(self._right_row)
+        else:
+            self._set_focus_pane("left")
+            self._focus_row_content(self._left_row)
+            self._sync_list_selection(self._left_row)
+        if self._left_row is not None:
+            self.set_title(f"{self._left_row.session_label} — tabit")
+        self._refresh_pane_badges()
+        self._save_split_settings()
+        return True
+
+    def _mark_ai_viewed(self, row):
+        """Clear sticky ✔ when the session is shown in either pane."""
+        if row is None or getattr(row, "icon_name", None) != ICON_AI:
+            return
+        as_ = self._agent_status_mod()
+        disp = getattr(row, "_agent_display", None)
+        if as_ is not None and disp is not None:
+            row._agent_display = as_.note_tab_selected(disp)
+        else:
+            row._agent_had_busy_turn = False
+            row._agent_unseen_output = False
+        self._update_agent_status(row)
+
+    def _schedule_term_resize(self):
+        """After paned drag / split toggle, force VTE to recompute columns."""
+        src = getattr(self, "_term_resize_src", None)
+        if src is not None:
+            GLib.source_remove(src)
+            self._term_resize_src = None
+
+        def fire():
+            self._term_resize_src = None
+            self._refresh_visible_terms_size()
+            return False
+
+        self._term_resize_src = GLib.idle_add(fire)
+
+    def _refresh_visible_terms_size(self):
+        """Force VTE grid to match the frame allocation."""
+        for frame in (self._left_frame, self._right_frame):
+            try:
+                frame.queue_resize()
+            except Exception:
+                pass
+            for page in self._frame_page_children(frame):
+                try:
+                    page.set_hexpand(True)
+                    page.set_vexpand(True)
+                    page.queue_resize()
+                except Exception:
+                    pass
+        for row in self._session_rows():
+            term = getattr(row, "term", None)
+            page = getattr(row, "page", None)
+            if term is None or page is None:
+                continue
+            if page.get_parent() not in (self._left_frame, self._right_frame):
+                continue
+            try:
+                term.set_size_request(1, 1)
+                try:
+                    term.set_rewrap_on_resize(True)
+                except Exception:
+                    pass
+                term.queue_resize()
+                alloc = term.get_allocation()
+                cw = term.get_char_width()
+                ch = term.get_char_height()
+                if (alloc.width > 10 and alloc.height > 10
+                        and cw > 0 and ch > 0):
+                    cols = max(2, (alloc.width - 2) // cw)
+                    rows = max(1, (alloc.height - 2) // ch)
+                    term.set_size(cols, rows)
+                term.queue_draw()
+            except Exception:
+                pass
+        try:
+            self.split_paned.queue_resize()
+        except Exception:
+            pass
+
+    def _show_right_pane(self):
+        self._split_on = True
+        self._right_frame.set_no_show_all(False)
+        self._right_frame.set_hexpand(True)
+        self._right_frame.set_vexpand(True)
+        self._apply_sidebar_layout()
+        self._update_pane_headers()
+        self._refresh_pane_badges()
+        GLib.timeout_add(50, lambda: (self._refresh_visible_terms_size() or False))
+        GLib.timeout_add(150, lambda: (self._refresh_visible_terms_size() or False))
+
+    def _hide_right_pane(self):
+        self._split_on = False
+        # Detach right *pages* only (keep header widget)
+        for child in self._frame_page_children(self._right_frame):
+            self._right_frame.remove(child)
+        self._right_frame.set_no_show_all(True)
+        self._right_frame.hide()
+        self._set_focus_pane("left")
+        self._apply_sidebar_layout()
+        self._update_pane_headers()
+        self._refresh_pane_badges()
+        self._schedule_term_resize()
+
+    def _unsplit(self, focus_row=None):
+        """Drop right pane; show focus_row (or current left/selection) on left."""
+        right = self._right_row
+        if right is not None:
+            self._right_row = None
+        self._hide_right_pane()
+        self._refresh_pane_badges()
+        self._save_split_settings()
+        target = focus_row
+        if target is None or target.get_parent() is None:
+            target = getattr(self, "_left_row", None) or self.listbox.get_selected_row()
+        if (target is not None
+                and getattr(target, "kind", None) != "group_header"
+                and getattr(target, "page", None) is not None):
+            self._show_row_in_pane(target, "left")
+            self.set_title(f"{target.session_label} — tabit")
+            self._mark_ai_viewed(target)
+            self._set_focus_pane("left")
+            self._focus_row_content(target)
+
+    def _pin_row_to_right(self, row):
+        """Pin session to the secondary (right) pane; open split if needed."""
+        if row is None or getattr(row, "kind", None) == "group_header":
+            return False
+        if getattr(row, "page", None) is None:
+            return False
+        sessions = self._session_rows()
+        others = [r for r in sessions if r is not row]
+        if not others:
+            return False
+        if self._right_row is row:
+            self._set_focus_pane("right")
+            self._focus_row_content(row)
+            return True
+        # Keep the existing left session whenever possible. Old bug: when list
+        # selection was already `row` (nav onto right), we fell through to
+        # others[0] and reset the left pane to the first tab every time.
+        left = getattr(self, "_left_row", None)
+        if left is row or left is None or left.get_parent() is None:
+            left_cand = next((r for r in others if r is not row), None)
+            if left_cand is None:
+                return False
+            saved_nav = getattr(self, "_nav_pane", None)
+            self._nav_pane = "left"
+            try:
+                self._show_row_in_pane(left_cand, "left")
+            finally:
+                self._nav_pane = saved_nav
+        else:
+            # Ensure left page is still attached (may have been unparented)
+            if getattr(left, "page", None) is not None:
+                if left.page.get_parent() is not self._left_frame:
+                    self._show_row_in_pane(left, "left")
+
+        self._show_right_pane()
+        self._show_row_in_pane(row, "right")
+        self._right_row = row
+        self._mark_ai_viewed(row)
+        self._set_focus_pane("right")
+        self._focus_row_content(row)
+        self._refresh_pane_badges()
+        self._save_split_settings()
+        return True
+
+    def _toggle_split(self):
+        if self._split_on and self._right_row is not None:
+            self._unsplit(focus_row=self.listbox.get_selected_row())
+            return True
+        # Open split: pin the next session after selection (or first other)
+        row = self.listbox.get_selected_row()
+        if row is None or getattr(row, "kind", None) == "group_header":
+            sessions = self._session_rows()
+            if len(sessions) < 2:
+                return False
+            return self._pin_row_to_right(sessions[1])
+        sessions = self._session_rows()
+        if len(sessions) < 2:
+            return False
+        try:
+            i = sessions.index(row)
+        except ValueError:
+            i = 0
+        other = sessions[(i + 1) % len(sessions)]
+        if other is row:
+            return False
+        return self._pin_row_to_right(other)
+
+    def _sync_list_selection(self, row):
+        """Move list highlight to row without changing pane contents."""
+        if row is None or row.get_parent() is None:
+            return
+        self._list_sync_only = True
+        try:
+            if self.listbox.get_selected_row() is not row:
+                self.listbox.select_row(row)
+            GLib.timeout_add(50, self._scroll_to_row, row)
+        finally:
+            self._list_sync_only = False
+
+    def _focus_other_pane(self):
+        if not self._split_on or self._right_row is None:
+            return False
+        if self._focus_pane == "left":
+            self._set_focus_pane("right")
+            self._focus_row_content(self._right_row)
+            self._sync_list_selection(self._right_row)
+        else:
+            left = getattr(self, "_left_row", None)
+            if left is None:
+                sel = self.listbox.get_selected_row()
+                if sel is not None and getattr(sel, "kind", None) != "group_header":
+                    left = sel
+            self._set_focus_pane("left")
+            if left is not None:
+                self._focus_row_content(left)
+                self._sync_list_selection(left)
+        return True
+
+    def _navigate_session(self, delta):
+        """Ctrl+PageUp/Down: walk visible list (sessions + group headers).
+
+        - Group headers are selectable (rename / Enter to expand-collapse).
+        - Session rows update the *focused* pane (left or right).
+        - Anchor is the focused pane's session (or list selection on a header),
+          not whatever tab the other pane last selected in the list.
+        """
+        pane = ("right" if (self._split_on and self._focus_pane == "right")
+                else "left")
+        other = None
+        if self._split_on:
+            other = (self._right_row if pane == "left"
+                     else getattr(self, "_left_row", None))
+
+        # Anchor: prefer list selection when it is a group header (so we can
+        # step from header → next tab). Otherwise use the pane's remembered row.
+        sel = self.listbox.get_selected_row()
+        if sel is not None and getattr(sel, "kind", None) == "group_header":
+            current = sel
+        elif pane == "right":
+            current = self._right_row or sel
+        else:
+            current = getattr(self, "_left_row", None) or sel
+
+        all_items = sorted(
+            self.listbox.get_children(),
+            key=lambda r: getattr(r, "_order", 9999))
+        rows = [r for r in all_items
+                if r.get_visible() or r is current]
+        if not rows:
+            return True
+
+        if current in rows:
+            i = rows.index(current)
+        else:
+            i = 0 if delta > 0 else len(rows) - 1
+
+        n = len(rows)
+        target = None
+        for step in range(1, n + 1):
+            j = (i + delta * step) % n
+            cand = rows[j]
+            if getattr(cand, "kind", None) == "group_header":
+                target = cand
+                break
+            if cand is other:
+                continue  # skip session shown in the other pane
+            target = cand
+            break
+        if target is None:
+            return True
+
+        if getattr(target, "kind", None) == "group_header":
+            # Land on header only — no expand, no pane change
+            self._nav_pane = None
+            if self.listbox.get_selected_row() is not target:
+                self.listbox.select_row(target)
+            else:
+                self.listbox.grab_focus()
+                GLib.timeout_add(50, self._scroll_to_row, target)
+            return True
+
+        self._nav_pane = pane
+        try:
+            prev_sel = self.listbox.get_selected_row()
+            self.listbox.select_row(target)
+            if prev_sel is target:
+                self._on_row_selected(self.listbox, target)
+        finally:
+            self._nav_pane = None
+        return True
+
+    def _close_content_pane(self, pane):
+        """Header [x]: close that pane of the split (session tabs stay in list)."""
+        if not self._split_on:
+            return
+        if pane == "right":
+            # Keep left fullscreen
+            keep = getattr(self, "_left_row", None) or self.listbox.get_selected_row()
+            if keep is self._right_row:
+                keep = next(
+                    (r for r in self._session_rows() if r is not self._right_row),
+                    keep)
+            self._unsplit(focus_row=keep)
+            return
+        if pane == "left":
+            # Promote right → left fullscreen
+            right = self._right_row
+            if right is None:
+                return
+            self._unsplit(focus_row=right)
+            if right.get_parent() is not None:
+                self.listbox.select_row(right)
+            return
+
+    def _set_focus_pane(self, which):
+        prev = getattr(self, "_focus_pane", "left")
+        self._focus_pane = which if which in ("left", "right") else "left"
+        lf = getattr(self, "_left_frame", None)
+        rf = getattr(self, "_right_frame", None)
+        if lf is not None:
+            ctx = lf.get_style_context()
+            if self._focus_pane == "left":
+                ctx.add_class("pane-focused")
+            else:
+                ctx.remove_class("pane-focused")
+        if rf is not None:
+            ctx = rf.get_style_context()
+            if self._focus_pane == "right" and self._split_on:
+                ctx.add_class("pane-focused")
+            else:
+                ctx.remove_class("pane-focused")
+        self._update_pane_headers()
+        # Keep tab list selection on the session shown in the focused pane
+        if (self._split_on and prev != self._focus_pane
+                and not getattr(self, "_list_sync_only", False)
+                and not getattr(self, "_nav_pane", None)):
+            if self._focus_pane == "right" and self._right_row is not None:
+                self._sync_list_selection(self._right_row)
+            elif self._focus_pane == "left":
+                left = getattr(self, "_left_row", None)
+                if left is not None:
+                    self._sync_list_selection(left)
+
+    def _on_window_set_focus(self, _win, widget):
+        if widget is None:
+            return
+        w = widget
+        for _ in range(24):
+            if w is None:
+                break
+            if w is self._right_frame:
+                self._set_focus_pane("right")
+                return
+            if w is self._left_frame:
+                self._set_focus_pane("left")
+                return
+            try:
+                w = w.get_parent()
+            except Exception:
+                break
+
+    def _on_split_paned_released(self, *_a):
+        if self._split_on:
+            self._save_split_settings()
+        return False
+
+    def _on_sidebar_paned_released(self, *_a):
+        self._save_sidebar_geometry()
+        return False
+
+    def _effective_sidebar_position(self):
+        """left | right | center — center only when content split is active."""
+        pos = getattr(self, "_sidebar_position", None) or "left"
+        if pos not in ("left", "right", "center"):
+            pos = "left"
+        if pos == "center" and not self._split_on:
+            return "left"
+        return pos
+
+    @staticmethod
+    def _clear_paned(paned):
+        if paned is None:
+            return
+        for child in list(paned.get_children()):
+            paned.remove(child)
+
+    def _unparent_layout_widgets(self):
+        for w in (
+            getattr(self, "sidebar", None),
+            getattr(self, "_left_frame", None),
+            getattr(self, "_right_frame", None),
+            getattr(self, "split_paned", None),
+            getattr(self, "_center_paned", None),
+        ):
+            if w is None:
+                continue
+            parent = w.get_parent()
+            if parent is not None:
+                parent.remove(w)
+
+    def _apply_sidebar_layout(self):
+        """Repack sidebar + content for left / right / center placement.
+
+        Single pane: left or right only (center falls back to left).
+        Split: left = list|L|R, right = L|R|list, center = L|list|R.
+        """
+        if not getattr(self, "_paned", None) or not getattr(self, "sidebar", None):
+            return
+        pos = self._effective_sidebar_position()
+        sw = int(self._load_settings().get("sidebar_width", SIDEBAR_WIDTH) or SIDEBAR_WIDTH)
+        sw = max(140, min(600, sw))
+        split_pos = int(self._load_settings().get("split_pos") or 0)
+
+        self._unparent_layout_widgets()
+        self._clear_paned(self._paned)
+        self._clear_paned(self.split_paned)
+        self._clear_paned(self._center_paned)
+
+        sctx = self.sidebar.get_style_context()
+        for c in ("sidebar-on-right", "sidebar-on-center"):
+            sctx.remove_class(c)
+        if pos == "right":
+            sctx.add_class("sidebar-on-right")
+        elif pos == "center":
+            sctx.add_class("sidebar-on-center")
+
+        # Outer paned is a content divider only in center split (L | list+R).
+        # Otherwise it is the list edge — keep the thin default handle.
+        pctx = self._paned.get_style_context()
+        if self._split_on and pos == "center":
+            pctx.add_class("content-split")
+            self._paned.set_wide_handle(True)
+        else:
+            pctx.remove_class("content-split")
+            self._paned.set_wide_handle(False)
+
+        if self._split_on:
+            self._right_frame.set_no_show_all(False)
+            self._right_frame.show()
+            if pos == "center":
+                # L | (sidebar | R)
+                self._center_paned.pack1(self.sidebar, False, False)
+                self._center_paned.pack2(self._right_frame, True, True)
+                self._paned.pack1(self._left_frame, True, True)
+                self._paned.pack2(self._center_paned, True, True)
+            elif pos == "right":
+                # (L | R) | list
+                self.split_paned.pack1(self._left_frame, True, True)
+                self.split_paned.pack2(self._right_frame, True, True)
+                self._paned.pack1(self.split_paned, True, True)
+                self._paned.pack2(self.sidebar, False, False)
+            else:
+                # list | (L | R)
+                self.split_paned.pack1(self._left_frame, True, True)
+                self.split_paned.pack2(self._right_frame, True, True)
+                self._paned.pack1(self.sidebar, False, False)
+                self._paned.pack2(self.split_paned, True, True)
+        else:
+            # single content: only left frame
+            if pos == "right":
+                self._paned.pack1(self._left_frame, True, True)
+                self._paned.pack2(self.sidebar, False, False)
+            else:
+                self._paned.pack1(self.sidebar, False, False)
+                self._paned.pack2(self._left_frame, True, True)
+
+        self._paned.show_all()
+        if self._split_on:
+            self._update_pane_headers()
+        else:
+            self._right_frame.hide()
+
+        def place():
+            try:
+                total = max(1, self._paned.get_allocated_width())
+            except Exception:
+                total = 1100
+            if self._split_on and pos == "center":
+                # outer: left content width ≈ half of remaining after sidebar
+                content = max(200, total - sw)
+                left_w = split_pos if 40 < split_pos < content - 40 else content // 2
+                self._paned.set_position(left_w)
+                self._center_paned.set_position(sw)
+            elif self._split_on and pos == "right":
+                content = max(200, total - sw)
+                self._paned.set_position(content)
+                self.split_paned.set_position(
+                    split_pos if 40 < split_pos < content - 40 else content // 2)
+            elif self._split_on:  # left
+                self._paned.set_position(sw)
+                content = max(200, total - sw)
+                self.split_paned.set_position(
+                    split_pos if 40 < split_pos < content - 40 else content // 2)
+            elif pos == "right":
+                self._paned.set_position(max(200, total - sw))
+            else:
+                self._paned.set_position(sw)
+            self._schedule_term_resize()
+            return False
+
+        GLib.idle_add(place)
+        GLib.timeout_add(80, place)
+
+    def _save_sidebar_geometry(self):
+        """Persist sidebar width depending on list placement."""
+        try:
+            total = self._paned.get_allocated_width()
+            pos = self._paned.get_position()
+        except Exception:
+            return
+        layout = self._effective_sidebar_position()
+        data = {}
+        if layout == "left":
+            data["sidebar_width"] = max(140, pos)
+        elif layout == "right":
+            data["sidebar_width"] = max(140, total - pos)
+        elif layout == "center":
+            try:
+                data["sidebar_width"] = max(
+                    140, self._center_paned.get_position())
+                data["split_pos"] = max(80, pos)  # left content width
+            except Exception:
+                data["sidebar_width"] = max(140, SIDEBAR_WIDTH)
+        if self._split_on and layout in ("left", "right"):
+            try:
+                data["split_pos"] = max(80, self.split_paned.get_position())
+            except Exception:
+                pass
+        if data:
+            self._save_settings(data)
+
+    def _save_split_settings(self):
+        right = self._right_row
+        data = {
+            "split_enabled": bool(self._split_on and right is not None),
+            "split_pos": int(self.split_paned.get_position())
+            if self._split_on and self._effective_sidebar_position() != "center"
+            else int(self._load_settings().get("split_pos") or 0),
+            "split_right_label": (
+                getattr(right, "title_text", "") or "") if right else "",
+            "split_right_sub": (
+                getattr(right, "sub_text", "") or "") if right else "",
+            "split_right_icon": (
+                getattr(right, "icon_name", "") or "") if right else "",
+        }
+        # When center, outer paned position is left width (= split_pos)
+        if self._split_on and self._effective_sidebar_position() == "center":
+            try:
+                data["split_pos"] = max(80, self._paned.get_position())
+                data["sidebar_width"] = max(
+                    140, self._center_paned.get_position())
+            except Exception:
+                pass
+        self._save_settings(data)
+
+    def _restore_split_from_settings(self):
+        s = self._load_settings()
+        if not s.get("split_enabled"):
+            return False
+        lab = s.get("split_right_label") or ""
+        sub = s.get("split_right_sub") or ""
+        icon = s.get("split_right_icon") or ""
+        match = None
+        for r in self._session_rows():
+            if (getattr(r, "title_text", None) or "") != lab:
+                continue
+            if icon and getattr(r, "icon_name", None) != icon:
+                continue
+            if sub and (getattr(r, "sub_text", None) or "") != sub:
+                continue
+            match = r
+            break
+        if match is None:
+            return False
+        selected = self.listbox.get_selected_row()
+        if selected is match:
+            # ensure primary is someone else
+            for r in self._session_rows():
+                if r is not match:
+                    self.listbox.select_row(r)
+                    break
+        self._pin_row_to_right(match)
+        return False  # idle_add once
 
     def _scroll_to_row(self, row):
         if row is None or not hasattr(self, "sidebar_scroll"):
@@ -4639,11 +5653,17 @@ if (data !== null) {{
         self._save_sessions()
 
     def _on_tab_button(self, _hit, event, row):
-        """EventBox on each tab: Ctrl+click mark, double-click rename,
-        right-click menu."""
+        """EventBox on each tab: Ctrl+click mark, Alt+click pin right,
+        double-click rename, right-click menu."""
         if (event.button == 1 and event.type == Gdk.EventType.BUTTON_PRESS
                 and (event.state & Gdk.ModifierType.CONTROL_MASK)):
             self._toggle_mark(row)  # multi-select for a group action
+            return True
+        # Alt+click: pin to right pane (Ctrl is already used for multi-mark)
+        if (event.button == 1 and event.type == Gdk.EventType.BUTTON_PRESS
+                and (event.state & Gdk.ModifierType.MOD1_MASK)
+                and getattr(row, "kind", None) != "group_header"):
+            self._pin_row_to_right(row)
             return True
         if event.button == 1 and event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS:
             self.listbox.select_row(row)
@@ -4668,6 +5688,26 @@ if (data !== null) {{
                 item = Gtk.MenuItem(label="Rename…")
                 item.connect("activate", lambda *_: self._rename_session(row))
                 menu.append(item)
+                if getattr(row, "kind", None) != "group_header":
+                    if self._right_row is row:
+                        unpin = Gtk.MenuItem(label="Close right pane")
+                        unpin.connect(
+                            "activate",
+                            lambda *_: self._unsplit(
+                                focus_row=self.listbox.get_selected_row()))
+                        menu.append(unpin)
+                    else:
+                        pin = Gtk.MenuItem(label="Open in right pane")
+                        pin.connect(
+                            "activate",
+                            lambda *_, r=row: self._pin_row_to_right(r))
+                        menu.append(pin)
+                    if (self._split_on and self._right_row is not None
+                            and getattr(self, "_left_row", None) is not None):
+                        swap = Gtk.MenuItem(label="Swap left/right panes")
+                        swap.connect(
+                            "activate", lambda *_: self._swap_panes())
+                        menu.append(swap)
                 group_item = Gtk.MenuItem(label="Group color")
                 submenu = Gtk.Menu()
                 used_colors = {getattr(r, "group_color", None) for r in self._session_rows()
@@ -6179,8 +7219,21 @@ if (data !== null) {{
                 return action
         return None
 
+    def _action_target_row(self):
+        """Session that receives paste/find/etc. — focused pane when split."""
+        if (self._split_on and self._focus_pane == "right"
+                and self._right_row is not None
+                and self._right_row.get_parent() is not None):
+            return self._right_row
+        # List selection may be the right-pinned tab; paste still goes to left
+        left = getattr(self, "_left_row", None)
+        if (self._split_on and left is not None
+                and left.get_parent() is not None):
+            return left
+        return self.listbox.get_selected_row()
+
     def _run_action(self, action, term=None):
-        row = self.listbox.get_selected_row()
+        row = self._action_target_row()
         if action == "new_shell":
             self._on_add_shell(None)
         elif action == "new_serial":
@@ -6246,8 +7299,22 @@ if (data !== null) {{
             else:
                 return False
         elif action == "close_session":
-            if row is not None:
+            # Close the focused pane's session when split is active
+            if (self._split_on and self._focus_pane == "right"
+                    and self._right_row is not None):
+                self._close_session(self._right_row)
+            elif row is not None:
                 self._close_session(row)
+        elif action == "toggle_split":
+            return self._toggle_split()
+        elif action == "focus_other_pane":
+            return self._focus_other_pane()
+        elif action == "swap_panes":
+            return self._swap_panes()
+        elif action == "pin_right_pane":
+            if row is not None and getattr(row, "kind", None) != "group_header":
+                return self._pin_row_to_right(row)
+            return False
         elif action == "rename_session":
             if row is not None and getattr(row, "kind", None) == "group_header":
                 self._rename_group(row)
@@ -6281,16 +7348,8 @@ if (data !== null) {{
                 return False
             self._toggle_group_collapsed(color)
         elif action in ("prev_session", "next_session"):
-            all_items = self.listbox.get_children()
-            all_items.sort(key=lambda r: getattr(r, "_order", 9999))
-            rows = [r for r in all_items
-                    if r.get_visible() or r is row]
-            if not rows:
-                return True
-            current = row
-            i = rows.index(current) if current in rows else 0
-            i = (i - 1 if action == "prev_session" else i + 1) % len(rows)
-            self.listbox.select_row(rows[i])
+            return self._navigate_session(
+                -1 if action == "prev_session" else 1)
         elif action == "copy":
             if row is not None and getattr(row, "kind", None) == "note":
                 row.view.emit("copy-clipboard")
@@ -6958,6 +8017,34 @@ if (data !== null) {{
             "+ Shell (Ctrl+Shift+T) and + AI start in the focused tab's "
             "working directory instead of home. Default is off.")
 
+        layout_head = Gtk.Label(xalign=0)
+        layout_head.set_markup("<b>Layout</b>")
+        side_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        side_lbl = Gtk.Label(label="Tab list position:", xalign=0)
+        side_combo = Gtk.ComboBoxText()
+        # id, label
+        side_opts = [
+            ("left", "Left"),
+            ("right", "Right"),
+            ("center", "Center (when split)"),
+        ]
+        cur_side = s.get("sidebar_position", "left") or "left"
+        if cur_side not in ("left", "right", "center"):
+            cur_side = "left"
+        side_active = 0
+        for i, (sid, lab) in enumerate(side_opts):
+            side_combo.append(sid, lab)
+            if sid == cur_side:
+                side_active = i
+        side_combo.set_active(side_active)
+        side_combo.set_tooltip_text(
+            "Where the session list sits.\n"
+            "• Left / Right: always available\n"
+            "• Center: between the two content panes when split is on "
+            "(falls back to Left when not split)")
+        side_box.pack_start(side_lbl, False, False, 0)
+        side_box.pack_start(side_combo, True, True, 0)
+
         ai_head = Gtk.Label(xalign=0)
         ai_head.set_markup("<b>AI</b>")
         ai_fresh = Gtk.CheckButton(
@@ -7003,6 +8090,8 @@ if (data !== null) {{
         box.pack_start(wrap, False, False, 0)
         box.pack_start(term_head, False, False, 0)
         box.pack_start(inherit, False, False, 0)
+        box.pack_start(layout_head, False, False, 0)
+        box.pack_start(side_box, False, False, 0)
         box.pack_start(ai_head, False, False, 0)
         box.pack_start(ai_fresh, False, False, 0)
         box.pack_start(hint, False, False, 0)
@@ -7020,6 +8109,9 @@ if (data !== null) {{
                     t_sz = int(term_size_spin.entry.get_text() or "12")
                 except ValueError:
                     t_sz = 12
+                side_id = side_combo.get_active_id() or "left"
+                if side_id not in ("left", "right", "center"):
+                    side_id = "left"
 
                 self._save_settings({"theme": selected_theme,
                                      "note_wrap": wrap.get_active(),
@@ -7027,7 +8119,10 @@ if (data !== null) {{
                                      "ai_fresh_on_restore": ai_fresh.get_active(),
                                      "ui_font_size": ui_sz,
                                      "term_font": t_font,
-                                     "term_font_size": t_sz})
+                                     "term_font_size": t_sz,
+                                     "sidebar_position": side_id})
+                self._sidebar_position = side_id
+                self._apply_sidebar_layout()
                 self._apply_note_wrap_setting(wrap.get_active())
                 self._apply_theme(selected_theme)
                 self._apply_editor_font(t_font, t_sz)
@@ -7151,6 +8246,23 @@ def _ensure_screen_sh():
         pass  # serial "screen" will fail visibly if this could not be written
 
 
+def _raise_request_path():
+    return os.path.join(GLib.get_user_runtime_dir(), "tabit.raise")
+
+
+def _request_existing_tabit_raise():
+    """Signal the running instance to present() its window (no wmctrl needed)."""
+    path = _raise_request_path()
+    try:
+        with open(path, "w") as f:
+            f.write(str(time.time()))
+        # Give the other process a moment to notice (it polls every 400ms)
+        time.sleep(0.6)
+        return True
+    except OSError:
+        return False
+
+
 def main():
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     GLib.set_prgname("tabit")
@@ -7162,6 +8274,26 @@ def main():
     try:
         fcntl.lockf(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
+        # Re-clicking the launcher: ask the live instance to raise itself
+        if _request_existing_tabit_raise():
+            sys.exit(0)
+        try:
+            d = Gtk.MessageDialog(
+                message_type=Gtk.MessageType.WARNING,
+                buttons=Gtk.ButtonsType.OK,
+                text="tabit is already running",
+            )
+            d.format_secondary_text(
+                "Could not signal the existing process.\n"
+                "If you do not see the window, end the old process and remove "
+                "the lock, then start again:\n"
+                "  killall -9 tabit 2>/dev/null; "
+                "rm -f \"$XDG_RUNTIME_DIR/tabit.lock\""
+            )
+            d.run()
+            d.destroy()
+        except Exception:
+            pass
         sys.exit("tabit is already running")
 
     # ask for the dark theme variant; the WM reads this to draw a dark
@@ -7171,12 +8303,38 @@ def main():
         settings.set_property("gtk-application-prefer-dark-theme", True)
 
     init_theme = Tabit._load_settings().get("theme", "tokyo-night")
-    CSS_PROVIDER.load_from_data(get_theme_css(init_theme))
+    css = get_theme_css(init_theme)
+    if isinstance(css, str):
+        css = css.encode("utf-8")
+    try:
+        CSS_PROVIDER.load_from_data(css)
+    except TypeError:
+        CSS_PROVIDER.load_from_data(css.decode("utf-8") if isinstance(css, bytes) else css)
     Gtk.StyleContext.add_provider_for_screen(
         Gdk.Screen.get_default(), CSS_PROVIDER,
         Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
-    Tabit().show_all()
+    try:
+        win = Tabit()
+        win.show_all()
+        try:
+            win.present()
+        except Exception:
+            pass
+    except Exception as ex:
+        try:
+            d = Gtk.MessageDialog(
+                message_type=Gtk.MessageType.ERROR,
+                buttons=Gtk.ButtonsType.OK,
+                text="tabit failed to start",
+            )
+            d.format_secondary_text(f"{type(ex).__name__}: {ex}")
+            d.run()
+            d.destroy()
+        except Exception:
+            pass
+        raise
+
     Gtk.main()
 
 
