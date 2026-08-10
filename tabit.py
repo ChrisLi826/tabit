@@ -976,6 +976,7 @@ class Tabit(Gtk.Window):
         self._counter = 0
         self._order_seq = 0
         self._open_dialogs = set()
+        self._single_dialogs = {}  # key -> the one open dialog of that kind
         self._save_src = None  # debounced sessions.json write
         self._keys = self._load_keys()  # action -> (keyval, mods)
         self.theme = self._load_settings().get("theme", "tokyo-night")
@@ -1649,7 +1650,7 @@ class Tabit(Gtk.Window):
 
     def _on_edit_commands(self):
         dialog = Gtk.Dialog(title="Quick commands", transient_for=self,
-                            modal=False)
+                            modal=True)
         self._open_dialogs.add(dialog)
         dialog.add_button("Close", Gtk.ResponseType.CLOSE)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
@@ -2530,10 +2531,35 @@ if (data !== null) {{
                           ["/bin/sh", "-c", f"exec {editor} {q}"],
                           "utilities-terminal-symbolic", sub=editor)
 
+    def _raise_open_dialog(self, key):
+        """Bring an already-open dialog of this kind to the front.
+
+        These dialogs are deliberately non-modal, so you can keep typing in a
+        terminal while one is open — but that also meant every extra click on
+        the button stacked another copy on top of the last one.
+        """
+        dlg = self._single_dialogs.get(key)
+        if dlg is None:
+            return False
+        try:
+            dlg.present()
+            return True
+        except Exception:
+            self._single_dialogs.pop(key, None)
+            return False
+
+    def _register_dialog(self, key, dialog):
+        """Track a dialog for close-on-quit and for the one-at-a-time rule."""
+        self._open_dialogs.add(dialog)
+        self._single_dialogs[key] = dialog
+        dialog.connect(
+            "destroy", lambda _d, k=key: self._single_dialogs.pop(k, None))
+        return dialog
+
     def _note_msg(self, kind, text, secondary=None, parent=None):
         parent_win = parent or self
         dialog = Gtk.MessageDialog(
-            transient_for=parent_win, modal=False,
+            transient_for=parent_win, modal=True,
             message_type=kind,
             buttons=Gtk.ButtonsType.OK,
             text=text)
@@ -6269,8 +6295,10 @@ if (data !== null) {{
                           track_cwd=True)
 
     def _on_add_note(self, _btn):
-        dialog = Gtk.Dialog(title="New note", transient_for=self, modal=False)
-        self._open_dialogs.add(dialog)
+        if self._raise_open_dialog("note"):
+            return
+        dialog = Gtk.Dialog(title="New note", transient_for=self, modal=True)
+        self._register_dialog("note", dialog)
         dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                            "Blank note", Gtk.ResponseType.YES,
                            "Open file…", Gtk.ResponseType.OK)
@@ -6288,7 +6316,7 @@ if (data !== null) {{
                 chooser = Gtk.FileChooserDialog(
                     title="Open note", parent=self,
                     action=Gtk.FileChooserAction.OPEN,
-                    modal=False)
+                    modal=True)
                 self._open_dialogs.add(chooser)
                 chooser.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                                     "Open", Gtk.ResponseType.OK)
@@ -6341,7 +6369,7 @@ if (data !== null) {{
         editor = os.environ.get("EDITOR") or "vi"
         decoded = self._b64_decode_file(path)
         dialog = Gtk.MessageDialog(
-            transient_for=self, modal=False,
+            transient_for=self, modal=True,
             message_type=Gtk.MessageType.QUESTION,
             buttons=Gtk.ButtonsType.NONE,
             text=f"“{os.path.basename(path)}” is large "
@@ -6444,9 +6472,11 @@ if (data !== null) {{
         dialog.connect("key-press-event", on_key)
 
     def _on_add_serial(self, _btn):
+        if self._raise_open_dialog("serial"):
+            return
         dialog = Gtk.Dialog(title="New serial session", transient_for=self,
-                            modal=False)
-        self._open_dialogs.add(dialog)
+                            modal=True)
+        self._register_dialog("serial", dialog)
         grid = Gtk.Grid(row_spacing=6, column_spacing=6, margin=12)
         # serial: a /dev dropdown; ssh/telnet: a plain host entry (no dropdown)
         combo = Gtk.ComboBoxText.new_with_entry()
@@ -6603,9 +6633,11 @@ if (data !== null) {{
         if not HAS_SSH_TOOL:
             return
 
+        if self._raise_open_dialog("connect"):
+            return
         last = self._load_connect_last()
-        dialog = Gtk.Dialog(title="New Cloud Connect session", transient_for=self, modal=False)
-        self._open_dialogs.add(dialog)
+        dialog = Gtk.Dialog(title="New Cloud Connect session", transient_for=self, modal=True)
+        self._register_dialog("connect", dialog)
         grid = Gtk.Grid(row_spacing=8, column_spacing=10, margin=12)
 
         # 1. Device SN (required)
@@ -7339,11 +7371,13 @@ if (data !== null) {{
         dialog.destroy()
 
     def _on_add_ai(self, _btn):
+        if self._raise_open_dialog("ai"):
+            return
         last = self._load_ai_last()
         entries = self._load_ai_clis()
         dialog = Gtk.Dialog(title="New AI session", transient_for=self,
-                            modal=False)
-        self._open_dialogs.add(dialog)
+                            modal=True)
+        self._register_dialog("ai", dialog)
         dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                            "Open", Gtk.ResponseType.OK)
         grid = Gtk.Grid(row_spacing=6, column_spacing=6, margin=12)
@@ -7369,7 +7403,7 @@ if (data !== null) {{
             chooser = Gtk.FileChooserDialog(
                 title="Working directory", parent=dialog,
                 action=Gtk.FileChooserAction.SELECT_FOLDER,
-                modal=False)
+                modal=True)
             self._open_dialogs.add(chooser)
             chooser.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                                 "Select", Gtk.ResponseType.OK)
@@ -7861,7 +7895,8 @@ if (data !== null) {{
 
     def _show_release_notes_dialog(self, title, notes_body, parent=None):
         win = parent or self
-        dialog = Gtk.Dialog(title=f"Release Notes — {title}", transient_for=win, modal=False)
+        dialog = Gtk.Dialog(title=f"Release Notes — {title}", transient_for=win,
+                            modal=bool(parent))
         self._open_dialogs.add(dialog)
         dialog.set_default_size(620, 440)
         dialog.add_button("Close", Gtk.ResponseType.CLOSE)
@@ -7898,7 +7933,8 @@ if (data !== null) {{
 
     def _show_update_dialog(self, new_ver, notes_body, parent=None):
         win = parent or self
-        dialog = Gtk.Dialog(title=f"Update Available — {new_ver}", transient_for=win, modal=False)
+        dialog = Gtk.Dialog(title=f"Update Available — {new_ver}", transient_for=win,
+                            modal=bool(parent))
         self._open_dialogs.add(dialog)
         dialog.set_default_size(620, 450)
         dialog.add_buttons("Later", Gtk.ResponseType.CANCEL, "🚀 Update Now", Gtk.ResponseType.OK)
@@ -7987,7 +8023,8 @@ if (data !== null) {{
 
     def _perform_update(self, parent=None):
         win = parent or self
-        dialog = Gtk.Dialog(title="Updating tabit...", transient_for=win, modal=False)
+        dialog = Gtk.Dialog(title="Updating tabit...", transient_for=win,
+                            modal=bool(parent))
         dialog.set_default_size(540, 340)
         self._open_dialogs.add(dialog)
 
@@ -8156,9 +8193,11 @@ if (data !== null) {{
             self._trigger_update_check(manual=False)
 
     def _on_edit_settings(self, _btn):
+        if self._raise_open_dialog("settings"):
+            return
         s = self._load_settings()
-        dialog = Gtk.Dialog(title="Settings", transient_for=self, modal=False)
-        self._open_dialogs.add(dialog)
+        dialog = Gtk.Dialog(title="Settings", transient_for=self, modal=True)
+        self._register_dialog("settings", dialog)
         dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                            "Save", Gtk.ResponseType.OK)
         dialog.set_default_response(Gtk.ResponseType.OK)
@@ -8441,9 +8480,11 @@ if (data !== null) {{
         dialog.show_all()
 
     def _on_edit_keys(self, _btn):
+        if self._raise_open_dialog("keys"):
+            return
         dialog = Gtk.Dialog(title="Keyboard shortcuts", transient_for=self,
-                            modal=False)
-        self._open_dialogs.add(dialog)
+                            modal=True)
+        self._register_dialog("keys", dialog)
         dialog.add_buttons("Reset defaults", Gtk.ResponseType.APPLY,
                            "Cancel", Gtk.ResponseType.CANCEL,
                            "Save", Gtk.ResponseType.OK)
