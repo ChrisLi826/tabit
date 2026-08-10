@@ -1163,7 +1163,7 @@ class Tabit(Gtk.Window):
                     self._apply_group(r, color)
                 if r is not None:
                     last_row = r
-            except (KeyError, TypeError, OSError):
+            except (KeyError, TypeError, ValueError, IndexError, OSError):
                 continue  # skip broken entries in a hand-edited file
         self._restoring_sessions = False
         self._relayout()  # build group headers + cluster + apply collapse
@@ -2001,8 +2001,30 @@ class Tabit(Gtk.Window):
             base = "file://" + os.path.dirname(row.file_path) + "/"
         row.webview.load_html(doc, base)
 
+    @staticmethod
+    def _yaml_mod():
+        """PyYAML if the system has it (python3-yaml), else None.
+
+        Optional like WebKit: the YAML browser says so instead of raising an
+        ImportError nobody sees.
+        """
+        try:
+            import yaml
+            return yaml
+        except ImportError:
+            return None
+
+    def _note_yaml_missing_msg(self):
+        self._note_msg(
+            Gtk.MessageType.WARNING,
+            "YAML browser needs PyYAML",
+            "Install it with:  sudo apt install python3-yaml\n"
+            "(or rerun ./install.sh)")
+
     def _note_render_yaml(self, row):
-        import yaml
+        yaml = self._yaml_mod()
+        if yaml is None:
+            return
         start, end = row.buffer.get_bounds()
         text = row.buffer.get_text(start, end, True)
         
@@ -2031,7 +2053,7 @@ class Tabit(Gtk.Window):
   body {{ background-color: #1a1b26; color: #a9b1d6; font-family: monospace; padding: 16px; }}
   .err-box {{ background: rgba(247, 118, 142, 0.15); border-left: 4px solid #f7768e; color: #f7768e; padding: 12px; border-radius: 4px; white-space: pre-wrap; }}
 </style></head><body>
-<div class="err-box"><b>YAML Syntax Error:</b><br><br>{html.escape(err_msg)}</div>
+<div class="err-box"><b>YAML Syntax Error:</b><br><br>{html_module.escape(err_msg)}</div>
 </body></html>"""
         else:
             doc = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
@@ -2354,6 +2376,17 @@ if (data !== null) {{
         if not HAS_WEBKIT or getattr(row, "webview", None) is None:
             return
         on = bool(on)
+        # The tools-bar toggle reaches this directly, not only via the shortcut
+        if on and self._yaml_mod() is None:
+            self._note_yaml_missing_msg()
+            btn = getattr(row, "yaml_btn", None)
+            if btn is not None and btn.get_active():
+                row._yaml_syncing = True
+                try:
+                    btn.set_active(False)
+                finally:
+                    row._yaml_syncing = False
+            return
         row.yaml_on = on
         if on and getattr(row, "preview_on", False):
             self._note_set_preview(row, False)
@@ -2406,7 +2439,6 @@ if (data !== null) {{
         return True
 
     def _note_toggle_yaml_browser(self, row=None):
-        import yaml
         row = row or self.listbox.get_selected_row()
         if row is None or getattr(row, "kind", None) != "note":
             return False
@@ -2415,6 +2447,10 @@ if (data !== null) {{
                 Gtk.MessageType.WARNING,
                 "YAML browser needs WebKit2",
                 "Install gir1.2-webkit2-4.0.")
+            return False
+        yaml = self._yaml_mod()
+        if yaml is None:
+            self._note_yaml_missing_msg()
             return False
 
         start, end = row.buffer.get_bounds()
@@ -3672,7 +3708,7 @@ if (data !== null) {{
                 badge = Gtk.Box()
                 badge.set_size_request(6, 6)
                 badge.set_valign(Gtk.Align.START)
-                badge.set_halign(Gdk.Align.END if hasattr(Gdk, "Align") else Gtk.Align.END)
+                badge.set_halign(Gtk.Align.END)
                 badge.get_style_context().add_class("in-use-badge")
                 overlay.add_overlay(badge)
 
@@ -4708,6 +4744,10 @@ if (data !== null) {{
     def _close_session(self, row):
         if row.get_parent() is None:
             return
+        # Group headers are not sessions: the close shortcut can fire while one
+        # is selected, and _session_rows() (headers excluded) would not find it.
+        if getattr(row, "kind", None) == "group_header":
+            return
         if not self._confirm_close_row(row):
             return
         was_selected = self.listbox.get_selected_row() is row
@@ -4715,7 +4755,7 @@ if (data !== null) {{
         rows = self._session_rows()
         idx = rows.index(row)
         # drop pending note timers so they don't fire on a destroyed widget
-        for attr in ("_preview_src", "_tune_src"):
+        for attr in ("_preview_src", "_tune_src", "_yaml_src"):
             src = getattr(row, attr, None)
             if src:
                 GLib.source_remove(src)
@@ -8461,6 +8501,26 @@ if (data !== null) {{
         box = dialog.get_content_area()
         box.add(grid)
         box.add(hint)
+        action_labels = {a: lab for a, lab, _d in KEY_ACTIONS}
+
+        def collisions():
+            """[(accel text, [action names])] for combos bound more than once.
+
+            Compare the way _match_action does — normalised keyval + masked
+            modifiers — so this catches exactly the pairs where one action
+            would silently shadow the other.
+            """
+            seen = {}
+            for action, _label, _d in KEY_ACTIONS:
+                pair = self._parse_accel(accels[action])
+                if pair is None:
+                    continue
+                combo = (self._norm_keyval(pair[0]), pair[1] & MOD_MASK)
+                seen.setdefault(combo, []).append(action)
+            return [(self._accel_label(*combo),
+                     [action_labels[a] for a in acts])
+                    for combo, acts in seen.items() if len(acts) > 1]
+
         def _on_keys_response(dlg, resp):
             if resp == Gtk.ResponseType.APPLY:
                 for action, _label, default in KEY_ACTIONS:
@@ -8468,6 +8528,17 @@ if (data !== null) {{
                     buttons[action].set_label(self._accel_label_from_name(default))
                 return  # Keep dialog open for further edits
             if resp == Gtk.ResponseType.OK:
+                dups = collisions()
+                if dups:
+                    self._note_msg(
+                        Gtk.MessageType.WARNING,
+                        "Two actions share one shortcut",
+                        "Only the first one would ever fire. "
+                        "Change one of these, then save again:\n\n"
+                        + "\n".join(f"{accel}  —  {' / '.join(acts)}"
+                                    for accel, acts in dups),
+                        parent=dlg)
+                    return  # keep the dialog open so the user can fix it
                 self._save_keys({a: accels[a] for a, _l, _d in KEY_ACTIONS})
             self._open_dialogs.discard(dlg)
             dlg.destroy()

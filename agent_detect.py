@@ -33,6 +33,8 @@ GITHUB_RAW_BASE = (
     "https://raw.githubusercontent.com/herdrdev/herdr/master/"
     "website/agent-detection"
 )
+# Bundled manifests are a few KB; refuse anything wildly bigger.
+MAX_MANIFEST_BYTES = 512 * 1024
 
 # herdr regex dialect → Python
 _HEX_ESC = re.compile(r"\\x\{([0-9A-Fa-f]+)\}")
@@ -56,6 +58,22 @@ def _compile_re(pattern: str) -> Optional[re.Pattern]:
             return re.compile(pattern, re.MULTILINE)
         except re.error:
             return None
+
+
+def _version_key(value: Any) -> list:
+    """Sort key for manifest versions like 2026.07.13.1.
+
+    Compare component by component, numbers as numbers: plain string compare
+    puts "2026.07.13.10" before ".9", and breaks entirely if upstream ever
+    stops zero-padding the date.
+    """
+    out = []
+    for part in str(value or "").split("."):
+        try:
+            out.append((0, int(part), ""))
+        except ValueError:
+            out.append((1, 0, part))
+    return out
 
 
 def _non_empty_lines(text: str) -> List[str]:
@@ -300,7 +318,8 @@ class ManifestStore:
                 mid = str(data.get("id") or name[:-5])
                 # prefer higher version string when both exist
                 prev = self._manifests.get(mid)
-                if prev is None or str(data.get("version", "")) >= str(prev.get("version", "")):
+                if prev is None or (_version_key(data.get("version"))
+                                    >= _version_key(prev.get("version"))):
                     self._manifests[mid] = data
                     self._mtime[mid] = os.path.getmtime(path)
                 for a in data.get("aliases") or []:
@@ -353,7 +372,12 @@ class ManifestStore:
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": "tabit-agent-detect"})
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    return resp.read()
+                    # Cap the body: a manifest is a few KB, and this text ends
+                    # up compiled into regexes on the UI thread.
+                    body = resp.read(MAX_MANIFEST_BYTES + 1)
+                    if len(body) > MAX_MANIFEST_BYTES:
+                        return None
+                    return body
             except Exception:
                 return None
 
@@ -409,9 +433,8 @@ class ManifestStore:
             mid = str(data.get("id") or aid)
             path = os.path.join(self.cache_dir, fname if fname.endswith(".toml") else f"{mid}.toml")
             old = self._manifests.get(mid)
-            new_ver = str(data.get("version") or "")
-            old_ver = str(old.get("version") or "") if old else ""
-            if old is None or new_ver >= old_ver:
+            if old is None or (_version_key(data.get("version"))
+                               >= _version_key(old.get("version"))):
                 try:
                     with open(path, "wb") as f:
                         f.write(body)

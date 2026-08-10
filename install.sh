@@ -24,7 +24,7 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 
 $SUDO apt-get install -y python3-gi gir1.2-gtk-3.0 gir1.2-vte-2.91 \
-    gir1.2-gtksource-4 python3-markdown picocom screen
+    gir1.2-gtksource-4 python3-markdown python3-yaml picocom screen
 
 # WebKit for the note Markdown preview: 4.0 on older Ubuntu, 4.1 on 24.04+.
 # Optional - if neither is available the app just runs without the preview.
