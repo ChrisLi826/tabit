@@ -6100,11 +6100,13 @@ if (data !== null) {{
         pop.set_modal(True)
 
         is_ai = (getattr(row, "icon_name", None) == ICON_AI)
-        has_resume = False
-        if is_ai and getattr(row, "argv", None) and len(row.argv) == 3:
-            cmd = row.argv[2]
-            if " || " in cmd:
-                has_resume = True
+        # Ask the argv, do not pattern-match it: a plain AI tab reads
+        # `cd <path> || exit 1; exec cli`, so testing for " || " ticked the box
+        # on every AI tab. Stripping the tries changes the argv only when the
+        # tab really has them.
+        has_resume = bool(
+            is_ai and getattr(row, "argv", None) and len(row.argv) == 3
+            and self._ai_argv_plain(row.argv) != row.argv)
 
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=8)
         hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -7348,7 +7350,10 @@ if (data !== null) {{
 
         resume_chk = Gtk.CheckButton(
             label="Continue / resume previous session")
-        resume_chk.set_active(False)
+        # On by default; Settings → "Start AI tabs fresh after reopening"
+        # is the preference that turns it off.
+        resume_chk.set_active(
+            not self._load_settings().get("ai_fresh_on_restore", False))
 
         try_hint = Gtk.Label(xalign=0)
         try_hint.get_style_context().add_class("session-sub")
