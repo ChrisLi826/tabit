@@ -46,7 +46,7 @@ password for apt).
 |---|---|
 | `+ Serial` | Pick device, baud (default 115200), and tool: `screen` (bundled `screen.sh`) / `kermit` / `picocom`; or `ssh` / `telnet` to a host + port (for network console servers) |
 | `+ Shell` | New tab running your login shell |
-| `+ AI` | Pick AI CLI and working directory. **Edit list…** manages CLI names and per-CLI continue/resume tries (`~/.config/tabit/ai_clis.json`) |
+| `+ AI` | Pick AI CLI and working directory; an optional **Session ID** resumes that exact session (tried first, normal continue/resume stays as fallback). **Edit list…** manages CLI names and per-CLI continue/resume tries (`~/.config/tabit/ai_clis.json`) |
 | `+ Note` | GtkSourceView editor + **Markdown Preview** (WebKit); bottom tools: Base64 / JSON Format; wrap in **Settings…**; huge-line guards |
 | `Settings…` | Note wrap default and other prefs (`settings.json`) |
 | `+ Command` | Run anything (e.g. `ssh root@192.168.1.1`) in a new tab |

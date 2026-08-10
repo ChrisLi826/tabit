@@ -271,7 +271,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v1.7.1"
+APP_VERSION = "v1.7.2"
 
 def _get_tabit_repo_dir():
     try:
@@ -310,6 +310,11 @@ def _get_current_version():
     return APP_VERSION
 
 DEFAULT_AI_TRY = ["--continue", "resume --last", "--resume latest"]
+# +AI "Session ID": argument template tried first when the user names an exact
+# session. {id} is substituted. Per-CLI override: add "resume_id" to an entry
+# in ~/.config/tabit/ai_clis.json.
+DEFAULT_AI_RESUME_ID = "--resume {id}"
+AI_RESUME_ID_ARGS = {"codex": "resume {id}"}
 KERMRC = os.path.expanduser("~/senaoenv/kermrc")
 CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "tabit")
 SCREEN_SH_PATH = os.path.join(CONFIG_DIR, "screen.sh")
@@ -6203,7 +6208,11 @@ if (data !== null) {{
             target_color = selected_group[0]
             if getattr(row, "group_color", None) != target_color:
                 self._set_group(row, target_color)
-            if is_ai and resume_chk is not None and getattr(row, "argv", None) and len(row.argv) == 3:
+            # Only touch argv when the box actually changed: rebuilding from
+            # the CLI list would throw away a session id chosen in +AI.
+            if (is_ai and resume_chk is not None
+                    and resume_chk.get_active() != has_resume
+                    and getattr(row, "argv", None) and len(row.argv) == 3):
                 plain_argv = self._ai_argv_plain(row.argv)
                 plain_cmd = plain_argv[2]
                 split_marker = " || exit 1; exec "
@@ -7074,8 +7083,33 @@ if (data !== null) {{
             if isinstance(tries, str):
                 tries = [t.strip() for t in tries.split("||")]
             tries = [str(t).strip() for t in tries if str(t).strip()]
-            return {"cli": name, "try": tries}
+            out = {"cli": name, "try": tries}
+            rid = str(item.get("resume_id") or "").strip()
+            if rid:
+                out["resume_id"] = rid
+            return out
         return None
+
+    @classmethod
+    def _ai_resume_id_arg(cls, cli):
+        """Argument template that resumes one named session for this CLI."""
+        for e in cls._load_ai_clis():
+            if e["cli"] == cli and e.get("resume_id"):
+                return e["resume_id"]
+        return AI_RESUME_ID_ARGS.get(cli, DEFAULT_AI_RESUME_ID)
+
+    @classmethod
+    def _ai_tries_with_id(cls, cli, tries, session_id):
+        """Put "resume <id>" in front of the normal tries, if an id was given."""
+        session_id = (session_id or "").strip()
+        if not session_id:
+            return list(tries or [])
+        template = cls._ai_resume_id_arg(cli)
+        if "{id}" in template:
+            first = template.replace("{id}", session_id)
+        else:
+            first = f"{template} {session_id}".strip()
+        return [first] + [t for t in (tries or []) if t != first]
 
     @classmethod
     def _load_ai_clis(cls):
@@ -7101,8 +7135,14 @@ if (data !== null) {{
     @staticmethod
     def _save_ai_clis(entries):
         os.makedirs(CONFIG_DIR, exist_ok=True)
-        data = [{"cli": e["cli"], "try": list(e.get("try") or [])}
-                for e in entries if e.get("cli")]
+        data = []
+        for e in entries:
+            if not e.get("cli"):
+                continue
+            item = {"cli": e["cli"], "try": list(e.get("try") or [])}
+            if e.get("resume_id"):  # hand-added override; do not drop it
+                item["resume_id"] = e["resume_id"]
+            data.append(item)
         with open(AI_CLIS_FILE, "w") as f:
             json.dump(data, f, indent=2)
 
@@ -7335,16 +7375,23 @@ if (data !== null) {{
                 store.append([e["cli"], self._format_try_display(e.get("try"))])
 
         def store_to_entries():
+            # resume_id has no column here; carry it over so editing the try
+            # list does not silently drop a hand-added override
+            keep_id = {e["cli"]: e["resume_id"] for e in entries
+                       if e.get("resume_id")}
             out, seen = [], set()
             for row in store:
                 name = row[0].strip()
                 if not name or name in seen:
                     continue
                 seen.add(name)
-                out.append({
+                item = {
                     "cli": name,
                     "try": self._parse_try_display(row[1] or ""),
-                })
+                }
+                if name in keep_id:
+                    item["resume_id"] = keep_id[name]
+                out.append(item)
             return out or [{"cli": e["cli"], "try": list(e["try"])}
                            for e in DEFAULT_AI_CLIS]
 
@@ -7429,29 +7476,40 @@ if (data !== null) {{
         resume_chk.set_active(
             not self._load_settings().get("ai_fresh_on_restore", False))
 
+        # Optional exact session to resume; empty = whatever the CLI's own
+        # continue/resume tries pick (usually the newest in that folder).
+        sid = Gtk.Entry(width_chars=36)
+        sid.set_placeholder_text("Session ID (optional)")
+        sid.set_tooltip_text(
+            "Resume one specific session instead of the most recent one.\n"
+            "Tried first; the normal continue/resume tries stay as fallback.")
+
         try_hint = Gtk.Label(xalign=0)
         try_hint.get_style_context().add_class("session-sub")
+        try_hint.set_line_wrap(True)
+
+        def cli_tries(tool):
+            for e in self._load_ai_clis():
+                if e["cli"] == tool:
+                    return e.get("try") or []
+            return list(DEFAULT_AI_TRY)
 
         def update_try_hint(*_a):
-            if not resume_chk.get_active():
+            on = resume_chk.get_active()
+            sid.set_sensitive(on)
+            if not on:
                 try_hint.set_text("Will start fresh (no continue/resume)")
                 return
             tool = (cli.get_active_text() or "").strip()
-            tries = None
-            for e in self._load_ai_clis():
-                if e["cli"] == tool:
-                    tries = e.get("try") or []
-                    break
-            if tries is None:
-                tries = list(DEFAULT_AI_TRY)
-            if tries:
-                chain = " → ".join(tries) + " → plain"
-            else:
-                chain = "plain start only"
+            tries = self._ai_tries_with_id(
+                tool, cli_tries(tool), sid.get_text())
+            chain = (" → ".join(tries) + " → plain") if tries \
+                else "plain start only"
             try_hint.set_text(f"Will try: {chain}")
 
         cli.connect("changed", update_try_hint)
         resume_chk.connect("toggled", update_try_hint)
+        sid.connect("changed", update_try_hint)
         update_try_hint()
 
         grid.attach(Gtk.Label(label="CLI", xalign=0), 0, 0, 1, 1)
@@ -7459,7 +7517,9 @@ if (data !== null) {{
         grid.attach(Gtk.Label(label="Path", xalign=0), 0, 1, 1, 1)
         grid.attach(path_box, 1, 1, 1, 1)
         grid.attach(resume_chk, 1, 2, 1, 1)
-        grid.attach(try_hint, 0, 3, 2, 1)
+        grid.attach(Gtk.Label(label="Session ID", xalign=0), 0, 3, 1, 1)
+        grid.attach(sid, 1, 3, 1, 1)
+        grid.attach(try_hint, 0, 4, 2, 1)
         dialog.get_content_area().add(grid)
         self._dialog_enter_is_ok(dialog)
 
@@ -7471,13 +7531,8 @@ if (data !== null) {{
                 if tool:
                     tries = []
                     if resume_chk.get_active():
-                        tries = None
-                        for e in self._load_ai_clis():
-                            if e["cli"] == tool:
-                                tries = e.get("try") or []
-                                break
-                        if tries is None:
-                            tries = list(DEFAULT_AI_TRY)
+                        tries = self._ai_tries_with_id(
+                            tool, cli_tries(tool), sid.get_text())
                     short = cwd if len(cwd) <= 28 else "…" + cwd[-27:]
                     self._add_session(tool, self._ai_argv(tool, cwd, tries),
                                       ICON_AI, sub=short)
