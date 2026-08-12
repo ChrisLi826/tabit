@@ -46,7 +46,7 @@ password for apt).
 |---|---|
 | `+ Serial` | Pick device, baud (default 115200), and tool: `screen` (bundled `screen.sh`) / `kermit` / `picocom`; or `ssh` / `telnet` to a host + port (for network console servers) |
 | `+ Shell` | New tab running your login shell |
-| `+ AI` | Pick AI CLI and working directory; an optional **Session ID** resumes that exact session (tried first, normal continue/resume stays as fallback). **Edit list…** manages CLI names and per-CLI continue/resume tries (`~/.config/tabit/ai_clis.json`) |
+| `+ AI` | Pick AI CLI and working directory; an optional **Session ID** resumes that exact session (tried first, normal continue/resume stays as fallback). **Run inside tmux** keeps the agent alive across restarts and lists the ones still running. **Edit list…** manages CLI names and per-CLI continue/resume tries (`~/.config/tabit/ai_clis.json`) |
 | `+ Note` | GtkSourceView editor + **Markdown Preview** (WebKit); bottom tools: Base64 / JSON Format; wrap in **Settings…**; huge-line guards |
 | `Settings…` | Note wrap default and other prefs (`settings.json`) |
 | `+ Command` | Run anything (e.g. `ssh root@192.168.1.1`) in a new tab |
@@ -82,6 +82,15 @@ uses `~/senaoenv/kermrc` when present (`-c -E`). `picocom` quit is
 Tabs are remembered: the next start restores the same set of sessions
 as fresh processes (serial consoles reconnect, shells start clean —
 scrollback is not kept). Stored in `~/.config/tabit/sessions.json`.
+
+An AI tab can instead **run inside tmux** (tick it in **+ AI**): the agent
+keeps running when tabit closes, and reopening the tab reattaches to the
+turn it was in the middle of, rather than replaying the conversation with
+`--continue`. **+ AI** lists the AI sessions still running — CLI, folder,
+and whether a tab is attached — so a detached agent can be picked back up
+or killed. tabit sets `status off`, window-title passthrough and prefix
+`C-a` on those sessions, so the AI status icons keep working and `Ctrl+B`
+still reaches the agent.
 
 Two sessions can share the window: `Ctrl+Alt+R` opens a **right content
 pane**, `Ctrl+Alt+P` pins the selected tab there. Drag the divider to

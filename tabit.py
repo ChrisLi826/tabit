@@ -271,7 +271,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v1.7.2"
+APP_VERSION = "v1.7.3"
 
 def _get_tabit_repo_dir():
     try:
@@ -315,6 +315,18 @@ DEFAULT_AI_TRY = ["--continue", "resume --last", "--resume latest"]
 # in ~/.config/tabit/ai_clis.json.
 DEFAULT_AI_RESUME_ID = "--resume {id}"
 AI_RESUME_ID_ARGS = {"codex": "resume {id}"}
+# +AI "Run inside tmux": per-session options that keep the AI status icons
+# working. Measured, not guessed — without the first two tabit sees an empty
+# window title (the braille spinner rules in agent-detection/*.toml go blind)
+# and the tmux status bar takes the last screen line the idle-prompt rule
+# reads. Set per session, so the user's other tmux sessions are untouched.
+AI_TMUX_OPTS = (
+    ("set-titles", "on"),
+    ("set-titles-string", "#{pane_title}"),
+    ("status", "off"),
+    # Claude Code binds Ctrl+B ("run in background"), tmux's default prefix
+    ("prefix", "C-a"),
+)
 KERMRC = os.path.expanduser("~/senaoenv/kermrc")
 CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "tabit")
 SCREEN_SH_PATH = os.path.join(CONFIG_DIR, "screen.sh")
@@ -6178,6 +6190,9 @@ if (data !== null) {{
         has_resume = bool(
             is_ai and getattr(row, "argv", None) and len(row.argv) == 3
             and self._ai_argv_plain(row.argv) != row.argv)
+        cur_session = (self._ai_tmux_unwrap(row.argv)[1]
+                       if is_ai and getattr(row, "argv", None) else None)
+        in_tmux = cur_session is not None
 
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=8)
         hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -6188,11 +6203,19 @@ if (data !== null) {{
         hbox.pack_start(ok, False, False, 0)
         vbox.pack_start(hbox, True, True, 0)
 
-        resume_chk = None
+        resume_chk = tmux_chk = None
         if is_ai:
             resume_chk = Gtk.CheckButton(label="Continue / resume previous session")
             resume_chk.set_active(has_resume)
             vbox.pack_start(resume_chk, False, False, 0)
+            tmux_chk = Gtk.CheckButton(label="Run inside tmux session")
+            tmux_chk.set_active(in_tmux)
+            tmux_chk.set_tooltip_text(
+                "Takes effect the next time this tab starts — the process "
+                "running now stays where it is.\n"
+                "Unticking leaves an existing tmux session running; close it "
+                "from + tmux.")
+            vbox.pack_start(tmux_chk, False, False, 0)
 
         # Group assignment inside Rename Popover
         cur_c = getattr(row, "group_color", None)
@@ -6208,12 +6231,16 @@ if (data !== null) {{
             target_color = selected_group[0]
             if getattr(row, "group_color", None) != target_color:
                 self._set_group(row, target_color)
-            # Only touch argv when the box actually changed: rebuilding from
-            # the CLI list would throw away a session id chosen in +AI.
+            # Only touch argv when a box actually changed: rebuilding from the
+            # CLI list would throw away a session id chosen in +AI.
+            want_tmux = tmux_chk.get_active() if tmux_chk is not None else False
             if (is_ai and resume_chk is not None
-                    and resume_chk.get_active() != has_resume
+                    and (resume_chk.get_active() != has_resume
+                         or want_tmux != in_tmux)
                     and getattr(row, "argv", None) and len(row.argv) == 3):
-                plain_argv = self._ai_argv_plain(row.argv)
+                # Edit the command itself, not the tmux wrapper around it
+                inner_argv, _sess = self._ai_tmux_unwrap(row.argv)
+                plain_argv = self._ai_argv_plain(inner_argv)
                 plain_cmd = plain_argv[2]
                 split_marker = " || exit 1; exec "
                 if split_marker in plain_cmd:
@@ -6229,17 +6256,28 @@ if (data !== null) {{
                         cli_val = cli_quoted.strip("'\"")
                     
                     if resume_chk.get_active():
-                        tries = None
-                        for e in self._load_ai_clis():
-                            if e["cli"] == cli_val:
-                                tries = e.get("try") or []
-                                break
-                        if tries is None:
-                            tries = list(DEFAULT_AI_TRY)
+                        # keep whatever the tab already had (a session id from
+                        # +AI survives here) when only the tmux box moved
+                        if has_resume:
+                            tries = self._ai_tries_of(inner_argv[2])
+                        else:
+                            tries = None
+                            for e in self._load_ai_clis():
+                                if e["cli"] == cli_val:
+                                    tries = e.get("try") or []
+                                    break
+                            if tries is None:
+                                tries = list(DEFAULT_AI_TRY)
                     else:
                         tries = []
-                    
-                    row.argv = self._ai_argv(cli_val, path_val, tries)
+
+                    new_argv = self._ai_argv(cli_val, path_val, tries)
+                    if want_tmux:
+                        new_argv = self._ai_tmux_argv(
+                            new_argv,
+                            cur_session
+                            or self._ai_tmux_session(cli_val, path_val))
+                    row.argv = new_argv
 
             if name:
                 if getattr(row, "kind", None) == "note":
@@ -7061,10 +7099,11 @@ if (data !== null) {{
         return {}
 
     @staticmethod
-    def _save_ai_last(cli, path):
+    def _save_ai_last(cli, path, use_tmux=False):
         os.makedirs(CONFIG_DIR, exist_ok=True)
         with open(AI_LAST_FILE, "w") as f:
-            json.dump({"cli": cli, "path": path}, f, indent=2)
+            json.dump({"cli": cli, "path": path,
+                       "use_tmux": bool(use_tmux)}, f, indent=2)
 
     @staticmethod
     def _normalize_ai_entry(item):
@@ -7178,9 +7217,126 @@ if (data !== null) {{
         return ["/bin/sh", "-c", "; ".join(parts)]
 
     @staticmethod
-    def _ai_argv_plain(argv):
+    def _ai_tmux_sessions():
+        """Live `ai-*` tmux sessions as (name, cli, path, attached).
+
+        These outlive tabit on purpose, so after a restart they are the only
+        trace of an agent that is still running.
+        """
+        try:
+            out = subprocess.run(
+                ["tmux", "list-sessions", "-F",
+                 "#{session_name}\t#{session_path}\t#{session_attached}"],
+                capture_output=True, text=True, timeout=2)
+        except (OSError, subprocess.SubprocessError):
+            return []
+        if out.returncode != 0:  # no server / no sessions
+            return []
+        rows = []
+        for line in out.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 3 or not parts[0].startswith("ai-"):
+                continue
+            name = parts[0]
+            # ai-<cli>-<folder>-<digest>
+            bits = name.split("-")
+            cli = bits[1] if len(bits) > 2 else "ai"
+            rows.append((name, cli, parts[1],
+                         parts[2] not in ("", "0")))
+        return rows
+
+    @staticmethod
+    def _short_path(path):
+        home = GLib.get_home_dir()
+        if path == home:
+            return "~"
+        if path.startswith(home + "/"):
+            path = "~" + path[len(home):]
+        return path if len(path) <= 34 else "…" + path[-33:]
+
+    @staticmethod
+    def _ai_tmux_session(cli, path):
+        """Stable tmux name for this CLI+folder, so reopening reattaches."""
+        base = os.path.basename(os.path.normpath(path)) or "home"
+        slug = re.sub(r"[^A-Za-z0-9_-]", "-", f"{cli}-{base}")[:32].strip("-")
+        # tmux rejects "." and ":" in names; the digest keeps two folders with
+        # the same basename apart
+        digest = f"{abs(hash((cli, os.path.normpath(path)))):x}"[:6]
+        return f"ai-{slug}-{digest}"
+
+    @classmethod
+    def _ai_tmux_argv(cls, argv, session):
+        """Wrap an AI argv so it runs in a named tmux session.
+
+        Attach when the session is already there — that is the whole point:
+        the agent keeps running while tabit restarts. tmux only runs the
+        command when it has to create the session, so the continue/resume
+        chain inside applies to the first launch only.
+        """
+        if len(argv) != 3 or argv[0] != "/bin/sh":
+            return argv
+        inner = shlex.quote(argv[2])
+        name = shlex.quote(session)
+        opts = " ".join(
+            f"tmux set-option -t {name} {shlex.quote(k)} {shlex.quote(v)}"
+            f" >/dev/null 2>&1;"
+            for k, v in AI_TMUX_OPTS)
+        # keep ";" a separate word — glued to the quoted command it becomes
+        # part of that token and the unwrap parses "claude;" as the CLI name
+        return ["/bin/sh", "-c",
+                f"tmux has-session -t {name} 2>/dev/null"
+                f" || tmux new-session -d -s {name} {inner} ;"
+                f" {opts}"
+                f" exec tmux attach-session -t {name}"]
+
+    @staticmethod
+    def _ai_tries_of(cmd):
+        """Read the try strings back out of a built AI command.
+
+        Lets the rename popover flip the tmux box without rebuilding the tries
+        from the CLI list, which would drop a session id the tab was made with.
+        """
+        marker = " || exit 1; "
+        i = cmd.find(marker)
+        if i == -1:
+            return []
+        out = []
+        for part in cmd[i + len(marker):].split(" || ")[:-1]:  # last = exec cli
+            try:
+                toks = shlex.split(part)
+            except ValueError:
+                continue
+            if len(toks) > 1:
+                out.append(" ".join(toks[1:]))
+        return out
+
+    @classmethod
+    def _ai_tmux_unwrap(cls, argv):
+        """(inner argv, tmux session) for a wrapped AI tab, else (argv, None).
+
+        Everything that edits an AI command has to unwrap first: the tmux
+        wrapper carries the original command as a quoted argument, so a plain
+        string search finds the inner markers and parses the wrong thing.
+        """
+        if (len(argv) != 3 or argv[0] != "/bin/sh"
+                or "tmux has-session" not in argv[2]):
+            return argv, None
+        try:
+            toks = shlex.split(argv[2])
+            i = toks.index("new-session")
+            j = toks.index("-s", i)
+            return ["/bin/sh", "-c", toks[j + 2].rstrip(";")], toks[j + 1]
+        except (ValueError, IndexError):
+            return argv, None
+
+    @classmethod
+    def _ai_argv_plain(cls, argv):
         """Strip the continue/resume tries from a stored AI argv, leaving just
         `cd <path>; exec <cli>` so a restored AI tab starts fresh."""
+        inner, session = cls._ai_tmux_unwrap(argv)
+        if session is not None:
+            plain = cls._ai_argv_plain(inner)
+            return cls._ai_tmux_argv(plain, session)
         marker = " || exit 1; "
         if len(argv) != 3 or argv[0] != "/bin/sh":
             return argv
@@ -7512,14 +7668,84 @@ if (data !== null) {{
         sid.connect("changed", update_try_hint)
         update_try_hint()
 
+        tmux_chk = Gtk.CheckButton(
+            label="Run inside tmux session (survives tabit restart)")
+        tmux_chk.set_active(bool(last.get("use_tmux", False)))
+        tmux_chk.set_tooltip_text(
+            "The agent keeps running when tabit closes; reopening the tab "
+            "reattaches instead of starting over.\n"
+            "tabit sets status off / title passthrough / prefix C-a on that "
+            "session so the AI status icons keep working.")
+
         grid.attach(Gtk.Label(label="CLI", xalign=0), 0, 0, 1, 1)
         grid.attach(cli_box, 1, 0, 1, 1)
         grid.attach(Gtk.Label(label="Path", xalign=0), 0, 1, 1, 1)
         grid.attach(path_box, 1, 1, 1, 1)
+        # Agents left running in tmux — the only trace of them after a restart
+        live_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4,
+                           margin_top=8)
+
+        def attach_session(name, cli_name, spath):
+            inner = self._ai_argv(cli_name, spath, [])
+            self._add_session(
+                cli_name, self._ai_tmux_argv(inner, name), ICON_AI,
+                sub=f"{self._short_path(spath)} [tmux]")
+            dialog.response(Gtk.ResponseType.CANCEL)
+
+        def kill_session(name):
+            if not self._confirm_kill(dialog, f"Kill AI session “{name}”?"):
+                return
+            subprocess.run(["tmux", "kill-session", "-t", name],
+                           capture_output=True)
+            refresh_live()
+
+        def refresh_live():
+            for c in live_box.get_children():
+                live_box.remove(c)
+            rows = self._ai_tmux_sessions()
+            head = Gtk.Label(
+                label="Running AI sessions (tmux):" if rows
+                else "No AI sessions running in tmux", xalign=0)
+            head.get_style_context().add_class("session-sub")
+            live_box.pack_start(head, False, False, 0)
+            for name, cli_name, spath, attached in rows:
+                r = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+                text = f"{cli_name} · {self._short_path(spath)}"
+                lbl = Gtk.Label(label=text, xalign=0)
+                lbl.set_hexpand(True)
+                lbl.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+                lbl.set_tooltip_text(f"{name}\n{spath}")
+                r.pack_start(lbl, True, True, 0)
+                if attached:
+                    tag = Gtk.Label(label="● open")
+                    tag.get_style_context().add_class("session-sub")
+                    tag.set_tooltip_text("A tab is attached to this session")
+                    r.pack_start(tag, False, False, 0)
+                att = Gtk.Button(label="Attach")
+                att.set_tooltip_text("Open this running agent in a new tab")
+                att.connect("clicked",
+                            lambda _b, n=name, c=cli_name, p=spath:
+                            attach_session(n, c, p))
+                kill = Gtk.Button.new_from_icon_name("user-trash-symbolic",
+                                                     Gtk.IconSize.MENU)
+                kill.set_relief(Gtk.ReliefStyle.NONE)
+                kill.set_tooltip_text("Kill this session (the agent stops)")
+                kill.connect("clicked", lambda _b, n=name: kill_session(n))
+                r.pack_start(att, False, False, 0)
+                r.pack_start(kill, False, False, 0)
+                live_box.pack_start(r, False, False, 0)
+            live_box.show_all()
+
+        refresh_live()
+
         grid.attach(resume_chk, 1, 2, 1, 1)
         grid.attach(Gtk.Label(label="Session ID", xalign=0), 0, 3, 1, 1)
         grid.attach(sid, 1, 3, 1, 1)
-        grid.attach(try_hint, 0, 4, 2, 1)
+        grid.attach(tmux_chk, 1, 4, 1, 1)
+        grid.attach(try_hint, 0, 5, 2, 1)
+        grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
+                    0, 6, 2, 1)
+        grid.attach(live_box, 0, 7, 2, 1)
         dialog.get_content_area().add(grid)
         self._dialog_enter_is_ok(dialog)
 
@@ -7534,9 +7760,14 @@ if (data !== null) {{
                         tries = self._ai_tries_with_id(
                             tool, cli_tries(tool), sid.get_text())
                     short = cwd if len(cwd) <= 28 else "…" + cwd[-27:]
-                    self._add_session(tool, self._ai_argv(tool, cwd, tries),
-                                      ICON_AI, sub=short)
-                    self._save_ai_last(tool, cwd)
+                    argv = self._ai_argv(tool, cwd, tries)
+                    if tmux_chk.get_active():
+                        argv = self._ai_tmux_argv(
+                            argv, self._ai_tmux_session(tool, cwd))
+                        short = f"{short} [tmux]"
+                    self._add_session(tool, argv, ICON_AI, sub=short)
+                    self._save_ai_last(tool, cwd,
+                                       use_tmux=tmux_chk.get_active())
             self._open_dialogs.discard(dlg)
             dlg.destroy()
 
