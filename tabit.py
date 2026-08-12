@@ -6656,7 +6656,7 @@ if (data !== null) {{
 
         # 2. Target Environment
         env_combo = Gtk.ComboBoxText()
-        envs = ["prod", "staging", "dev", "prod-jp", "staging-jp", "kokomo"]
+        envs = ["prod", "staging", "dev", "prod-jp", "staging-jp", "kokomo", "ehr"]
         cur_env = last.get("env", "prod")
         active_env_idx = 0
         for i, e in enumerate(envs):
