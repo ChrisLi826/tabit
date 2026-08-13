@@ -4373,9 +4373,15 @@ if (data !== null) {{
             below = max(vis, 16)
             start_row = max(0, crow - max_lines + 1)
             end_row = crow + below
+            # Passing -1 as end_col is unsafe with some VTE versions: it can
+            # wrap during size calculation and trigger a multi-GiB allocation.
+            try:
+                end_col = max(0, int(term.get_column_count()) - 1)
+            except Exception:
+                end_col = 500
             try:
                 text, _attrs = term.get_text_range(
-                    start_row, 0, end_row, -1, None)
+                    start_row, 0, end_row, end_col, None)
             except TypeError:
                 text, _attrs = term.get_text_range(
                     start_row, 0, end_row, 500, lambda *_a: False)
