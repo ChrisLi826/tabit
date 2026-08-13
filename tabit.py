@@ -271,7 +271,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v1.7.3"
+APP_VERSION = "v1.7.4"
 
 def _get_tabit_repo_dir():
     try:
@@ -6657,6 +6657,20 @@ if (data !== null) {{
         on_backend_changed()  # after show_all so hide() sticks
 
     @staticmethod
+    def _ssh_tool_envs():
+        """Canonical --env names from ssh_tool (connect.py --list-envs)."""
+        try:
+            out = subprocess.check_output(
+                ["python3", SSH_TOOL_CONNECT_PY, "--list-envs"],
+                cwd=SSH_TOOL_DIR, text=True, timeout=8)
+            envs = [ln.strip() for ln in out.splitlines() if ln.strip()]
+            if envs:
+                return envs
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return ["prod"]
+
+    @staticmethod
     def _load_connect_last():
         try:
             with open(CONNECT_LAST_FILE) as f:
@@ -6694,7 +6708,7 @@ if (data !== null) {{
 
         # 2. Target Environment
         env_combo = Gtk.ComboBoxText()
-        envs = ["prod", "staging", "dev", "prod-jp", "staging-jp", "kokomo", "ehr"]
+        envs = self._ssh_tool_envs()
         cur_env = last.get("env", "prod")
         active_env_idx = 0
         for i, e in enumerate(envs):
