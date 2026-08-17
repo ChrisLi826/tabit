@@ -349,6 +349,29 @@ AI_TMUX_OPTS = (
     # Claude Code binds Ctrl+B ("run in background"), tmux's default prefix
     ("prefix", "C-a"),
 )
+USER_TMUX_CONF = os.path.expanduser("~/.tmux.conf")
+
+
+def _tmux_apply_user_conf():
+    """Load ~/.tmux.conf on the running server (mouse, history, binds).
+
+    The server may have been started with another HOME, so it never read
+    this file. source-file applies it without killing sessions.
+    Missing file: do nothing; tmux keeps its built-in defaults.
+    """
+    if not os.path.isfile(USER_TMUX_CONF):
+        return
+    try:
+        subprocess.run(
+            ["tmux", "source-file", USER_TMUX_CONF],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 KERMRC = os.path.expanduser("~/senaoenv/kermrc")
 CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "tabit")
 SCREEN_SH_PATH = os.path.join(CONFIG_DIR, "screen.sh")
@@ -1226,6 +1249,7 @@ class Tabit(Gtk.Window):
         self._agent_store = None
         GLib.idle_add(self._deferred_init_agent_store)
         GLib.timeout_add_seconds(self._AGENT_POLL_SEC, self._poll_ai_agent_statuses)
+        _tmux_apply_user_conf()
         GLib.idle_add(self._check_weekly_auto_update)
         # Second launcher click writes tabit.raise — present this window
         GLib.timeout_add(400, self._poll_raise_request)
@@ -6964,6 +6988,7 @@ if (data !== null) {{
                         raw_cmd.extend(["--magic-words", magic_words_val])
 
                     if use_tmux_val:
+                        _tmux_apply_user_conf()
                         session_name = f"conn-{sn.lower()}"
                         cmd_str = " ".join(shlex.quote(arg) for arg in raw_cmd)
                         if reconnect_val:
@@ -7126,6 +7151,7 @@ if (data !== null) {{
         chosen = {}  # filled with label/argv when the user picks a session
 
         def open_session(label, argv):
+            _tmux_apply_user_conf()
             chosen["label"] = label
             chosen["argv"] = argv
             dialog.response(Gtk.ResponseType.OK)
@@ -7507,10 +7533,14 @@ if (data !== null) {{
             f"tmux set-option -t {name} {shlex.quote(k)} {shlex.quote(v)}"
             f" >/dev/null 2>&1;"
             for k, v in AI_TMUX_OPTS)
+        src = ""
+        if os.path.isfile(USER_TMUX_CONF):
+            src = (f"tmux source-file {shlex.quote(USER_TMUX_CONF)}"
+                   f" >/dev/null 2>&1; ")
         # keep ";" a separate word — glued to the quoted command it becomes
         # part of that token and the unwrap parses "claude;" as the CLI name
         return ["/bin/sh", "-c",
-                f"tmux has-session -t {name} 2>/dev/null"
+                f"{src}tmux has-session -t {name} 2>/dev/null"
                 f" || tmux new-session -d -s {name} {inner} ;"
                 f" {opts}"
                 f" exec tmux attach-session -t {name}"]
