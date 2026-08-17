@@ -63,6 +63,11 @@ SIDEBAR_WIDTH = 200
 DEFAULT_BAUD = "115200"
 # custom sidebar icon for +AI tabs (stored as icon_name in sessions.json)
 ICON_AI = "tabit-ai"
+ICON_AI_TMUX = "tabit-ai-tmux"
+
+
+def _is_ai_icon(name):
+    return name in (ICON_AI, ICON_AI_TMUX)
 # sessions.json argv[0] for note tabs; argv[1] is path or ""
 NOTE_SENTINEL = "__tabit_note__"
 ICON_NOTE = "text-x-generic-symbolic"
@@ -97,6 +102,22 @@ AI_ICON_SVG = b"""<?xml version="1.0" encoding="UTF-8"?>
   <!-- I -->
   <path fill="#b4ccff"
     d="M9.2 4.2 H13.2 V5.3 H11.85 V11.1 H13.2 V12.2 H9.2 V11.1 H10.55 V5.3 H9.2 Z"/>
+</svg>
+"""
+# Original blue AI mark, wrapped in the purple tmux frame
+AI_TMUX_ICON_SVG = b"""<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <rect x="0.4" y="0.4" width="15.2" height="15.2" rx="3.6" ry="3.6"
+        fill="#161022" stroke="#bb9af7" stroke-width="1.6"/>
+  <g transform="translate(8,8) scale(0.74) translate(-8,-8)">
+    <rect x="0.5" y="0.5" width="15" height="15" rx="3" ry="3"
+          fill="#1a2744" stroke="#7aa2f7" stroke-width="1"/>
+    <path fill="#b4ccff"
+      d="M2.2 12.2 L4.6 4.2 L5.4 4.2 L7.8 12.2 L6.7 12.2 L6.15 10.3 L3.85 10.3
+         L3.3 12.2 Z M4.2 9.2 L5.8 9.2 L5 6.4 Z"/>
+    <path fill="#b4ccff"
+      d="M9.2 4.2 H13.2 V5.3 H11.85 V11.1 H13.2 V12.2 H9.2 V11.1 H10.55 V5.3 H9.2 Z"/>
+  </g>
 </svg>
 """
 # serial backends shown in the +Serial dialog (first = default).
@@ -271,7 +292,8 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v1.7.4"
+APP_VERSION = "v1.7.5"
+
 
 def _get_tabit_repo_dir():
     try:
@@ -964,6 +986,8 @@ DEFAULT_SETTINGS = {
     "note_wrap": True,
     "shell_inherit_cwd": False,  # new shell opens in the focused tab's path
     "ai_fresh_on_restore": False,  # restored AI tabs start fresh (no continue)
+    "ai_use_tmux": True,           # +AI dialog: run inside tmux (can uncheck)
+    "ai_claude_bypass": False,     # +AI: launch claude with --dangerously-skip-permissions
     "group_names": {},             # tab-group color -> display name
     "collapsed_groups": [],        # group colors whose member tabs are hidden
     # refresh herdr agent-detection TOMLs from herdr.dev (~daily)
@@ -1171,7 +1195,7 @@ class Tabit(Gtk.Window):
                                                sub=s.get("sub"))
                 else:
                     argv = s["argv"]
-                    if ai_fresh and s.get("icon") == ICON_AI:
+                    if ai_fresh and _is_ai_icon(s.get("icon")):
                         argv = self._ai_argv_plain(argv)  # no continue/resume
                     r = self._add_session(s["label"], argv, s["icon"],
                                           s.get("sub"), s.get("cwd"),
@@ -1314,11 +1338,12 @@ class Tabit(Gtk.Window):
 
     @staticmethod
     def _session_icon(icon_name):
-        if icon_name == ICON_AI:
+        if _is_ai_icon(icon_name):
+            svg = AI_TMUX_ICON_SVG if icon_name == ICON_AI_TMUX else AI_ICON_SVG
             try:
                 loader = GdkPixbuf.PixbufLoader.new_with_type("svg")
                 loader.set_size(16, 16)
-                loader.write(AI_ICON_SVG)
+                loader.write(svg)
                 loader.close()
                 return Gtk.Image.new_from_pixbuf(loader.get_pixbuf())
             except GLib.Error:
@@ -1331,6 +1356,22 @@ class Tabit(Gtk.Window):
         if cls:
             img.get_style_context().add_class(cls)
         return img
+
+    def _set_row_icon(self, row, icon_name):
+        """Swap the sidebar icon in place (AI ↔ AI+tmux)."""
+        if getattr(row, "icon_name", None) == icon_name and getattr(row, "icon_img", None):
+            return
+        new = self._session_icon(icon_name)
+        old = getattr(row, "icon_img", None)
+        if old is not None:
+            parent = old.get_parent()
+            if parent is not None:
+                parent.remove(old)
+                parent.pack_start(new, False, False, 0)
+                parent.reorder_child(new, 1)
+                new.show()
+        row.icon_img = new
+        row.icon_name = icon_name
 
     def _make_sidebar_row(self, label, sub, icon_name, tooltip):
         """Build the shared left-tab chrome; caller fills row.page / kind."""
@@ -1346,7 +1387,8 @@ class Tabit(Gtk.Window):
         group_bar.set_size_request(4, -1)
         group_bar.get_style_context().add_class("group-bar")
         box.pack_start(group_bar, False, False, 0)
-        box.pack_start(self._session_icon(icon_name), False, False, 0)
+        icon_img = self._session_icon(icon_name)
+        box.pack_start(icon_img, False, False, 0)
         # L/R after icon when this session is in a content pane (split mode)
         pin_badge = Gtk.Label(label="")
         pin_badge.get_style_context().add_class("pin-badge")
@@ -1396,6 +1438,7 @@ class Tabit(Gtk.Window):
         row.title_label = title
         row.sub_text = sub
         row.icon_name = icon_name
+        row.icon_img = icon_img
         row.subtitle = subtitle
         row.dot = dot
         row.pin_badge = pin_badge
@@ -1524,8 +1567,16 @@ class Tabit(Gtk.Window):
         # the right — a Gtk.Scrollbar bound to the terminal's own vadjustment
         # (the same approach gnome-terminal uses) rather than a ScrolledWindow,
         # which would fight VTE's built-in scroll handling.
+        if sub and isinstance(sub, str) and sub.endswith(" [tmux]"):
+            sub = sub[:-7].rstrip()
+            if _is_ai_icon(icon_name):
+                icon_name = ICON_AI_TMUX
         row = self._make_sidebar_row(label, sub, icon_name, " ".join(argv))
         row.argv = argv
+        if _is_ai_icon(icon_name):
+            want = ICON_AI_TMUX if self._ai_tmux_unwrap(argv)[1] else ICON_AI
+            if want != icon_name:
+                self._set_row_icon(row, want)
         row.kind = "term"
         row.term = term
         row.pid = None
@@ -1547,10 +1598,14 @@ class Tabit(Gtk.Window):
         page.pack_start(self._build_cmd_bar(row), False, False, 0)
         self._place_tab_row(row, page)
 
+        if not (cwd and os.path.isdir(cwd)) and _is_ai_icon(icon_name):
+            parsed = self._ai_cd_path(argv)
+            if parsed and os.path.isdir(parsed):
+                cwd = parsed
         workdir = cwd if cwd and os.path.isdir(cwd) else GLib.get_home_dir()
         term.connect("child-exited", self._on_child_exited, row)
         term.connect("contents-changed", self._on_activity, row)
-        if icon_name == ICON_AI:
+        if _is_ai_icon(icon_name):
             # Episode + display state live in agent_status (pure module).
             as_ = self._agent_status_mod()
             row._agent_window_title = ""
@@ -3886,13 +3941,13 @@ if (data !== null) {{
         row.subtitle.set_text("exited")
         row.subtitle.set_no_show_all(False)
         row.subtitle.show()
-        if getattr(row, "icon_name", None) == ICON_AI:
+        if _is_ai_icon(getattr(row, "icon_name", None)):
             self._set_agent_status(row, "exited")
 
     def _on_activity(self, _term, row):
         # Only AI tabs show status chrome; no orange activity dots on
         # serial / shell / command / tmux / connect.
-        if getattr(row, "icon_name", None) == ICON_AI:
+        if _is_ai_icon(getattr(row, "icon_name", None)):
             # PTY timestamp only — does NOT enter working by itself (user
             # keystrokes also fire contents-changed on VTE).
             ep = getattr(row, "_agent_episode", None)
@@ -3911,7 +3966,7 @@ if (data !== null) {{
             row._agent_window_title = term.get_window_title() or ""
         except Exception:
             row._agent_window_title = ""
-        if getattr(row, "icon_name", None) == ICON_AI:
+        if _is_ai_icon(getattr(row, "icon_name", None)):
             self._schedule_agent_status(row)
 
     # --- AI agent status --------------------------------------------------
@@ -3931,7 +3986,7 @@ if (data !== null) {{
         self._agent_status_busy = True
         try:
             for r in self._session_rows():
-                if (getattr(r, "icon_name", None) == ICON_AI
+                if (_is_ai_icon(getattr(r, "icon_name", None))
                         and not getattr(r, "dead", False)
                         and getattr(r, "term", None) is not None):
                     self._update_agent_status(r)
@@ -3942,7 +3997,7 @@ if (data !== null) {{
     def _refresh_ai_status_widgets(self):
         """After show_all/relayout: re-apply which status widget is visible."""
         for r in self._session_rows():
-            if getattr(r, "icon_name", None) != ICON_AI:
+            if not _is_ai_icon(getattr(r, "icon_name", None)):
                 continue
             st = getattr(r, "agent_status", None)
             if not st:
@@ -4159,7 +4214,7 @@ if (data !== null) {{
         by_group = {}  # color -> status -> [rows]
 
         for r in self._session_rows():
-            if getattr(r, "icon_name", None) != ICON_AI:
+            if not _is_ai_icon(getattr(r, "icon_name", None)):
                 continue
             st = getattr(r, "agent_status", None)
             if st not in self._AI_ATTENTION_ORDER:
@@ -4587,7 +4642,7 @@ if (data !== null) {{
     def _update_agent_status(self, row):
         if row is None or row.get_parent() is None:
             return
-        if getattr(row, "icon_name", None) != ICON_AI:
+        if not _is_ai_icon(getattr(row, "icon_name", None)):
             return
         as_ = self._agent_status_mod()
         if getattr(row, "dead", False):
@@ -5145,7 +5200,7 @@ if (data !== null) {{
 
     def _mark_ai_viewed(self, row):
         """Clear sticky ✔ when the session is shown in either pane."""
-        if row is None or getattr(row, "icon_name", None) != ICON_AI:
+        if row is None or not _is_ai_icon(getattr(row, "icon_name", None)):
             return
         as_ = self._agent_status_mod()
         disp = getattr(row, "_agent_display", None)
@@ -6182,7 +6237,7 @@ if (data !== null) {{
         pop.set_position(Gtk.PositionType.RIGHT)
         pop.set_modal(True)
 
-        is_ai = (getattr(row, "icon_name", None) == ICON_AI)
+        is_ai = _is_ai_icon(getattr(row, "icon_name", None))
         # Ask the argv, do not pattern-match it: a plain AI tab reads
         # `cd <path> || exit 1; exec cli`, so testing for " || " ticked the box
         # on every AI tab. Stripping the tries changes the argv only when the
@@ -6271,13 +6326,25 @@ if (data !== null) {{
                     else:
                         tries = []
 
-                    new_argv = self._ai_argv(cli_val, path_val, tries)
+                    new_argv = self._ai_argv(
+                        cli_val, path_val, tries,
+                        bypass=self._ai_has_bypass(row.argv))
                     if want_tmux:
                         new_argv = self._ai_tmux_argv(
                             new_argv,
                             cur_session
-                            or self._ai_tmux_session(cli_val, path_val))
+                            or self._ai_tmux_session(
+                                cli_val, path_val,
+                                unique=not resume_chk.get_active()))
                     row.argv = new_argv
+                    self._set_row_icon(
+                        row, ICON_AI_TMUX if want_tmux else ICON_AI)
+                    shown_path = self._ai_sub(path_val)
+                    if shown_path:
+                        row.sub_text = shown_path
+                        row.subtitle.set_text(shown_path)
+                        row.subtitle.set_no_show_all(False)
+                        row.subtitle.show()
 
             if name:
                 if getattr(row, "kind", None) == "note":
@@ -6935,6 +7002,61 @@ if (data !== null) {{
                 names.append(m.group(1))
         return names
 
+    @staticmethod
+    def _copy_to_clipboard(text):
+        if not text:
+            return
+        clip = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        clip.set_text(text, -1)
+        clip.store()
+
+    def _clear_copied_flash(self):
+        fn = getattr(self, "_copied_flash", None)
+        self._copied_flash = None
+        if fn:
+            fn()
+
+    def _copy_name_button(self, name):
+        """Copy-icon button; flashes a dim 'copied' for 3s. No focus ring."""
+        wrap = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        btn = Gtk.Button.new_from_icon_name("edit-copy-symbolic",
+                                            Gtk.IconSize.MENU)
+        btn.set_relief(Gtk.ReliefStyle.NONE)
+        btn.set_can_focus(False)
+        btn.set_focus_on_click(False)
+        btn.set_tooltip_text("Copy session name")
+        lab = Gtk.Label(label="copied")
+        lab.get_style_context().add_class("session-sub")
+        lab.set_no_show_all(True)
+        lab.hide()
+        timer = {"id": None}
+
+        def hide_flash():
+            if timer["id"] is not None:
+                GLib.source_remove(timer["id"])
+                timer["id"] = None
+            lab.hide()
+            btn.show()
+
+        def on_timeout():
+            if getattr(self, "_copied_flash", None) is hide_flash:
+                self._copied_flash = None
+            hide_flash()
+            return False
+
+        def on_click(_b):
+            self._clear_copied_flash()
+            self._copy_to_clipboard(name)
+            btn.hide()
+            lab.show()
+            self._copied_flash = hide_flash
+            timer["id"] = GLib.timeout_add(3000, on_timeout)
+
+        btn.connect("clicked", on_click)
+        wrap.pack_start(btn, False, False, 0)
+        wrap.pack_start(lab, False, False, 0)
+        return wrap
+
     def _confirm_kill(self, parent, text):
         d = Gtk.MessageDialog(
             transient_for=parent, modal=True,
@@ -7029,6 +7151,7 @@ if (data !== null) {{
                 refresh()
 
         def refresh():
+            self._clear_copied_flash()
             for c in listbox.get_children():
                 listbox.remove(c)
             sessions = self._tmux_sessions()
@@ -7043,17 +7166,24 @@ if (data !== null) {{
                 nl.set_ellipsize(Pango.EllipsizeMode.END)
                 row.pack_start(nl, True, True, 0)
                 att = Gtk.Button(label="Attach")
+                att.set_can_focus(False)
+                att.set_focus_on_click(False)
+                copy = self._copy_name_button(name)
                 ren = Gtk.Button.new_from_icon_name("document-edit-symbolic",
                                                     Gtk.IconSize.MENU)
                 ren.set_tooltip_text("Rename")
+                ren.set_can_focus(False)
+                ren.set_focus_on_click(False)
                 kill = Gtk.Button.new_from_icon_name("user-trash-symbolic",
                                                      Gtk.IconSize.MENU)
                 kill.set_tooltip_text("Kill session")
+                kill.set_can_focus(False)
+                kill.set_focus_on_click(False)
                 att.connect("clicked", lambda _b, n=name: open_session(
                     n, ["tmux", "new-session", "-A", "-s", n]))
                 ren.connect("clicked", lambda _b, n=name: do_rename(n))
                 kill.connect("clicked", lambda _b, n=name: do_kill(n))
-                for b in (att, ren, kill):
+                for b in (att, copy, ren, kill):
                     row.pack_start(b, False, False, 0)
                 listbox.pack_start(row, False, False, 0)
             listbox.show_all()
@@ -7209,10 +7339,56 @@ if (data !== null) {{
         return [p.strip() for p in text.split("||") if p.strip()]
 
     @staticmethod
-    def _ai_argv(cli, path, tries=None):
+    def _ai_is_claude(cli):
+        return os.path.basename(cli.rstrip("/")) == "claude"
+
+    # Interactive Claude stays in bypass only if launched with this flag.
+    # `--permission-mode bypassPermissions` also starts bypass in -p tests,
+    # but mid-session the mode is unavailable without this one.
+    CLAUDE_BYPASS_FLAGS = ("--dangerously-skip-permissions",)
+
+    @classmethod
+    def _ai_bypass_tokens(cls, cli, enabled):
+        if enabled and cls._ai_is_claude(cli):
+            return list(cls.CLAUDE_BYPASS_FLAGS)
+        return []
+
+    @staticmethod
+    def _ai_strip_bypass_tokens(tokens):
+        out = []
+        i = 0
+        while i < len(tokens):
+            t = tokens[i]
+            if t == "--dangerously-skip-permissions":
+                i += 1
+                continue
+            if t == "--permission-mode" and i + 1 < len(tokens) \
+                    and tokens[i + 1] == "bypassPermissions":
+                i += 2
+                continue
+            if t.startswith("--permission-mode=") and \
+                    t.split("=", 1)[1] == "bypassPermissions":
+                i += 1
+                continue
+            out.append(t)
+            i += 1
+        return out
+
+    @classmethod
+    def _ai_has_bypass(cls, argv):
+        if not argv:
+            return False
+        inner, _sess = cls._ai_tmux_unwrap(argv)
+        blob = inner[2] if len(inner) == 3 else " ".join(inner)
+        return "--dangerously-skip-permissions" in blob
+
+    @classmethod
+    def _ai_argv(cls, cli, path, tries=None, bypass=False):
         # For each try string T: run `cli T`; if all fail, plain `cli`.
         c = shlex.quote(cli)
         d = shlex.quote(path)
+        tail = " ".join(shlex.quote(t) for t in cls._ai_bypass_tokens(cli, bypass))
+        tail = f" {tail}" if tail else ""
         parts = [f"cd {d} || exit 1"]
         cmds = []
         for t in tries or []:
@@ -7221,12 +7397,12 @@ if (data !== null) {{
                 continue
             # quote each token so user can write: resume --last
             try:
-                tokens = shlex.split(t)
+                tokens = cls._ai_strip_bypass_tokens(shlex.split(t))
             except ValueError:
                 tokens = t.split()
             extra = " ".join(shlex.quote(tok) for tok in tokens)
-            cmds.append(f"{c} {extra}")
-        cmds.append(f"exec {c}")
+            cmds.append(f"{c} {extra}{tail}" if extra else f"{c}{tail}")
+        cmds.append(f"exec {c}{tail}")
         parts.append(" || ".join(cmds))
         return ["/bin/sh", "-c", "; ".join(parts)]
 
@@ -7240,24 +7416,53 @@ if (data !== null) {{
         try:
             out = subprocess.run(
                 ["tmux", "list-sessions", "-F",
-                 "#{session_name}\t#{session_path}\t#{session_attached}"],
+                 "#{session_name}\t#{pane_current_path}\t#{session_attached}"],
                 capture_output=True, text=True, timeout=2)
         except (OSError, subprocess.SubprocessError):
             return []
         if out.returncode != 0:  # no server / no sessions
             return []
+        prefix = "ai-"
         rows = []
         for line in out.stdout.splitlines():
             parts = line.split("\t")
-            if len(parts) < 3 or not parts[0].startswith("ai-"):
+            if len(parts) < 3 or not parts[0].startswith(prefix):
                 continue
             name = parts[0]
-            # ai-<cli>-<folder>-<digest>
-            bits = name.split("-")
-            cli = bits[1] if len(bits) > 2 else "ai"
+            rest = name[len(prefix):]
+            bits = rest.split("-")
+            cli = bits[0] if bits and bits[0] else "ai"
             rows.append((name, cli, parts[1],
                          parts[2] not in ("", "0")))
         return rows
+
+    @classmethod
+    def _ai_cd_path(cls, argv):
+        """Working dir encoded as `cd PATH || exit 1; ...` in an AI argv."""
+        if not argv:
+            return None
+        inner, _sess = cls._ai_tmux_unwrap(argv)
+        if len(inner) != 3 or inner[0] != "/bin/sh":
+            return None
+        cmd = inner[2]
+        if not cmd.startswith("cd "):
+            return None
+        rest = cmd[3:]
+        for sep in (" || exit 1; ", " || exit 1;"):
+            if sep in rest:
+                rest = rest.split(sep, 1)[0]
+                break
+        try:
+            got = shlex.split(rest)[0]
+        except Exception:
+            got = rest.strip().strip("'\"")
+        return got or None
+
+    def _ai_sub(self, path):
+        """Sidebar subtitle for an AI tab: short path, no [tmux] tag."""
+        if not path:
+            return ""
+        return self._short_path(os.path.expanduser(path))
 
     @staticmethod
     def _short_path(path):
@@ -7269,14 +7474,21 @@ if (data !== null) {{
         return path if len(path) <= 34 else "…" + path[-33:]
 
     @staticmethod
-    def _ai_tmux_session(cli, path):
-        """Stable tmux name for this CLI+folder, so reopening reattaches."""
+    def _ai_tmux_session(cli, path, unique=False):
+        """tmux name for this CLI+folder.
+
+        Stable so resume/reopen reattaches. unique=True (resume unchecked)
+        adds a suffix so a new agent starts and the old session is left alone.
+        """
         base = os.path.basename(os.path.normpath(path)) or "home"
         slug = re.sub(r"[^A-Za-z0-9_-]", "-", f"{cli}-{base}")[:32].strip("-")
         # tmux rejects "." and ":" in names; the digest keeps two folders with
         # the same basename apart
         digest = f"{abs(hash((cli, os.path.normpath(path)))):x}"[:6]
-        return f"ai-{slug}-{digest}"
+        name = f"ai-{slug}-{digest}"
+        if unique:
+            name = f"{name}-{os.urandom(2).hex()}"
+        return name
 
     @classmethod
     def _ai_tmux_argv(cls, argv, session):
@@ -7321,7 +7533,9 @@ if (data !== null) {{
             except ValueError:
                 continue
             if len(toks) > 1:
-                out.append(" ".join(toks[1:]))
+                rest = Tabit._ai_strip_bypass_tokens(toks[1:])
+                if rest:
+                    out.append(" ".join(rest))
         return out
 
     @classmethod
@@ -7333,7 +7547,7 @@ if (data !== null) {{
         string search finds the inner markers and parses the wrong thing.
         """
         if (len(argv) != 3 or argv[0] != "/bin/sh"
-                or "tmux has-session" not in argv[2]):
+                or "tmux new-session" not in argv[2]):
             return argv, None
         try:
             toks = shlex.split(argv[2])
@@ -7684,12 +7898,32 @@ if (data !== null) {{
 
         tmux_chk = Gtk.CheckButton(
             label="Run inside tmux session (survives tabit restart)")
-        tmux_chk.set_active(bool(last.get("use_tmux", False)))
+        tmux_chk.set_active(bool(self._load_settings().get("ai_use_tmux", True)))
         tmux_chk.set_tooltip_text(
             "The agent keeps running when tabit closes; reopening the tab "
             "reattaches instead of starting over.\n"
+            "Default comes from Settings → +AI run in tmux; uncheck here "
+            "for this session only.\n"
             "tabit sets status off / title passthrough / prefix C-a on that "
             "session so the AI status icons keep working.")
+        bypass_chk = Gtk.CheckButton(
+            label="Claude: bypass permissions (--dangerously-skip-permissions)")
+        bypass_chk.set_active(
+            bool(self._load_settings().get("ai_claude_bypass", False)))
+        bypass_chk.set_tooltip_text(
+            "Launch claude with --dangerously-skip-permissions so the tab "
+            "starts in bypass (not auto). Uncheck here for this session.")
+
+        def update_bypass_visible(*_a):
+            tool = (cli.get_active_text() or "").strip()
+            if self._ai_is_claude(tool):
+                bypass_chk.set_no_show_all(False)
+                bypass_chk.show()
+            else:
+                bypass_chk.set_no_show_all(True)
+                bypass_chk.hide()
+
+        cli.connect("changed", update_bypass_visible)
 
         grid.attach(Gtk.Label(label="CLI", xalign=0), 0, 0, 1, 1)
         grid.attach(cli_box, 1, 0, 1, 1)
@@ -7700,10 +7934,14 @@ if (data !== null) {{
                            margin_top=8)
 
         def attach_session(name, cli_name, spath):
-            inner = self._ai_argv(cli_name, spath, [])
+            inner = self._ai_argv(
+                cli_name, spath, [],
+                bypass=self._load_settings().get("ai_claude_bypass", False))
+            argv = self._ai_tmux_argv(inner, name)
             self._add_session(
-                cli_name, self._ai_tmux_argv(inner, name), ICON_AI,
-                sub=f"{self._short_path(spath)} [tmux]")
+                cli_name, argv, ICON_AI_TMUX,
+                sub=self._ai_sub(spath),
+                cwd=spath if spath and os.path.isdir(spath) else None)
             dialog.response(Gtk.ResponseType.CANCEL)
 
         def kill_session(name):
@@ -7714,6 +7952,7 @@ if (data !== null) {{
             refresh_live()
 
         def refresh_live():
+            self._clear_copied_flash()
             for c in live_box.get_children():
                 live_box.remove(c)
             rows = self._ai_tmux_sessions()
@@ -7736,16 +7975,22 @@ if (data !== null) {{
                     tag.set_tooltip_text("A tab is attached to this session")
                     r.pack_start(tag, False, False, 0)
                 att = Gtk.Button(label="Attach")
+                att.set_can_focus(False)
+                att.set_focus_on_click(False)
                 att.set_tooltip_text("Open this running agent in a new tab")
                 att.connect("clicked",
                             lambda _b, n=name, c=cli_name, p=spath:
                             attach_session(n, c, p))
+                copy = self._copy_name_button(name)
                 kill = Gtk.Button.new_from_icon_name("user-trash-symbolic",
                                                      Gtk.IconSize.MENU)
                 kill.set_relief(Gtk.ReliefStyle.NONE)
+                kill.set_can_focus(False)
+                kill.set_focus_on_click(False)
                 kill.set_tooltip_text("Kill this session (the agent stops)")
                 kill.connect("clicked", lambda _b, n=name: kill_session(n))
                 r.pack_start(att, False, False, 0)
+                r.pack_start(copy, False, False, 0)
                 r.pack_start(kill, False, False, 0)
                 live_box.pack_start(r, False, False, 0)
             live_box.show_all()
@@ -7756,10 +8001,11 @@ if (data !== null) {{
         grid.attach(Gtk.Label(label="Session ID", xalign=0), 0, 3, 1, 1)
         grid.attach(sid, 1, 3, 1, 1)
         grid.attach(tmux_chk, 1, 4, 1, 1)
-        grid.attach(try_hint, 0, 5, 2, 1)
+        grid.attach(bypass_chk, 1, 5, 1, 1)
+        grid.attach(try_hint, 0, 6, 2, 1)
         grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
-                    0, 6, 2, 1)
-        grid.attach(live_box, 0, 7, 2, 1)
+                    0, 7, 2, 1)
+        grid.attach(live_box, 0, 8, 2, 1)
         dialog.get_content_area().add(grid)
         self._dialog_enter_is_ok(dialog)
 
@@ -7773,13 +8019,19 @@ if (data !== null) {{
                     if resume_chk.get_active():
                         tries = self._ai_tries_with_id(
                             tool, cli_tries(tool), sid.get_text())
-                    short = cwd if len(cwd) <= 28 else "…" + cwd[-27:]
-                    argv = self._ai_argv(tool, cwd, tries)
+                    argv = self._ai_argv(
+                        tool, cwd, tries,
+                        bypass=bypass_chk.get_active()
+                        and self._ai_is_claude(tool))
+                    icon = ICON_AI
                     if tmux_chk.get_active():
                         argv = self._ai_tmux_argv(
-                            argv, self._ai_tmux_session(tool, cwd))
-                        short = f"{short} [tmux]"
-                    self._add_session(tool, argv, ICON_AI, sub=short)
+                            argv, self._ai_tmux_session(
+                                tool, cwd,
+                                unique=not resume_chk.get_active()))
+                        icon = ICON_AI_TMUX
+                    self._add_session(tool, argv, icon,
+                                      sub=self._ai_sub(cwd), cwd=cwd)
                     self._save_ai_last(tool, cwd,
                                        use_tmux=tmux_chk.get_active())
             self._open_dialogs.discard(dlg)
@@ -7787,6 +8039,7 @@ if (data !== null) {{
 
         dialog.connect("response", _on_ai_response)
         dialog.show_all()
+        update_bypass_visible()
 
     # --- keyboard -----------------------------------------------------------
 
@@ -8284,6 +8537,7 @@ if (data !== null) {{
             candidates.append(os.path.join(tabit_dir, "sudo_askpass.py"))
         candidates.extend([
             os.path.expanduser("~/.local/share/tabit/sudo_askpass.py"),
+            os.path.expanduser("~/.local/share/tabit/sudo_askpass.py"),
             os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "sudo_askpass.py"),
             os.path.expanduser("~/tabit/sudo_askpass.py"),
@@ -8696,6 +8950,18 @@ if (data !== null) {{
         ai_fresh.set_tooltip_text(
             "When tabit reopens, restored AI tabs launch the CLI without "
             "--continue / resume. Default is off (they continue).")
+        ai_tmux = Gtk.CheckButton(
+            label="+AI run in tmux (default on)")
+        ai_tmux.set_active(bool(s.get("ai_use_tmux", True)))
+        ai_tmux.set_tooltip_text(
+            "Pre-ticks “Run inside tmux” in the +AI dialog. "
+            "You can still uncheck it there for one session. Default is on.")
+        ai_bypass = Gtk.CheckButton(
+            label="Claude +AI: --dangerously-skip-permissions (bypass)")
+        ai_bypass.set_active(bool(s.get("ai_claude_bypass", False)))
+        ai_bypass.set_tooltip_text(
+            "Pre-ticks the +AI bypass checkbox so new Claude tabs start "
+            "in bypass instead of auto. Uncheck in +AI for one session.")
 
         ver_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         
@@ -8737,6 +9003,8 @@ if (data !== null) {{
         box.pack_start(side_box, False, False, 0)
         box.pack_start(ai_head, False, False, 0)
         box.pack_start(ai_fresh, False, False, 0)
+        box.pack_start(ai_tmux, False, False, 0)
+        box.pack_start(ai_bypass, False, False, 0)
         box.pack_start(hint, False, False, 0)
         update_preview()
 
@@ -8760,6 +9028,8 @@ if (data !== null) {{
                                      "note_wrap": wrap.get_active(),
                                      "shell_inherit_cwd": inherit.get_active(),
                                      "ai_fresh_on_restore": ai_fresh.get_active(),
+                                     "ai_use_tmux": ai_tmux.get_active(),
+                                     "ai_claude_bypass": ai_bypass.get_active(),
                                      "ui_font_size": ui_sz,
                                      "term_font": t_font,
                                      "term_font_size": t_sz,
