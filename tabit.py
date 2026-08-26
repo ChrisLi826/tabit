@@ -1026,6 +1026,9 @@ DEFAULT_SETTINGS = {
     "ui_font_size": 10,
     "term_font": "Monospace",
     "term_font_size": 12,
+    # VTE cell-height multiplier.  A taller cell creates vertical breathing
+    # room while keeping glyphs, cursor, selection, and terminal rows aligned.
+    "term_line_spacing": 1.20,
 }
 
 
@@ -1549,6 +1552,15 @@ class Tabit(Gtk.Window):
         size = settings.get("term_font_size", 12)
         font_desc = Pango.FontDescription.from_string(f"{family} {size}")
         term.set_font(font_desc)
+        try:
+            line_spacing = float(settings.get("term_line_spacing", 1.20))
+        except (TypeError, ValueError):
+            line_spacing = 1.20
+        # VTE accepts 1.0–2.0.  Clamp hand-edited settings rather than letting
+        # an invalid value break terminal creation.
+        line_spacing = max(1.0, min(2.0, line_spacing))
+        if hasattr(term, "set_cell_height_scale"):
+            term.set_cell_height_scale(line_spacing)
 
     def _apply_editor_font(self, font_family=None, font_size=None):
         if font_family is None or font_size is None:
@@ -8928,6 +8940,21 @@ if (data !== null) {{
         term_size_box.pack_start(term_size_lbl, False, False, 0)
         term_size_box.pack_start(term_size_spin, False, False, 0)
 
+        term_spacing_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        term_spacing_lbl = Gtk.Label(label="Terminal line spacing (%):", xalign=0)
+        try:
+            cur_line_spacing = float(s.get("term_line_spacing", 1.20))
+        except (TypeError, ValueError):
+            cur_line_spacing = 1.20
+        cur_line_spacing = max(1.0, min(2.0, cur_line_spacing))
+        term_spacing_spin = make_custom_spin(
+            int(round(cur_line_spacing * 100)), 100, 200)
+        term_spacing_spin.set_tooltip_text(
+            "100% is VTE's compact default; 120% adds 20% more vertical "
+            "space without changing the font size.")
+        term_spacing_box.pack_start(term_spacing_lbl, False, False, 0)
+        term_spacing_box.pack_start(term_spacing_spin, False, False, 0)
+
         head = Gtk.Label(xalign=0)
         head.set_markup("<b>Notes</b>")
         wrap = Gtk.CheckButton(label="Word wrap notes (recommended)")
@@ -9024,6 +9051,7 @@ if (data !== null) {{
         box.pack_start(ui_font_box, False, False, 0)
         box.pack_start(term_font_box, False, False, 0)
         box.pack_start(term_size_box, False, False, 0)
+        box.pack_start(term_spacing_box, False, False, 0)
         box.pack_start(demo_frame, False, False, 0)
         box.pack_start(head, False, False, 0)
         box.pack_start(wrap, False, False, 0)
@@ -9050,6 +9078,12 @@ if (data !== null) {{
                     t_sz = int(term_size_spin.entry.get_text() or "12")
                 except ValueError:
                     t_sz = 12
+                try:
+                    t_line_spacing = int(
+                        term_spacing_spin.entry.get_text() or "120") / 100.0
+                except ValueError:
+                    t_line_spacing = 1.20
+                t_line_spacing = max(1.0, min(2.0, t_line_spacing))
                 side_id = side_combo.get_active_id() or "left"
                 if side_id not in ("left", "right", "center"):
                     side_id = "left"
@@ -9063,6 +9097,7 @@ if (data !== null) {{
                                      "ui_font_size": ui_sz,
                                      "term_font": t_font,
                                      "term_font_size": t_sz,
+                                     "term_line_spacing": t_line_spacing,
                                      "sidebar_position": side_id})
                 self._sidebar_position = side_id
                 self._apply_sidebar_layout()

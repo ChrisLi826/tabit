@@ -48,7 +48,7 @@ password for apt).
 | `+ Shell` | New tab running your login shell |
 | `+ AI` | Pick AI CLI and working directory; an optional **Session ID** resumes that exact session (tried first, normal continue/resume stays as fallback). **Run inside tmux** keeps the agent alive across restarts and lists the ones still running. **Edit list…** manages CLI names and per-CLI continue/resume tries (`~/.config/tabit/ai_clis.json`) |
 | `+ Note` | GtkSourceView editor + **Markdown Preview** (WebKit); bottom tools: Base64 / JSON Format; wrap in **Settings…**; huge-line guards |
-| `Settings…` | Note wrap default and other prefs (`settings.json`) |
+| `Settings…` | Theme, fonts, terminal line spacing, note wrap, and other prefs (`settings.json`) |
 | `+ Command` | Run anything (e.g. `ssh root@192.168.1.1`) in a new tab |
 | `+ tmux` | Attach to a running tmux session or create one; rename / kill sessions from the list |
 | Click a tab | Switch to that session |
