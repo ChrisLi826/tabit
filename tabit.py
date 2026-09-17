@@ -2767,16 +2767,23 @@ if (data !== null) {{
 
         chk_case = Gtk.CheckButton(label="Match Case")
         chk_word = Gtk.CheckButton(label="Whole Word")
+        chk_highlight = Gtk.CheckButton(label="Highlight")
+        chk_highlight.set_active(True)
+        chk_highlight.set_tooltip_text("Highlight all matches")
 
         search_box.pack_start(entry, False, False, 0)
         search_box.pack_start(btn_prev, False, False, 0)
         search_box.pack_start(btn_next, False, False, 0)
         search_box.pack_start(chk_case, False, False, 0)
         search_box.pack_start(chk_word, False, False, 0)
+        search_box.pack_start(chk_highlight, False, False, 0)
         search_box.pack_start(btn_close, False, False, 0)
 
         chk_case.connect("toggled", lambda b: search_settings.set_case_sensitive(b.get_active()))
         chk_word.connect("toggled", lambda b: search_settings.set_at_word_boundaries(b.get_active()))
+        chk_highlight.connect(
+            "toggled",
+            lambda b: search_context.set_highlight(b.get_active()))
 
         lbl_status = Gtk.Label(label="")
         lbl_status.get_style_context().add_class("session-sub")
@@ -2788,6 +2795,8 @@ if (data !== null) {{
             search_settings.set_search_text(text or None)
             if text:  # jump to the first match as you type
                 self._search_find(row, forward=True)
+            else:
+                self._update_note_search_status(row)
 
         entry.connect("search-changed", on_search_changed)
 
@@ -2805,6 +2814,7 @@ if (data !== null) {{
             search_box.set_no_show_all(True)
             search_box.hide()
             search_settings.set_search_text(None)
+            lbl_status.set_text("")
             view.grab_focus()
 
         btn_close.connect("clicked", on_close)
@@ -2821,22 +2831,85 @@ if (data !== null) {{
         entry.connect("key-press-event", on_entry_key)
 
         def on_occurrences_changed(*_):
-            cnt = search_context.get_occurrences_count()
-            if not search_settings.get_search_text():
-                lbl_status.set_text("")
-            elif cnt == 0:
-                lbl_status.set_text("No matches")
-            else:
-                lbl_status.set_text(f"{cnt} matches")
+            self._update_note_search_status(row)
         search_context.connect("notify::occurrences-count", on_occurrences_changed)
 
         search_box.set_no_show_all(True)
         search_box.hide()
         return search_box
 
+    def _update_note_search_status(self, row):
+        """Show current/total (e.g. 2/5) for the active Note Find match."""
+        lbl = getattr(row, "search_status_lbl", None)
+        if lbl is None or not hasattr(row, "search_context"):
+            return
+        settings = row.search_settings
+        ctx = row.search_context
+        if not settings.get_search_text():
+            lbl.set_text("")
+            return
+        cnt = ctx.get_occurrences_count()
+        if cnt == 0:
+            lbl.set_text("No matches")
+            return
+        if cnt < 0:
+            # GtkSource still scanning the buffer
+            lbl.set_text("…")
+            return
+        bounds = row.buffer.get_selection_bounds()
+        if bounds:
+            pos = ctx.get_occurrence_position(bounds[0], bounds[1])
+            if pos > 0:
+                lbl.set_text(f"{pos}/{cnt}")
+                return
+        lbl.set_text(f"{cnt} matches")
+
     # --- terminal (VTE) search -------------------------------------------
 
+    def _term_get_all_text(self, term):
+        """Best-effort full scrollback text for Find match counting."""
+        if term is None:
+            return ""
+        text = None
+        try:
+            text, _attrs = term.get_text(None)
+        except (TypeError, GLib.Error, Exception):
+            try:
+                text, _attrs = term.get_text(lambda *_a: False)
+            except Exception:
+                return ""
+        return text or ""
+
+    def _term_count_matches(self, term, needle, case_sensitive, whole_word):
+        if not needle:
+            return 0
+        hay = self._term_get_all_text(term)
+        if not hay:
+            return 0
+        pat = re.escape(needle)
+        if whole_word:
+            pat = r"\b" + pat + r"\b"
+        flags = 0 if case_sensitive else re.IGNORECASE
+        try:
+            return len(re.findall(pat, hay, flags))
+        except re.error:
+            return 0
+
+    def _update_term_search_status(self, row, current, total):
+        lbl = getattr(row, "term_search_status_lbl", None)
+        if lbl is None:
+            return
+        if not getattr(row, "term_search_entry", None) or not row.term_search_entry.get_text():
+            lbl.set_text("")
+        elif total <= 0:
+            lbl.set_text("No matches")
+        elif current > 0:
+            lbl.set_text(f"{current}/{total}")
+        else:
+            lbl.set_text(f"{total} matches")
+
     def _build_term_search_bar(self, row, term):
+        """Find bar for all VTE tabs (Shell, Serial, AI, Command, tmux, …)."""
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
                       margin=4)
         box.get_style_context().add_class("search-bar")
@@ -2851,13 +2924,23 @@ if (data !== null) {{
         btn_next.set_tooltip_text("Next occurrence")
         chk_case = Gtk.CheckButton(label="Match Case")
         chk_word = Gtk.CheckButton(label="Whole Word")
+        chk_highlight = Gtk.CheckButton(label="Highlight")
+        chk_highlight.set_active(True)
+        chk_highlight.set_tooltip_text("Highlight all matches")
         btn_close = Gtk.Button.new_from_icon_name("window-close-symbolic",
                                                   Gtk.IconSize.BUTTON)
         btn_close.set_relief(Gtk.ReliefStyle.NONE)
-        for w in (entry, btn_prev, btn_next, chk_case, chk_word, btn_close):
+        btn_close.set_tooltip_text("Close search")
+        lbl_status = Gtk.Label(label="")
+        lbl_status.get_style_context().add_class("session-sub")
+        for w in (entry, btn_prev, btn_next, chk_case, chk_word,
+                  chk_highlight, btn_close, lbl_status):
             box.pack_start(w, False, False, 0)
         row.term_search_box = box
         row.term_search_entry = entry
+        row.term_search_status_lbl = lbl_status
+        row.term_search_highlight = chk_highlight
+        row._term_match_idx = 0
 
         def apply_regex():
             text = entry.get_text()
@@ -2879,20 +2962,86 @@ if (data !== null) {{
             term.search_set_wrap_around(True)
             return True
 
-        def go_next(*_):
-            if apply_regex():
-                term.search_find_next()
+        def clear_all_match_highlight():
+            # Drop the search regex so VTE stops painting every hit, while
+            # leaving the current selection (active match) intact.
+            term.search_set_regex(None, 0)
+
+        def refresh_highlight_decoration():
+            if chk_highlight.get_active():
+                apply_regex()
+            else:
+                clear_all_match_highlight()
+
+        def go_next(*_, reset=False):
+            if reset:
+                row._term_match_idx = 0
+            text = entry.get_text()
+            if not text:
+                row._term_match_idx = 0
+                self._update_term_search_status(row, 0, 0)
+                term.search_set_regex(None, 0)
+                return
+            if not apply_regex():
+                row._term_match_idx = 0
+                self._update_term_search_status(row, 0, 0)
+                return
+            found = term.search_find_next()
+            if not chk_highlight.get_active():
+                clear_all_match_highlight()
+            total = self._term_count_matches(
+                term, text, chk_case.get_active(), chk_word.get_active())
+            if not found or total <= 0:
+                row._term_match_idx = 0
+                self._update_term_search_status(row, 0, total)
+                return
+            idx = row._term_match_idx
+            if idx <= 0 or idx >= total:
+                idx = 1
+            else:
+                idx = idx + 1
+                if idx > total:
+                    idx = 1
+            row._term_match_idx = idx
+            self._update_term_search_status(row, idx, total)
 
         def go_prev(*_):
-            if apply_regex():
-                term.search_find_previous()
+            text = entry.get_text()
+            if not text:
+                row._term_match_idx = 0
+                self._update_term_search_status(row, 0, 0)
+                term.search_set_regex(None, 0)
+                return
+            if not apply_regex():
+                row._term_match_idx = 0
+                self._update_term_search_status(row, 0, 0)
+                return
+            found = term.search_find_previous()
+            if not chk_highlight.get_active():
+                clear_all_match_highlight()
+            total = self._term_count_matches(
+                term, text, chk_case.get_active(), chk_word.get_active())
+            if not found or total <= 0:
+                row._term_match_idx = 0
+                self._update_term_search_status(row, 0, total)
+                return
+            idx = row._term_match_idx
+            if idx <= 1:
+                idx = total
+            else:
+                idx = idx - 1
+            row._term_match_idx = idx
+            self._update_term_search_status(row, idx, total)
 
-        entry.connect("search-changed", go_next)  # jump as you type
+        entry.connect("search-changed",
+                      lambda *_: go_next(reset=True))  # jump as you type
         entry.connect("activate", go_next)
         btn_next.connect("clicked", go_next)
         btn_prev.connect("clicked", go_prev)
-        chk_case.connect("toggled", go_next)
-        chk_word.connect("toggled", go_next)
+        chk_case.connect("toggled", lambda *_: go_next(reset=True))
+        chk_word.connect("toggled", lambda *_: go_next(reset=True))
+        chk_highlight.connect("toggled",
+                              lambda *_: refresh_highlight_decoration())
         row._term_find_next = go_next  # so F3 works from the terminal too
         row._term_find_prev = go_prev
 
@@ -2900,6 +3049,8 @@ if (data !== null) {{
             box.set_no_show_all(True)
             box.hide()
             term.search_set_regex(None, 0)
+            row._term_match_idx = 0
+            lbl_status.set_text("")
             term.grab_focus()
 
         btn_close.connect("clicked", on_close)
@@ -2972,10 +3123,12 @@ if (data !== null) {{
                 if res and res[0]:
                     match_start, match_end = res[1], res[2]
                 else:
+                    self._update_note_search_status(row)
                     return
 
             buf.select_range(match_start, match_end)
             row.view.scroll_to_iter(match_start, 0.0, False, 0.5, 0.5)
+        self._update_note_search_status(row)
 
     def _action_accel_label(self, action_id):
         pair = self._keys.get(action_id)
