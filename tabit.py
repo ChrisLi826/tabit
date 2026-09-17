@@ -2867,18 +2867,69 @@ if (data !== null) {{
     # --- terminal (VTE) search -------------------------------------------
 
     def _term_get_all_text(self, term):
-        """Best-effort full scrollback text for Find match counting."""
+        """Best-effort full scrollback text for Find match counting.
+
+        Prefer get_text_range_format (VTE >= 0.72). Deprecated get_text /
+        get_text_range return NULL on modern VTE when PyGObject requests the
+        attributes out-array, which made Find status stick on "No matches"
+        even while search_find_next still jumped between hits.
+        """
         if term is None:
             return ""
-        text = None
+        try:
+            _col, crow = term.get_cursor_position()
+            crow = int(crow)
+        except Exception:
+            crow = 0
+        try:
+            vis = max(1, int(term.get_row_count()))
+        except Exception:
+            vis = 24
+        try:
+            sb = max(0, int(term.get_scrollback_lines()))
+        except Exception:
+            sb = 0
+        start_row = max(0, crow - sb)
+        end_row = crow + vis
+
+        # Modern API — no attributes callback, works on VTE 0.72+.
+        if hasattr(term, "get_text_range_format") and hasattr(Vte, "Format"):
+            try:
+                text, _length = term.get_text_range_format(
+                    Vte.Format.TEXT, start_row, 0, end_row, -1)
+                if text:
+                    return text
+            except Exception:
+                pass
+
+        # Older VTE fallbacks (may still work when attributes are nullable).
+        try:
+            text, _attrs = term.get_text_range(
+                start_row, 0, end_row, -1, None)
+            if text:
+                return text
+        except TypeError:
+            try:
+                text, _attrs = term.get_text_range(
+                    start_row, 0, end_row, -1, lambda *_a: False)
+                if text:
+                    return text
+            except Exception:
+                pass
+        except (GLib.Error, Exception):
+            pass
         try:
             text, _attrs = term.get_text(None)
+            if text:
+                return text
         except (TypeError, GLib.Error, Exception):
             try:
                 text, _attrs = term.get_text(lambda *_a: False)
+                if text:
+                    return text
             except Exception:
                 return ""
-        return text or ""
+        return ""
 
     def _term_count_matches(self, term, needle, case_sensitive, whole_word):
         if not needle:
