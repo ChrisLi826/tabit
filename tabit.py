@@ -1113,7 +1113,7 @@ class Tabit(Gtk.Window):
         if HAS_SSH_TOOL:
             button_items.append(("+ Connect", ICON_CONNECT, self._on_add_connect))
         button_items.extend([
-            ("+ File", ICON_NOTE, self._on_add_note),
+            ("+ Note", ICON_NOTE, self._on_add_note),
             ("+ Command", ICON_COMMAND, self._on_add_command),
             ("+ tmux", ICON_TMUX, self._on_add_tmux),
         ])
@@ -1334,6 +1334,9 @@ class Tabit(Gtk.Window):
     def _save_sessions(self):
         data = []
         for r in self._session_rows():  # skip group-header rows
+            if getattr(r, "dead", False):
+                # Exited tabs must not resurrect as live processes on restart
+                continue
             entry = {"label": r.title_text, "sub": r.sub_text,
                      "argv": r.argv, "icon": r.icon_name}
             if getattr(r, "track_cwd", False):
@@ -3967,6 +3970,8 @@ if (data !== null) {{
         row.subtitle.show()
         if _is_ai_icon(getattr(row, "icon_name", None)):
             self._set_agent_status(row, "exited")
+        # Drop from sessions.json so a restart does not respawn this argv
+        self._save_sessions_soon()
 
     def _on_activity(self, _term, row):
         # Only AI tabs show status chrome; no orange activity dots on
@@ -6725,21 +6730,34 @@ if (data !== null) {{
                 if net:
                     dev = (host.get_text() or "").strip()
                     prt = (port.get_text() or "").strip()
-                    if dev:
-                        label = (dev.split() or [dev])[0]
-                        sub = f"{tool}:{prt}" if prt else tool
-                        self._add_session(
-                            label, self._serial_argv(tool, dev, "", prt),
-                            "network-transmit-receive-symbolic", sub=sub)
+                    if not dev:
+                        self._note_msg(
+                            Gtk.MessageType.WARNING,
+                            "Please enter a host",
+                            "Host is required for ssh/telnet serial sessions.",
+                            parent=dlg)
+                        return
+                    label = (dev.split() or [dev])[0]
+                    sub = f"{tool}:{prt}" if prt else tool
+                    self._add_session(
+                        label, self._serial_argv(tool, dev, "", prt),
+                        "network-transmit-receive-symbolic", sub=sub)
                 else:
                     dev = (combo.get_active_text() or combo.get_child().get_text() or "").strip()
                     bd = (baud.get_text() or "").strip() or DEFAULT_BAUD
-                    if dev:
-                        label = os.path.basename(dev)
-                        sub = f"{tool}:{bd}" if tool != "screen" else bd
-                        self._add_session(
-                            label, self._serial_argv(tool, dev, bd),
-                            "network-wired-symbolic", sub=sub)
+                    if not dev:
+                        self._note_msg(
+                            Gtk.MessageType.WARNING,
+                            "No serial device selected",
+                            "No /dev/ttyUSB* or /dev/ttyACM* found. "
+                            "Plug in a device or type a device path.",
+                            parent=dlg)
+                        return
+                    label = os.path.basename(dev)
+                    sub = f"{tool}:{bd}" if tool != "screen" else bd
+                    self._add_session(
+                        label, self._serial_argv(tool, dev, bd),
+                        "network-wired-symbolic", sub=sub)
             self._open_dialogs.discard(dlg)
             dlg.destroy()
 
@@ -6937,74 +6955,80 @@ if (data !== null) {{
         def _on_connect_response(dlg, resp):
             if resp == Gtk.ResponseType.OK:
                 sn = sn_entry.get_text().strip()
-                if sn:
-                    env_val = envs[env_combo.get_active()]
-                    email_val = email_entry.get_text().strip()
-                    pwd_val = pwd_entry.get_text().strip()
-                    ticket_val = ticket_entry.get_text().strip()
-                    org_val = org_entry.get_text().strip()
-                    net_val = net_entry.get_text().strip()
-                    dtype_val = dtypes[dtype_combo.get_active()]
-                    nocache_val = nocache_chk.get_active()
-                    use_tmux_val = use_tmux_chk.get_active()
-                    reconnect_val = reconnect_chk.get_active()
-                    gw_pass_val = gw_pass_entry.get_text().strip()
-                    magic_words_val = magic_words_entry.get_text().strip()
+                if not sn:
+                    self._note_msg(
+                        Gtk.MessageType.WARNING,
+                        "Please enter a serial number",
+                        "Device SN is required to open a Connect session.",
+                        parent=dlg)
+                    return
+                env_val = envs[env_combo.get_active()]
+                email_val = email_entry.get_text().strip()
+                pwd_val = pwd_entry.get_text().strip()
+                ticket_val = ticket_entry.get_text().strip()
+                org_val = org_entry.get_text().strip()
+                net_val = net_entry.get_text().strip()
+                dtype_val = dtypes[dtype_combo.get_active()]
+                nocache_val = nocache_chk.get_active()
+                use_tmux_val = use_tmux_chk.get_active()
+                reconnect_val = reconnect_chk.get_active()
+                gw_pass_val = gw_pass_entry.get_text().strip()
+                magic_words_val = magic_words_entry.get_text().strip()
 
-                    # Save last used credentials/parameters
-                    self._save_connect_last({
-                        "sn": sn,
-                        "env": env_val,
-                        "email": email_entry.get_text().strip(),
-                        "password": pwd_entry.get_text().strip(),
-                        "ticket": ticket_val,
-                        "org": org_val,
-                        "network": net_val,
-                        "device_type": dtype_val,
-                        "no_cache": nocache_val,
-                        "use_tmux": use_tmux_val,
-                        "reconnect": reconnect_val,
-                        "gateway_pass": gw_pass_val,
-                        "magic_words": magic_words_val,
-                    })
+                # Save last used credentials/parameters
+                self._save_connect_last({
+                    "sn": sn,
+                    "env": env_val,
+                    "email": email_entry.get_text().strip(),
+                    "password": pwd_entry.get_text().strip(),
+                    "ticket": ticket_val,
+                    "org": org_val,
+                    "network": net_val,
+                    "device_type": dtype_val,
+                    "no_cache": nocache_val,
+                    "use_tmux": use_tmux_val,
+                    "reconnect": reconnect_val,
+                    "gateway_pass": gw_pass_val,
+                    "magic_words": magic_words_val,
+                })
 
-                    # Build raw command args
-                    raw_cmd = ["python3", SSH_TOOL_CONNECT_PY, "--sn", sn, "--email", email_val, "--password", pwd_val]
-                    if env_val and env_val != "prod":
-                        raw_cmd.extend(["--env", env_val])
-                    if ticket_val:
-                        raw_cmd.extend(["--ticket", ticket_val])
-                    if org_val:
-                        raw_cmd.extend(["--org", org_val])
-                    if net_val:
-                        raw_cmd.extend(["--network", net_val])
-                    if dtype_val != "auto":
-                        raw_cmd.extend(["--device-type", dtype_val])
-                    if nocache_val:
-                        raw_cmd.append("--no-cache")
-                    if gw_pass_val:
-                        raw_cmd.extend(["--gateway-pass", gw_pass_val])
-                    if magic_words_val:
-                        raw_cmd.extend(["--magic-words", magic_words_val])
+                # Build raw command args
+                raw_cmd = ["python3", SSH_TOOL_CONNECT_PY, "--sn", sn, "--email", email_val, "--password", pwd_val]
+                if env_val and env_val != "prod":
+                    raw_cmd.extend(["--env", env_val])
+                if ticket_val:
+                    raw_cmd.extend(["--ticket", ticket_val])
+                if org_val:
+                    raw_cmd.extend(["--org", org_val])
+                if net_val:
+                    raw_cmd.extend(["--network", net_val])
+                if dtype_val != "auto":
+                    raw_cmd.extend(["--device-type", dtype_val])
+                if nocache_val:
+                    raw_cmd.append("--no-cache")
+                if gw_pass_val:
+                    raw_cmd.extend(["--gateway-pass", gw_pass_val])
+                if magic_words_val:
+                    raw_cmd.extend(["--magic-words", magic_words_val])
 
-                    if use_tmux_val:
-                        _tmux_apply_user_conf()
-                        session_name = f"conn-{sn.lower()}"
-                        cmd_str = " ".join(shlex.quote(arg) for arg in raw_cmd)
-                        if reconnect_val:
-                            cmd = ["sh", "-c", f"tmux kill-session -t {shlex.quote(session_name)} 2>/dev/null; exec tmux new-session -s {shlex.quote(session_name)} {shlex.quote(cmd_str + '; exec bash')}"]
-                        else:
-                            cmd = ["tmux", "new-session", "-A", "-s", session_name, f"{cmd_str}; exec bash"]
-                        icon_name = ICON_TMUX
-                        sub = f"cloud ({env_val}) [tmux]"
+                if use_tmux_val:
+                    _tmux_apply_user_conf()
+                    session_name = f"conn-{sn.lower()}"
+                    cmd_str = " ".join(shlex.quote(arg) for arg in raw_cmd)
+                    if reconnect_val:
+                        cmd = ["sh", "-c", f"tmux kill-session -t {shlex.quote(session_name)} 2>/dev/null; exec tmux new-session -s {shlex.quote(session_name)} {shlex.quote(cmd_str + '; exec bash')}"]
                     else:
-                        cmd = raw_cmd
-                        icon_name = ICON_CONNECT
-                        sub = f"cloud ({env_val})"
+                        cmd = ["tmux", "new-session", "-A", "-s", session_name, f"{cmd_str}; exec bash"]
+                    icon_name = ICON_TMUX
+                    sub = f"cloud ({env_val}) [tmux]"
+                else:
+                    cmd = raw_cmd
+                    icon_name = ICON_CONNECT
+                    sub = f"cloud ({env_val})"
 
-                    label = f"{sn} (connect)"
-                    self._add_session(label=label, argv=cmd, icon_name=icon_name,
-                                      sub=sub, cwd=SSH_TOOL_DIR)
+                label = f"{sn} (connect)"
+                self._add_session(label=label, argv=cmd, icon_name=icon_name,
+                                  sub=sub, cwd=SSH_TOOL_DIR)
 
             self._open_dialogs.discard(dlg)
             dlg.destroy()
