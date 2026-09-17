@@ -7343,20 +7343,80 @@ if (data !== null) {{
         dialog.destroy()
 
     @staticmethod
-    def _tmux_sessions():
+    def _tmux_session_category(name):
+        """Bucket a tmux session for the +tmux picker filter."""
+        if name.startswith("ai-"):
+            return "ai"
+        if name.startswith("conn-"):
+            return "connect"
+        return "other"
+
+    @staticmethod
+    def _tmux_ai_cli(name):
+        """Agent CLI encoded in `ai-{cli}-{folder}-{digest}` session names."""
+        rest = name[3:] if name.startswith("ai-") else name
+        bits = rest.split("-")
+        return bits[0] if bits and bits[0] else "ai"
+
+    @staticmethod
+    def _tmux_connect_sn(name):
+        """Serial/SN from `conn-{sn}` Connect-in-tmux sessions."""
+        if name.startswith("conn-") and len(name) > 5:
+            return name[5:]
+        return name
+
+    def _tmux_sessions(self):
+        """Live tmux sessions with category + readable label.
+
+        Each row: name, category ("ai"|"connect"|"other"), path, attached,
+        label (SN / agent·cwd — not only cryptic `conn-*` / `ai-*` names),
+        tab_label / tab_sub for Attach.
+        """
         try:
             out = subprocess.run(
-                ["tmux", "list-sessions", "-F", "#{session_name}"],
+                ["tmux", "list-sessions", "-F",
+                 "#{session_name}\t#{pane_current_path}\t#{session_attached}"],
                 capture_output=True, text=True, timeout=2)
         except (OSError, subprocess.SubprocessError):
             return []
         if out.returncode != 0:  # no server running / no sessions
             return []
-        return [s for s in out.stdout.splitlines() if s]
+        rows = []
+        for line in out.stdout.splitlines():
+            parts = line.split("\t")
+            if not parts or not parts[0]:
+                continue
+            name = parts[0]
+            path = parts[1] if len(parts) > 1 else ""
+            attached = (len(parts) > 2 and parts[2] not in ("", "0"))
+            cat = self._tmux_session_category(name)
+            short = self._short_path(path) if path else ""
+            if cat == "ai":
+                cli = self._tmux_ai_cli(name)
+                label = f"{cli} · {short}" if short else cli
+                tab_label, tab_sub = cli, short or "tmux"
+            elif cat == "connect":
+                sn = self._tmux_connect_sn(name)
+                label = sn.upper() if sn.islower() else sn
+                tab_label, tab_sub = f"{label} (connect)", "tmux"
+            else:
+                label = f"{name} · {short}" if short else name
+                tab_label, tab_sub = name, short or "tmux"
+            rows.append({
+                "name": name,
+                "category": cat,
+                "path": path,
+                "attached": attached,
+                "label": label,
+                "tab_label": tab_label,
+                "tab_sub": tab_sub,
+            })
+        return rows
 
     def _on_add_tmux(self, _btn):
         dialog = Gtk.Dialog(title="tmux sessions", transient_for=self,
                             modal=True)
+        dialog.set_default_size(520, 420)
         dialog.add_button("Close", Gtk.ResponseType.CANCEL)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
                       margin=12)
@@ -7373,15 +7433,44 @@ if (data !== null) {{
         box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
                        False, False, 0)
 
+        # category filter: All / AI / Connect / Other (M1)
+        filt_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        filt_lbl = Gtk.Label(label="Show:", xalign=0)
+        filt_lbl.get_style_context().add_class("session-sub")
+        filt_row.pack_start(filt_lbl, False, False, 0)
+        filter_state = {"value": "all"}
+        filter_radios = []
+        filter_group = None
+        for key, title in (("all", "All"), ("ai", "AI"),
+                           ("connect", "Connect"), ("other", "Other")):
+            rb = Gtk.RadioButton.new_with_label_from_widget(
+                filter_group, title)
+            if filter_group is None:
+                filter_group = rb
+            rb.set_can_focus(False)
+            filter_radios.append((key, rb))
+            filt_row.pack_start(rb, False, False, 0)
+        box.pack_start(filt_row, False, False, 0)
+
         listbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        box.pack_start(listbox, True, True, 0)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_min_content_height(180)
+        try:
+            scroll.set_max_content_height(320)
+            scroll.set_propagate_natural_height(True)
+        except AttributeError:
+            pass
+        scroll.add(listbox)
+        box.pack_start(scroll, True, True, 0)
 
         chosen = {}  # filled with label/argv when the user picks a session
 
-        def open_session(label, argv):
+        def open_session(label, argv, sub="tmux"):
             _tmux_apply_user_conf()
             chosen["label"] = label
             chosen["argv"] = argv
+            chosen["sub"] = sub
             dialog.response(Gtk.ResponseType.OK)
 
         def create_new(*_a):
@@ -7404,21 +7493,48 @@ if (data !== null) {{
                                capture_output=True)
                 refresh()
 
+        cat_titles = {"ai": "AI", "connect": "Connect", "other": "Other"}
+
         def refresh():
             self._clear_copied_flash()
             for c in listbox.get_children():
                 listbox.remove(c)
             sessions = self._tmux_sessions()
+            want = filter_state["value"]
+            if want != "all":
+                sessions = [s for s in sessions if s["category"] == want]
             if not sessions:
-                lbl = Gtk.Label(label="No running tmux sessions.", xalign=0)
+                empty = ("No running tmux sessions." if want == "all"
+                         else f"No {cat_titles.get(want, want)} tmux sessions.")
+                lbl = Gtk.Label(label=empty, xalign=0)
                 lbl.get_style_context().add_class("session-sub")
                 listbox.pack_start(lbl, False, False, 0)
-            for name in sessions:
+            for sess in sessions:
+                name = sess["name"]
                 row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-                nl = Gtk.Label(label=name, xalign=0)
+                # primary readable label; cryptic name stays in tooltip + copy
+                text_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                                   spacing=0)
+                nl = Gtk.Label(label=sess["label"], xalign=0)
                 nl.set_hexpand(True)
-                nl.set_ellipsize(Pango.EllipsizeMode.END)
-                row.pack_start(nl, True, True, 0)
+                nl.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+                tip = name
+                if sess["path"]:
+                    tip = f"{name}\n{sess['path']}"
+                nl.set_tooltip_text(tip)
+                text_col.pack_start(nl, True, True, 0)
+                if want == "all":
+                    tag = Gtk.Label(
+                        label=cat_titles.get(sess["category"], ""), xalign=0)
+                    tag.get_style_context().add_class("session-sub")
+                    text_col.pack_start(tag, False, False, 0)
+                row.pack_start(text_col, True, True, 0)
+                if sess["attached"]:
+                    open_tag = Gtk.Label(label="● open")
+                    open_tag.get_style_context().add_class("session-sub")
+                    open_tag.set_tooltip_text(
+                        "A tab is attached to this session")
+                    row.pack_start(open_tag, False, False, 0)
                 att = Gtk.Button(label="Attach")
                 att.set_can_focus(False)
                 att.set_focus_on_click(False)
@@ -7433,14 +7549,26 @@ if (data !== null) {{
                 kill.set_tooltip_text("Kill session")
                 kill.set_can_focus(False)
                 kill.set_focus_on_click(False)
-                att.connect("clicked", lambda _b, n=name: open_session(
-                    n, ["tmux", "new-session", "-A", "-s", n]))
+                att.connect(
+                    "clicked",
+                    lambda _b, s=sess: open_session(
+                        s["tab_label"],
+                        ["tmux", "new-session", "-A", "-s", s["name"]],
+                        sub=s["tab_sub"]))
                 ren.connect("clicked", lambda _b, n=name: do_rename(n))
                 kill.connect("clicked", lambda _b, n=name: do_kill(n))
                 for b in (att, copy, ren, kill):
                     row.pack_start(b, False, False, 0)
                 listbox.pack_start(row, False, False, 0)
             listbox.show_all()
+
+        def on_filter_toggled(btn, key):
+            if btn.get_active():
+                filter_state["value"] = key
+                refresh()
+
+        for key, rb in filter_radios:
+            rb.connect("toggled", on_filter_toggled, key)
 
         create.connect("clicked", create_new)
         entry.connect("activate", create_new)
@@ -7450,7 +7578,7 @@ if (data !== null) {{
         dialog.destroy()
         if resp == Gtk.ResponseType.OK and chosen:
             self._add_session(chosen["label"], chosen["argv"], ICON_TMUX,
-                              sub="tmux")
+                              sub=chosen.get("sub") or "tmux")
 
     @staticmethod
     def _tmux_prompt_rename(parent, old):
