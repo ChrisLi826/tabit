@@ -294,7 +294,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v1.7.10"
+APP_VERSION = "v1.7.11"
 
 
 def _get_tabit_repo_dir():
