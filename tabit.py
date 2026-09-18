@@ -295,6 +295,68 @@ DEFAULT_AI_CLIS = [
 ]
 # used when user types a CLI not in the list
 APP_VERSION = "v1.7.11"
+# Fresh Taiwan-origin cuisine English name picked at release time (no public
+# future pool). Display: v1.7.11 · Oyster Omelette
+APP_CODENAME = "Oyster Omelette"
+_VERSION_CODENAME_SEP = " · "
+
+
+def _format_version_label(version=None, codename=None):
+    """Human-facing release label: 'v1.7.12 · Codename'."""
+    ver = APP_VERSION if version is None else version
+    code = APP_CODENAME if codename is None else codename
+    ver = (ver or "").strip()
+    code = (code or "").strip()
+    if ver and code:
+        return f"{ver}{_VERSION_CODENAME_SEP}{code}"
+    return ver or code
+
+
+def _get_version_display():
+    """Label for About / Settings: running version + local cuisine codename."""
+    return _format_version_label(_get_current_version(), APP_CODENAME)
+
+
+def _codename_for_tag(tag):
+    """Cuisine codename for a release tag (APP_CODENAME, then shipped history).
+
+    Used when a GitHub release title is still a plain version so Release Notes
+    can match About / Check / Update without waiting for a GH title edit.
+    """
+    tag = (tag or "").strip()
+    if not tag:
+        return ""
+    if tag == APP_VERSION and (APP_CODENAME or "").strip():
+        return APP_CODENAME.strip()
+    try:
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "release-codenames.json")
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        for item in data.get("shipped") or []:
+            if item.get("version") == tag:
+                return (item.get("english") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _release_display_name(tag, name=None):
+    """Prefer GitHub release title when it already includes the codename.
+
+    If GH name/tag_name lacks '· Codename', fall back to APP_CODENAME /
+    release-codenames.json so Notes match About even for older GH titles.
+    """
+    tag = (tag or "").strip()
+    name = (name or "").strip()
+    if name and _VERSION_CODENAME_SEP in name:
+        return name
+    if name and tag and name != tag and not name.lstrip().startswith("v"):
+        return _format_version_label(tag, name)
+    code = _codename_for_tag(tag)
+    if code:
+        return _format_version_label(tag, code)
+    return tag or name
 
 
 def _get_tabit_repo_dir():
@@ -8937,7 +8999,7 @@ if (data !== null) {{
             if resp.status == 200:
                 releases = json.loads(resp.read().decode("utf-8"))
                 if not isinstance(releases, list) or not releases:
-                    return "", "", ""
+                    return "", "", "", ""
                 
                 latest_tag = releases[0].get("tag_name", "")
                 
@@ -8950,19 +9012,21 @@ if (data !== null) {{
                 for rel in releases:
                     tag = rel.get("tag_name", "")
                     body = rel.get("body", "").strip()
+                    rel_label = _release_display_name(tag, rel.get("name", ""))
                     rel_v_parsed = parse_v(tag)
                     
                     if rel_v_parsed > cur_v_parsed:
-                        header = f"========================================\n📦 Release {tag}\n========================================"
+                        header = f"========================================\n📦 Release {rel_label}\n========================================"
                         combined_notes.append(f"{header}\n\n{body}")
                     elif rel_v_parsed == cur_v_parsed and not combined_notes:
-                        header = f"========================================\n📦 Release {tag} (Current)\n========================================"
+                        header = f"========================================\n📦 Release {rel_label} (Current)\n========================================"
                         combined_notes.append(f"{header}\n\n{body}")
                         break
 
                 final_body = "\n\n\n".join(combined_notes) if combined_notes else (releases[0].get("body", "") or "")
-                return latest_tag, final_body, releases[0].get("html_url", "")
-        return "", "", ""
+                latest_name = releases[0].get("name", "") or latest_tag
+                return latest_tag, final_body, releases[0].get("html_url", ""), latest_name
+        return "", "", "", ""
 
     def _trigger_update_check(self, manual=True, status_label=None, notes_btn=None, parent_dialog=None):
         if status_label:
@@ -8973,7 +9037,9 @@ if (data !== null) {{
         def thread_fn():
             try:
                 cur_ver = _get_current_version()
-                latest_tag, body, html_url = self._fetch_latest_release_info(cur_ver)
+                cur_label = _get_version_display()
+                latest_tag, body, html_url, latest_name = self._fetch_latest_release_info(cur_ver)
+                latest_label = _release_display_name(latest_tag, latest_name)
                 is_newer = False
                 if latest_tag:
                     clean_latest = latest_tag.lstrip("v")
@@ -8986,7 +9052,7 @@ if (data !== null) {{
                 def on_done():
                     if status_label:
                         if is_newer:
-                            status_label.set_markup(f"<span color='#ff9e64'>New version <b>{latest_tag}</b> available!</span>")
+                            status_label.set_markup(f"<span color='#ff9e64'>New version <b>{latest_label}</b> available!</span>")
                         elif latest_tag:
                             status_label.set_markup("<span color='#9ece6a'>✓ You are using the latest version.</span>")
                         else:
@@ -8994,19 +9060,19 @@ if (data !== null) {{
 
                     if notes_btn and body:
                         notes_btn.set_visible(True)
-                        notes_btn.set_tooltip_text(f"View release notes for {latest_tag or cur_ver}")
+                        notes_btn.set_tooltip_text(f"View release notes for {latest_label or cur_label}")
                         if hasattr(notes_btn, "_notes_handler_id"):
                             notes_btn.disconnect(notes_btn._notes_handler_id)
                         notes_btn._notes_handler_id = notes_btn.connect(
-                            "clicked", lambda _b, t=latest_tag or cur_ver, b=body: self._show_release_notes_dialog(t, b, parent=parent_dialog))
+                            "clicked", lambda _b, t=latest_label or cur_label, b=body: self._show_release_notes_dialog(t, b, parent=parent_dialog))
 
                     if is_newer:
-                        self._show_update_dialog(latest_tag, body, parent=parent_dialog)
+                        self._show_update_dialog(latest_tag, body, parent=parent_dialog, new_label=latest_label)
                     elif manual and not is_newer and latest_tag:
                         self._note_msg(
                             Gtk.MessageType.INFO,
                             "Already Up to Date",
-                            f"You are currently using {cur_ver}, which is the latest version.",
+                            f"You are currently using {cur_label}, which is the latest version.",
                             parent=parent_dialog)
 
                 GLib.idle_add(on_done)
@@ -9058,9 +9124,11 @@ if (data !== null) {{
         dialog.connect("response", _on_rel_notes_resp)
         dialog.show_all()
 
-    def _show_update_dialog(self, new_ver, notes_body, parent=None):
+    def _show_update_dialog(self, new_ver, notes_body, parent=None, new_label=None):
         win = parent or self
-        dialog = Gtk.Dialog(title=f"Update Available — {new_ver}", transient_for=win,
+        new_disp = new_label or new_ver
+        cur_disp = _get_version_display()
+        dialog = Gtk.Dialog(title=f"Update Available — {new_disp}", transient_for=win,
                             modal=bool(parent))
         self._open_dialogs.add(dialog)
         dialog.set_default_size(620, 450)
@@ -9072,7 +9140,7 @@ if (data !== null) {{
             getattr(box, f"set_margin_{side}")(14)
 
         head = Gtk.Label(xalign=0)
-        head.set_markup(f"<big><b>A new version of tabit is available!</b></big>\nNew version: <b>{new_ver}</b> (Current: {_get_current_version()})")
+        head.set_markup(f"<big><b>A new version of tabit is available!</b></big>\nNew version: <b>{new_disp}</b> (Current: {cur_disp})")
         box.pack_start(head, False, False, 0)
 
         if notes_body:
@@ -9614,7 +9682,7 @@ if (data !== null) {{
 
         ver_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         
-        cur_v = _get_current_version()
+        cur_v = _get_version_display()
         ver_lbl = Gtk.Label(xalign=0)
         ver_lbl.set_markup(f"Version: <b>{cur_v}</b>")
         

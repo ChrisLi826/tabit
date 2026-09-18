@@ -1,0 +1,6 @@
+{
+  "_comment": "Shipped release codenames only (history). Do NOT add upcoming candidates — that spoils the surprise. At release time RD picks a fresh Taiwan-origin cuisine English name, sets APP_CODENAME in tabit.py, and records it here with scripts/release-codename.py record.",
+  "shipped": [
+    {"version": "v1.7.11", "english": "Oyster Omelette"}
+  ]
+}
