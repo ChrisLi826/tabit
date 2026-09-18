@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Release snack-codename label helpers and catalog consistency."""
+"""Release cuisine-codename label helpers and shipped-history consistency."""
 import json
 import os
 import re
@@ -32,7 +32,7 @@ class TestVersionLabel(unittest.TestCase):
             "v1.7.12 · Bubble Tea",
         )
 
-    def test_release_display_snack_only_name(self):
+    def test_release_display_codename_only_name(self):
         self.assertEqual(
             tabit._release_display_name("v1.7.12", "Bubble Tea"),
             "v1.7.12 · Bubble Tea",
@@ -54,49 +54,44 @@ class TestVersionLabel(unittest.TestCase):
         )
 
 
-class TestCodenameCatalog(unittest.TestCase):
+class TestCodenameHistory(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         path = os.path.join(ROOT, "release-codenames.json")
         with open(path, encoding="utf-8") as f:
             cls.data = json.load(f)
-        cls.items = cls.data["codenames"]
+        cls.items = cls.data["shipped"]
 
-    def test_expected_snacks_present(self):
-        english = {c["english"] for c in self.items}
-        expected = {
-            "Oyster Omelette",
-            "Stinky Tofu",
-            "Bubble Tea",
-            "Braised Pork Rice",
-            "Pepper Buns",
-            "Fried Chicken",
-            "Scallion Pancake",
-            "Beef Noodle",
-            "Aiyu Jelly",
-            "Mango Shaved Ice",
-        }
-        self.assertEqual(english, expected)
+    def test_no_future_candidate_pool(self):
+        # Product rule: do not publish upcoming names. Only shipped history.
+        self.assertNotIn("codenames", self.data)
+        for c in self.items:
+            self.assertIn("version", c)
+            self.assertIn("english", c)
+            self.assertTrue(c["version"])
+            self.assertTrue(c["english"])
+            # No Chinese / unused / used_by fields in the public history.
+            self.assertNotIn("chinese", c)
+            self.assertNotIn("used_by", c)
 
     def test_no_duplicate_english(self):
-        names = [c["english"] for c in self.items]
+        names = [c["english"].strip().lower() for c in self.items]
         self.assertEqual(len(names), len(set(names)))
 
-    def test_used_by_unique(self):
-        used = [c["used_by"] for c in self.items if c.get("used_by")]
-        self.assertEqual(len(used), len(set(used)))
+    def test_no_duplicate_versions(self):
+        vers = [c["version"] for c in self.items]
+        self.assertEqual(len(vers), len(set(vers)))
 
-    def test_app_version_matches_catalog(self):
+    def test_app_version_matches_history(self):
         hit = next(
-            (c for c in self.items if c.get("used_by") == tabit.APP_VERSION),
+            (c for c in self.items if c.get("version") == tabit.APP_VERSION),
             None,
         )
         self.assertIsNotNone(
-            hit, f"{tabit.APP_VERSION} missing used_by in release-codenames.json")
+            hit, f"{tabit.APP_VERSION} missing from release-codenames.json history")
         self.assertEqual(hit["english"], tabit.APP_CODENAME)
 
     def test_script_title_matches_app(self):
-        # Keep scripts/release-codename.py title in sync with tabit.py constants.
         with open(os.path.join(ROOT, "tabit.py"), encoding="utf-8") as _f:
             text = _f.read()
         ver = re.search(r'^APP_VERSION\s*=\s*"([^"]*)"', text, re.M).group(1)

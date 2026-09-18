@@ -295,14 +295,14 @@ DEFAULT_AI_CLIS = [
 ]
 # used when user types a CLI not in the list
 APP_VERSION = "v1.7.11"
-# English snack from release-codenames.json (used_by == APP_VERSION). Display:
-#   v1.7.11 · Oyster Omelette
+# Fresh Taiwan-origin cuisine English name picked at release time (no public
+# future pool). Display: v1.7.11 · Oyster Omelette
 APP_CODENAME = "Oyster Omelette"
 _VERSION_CODENAME_SEP = " · "
 
 
 def _format_version_label(version=None, codename=None):
-    """Human-facing release label: 'v1.7.12 · Oyster Omelette'."""
+    """Human-facing release label: 'v1.7.12 · Codename'."""
     ver = APP_VERSION if version is None else version
     code = APP_CODENAME if codename is None else codename
     ver = (ver or "").strip()
@@ -313,12 +313,12 @@ def _format_version_label(version=None, codename=None):
 
 
 def _get_version_display():
-    """Label for About / Settings: running version + local snack codename."""
+    """Label for About / Settings: running version + local cuisine codename."""
     return _format_version_label(_get_current_version(), APP_CODENAME)
 
 
 def _release_display_name(tag, name=None):
-    """Prefer GitHub release title when it already includes the snack."""
+    """Prefer GitHub release title when it already includes the codename."""
     tag = (tag or "").strip()
     name = (name or "").strip()
     if name and _VERSION_CODENAME_SEP in name:

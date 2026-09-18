@@ -1,15 +1,6 @@
 {
-  "_comment": "Taiwanese snack release codenames. Each snack used at most once. Display: v1.7.12 · Oyster Omelette. Manage with: python3 scripts/release-codename.py",
-  "codenames": [
-    {"english": "Oyster Omelette", "chinese": "蚵仔煎", "used_by": "v1.7.11"},
-    {"english": "Stinky Tofu", "chinese": "臭豆腐", "used_by": null},
-    {"english": "Bubble Tea", "chinese": "珍珠奶茶", "used_by": null},
-    {"english": "Braised Pork Rice", "chinese": "滷肉飯", "used_by": null},
-    {"english": "Pepper Buns", "chinese": "胡椒餅", "used_by": null},
-    {"english": "Fried Chicken", "chinese": "鹽酥雞", "used_by": null},
-    {"english": "Scallion Pancake", "chinese": "蔥油餅", "used_by": null},
-    {"english": "Beef Noodle", "chinese": "牛肉麵", "used_by": null},
-    {"english": "Aiyu Jelly", "chinese": "愛玉", "used_by": null},
-    {"english": "Mango Shaved Ice", "chinese": "芒果冰", "used_by": null}
+  "_comment": "Shipped release codenames only (history). Do NOT add upcoming candidates — that spoils the surprise. At release time RD picks a fresh Taiwan-origin cuisine English name, sets APP_CODENAME in tabit.py, and records it here with scripts/release-codename.py record.",
+  "shipped": [
+    {"version": "v1.7.11", "english": "Oyster Omelette"}
   ]
 }

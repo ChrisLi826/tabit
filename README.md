@@ -125,9 +125,13 @@ status without tiling windows by hand.
 - File browser pane + text editing tabs
 - Saved session profiles (named serial/ssh setups)
 
-## Releasing (snack codenames)
+## Releasing (cuisine codenames)
 
-Each release gets a **Taiwanese snack** English codename. The public label is:
+Each release gets a fresh **Taiwan-origin cuisine** English codename. There is
+**no public menu of upcoming names** in the repo (that would spoil the
+surprise). RD picks the name when cutting the release.
+
+Public label:
 
 ```text
 v1.7.12 · Oyster Omelette
@@ -139,29 +143,42 @@ That same string appears in:
 - In-app **Update** dialog (`New version: …`)
 - **Settings** version line (About)
 
+### Naming rules
+
+| Rule | Detail |
+|---|---|
+| Origin | Must be **Taiwan-origin cuisine** (not limited to street snacks) |
+| Major / minor | 1st and 2nd version digits → more **internationally known** names |
+| Patch | 3rd digit → more **obscure** names |
+| Language | **English** display name in the public label; optional Chinese only in private notes if needed — never a browsable public catalog |
+| Reuse | Do not reuse a name already in shipped history |
+
 ### Files
 
 | File | Role |
 |---|---|
-| `release-codenames.json` | Official English + Chinese list; `used_by` is the tag or `null` |
 | `APP_VERSION` / `APP_CODENAME` in `tabit.py` | What the running build shows |
-| `scripts/release-codename.py` | List / next / assign / title helpers |
-
-Names are **never reused**. Add more snacks to the JSON when the pool runs low.
+| `release-codenames.json` | **Shipped history only** (no future candidates) |
+| `scripts/release-codename.py` | `list` / `title` / `record` / `check` helpers |
 
 ### Checklist when cutting a release
 
-1. `python3 scripts/release-codename.py next` — pick the next unused English name.
+1. Pick a fresh English codename per the rules above (`python3 scripts/release-codename.py list` shows names already used).
 2. Bump `APP_VERSION` and set `APP_CODENAME` in `tabit.py` to that English name.
-3. `python3 scripts/release-codename.py assign vX.Y.Z` (marks `used_by` in the JSON).
-4. Commit, tag `vX.Y.Z`, and create the GitHub release **with the snack in the title**:
+3. Record history (no candidate pool):  
+   `python3 scripts/release-codename.py record vX.Y.Z --name "English Name"`
+4. Commit, tag `vX.Y.Z`, and create the GitHub release **with the codename in the title**:
 
 ```sh
-TITLE=$(python3 scripts/release-codename.py title vX.Y.Z)
+TITLE=$(python3 scripts/release-codename.py title)
 gh release create vX.Y.Z -t "$TITLE" -F .release/vX.Y.Z-notes.md
 ```
 
-5. Confirm Settings → Version, Check for Updates / Update dialog, and the GitHub release title all spell the **same** `vX.Y.Z · Snack` string.
+5. Confirm four places spell the **same** `vX.Y.Z · Name` string:
+   - `APP_CODENAME` in `tabit.py`
+   - shipped entry in `release-codenames.json`
+   - Settings → Version (About)
+   - Check for Updates / Update dialog (and GitHub release title)
 
 ## License
 
