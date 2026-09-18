@@ -38,11 +38,30 @@ class TestVersionLabel(unittest.TestCase):
             "v1.7.12 · Bubble Tea",
         )
 
-    def test_release_display_plain_tag_title(self):
+    def test_release_display_plain_tag_title_unknown(self):
+        # Unknown tag with plain GH title stays plain (no history / APP match).
         self.assertEqual(
-            tabit._release_display_name("v1.7.12", "v1.7.12"),
-            "v1.7.12",
+            tabit._release_display_name("v9.9.9", "v9.9.9"),
+            "v9.9.9",
         )
+
+    def test_release_display_plain_tag_falls_back_to_app_codename(self):
+        # Older GH titles that are still just the version must match About.
+        self.assertEqual(
+            tabit._release_display_name(tabit.APP_VERSION, tabit.APP_VERSION),
+            f"{tabit.APP_VERSION} · {tabit.APP_CODENAME}",
+        )
+        self.assertEqual(
+            tabit._release_display_name(tabit.APP_VERSION, ""),
+            f"{tabit.APP_VERSION} · {tabit.APP_CODENAME}",
+        )
+
+    def test_codename_for_tag_from_history(self):
+        self.assertEqual(
+            tabit._codename_for_tag("v1.7.11"),
+            "Oyster Omelette",
+        )
+        self.assertEqual(tabit._codename_for_tag("v0.0.0"), "")
 
     def test_app_codename_wired(self):
         self.assertTrue(tabit.APP_VERSION.startswith("v"))

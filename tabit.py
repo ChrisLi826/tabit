@@ -317,15 +317,46 @@ def _get_version_display():
     return _format_version_label(_get_current_version(), APP_CODENAME)
 
 
+def _codename_for_tag(tag):
+    """Cuisine codename for a release tag (APP_CODENAME, then shipped history).
+
+    Used when a GitHub release title is still a plain version so Release Notes
+    can match About / Check / Update without waiting for a GH title edit.
+    """
+    tag = (tag or "").strip()
+    if not tag:
+        return ""
+    if tag == APP_VERSION and (APP_CODENAME or "").strip():
+        return APP_CODENAME.strip()
+    try:
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "release-codenames.json")
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        for item in data.get("shipped") or []:
+            if item.get("version") == tag:
+                return (item.get("english") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
 def _release_display_name(tag, name=None):
-    """Prefer GitHub release title when it already includes the codename."""
+    """Prefer GitHub release title when it already includes the codename.
+
+    If GH name/tag_name lacks '· Codename', fall back to APP_CODENAME /
+    release-codenames.json so Notes match About even for older GH titles.
+    """
     tag = (tag or "").strip()
     name = (name or "").strip()
     if name and _VERSION_CODENAME_SEP in name:
         return name
     if name and tag and name != tag and not name.lstrip().startswith("v"):
         return _format_version_label(tag, name)
-    return tag
+    code = _codename_for_tag(tag)
+    if code:
+        return _format_version_label(tag, code)
+    return tag or name
 
 
 def _get_tabit_repo_dir():
