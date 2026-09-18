@@ -1045,7 +1045,8 @@ class Tabit(Gtk.Window):
         self.connect("destroy", Gtk.main_quit)
         self.connect("key-press-event", self._on_window_key)
         # Full app quit must leave tmux sessions alive for painless resume/
-        # Attach after restart. Single-tab close and child-exited kill them.
+        # Attach after restart. Only intentional single-tab close kills them;
+        # a tab becoming exited leaves the session for the user to inspect.
         self._shutting_down = False
         self._counter = 0
         self._order_seq = 0
@@ -3318,9 +3319,10 @@ if (data !== null) {{
                 return True  # abort window close
         self._save_sessions()  # capture each shell's current cwd before exit
         self._save_sidebar_geometry()
-        # Window teardown destroys VTE widgets and fires child-exited for
-        # every attached tab. Mark shutdown so those handlers do NOT
-        # kill-session — tabs/groups + tmux sessions must resume/Attach.
+        # Window teardown destroys VTE widgets and may fire child-exited for
+        # every attached tab. Mark shutdown so any kill helper path (e.g.
+        # intentional close racing teardown) does NOT kill-session —
+        # tabs/groups + tmux sessions must resume/Attach.
         self._shutting_down = True
         return False
 
@@ -4192,9 +4194,9 @@ if (data !== null) {{
         self._save_sessions()
 
     def _on_child_exited(self, _term, _status, row):
-        # VTE child gone (detach / session ended). Kill the named tmux
-        # session so it does not linger — skipped during full app quit.
-        self._kill_row_tmux_session(row)
+        # VTE child gone (detach / session ended). Do NOT kill the named
+        # tmux session here — leave it so the user sees "exited" and can
+        # decide; intentional single-tab close (_close_session) kills it.
         # keep the tab and its scrollback; only the x really closes it
         row.dead = True
         row.get_style_context().add_class("dead")
@@ -7464,11 +7466,13 @@ if (data !== null) {{
         return self._tmux_session_from_argv(argv)
 
     def _kill_row_tmux_session(self, row):
-        """Kill this tab's tmux session on single-tab close / exited.
+        """Kill this tab's tmux session on intentional single-tab close.
 
+        Called from `_close_session` only — not from child-exited (exited
+        tabs keep their session until the user closes them).
         Must NOT run during full app quit (`_shutting_down`): restarting
         tabit must still restore layout and Attach to the same sessions.
-        Idempotent per row (close + subsequent child-exited).
+        Idempotent per row.
         """
         if getattr(self, "_shutting_down", False):
             return

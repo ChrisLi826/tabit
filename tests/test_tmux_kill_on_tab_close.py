@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Kill tmux on single-tab close/exited — never on full app quit."""
+"""Kill tmux on intentional single-tab close — never on exited or app quit."""
 import os
 import sys
 import unittest
@@ -75,22 +75,33 @@ class TestKillRowTmuxSession(unittest.TestCase):
             run.assert_not_called()
 
 
-class TestShutdownFlagContract(unittest.TestCase):
-    """Document the close vs quit distinction (helpers only — no GTK window)."""
+class TestCloseVsExitedVsShutdownContract(unittest.TestCase):
+    """Source-level: close kills; exited does not; quit never kills."""
 
-    def test_delete_event_sets_shutting_down_before_teardown(self):
-        # Source-level contract: _on_delete_event assigns the flag so
-        # subsequent child-exited from VTE destroy will not kill-session.
+    def _src(self):
         with open(os.path.join(ROOT, "tabit.py")) as f:
-            src = f.read()
-        # Flag set in delete-event path
-        self.assertIn("self._shutting_down = True", src)
-        # kill only via the shared helper (close + exited)
-        self.assertIn("self._kill_row_tmux_session(row)", src)
-        # delete-event must not invoke the kill helper (comments may mention it)
-        start = src.index("def _on_delete_event")
+            return f.read()
+
+    def _method_block(self, src, name):
+        start = src.index(f"def {name}")
         end = src.index("\n    def ", start + 1)
-        block = src[start:end]
+        return src[start:end]
+
+    def test_close_session_kills(self):
+        block = self._method_block(self._src(), "_close_session")
+        self.assertIn("self._kill_row_tmux_session(row)", block)
+
+    def test_child_exited_does_not_kill(self):
+        """Tab becoming exited must leave the tmux session for the user."""
+        block = self._method_block(self._src(), "_on_child_exited")
+        self.assertNotIn("_kill_row_tmux_session(", block)
+        self.assertNotIn('["tmux", "kill-session"', block)
+        self.assertIn("row.dead = True", block)
+
+    def test_delete_event_sets_shutting_down_and_does_not_kill(self):
+        src = self._src()
+        self.assertIn("self._shutting_down = True", src)
+        block = self._method_block(src, "_on_delete_event")
         self.assertNotIn("_kill_row_tmux_session(", block)
         self.assertNotIn('["tmux", "kill-session"', block)
         self.assertIn("_shutting_down = True", block)
