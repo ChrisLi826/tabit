@@ -6990,6 +6990,26 @@ if (data !== null) {{
         on_backend_changed()  # after show_all so hide() sticks
 
     @staticmethod
+    def _ssh_tool_has_pexpect():
+        """True if system python3 can import pexpect (required by connect.py)."""
+        try:
+            subprocess.check_call(
+                ["python3", "-c", "import pexpect"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=5)
+            return True
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    def _connect_pexpect_missing_msg(self, parent=None):
+        self._note_msg(
+            Gtk.MessageType.WARNING,
+            "Connect needs pexpect",
+            "Install it with:  sudo apt install python3-pexpect\n"
+            "(or: pip install pexpect)",
+            parent=parent)
+
+    @staticmethod
     def _ssh_tool_envs():
         """Canonical --env names from ssh_tool (connect.py --list-envs)."""
         try:
@@ -7185,6 +7205,9 @@ if (data !== null) {{
                         "Please enter a serial number",
                         "Device SN is required to open a Connect session.",
                         parent=dlg)
+                    return
+                if not self._ssh_tool_has_pexpect():
+                    self._connect_pexpect_missing_msg(parent=dlg)
                     return
                 env_val = envs[env_combo.get_active()]
                 email_val = email_entry.get_text().strip()
