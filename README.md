@@ -125,6 +125,44 @@ status without tiling windows by hand.
 - File browser pane + text editing tabs
 - Saved session profiles (named serial/ssh setups)
 
+## Releasing (snack codenames)
+
+Each release gets a **Taiwanese snack** English codename. The public label is:
+
+```text
+v1.7.12 · Oyster Omelette
+```
+
+That same string appears in:
+
+- GitHub Release **title** (and preferably the notes heading)
+- In-app **Update** dialog (`New version: …`)
+- **Settings** version line (About)
+
+### Files
+
+| File | Role |
+|---|---|
+| `release-codenames.json` | Official English + Chinese list; `used_by` is the tag or `null` |
+| `APP_VERSION` / `APP_CODENAME` in `tabit.py` | What the running build shows |
+| `scripts/release-codename.py` | List / next / assign / title helpers |
+
+Names are **never reused**. Add more snacks to the JSON when the pool runs low.
+
+### Checklist when cutting a release
+
+1. `python3 scripts/release-codename.py next` — pick the next unused English name.
+2. Bump `APP_VERSION` and set `APP_CODENAME` in `tabit.py` to that English name.
+3. `python3 scripts/release-codename.py assign vX.Y.Z` (marks `used_by` in the JSON).
+4. Commit, tag `vX.Y.Z`, and create the GitHub release **with the snack in the title**:
+
+```sh
+TITLE=$(python3 scripts/release-codename.py title vX.Y.Z)
+gh release create vX.Y.Z -t "$TITLE" -F .release/vX.Y.Z-notes.md
+```
+
+5. Confirm Settings → Version, Check for Updates / Update dialog, and the GitHub release title all spell the **same** `vX.Y.Z · Snack` string.
+
 ## License
 
 MIT
