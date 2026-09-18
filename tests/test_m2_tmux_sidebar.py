@@ -12,7 +12,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
 
 from tabit import (  # noqa: E402
-    ICON_AI_TMUX, ICON_CONNECT, ICON_TMUX, Tabit,
+    ICON_AI_TMUX, ICON_CONNECT, ICON_CONNECT_TMUX, ICON_TMUX, Tabit,
 )
 
 
@@ -52,8 +52,17 @@ class TestM2TmuxSidebarHelpers(unittest.TestCase):
             Tabit, "conn-device1",
             ["tmux", "new-session", "-A", "-s", "conn-device1"],
             ICON_TMUX, "tmux")
-        self.assertEqual(icon, ICON_CONNECT)
+        self.assertEqual(icon, ICON_CONNECT_TMUX)
         self.assertIn("connect", lab.lower())
+
+        # restored from sessions.json: the " [tmux]" sub is already stripped,
+        # so the tmux frame has to come back from argv alone
+        lab, argv, icon, sub = Tabit._normalize_tmux_hosted_tab(
+            Tabit, "DEVICE1 (connect)",
+            ["sh", "-c", "tmux kill-session -t conn-device1 2>/dev/null; "
+             "exec tmux new-session -s conn-device1 'connect.py; exec bash'"],
+            ICON_CONNECT, "cloud (prod)")
+        self.assertEqual(icon, ICON_CONNECT_TMUX)
 
         lab, argv, icon, sub = Tabit._normalize_tmux_hosted_tab(
             Tabit, "scratch",
@@ -132,6 +141,23 @@ class TestM2WorkGroupFocusInheritance(unittest.TestCase):
         row = self._conn_row()
         self.assertEqual(self.win._inherit_new_tab_group(row), "purple")
         self.assertEqual(row.icon_name, ICON_CONNECT)
+
+
+class TestConnectArgvNeverKills(unittest.TestCase):
+    """Force reconnect is a one-off action, never a stored instruction."""
+
+    def test_connect_argv_attaches(self):
+        argv = Tabit._connect_tmux_argv("conn-dev1", "python3 connect.py --sn DEV1")
+        self.assertEqual(argv[:4], ["tmux", "new-session", "-A", "-s"])
+        self.assertEqual(argv[4], "conn-dev1")
+
+    def test_connect_argv_has_no_kill(self):
+        argv = Tabit._connect_tmux_argv("conn-dev1", "python3 connect.py --sn DEV1")
+        self.assertNotIn("kill-session", " ".join(argv))
+
+    def test_stored_argv_still_resolves_to_its_session(self):
+        argv = Tabit._connect_tmux_argv("conn-dev1", "python3 connect.py")
+        self.assertEqual(Tabit._tmux_session_from_argv(argv), "conn-dev1")
 
 
 if __name__ == "__main__":

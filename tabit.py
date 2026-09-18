@@ -76,6 +76,8 @@ ICON_NOTE = "text-x-generic-symbolic"
 ICON_COMMAND = "system-run-symbolic"
 ICON_TMUX = "view-grid-symbolic"
 ICON_CONNECT = "network-transmit-receive-symbolic"
+# Connect running inside tmux: teal connect mark in the purple tmux frame
+ICON_CONNECT_TMUX = "tabit-connect-tmux"
 # per-type CSS class so each session icon gets its own color (see CSS)
 ICON_CLASS = {
     "utilities-terminal-symbolic": "ic-shell",
@@ -119,6 +121,21 @@ AI_TMUX_ICON_SVG = b"""<?xml version="1.0" encoding="UTF-8"?>
          L3.3 12.2 Z M4.2 9.2 L5.8 9.2 L5 6.4 Z"/>
     <path fill="#b4ccff"
       d="M9.2 4.2 H13.2 V5.3 H11.85 V11.1 H13.2 V12.2 H9.2 V11.1 H10.55 V5.3 H9.2 Z"/>
+  </g>
+</svg>
+"""
+# Teal transmit/receive arrows (the ic-connect color) in the purple tmux frame
+CONNECT_TMUX_ICON_SVG = b"""<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <rect x="0.4" y="0.4" width="15.2" height="15.2" rx="3.6" ry="3.6"
+        fill="#161022" stroke="#bb9af7" stroke-width="1.6"/>
+  <g transform="translate(8,8) scale(0.74) translate(-8,-8)">
+    <!-- transmit: arrow up -->
+    <path fill="#73daca"
+      d="M5.5 3.2 L8.0 6.6 L6.4 6.6 L6.4 12.8 L4.6 12.8 L4.6 6.6 L3.0 6.6 Z"/>
+    <!-- receive: arrow down -->
+    <path fill="#73daca"
+      d="M10.5 12.8 L13.0 9.4 L11.4 9.4 L11.4 3.2 L9.6 3.2 L9.6 9.4 L8.0 9.4 Z"/>
   </g>
 </svg>
 """
@@ -433,6 +450,19 @@ def _tmux_apply_user_conf():
     try:
         subprocess.run(
             ["tmux", "source-file", USER_TMUX_CONF],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _tmux_kill_session(name):
+    """Drop one tmux session now; missing session is not an error."""
+    try:
+        subprocess.run(
+            ["tmux", "kill-session", "-t", name],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=2,
@@ -1450,6 +1480,16 @@ class Tabit(Gtk.Window):
                 pass
             return Gtk.Image.new_from_icon_name("applications-science-symbolic",
                                                 Gtk.IconSize.MENU)
+        if icon_name == ICON_CONNECT_TMUX:
+            try:
+                loader = GdkPixbuf.PixbufLoader.new_with_type("svg")
+                loader.set_size(16, 16)
+                loader.write(CONNECT_TMUX_ICON_SVG)
+                loader.close()
+                return Gtk.Image.new_from_pixbuf(loader.get_pixbuf())
+            except GLib.Error:
+                pass
+            icon_name = ICON_CONNECT  # fall back to the plain teal mark
         img = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.MENU)
         # per-type color for symbolic icons (recolored via CSS `color`)
         cls = ICON_CLASS.get(icon_name)
@@ -7311,7 +7351,8 @@ if (data !== null) {{
                     "device_type": dtype_val,
                     "no_cache": nocache_val,
                     "use_tmux": use_tmux_val,
-                    "reconnect": reconnect_val,
+                    # "reconnect" is deliberately not remembered: it is a
+                    # one-off action, so every dialog starts unticked.
                     "gateway_pass": gw_pass_val,
                     "magic_words": magic_words_val,
                 })
@@ -7340,11 +7381,15 @@ if (data !== null) {{
                     session_name = f"conn-{sn.lower()}"
                     cmd_str = " ".join(shlex.quote(arg) for arg in raw_cmd)
                     if reconnect_val:
-                        cmd = ["sh", "-c", f"tmux kill-session -t {shlex.quote(session_name)} 2>/dev/null; exec tmux new-session -s {shlex.quote(session_name)} {shlex.quote(cmd_str + '; exec bash')}"]
-                    else:
-                        cmd = ["tmux", "new-session", "-A", "-s", session_name, f"{cmd_str}; exec bash"]
+                        # One-off action: drop the stale session now. The kill
+                        # never goes into argv — argv is stored in
+                        # sessions.json and replayed on every restart, which
+                        # would reconnect the device each time instead of
+                        # attaching to the session already running.
+                        _tmux_kill_session(session_name)
+                    cmd = self._connect_tmux_argv(session_name, cmd_str)
                     # Keep Connect identity in the sidebar (M2 chrome)
-                    icon_name = ICON_CONNECT
+                    icon_name = ICON_CONNECT_TMUX
                     sub = f"cloud ({env_val}) [tmux]"
                 else:
                     cmd = raw_cmd
@@ -7464,6 +7509,17 @@ if (data !== null) {{
         dialog.destroy()
 
     @staticmethod
+    def _connect_tmux_argv(session_name, cmd_str):
+        """Attach-or-create argv for a Connect tab.
+
+        Stored in sessions.json and replayed on every restart, so it must
+        never kill the session: `-A` attaches when it is already running and
+        only reconnects the device when it is gone.
+        """
+        return ["tmux", "new-session", "-A", "-s", session_name,
+                f"{cmd_str}; exec bash"]
+
+    @staticmethod
     def _tmux_session_category(name):
         """Bucket a tmux session for the +tmux picker filter."""
         if name.startswith("ai-"):
@@ -7567,8 +7623,11 @@ if (data !== null) {{
                 label = self._tmux_ai_cli(name)
             if not sub or sub == "tmux":
                 sub = sub or "tmux"
-        elif cat == "connect" and icon_name in (ICON_TMUX, None, ""):
-            icon_name = ICON_CONNECT
+        elif cat == "connect" and icon_name in (ICON_TMUX, ICON_CONNECT,
+                                                None, ""):
+            # conn-* only ever runs under tmux; ICON_CONNECT covers tabs
+            # restored from sessions.json, where the " [tmux]" sub is gone
+            icon_name = ICON_CONNECT_TMUX
             sn = self._tmux_connect_sn(name)
             pretty = sn.upper() if sn.islower() else sn
             if not label or label == name or label.startswith("conn-"):
@@ -7599,7 +7658,7 @@ if (data !== null) {{
             return
         if cat == "connect":
             self._add_session(
-                label, argv, ICON_CONNECT, sub=sub or "tmux")
+                label, argv, ICON_CONNECT_TMUX, sub=sub or "tmux")
             return
         self._add_session(label, argv, ICON_TMUX, sub=sub or "tmux")
 
