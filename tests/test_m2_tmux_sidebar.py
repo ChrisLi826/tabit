@@ -62,5 +62,88 @@ class TestM2TmuxSidebarHelpers(unittest.TestCase):
         self.assertEqual(lab, "scratch")
 
 
+class _FakeRow:
+    def __init__(self, argv=None, icon_name=None, group_color=None):
+        self.argv = argv or []
+        self.icon_name = icon_name
+        self.group_color = group_color
+
+
+class _FakeWin:
+    """Minimal stand-in to exercise M2 placement resolution without GTK UI."""
+
+    _CATEGORY_GROUP_PREF = Tabit._CATEGORY_GROUP_PREF
+    _tmux_session_category = staticmethod(Tabit._tmux_session_category)
+    _tmux_session_from_argv = staticmethod(Tabit._tmux_session_from_argv)
+    _ai_tmux_unwrap = classmethod(Tabit._ai_tmux_unwrap.__func__)
+
+    def __init__(self):
+        self._group_names = {}
+        self._active = None
+        self._rows = []
+
+    def _session_rows(self):
+        return list(self._rows)
+
+    def _get_active_group_color(self):
+        return self._active
+
+    def _new_group_color(self):
+        return "orange"
+
+    def _save_group_names(self):
+        pass
+
+    _is_category_group_color = Tabit._is_category_group_color
+    _category_group_color = Tabit._category_group_color
+    _row_auto_group_category = Tabit._row_auto_group_category
+    _resolve_new_tab_group = Tabit._resolve_new_tab_group
+
+
+class TestM2NewTabGroupResolve(unittest.TestCase):
+    def setUp(self):
+        self.win = _FakeWin()
+        # Prefill named system groups as restore/auto-group would.
+        self.win._group_names["purple"] = "AI"
+        self.win._group_names["teal"] = "Connect"
+
+    def test_ai_always_ai_even_if_connect_focused(self):
+        self.win._active = "teal"
+        row = _FakeRow(
+            argv=["tmux", "new-session", "-A", "-s", "ai-claude-proj-deadbeef"],
+            icon_name=ICON_AI_TMUX)
+        self.assertEqual(self.win._resolve_new_tab_group(row), "purple")
+
+    def test_connect_not_stolen_by_focused_ai(self):
+        self.win._active = "purple"  # focused AI group (QA failure)
+        row = _FakeRow(
+            argv=["tmux", "new-session", "-A", "-s", "conn-TESTDEVICE123"],
+            icon_name=ICON_CONNECT)
+        self.assertEqual(self.win._resolve_new_tab_group(row), "teal")
+
+    def test_other_not_sucked_into_focused_ai(self):
+        self.win._active = "purple"
+        row = _FakeRow(
+            argv=["tmux", "new-session", "-A", "-s", "misc-build"],
+            icon_name=ICON_TMUX)
+        self.assertIsNone(self.win._resolve_new_tab_group(row))
+
+    def test_other_inherits_manual_focused_group(self):
+        self.win._group_names["red"] = "Work"
+        self.win._active = "red"
+        row = _FakeRow(
+            argv=["tmux", "new-session", "-A", "-s", "misc-build"],
+            icon_name=ICON_TMUX)
+        self.assertEqual(self.win._resolve_new_tab_group(row), "red")
+
+    def test_ai_joins_ai_when_nothing_focused(self):
+        self.win._active = None
+        row = _FakeRow(
+            argv=["tmux", "new-session", "-A", "-s", "ai-claude-x"],
+            icon_name=ICON_AI_TMUX)
+        self.assertEqual(self.win._resolve_new_tab_group(row), "purple")
+
+
+
 if __name__ == "__main__":
     unittest.main()

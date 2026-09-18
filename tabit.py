@@ -1500,10 +1500,12 @@ class Tabit(Gtk.Window):
     def _place_tab_row(self, row, page):
         """Insert row under selection, show, select, persist.
 
-        New tabs inherit the focused group (any kind). During restore from
-        sessions.json we skip auto-join (saved color is applied by the restore
-        loop) and skip select — selecting members was expanding groups and
-        wiping collapsed_groups on every restart.
+        AI/Connect auto-category always wins for ai-*/conn-* tabs. Non-auto
+        ("other") tabs may inherit a focused *manual* color group — not the
+        named AI/Connect system groups. During restore from sessions.json we
+        skip auto-join (saved color is applied by the restore loop) and skip
+        select — selecting members was expanding groups and wiping
+        collapsed_groups on every restart.
         """
         self._counter += 1
         row._stack_name = f"session-{self._counter}"
@@ -1513,20 +1515,14 @@ class Tabit(Gtk.Window):
         row._pane = None  # attached on select / pin
         restoring = getattr(self, "_restoring_sessions", False)
         if not restoring:
-            cur_group = self._get_active_group_color()
-            if cur_group:
-                row.group_color = cur_group
-                self._apply_group(row, cur_group)
-                if cur_group in self._collapsed_groups:
-                    self._collapsed_groups.discard(cur_group)
+            g = self._resolve_new_tab_group(row)
+            if g:
+                self._apply_group(row, g)
+                # Expand only when joining the focused manual group (user intent).
+                cur = self._get_active_group_color()
+                if cur and g == cur and g in self._collapsed_groups:
+                    self._collapsed_groups.discard(g)
                     self._save_collapsed_groups()
-            else:
-                # M2: no focused group → drop AI-tmux / Connect into named groups
-                cat = self._row_auto_group_category(row)
-                if cat:
-                    g = self._category_group_color(cat)
-                    if g:
-                        self._apply_group(row, g)
         selected = self.listbox.get_selected_row()
         if selected is not None:
             row._order = selected._order + 1
@@ -7435,6 +7431,30 @@ if (data !== null) {{
         self._group_names[color] = want_name
         self._save_group_names()
         return color
+
+    def _is_category_group_color(self, color):
+        """True if color is the named AI or Connect system group."""
+        if not color:
+            return False
+        name = (self._group_names.get(color) or "").strip().upper()
+        want = {meta[1].upper() for meta in self._CATEGORY_GROUP_PREF.values()}
+        return name in want
+
+    def _resolve_new_tab_group(self, row):
+        """Color for a newly placed tab, or None.
+
+        Auto AI/Connect category always wins for ai-*/conn-* (and AI-tmux
+        chrome). Only non-auto tabs may inherit a focused *manual* group —
+        never the named AI/Connect system groups (QA: other stays ungrouped
+        when focus is on AI/Connect).
+        """
+        cat = self._row_auto_group_category(row)
+        if cat:
+            return self._category_group_color(cat)
+        cur_group = self._get_active_group_color()
+        if cur_group and not self._is_category_group_color(cur_group):
+            return cur_group
+        return None
 
     def _row_auto_group_category(self, row):
         """'ai' / 'connect' when this tab is AI-or-Connect hosted in tmux."""
