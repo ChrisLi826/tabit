@@ -1498,10 +1498,12 @@ class Tabit(Gtk.Window):
     def _place_tab_row(self, row, page):
         """Insert row under selection, show, select, persist.
 
-        New tabs inherit the focused group (any kind). During restore from
-        sessions.json we skip auto-join (saved color is applied by the restore
-        loop) and skip select — selecting members was expanding groups and
-        wiping collapsed_groups on every restart.
+        New tabs inherit the focused work group (any tab type — AI, Connect,
+        Serial, plain tmux, …). If nothing is focused / no group, stay
+        ungrouped. During restore from sessions.json we skip auto-join
+        (saved color is applied by the restore loop) and skip select —
+        selecting members was expanding groups and wiping collapsed_groups
+        on every restart.
         """
         self._counter += 1
         row._stack_name = f"session-{self._counter}"
@@ -1598,10 +1600,21 @@ class Tabit(Gtk.Window):
             sub = sub[:-7].rstrip()
             if _is_ai_icon(icon_name):
                 icon_name = ICON_AI_TMUX
+        # M2: plain +tmux attach of ai-* / conn-* → proper sidebar chrome
+        label, argv, icon_name, sub = self._normalize_tmux_hosted_tab(
+            label, argv, icon_name, sub)
         row = self._make_sidebar_row(label, sub, icon_name, " ".join(argv))
         row.argv = argv
         if _is_ai_icon(icon_name):
-            want = ICON_AI_TMUX if self._ai_tmux_unwrap(argv)[1] else ICON_AI
+            # Prefer tmux chrome when wrapped OR session name is ai-* (M2)
+            _, sess = self._ai_tmux_unwrap(argv)
+            if sess or icon_name == ICON_AI_TMUX:
+                want = ICON_AI_TMUX
+            else:
+                tname = self._tmux_session_from_argv(argv)
+                want = (ICON_AI_TMUX if (
+                    tname and self._tmux_session_category(tname) == "ai")
+                    else ICON_AI)
             if want != icon_name:
                 self._set_row_icon(row, want)
         row.kind = "term"
@@ -7223,7 +7236,8 @@ if (data !== null) {{
                         cmd = ["sh", "-c", f"tmux kill-session -t {shlex.quote(session_name)} 2>/dev/null; exec tmux new-session -s {shlex.quote(session_name)} {shlex.quote(cmd_str + '; exec bash')}"]
                     else:
                         cmd = ["tmux", "new-session", "-A", "-s", session_name, f"{cmd_str}; exec bash"]
-                    icon_name = ICON_TMUX
+                    # Keep Connect identity in the sidebar (M2 chrome)
+                    icon_name = ICON_CONNECT
                     sub = f"cloud ({env_val}) [tmux]"
                 else:
                     cmd = raw_cmd
@@ -7365,6 +7379,91 @@ if (data !== null) {{
             return name[5:]
         return name
 
+    # --- M2: sidebar chrome for AI / Connect in work groups ---------------
+    # Groups are work content (may mix AI, Connect, Serial…). Do NOT auto-
+    # create type mega-groups. Focus inheritance for new tabs lives in
+    # _place_tab_row. Below: recognize AI/Connect rows via icons/labels.
+
+    @staticmethod
+    def _tmux_session_from_argv(argv):
+        """Best-effort tmux session name from a tab argv."""
+        if not argv:
+            return None
+        if argv[0] == "tmux":
+            for flag in ("-s", "-t"):
+                try:
+                    i = argv.index(flag)
+                except ValueError:
+                    continue
+                if i + 1 < len(argv) and argv[i + 1]:
+                    return argv[i + 1]
+            return None
+        if (len(argv) >= 3 and argv[0] in ("/bin/sh", "sh")
+                and argv[1] == "-c" and isinstance(argv[2], str)):
+            cmd = argv[2]
+            for pat in (
+                r"attach-session\s+-t\s+['\"]?([^\s'\";]+)",
+                r"has-session\s+-t\s+['\"]?([^\s'\";]+)",
+                r"new-session(?:\s+[^;]*?)?\s+-s\s+['\"]?([^\s'\";]+)",
+                r"kill-session\s+-t\s+['\"]?([^\s'\";]+)",
+            ):
+                m = re.search(pat, cmd)
+                if m:
+                    return m.group(1)
+        return None
+
+    def _normalize_tmux_hosted_tab(self, label, argv, icon_name, sub):
+        """Upgrade generic tmux attach of ai-*/conn-* to AI/Connect chrome.
+
+        Keeps M1 readable labels when present; enables AI status icons (M2).
+        """
+        _, ai_sess = self._ai_tmux_unwrap(argv)
+        name = ai_sess or self._tmux_session_from_argv(argv)
+        if not name:
+            return label, argv, icon_name, sub
+        cat = self._tmux_session_category(name)
+        if cat == "ai" and not _is_ai_icon(icon_name):
+            icon_name = ICON_AI_TMUX
+            if not label or label == name or label.startswith("ai-"):
+                label = self._tmux_ai_cli(name)
+            if not sub or sub == "tmux":
+                sub = sub or "tmux"
+        elif cat == "connect" and icon_name in (ICON_TMUX, None, ""):
+            icon_name = ICON_CONNECT
+            sn = self._tmux_connect_sn(name)
+            pretty = sn.upper() if sn.islower() else sn
+            if not label or label == name or label.startswith("conn-"):
+                label = f"{pretty} (connect)"
+            if not sub:
+                sub = "tmux"
+        return label, argv, icon_name, sub
+
+    def _add_tmux_tab(self, label, argv, sub="tmux", category=None,
+                      path="", session_name=""):
+        """Attach/create from +tmux with AI/Connect chrome (icons + AI argv)."""
+        name = session_name or self._tmux_session_from_argv(argv) or ""
+        cat = category or (
+            self._tmux_session_category(name) if name else "other")
+        if cat == "ai" and name:
+            cli = self._tmux_ai_cli(name)
+            spath = path if path and os.path.isdir(path) else (
+                path or GLib.get_home_dir())
+            if not (spath and os.path.isdir(spath)):
+                spath = GLib.get_home_dir()
+            bypass = bool(self._load_settings().get("ai_claude_bypass", False))
+            inner = self._ai_argv(cli, spath, [], bypass=bypass)
+            argv = self._ai_tmux_argv(inner, name)
+            self._add_session(
+                label or cli, argv, ICON_AI_TMUX,
+                sub=self._ai_sub(spath) if spath else (sub or "tmux"),
+                cwd=spath)
+            return
+        if cat == "connect":
+            self._add_session(
+                label, argv, ICON_CONNECT, sub=sub or "tmux")
+            return
+        self._add_session(label, argv, ICON_TMUX, sub=sub or "tmux")
+
     def _tmux_sessions(self):
         """Live tmux sessions with category + readable label.
 
@@ -7466,11 +7565,15 @@ if (data !== null) {{
 
         chosen = {}  # filled with label/argv when the user picks a session
 
-        def open_session(label, argv, sub="tmux"):
+        def open_session(label, argv, sub="tmux", category=None,
+                         path="", name=""):
             _tmux_apply_user_conf()
             chosen["label"] = label
             chosen["argv"] = argv
             chosen["sub"] = sub
+            chosen["category"] = category
+            chosen["path"] = path
+            chosen["name"] = name
             dialog.response(Gtk.ResponseType.OK)
 
         def create_new(*_a):
@@ -7554,7 +7657,10 @@ if (data !== null) {{
                     lambda _b, s=sess: open_session(
                         s["tab_label"],
                         ["tmux", "new-session", "-A", "-s", s["name"]],
-                        sub=s["tab_sub"]))
+                        sub=s["tab_sub"],
+                        category=s["category"],
+                        path=s.get("path") or "",
+                        name=s["name"]))
                 ren.connect("clicked", lambda _b, n=name: do_rename(n))
                 kill.connect("clicked", lambda _b, n=name: do_kill(n))
                 for b in (att, copy, ren, kill):
@@ -7577,8 +7683,13 @@ if (data !== null) {{
         resp = dialog.run()
         dialog.destroy()
         if resp == Gtk.ResponseType.OK and chosen:
-            self._add_session(chosen["label"], chosen["argv"], ICON_TMUX,
-                              sub=chosen.get("sub") or "tmux")
+            # M2: AI/Connect attaches get proper icons + argv (status chrome)
+            self._add_tmux_tab(
+                chosen["label"], chosen["argv"],
+                sub=chosen.get("sub") or "tmux",
+                category=chosen.get("category"),
+                path=chosen.get("path") or "",
+                session_name=chosen.get("name") or "")
 
     @staticmethod
     def _tmux_prompt_rename(parent, old):
