@@ -27,6 +27,8 @@ import signal
 import subprocess
 import sys
 
+import shutil
+import tarfile
 import threading
 import time
 import urllib.request
@@ -292,21 +294,26 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v1.7.7"
+APP_VERSION = "v1.7.8"
 
 
 def _get_tabit_repo_dir():
+    """Return a local git checkout of tabit, or None.
+
+    install.sh copies tabit into ~/.local/bin with no .git next to it.
+    Update Now must fall back to a release tarball in that case.
+    """
     try:
         real_file = os.path.realpath(os.path.abspath(__file__))
         repo_dir = os.path.dirname(real_file)
-        if os.path.exists(os.path.join(repo_dir, ".git")):
+        if os.path.isdir(os.path.join(repo_dir, ".git")):
             return repo_dir
     except Exception:
         pass
     home_tabit = os.path.expanduser("~/tabit")
-    if os.path.exists(os.path.join(home_tabit, ".git")):
+    if os.path.isdir(os.path.join(home_tabit, ".git")):
         return home_tabit
-    return os.path.dirname(os.path.abspath(__file__))
+    return None
 
 def _get_current_version():
     """Version of the *running* binary.
@@ -9018,7 +9025,7 @@ if (data !== null) {{
             self._open_dialogs.discard(dlg)
             dlg.destroy()
             if res == Gtk.ResponseType.OK:
-                self._perform_update(parent=parent)
+                self._perform_update(parent=parent, target_ver=new_ver)
         dialog.connect("response", _on_update_resp)
         dialog.show_all()
 
@@ -9072,7 +9079,57 @@ if (data !== null) {{
             pass
         return None
 
-    def _perform_update(self, parent=None):
+    @staticmethod
+    def _fetch_release_source(tag, log_fn=None):
+        """Download a GitHub release source tarball and return its root dir.
+
+        Used when there is no local git checkout (typical ~/.local/bin install).
+        """
+        def _log(msg):
+            if log_fn:
+                log_fn(msg)
+
+        tag = (tag or "").strip()
+        if not tag:
+            raise RuntimeError("No release tag to download")
+
+        cache_root = os.path.join(
+            GLib.get_user_cache_dir() if hasattr(GLib, "get_user_cache_dir")
+            else os.path.expanduser("~/.cache"),
+            "tabit-update",
+        )
+        if os.path.isdir(cache_root):
+            shutil.rmtree(cache_root)
+        os.makedirs(cache_root, exist_ok=True)
+
+        url = f"https://github.com/ChrisLi826/tabit/archive/refs/tags/{tag}.tar.gz"
+        tarball = os.path.join(cache_root, f"{tag}.tar.gz")
+        _log(f">>> download {url}")
+        req = urllib.request.Request(url, headers={"User-Agent": "tabit-app"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            with open(tarball, "wb") as out:
+                shutil.copyfileobj(resp, out)
+        _log(f">>> extract {tarball}")
+        with tarfile.open(tarball, "r:gz") as tar:
+            # Python 3.12+: avoid path-traversal from crafted archives
+            if hasattr(tarfile, "data_filter"):
+                tar.extractall(cache_root, filter="data")
+            else:
+                tar.extractall(cache_root)
+
+        for root, _dirs, files in os.walk(cache_root):
+            if "install.sh" in files and "tabit.py" in files:
+                try:
+                    os.chmod(os.path.join(root, "install.sh"), 0o755)
+                except OSError:
+                    pass
+                _log(f">>> source ready at {root}")
+                return root
+        raise RuntimeError(
+            f"Downloaded {tag} but could not find install.sh in the archive")
+
+    def _perform_update(self, parent=None, target_ver=None):
+
         win = parent or self
         dialog = Gtk.Dialog(title="Updating tabit...", transient_for=win,
                             modal=bool(parent))
@@ -9131,31 +9188,52 @@ if (data !== null) {{
             text_view.scroll_to_mark(mark, 0.0, True, 0.0, 1.0)
 
         def do_bg_update():
-            tabit_dir = _get_tabit_repo_dir()
-            if not os.path.exists(os.path.join(tabit_dir, ".git")):
-                def on_no_git():
-                    status_lbl.set_markup("<span color='#f7768e'><b>❌ Update Failed: Not a git repository.</b></span>")
-                    append_log(f"[ERROR] '{tabit_dir}' is not a git repository.")
-                    close_btn.set_sensitive(True)
-                    restart_btn.hide()
-                GLib.idle_add(on_no_git)
-                return
-
             try:
-                # Step 1: git pull
-                GLib.idle_add(lambda: status_lbl.set_markup("<b>Step 1/2:</b> Pulling latest changes from GitHub..."))
-                GLib.idle_add(lambda: progress.set_fraction(0.35))
-                GLib.idle_add(lambda: progress.set_text("35% - git pull"))
-                GLib.idle_add(append_log, f">>> git pull origin main (in {tabit_dir})")
+                tabit_dir = _get_tabit_repo_dir()
+                if tabit_dir:
+                    # Step 1a: git pull when a local checkout exists
+                    GLib.idle_add(lambda: status_lbl.set_markup(
+                        "<b>Step 1/2:</b> Pulling latest changes from GitHub..."))
+                    GLib.idle_add(lambda: progress.set_fraction(0.35))
+                    GLib.idle_add(lambda: progress.set_text("35% - git pull"))
+                    GLib.idle_add(
+                        append_log,
+                        f">>> git pull origin main (in {tabit_dir})")
 
-                p1 = subprocess.Popen(["git", "pull", "origin", "main"], cwd=tabit_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                for line in p1.stdout:
-                    line_str = line.strip()
-                    if line_str:
-                        GLib.idle_add(append_log, line_str)
-                p1.wait()
-                if p1.returncode != 0:
-                    raise RuntimeError("git pull failed with exit code " + str(p1.returncode))
+                    p1 = subprocess.Popen(
+                        ["git", "pull", "origin", "main"],
+                        cwd=tabit_dir,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                    )
+                    for line in p1.stdout:
+                        line_str = line.strip()
+                        if line_str:
+                            GLib.idle_add(append_log, line_str)
+                    p1.wait()
+                    if p1.returncode != 0:
+                        raise RuntimeError(
+                            "git pull failed with exit code "
+                            + str(p1.returncode))
+                else:
+                    # Step 1b: no checkout (e.g. ~/.local/bin install) —
+                    # download the release source tarball and install from it.
+                    ver = target_ver or ""
+                    GLib.idle_add(lambda: status_lbl.set_markup(
+                        f"<b>Step 1/2:</b> Downloading {ver or 'release'}…"))
+                    GLib.idle_add(lambda: progress.set_fraction(0.35))
+                    GLib.idle_add(lambda: progress.set_text(
+                        "35% - download release"))
+                    GLib.idle_add(
+                        append_log,
+                        ">>> no local git checkout; "
+                        "fetching release source from GitHub")
+
+                    def _sync_log(msg):
+                        GLib.idle_add(append_log, msg)
+
+                    tabit_dir = self._fetch_release_source(ver, _sync_log)
 
                 # Step 2: install.sh (sudo via GUI askpass when needed)
                 GLib.idle_add(lambda: status_lbl.set_markup(
@@ -9206,17 +9284,21 @@ if (data !== null) {{
                         + " (password cancelled or apt error?)")
 
                 def on_success():
-                    status_lbl.set_markup("<span color='#9ece6a'><b>✓ Update Completed Successfully!</b></span>")
+                    status_lbl.set_markup(
+                        "<span color='#9ece6a'><b>✓ Update Completed Successfully!</b></span>")
                     progress.set_fraction(1.0)
                     progress.set_text("100% - Done")
-                    append_log("\n>>> Success! tabit has been updated to the latest version.")
+                    append_log(
+                        "\n>>> Success! tabit has been updated "
+                        "to the latest version.")
                     close_btn.set_sensitive(True)
                     restart_btn.show()
 
                 GLib.idle_add(on_success)
             except Exception as ex:
                 def on_fail():
-                    status_lbl.set_markup(f"<span color='#f7768e'><b>❌ Update Failed:</b> {ex}</span>")
+                    status_lbl.set_markup(
+                        f"<span color='#f7768e'><b>❌ Update Failed:</b> {ex}</span>")
                     append_log(f"\n[ERROR] {ex}")
                     close_btn.set_sensitive(True)
                     restart_btn.hide()

@@ -30,8 +30,9 @@ cd tabit
 
 To remove: `./install.sh --uninstall`
 
-In-app **Check for updates** can pull and reinstall (may ask for your sudo
-password for apt).
+In-app **Check for updates** reinstalls the latest release (git pull when a
+checkout exists; otherwise downloads the release tarball). May ask for your
+sudo password for apt.
 
 ## Requirements
 
