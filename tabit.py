@@ -1044,6 +1044,9 @@ class Tabit(Gtk.Window):
         self.connect("delete-event", self._on_delete_event)
         self.connect("destroy", Gtk.main_quit)
         self.connect("key-press-event", self._on_window_key)
+        # Full app quit must leave tmux sessions alive for painless resume/
+        # Attach after restart. Single-tab close and child-exited kill them.
+        self._shutting_down = False
         self._counter = 0
         self._order_seq = 0
         self._open_dialogs = set()
@@ -3315,6 +3318,10 @@ if (data !== null) {{
                 return True  # abort window close
         self._save_sessions()  # capture each shell's current cwd before exit
         self._save_sidebar_geometry()
+        # Window teardown destroys VTE widgets and fires child-exited for
+        # every attached tab. Mark shutdown so those handlers do NOT
+        # kill-session — tabs/groups + tmux sessions must resume/Attach.
+        self._shutting_down = True
         return False
 
     def _move_session(self, delta):
@@ -4185,6 +4192,9 @@ if (data !== null) {{
         self._save_sessions()
 
     def _on_child_exited(self, _term, _status, row):
+        # VTE child gone (detach / session ended). Kill the named tmux
+        # session so it does not linger — skipped during full app quit.
+        self._kill_row_tmux_session(row)
         # keep the tab and its scrollback; only the x really closes it
         row.dead = True
         row.get_style_context().add_class("dead")
@@ -5101,6 +5111,9 @@ if (data !== null) {{
             return
         if not self._confirm_close_row(row):
             return
+        # Active single-tab close: tear down that tab's tmux session (if any).
+        # App window close does not go through here — see _on_delete_event.
+        self._kill_row_tmux_session(row)
         was_selected = self.listbox.get_selected_row() is row
         was_right = self._right_row is row
         rows = self._session_rows()
@@ -7441,6 +7454,36 @@ if (data !== null) {{
                 if m:
                     return m.group(1)
         return None
+
+    def _row_tmux_session(self, row):
+        """Named tmux session for a sidebar row, or None if not tmux-backed."""
+        argv = getattr(row, "argv", None) or []
+        _, sess = self._ai_tmux_unwrap(argv)
+        if sess:
+            return sess
+        return self._tmux_session_from_argv(argv)
+
+    def _kill_row_tmux_session(self, row):
+        """Kill this tab's tmux session on single-tab close / exited.
+
+        Must NOT run during full app quit (`_shutting_down`): restarting
+        tabit must still restore layout and Attach to the same sessions.
+        Idempotent per row (close + subsequent child-exited).
+        """
+        if getattr(self, "_shutting_down", False):
+            return
+        if getattr(row, "_tmux_session_killed", False):
+            return
+        name = self._row_tmux_session(row)
+        if not name:
+            return
+        row._tmux_session_killed = True
+        try:
+            subprocess.run(
+                ["tmux", "kill-session", "-t", name],
+                capture_output=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
     def _normalize_tmux_hosted_tab(self, label, argv, icon_name, sub):
         """Upgrade generic tmux attach of ai-*/conn-* to AI/Connect chrome.
