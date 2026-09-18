@@ -1231,8 +1231,6 @@ class Tabit(Gtk.Window):
             except (KeyError, TypeError, ValueError, IndexError, OSError):
                 continue  # skip broken entries in a hand-edited file
         self._restoring_sessions = False
-        # M2: cluster ungrouped AI-tmux / Connect under named sidebar groups
-        self._auto_group_tmux_categories()
         self._relayout()  # build group headers + cluster + apply collapse
         # Prefer a visible (non-collapsed-member) row so we do not auto-expand
         if last_row is not None:
@@ -1500,12 +1498,12 @@ class Tabit(Gtk.Window):
     def _place_tab_row(self, row, page):
         """Insert row under selection, show, select, persist.
 
-        AI/Connect auto-category always wins for ai-*/conn-* tabs. Non-auto
-        ("other") tabs may inherit a focused *manual* color group — not the
-        named AI/Connect system groups. During restore from sessions.json we
-        skip auto-join (saved color is applied by the restore loop) and skip
-        select — selecting members was expanding groups and wiping
-        collapsed_groups on every restart.
+        New tabs inherit the focused work group (any tab type — AI, Connect,
+        Serial, plain tmux, …). If nothing is focused / no group, stay
+        ungrouped. During restore from sessions.json we skip auto-join
+        (saved color is applied by the restore loop) and skip select —
+        selecting members was expanding groups and wiping collapsed_groups
+        on every restart.
         """
         self._counter += 1
         row._stack_name = f"session-{self._counter}"
@@ -1515,13 +1513,12 @@ class Tabit(Gtk.Window):
         row._pane = None  # attached on select / pin
         restoring = getattr(self, "_restoring_sessions", False)
         if not restoring:
-            g = self._resolve_new_tab_group(row)
-            if g:
-                self._apply_group(row, g)
-                # Expand only when joining the focused manual group (user intent).
-                cur = self._get_active_group_color()
-                if cur and g == cur and g in self._collapsed_groups:
-                    self._collapsed_groups.discard(g)
+            cur_group = self._get_active_group_color()
+            if cur_group:
+                row.group_color = cur_group
+                self._apply_group(row, cur_group)
+                if cur_group in self._collapsed_groups:
+                    self._collapsed_groups.discard(cur_group)
                     self._save_collapsed_groups()
         selected = self.listbox.get_selected_row()
         if selected is not None:
@@ -7239,7 +7236,7 @@ if (data !== null) {{
                         cmd = ["sh", "-c", f"tmux kill-session -t {shlex.quote(session_name)} 2>/dev/null; exec tmux new-session -s {shlex.quote(session_name)} {shlex.quote(cmd_str + '; exec bash')}"]
                     else:
                         cmd = ["tmux", "new-session", "-A", "-s", session_name, f"{cmd_str}; exec bash"]
-                    # Keep Connect identity in the sidebar (M2 grouping/status)
+                    # Keep Connect identity in the sidebar (M2 chrome)
                     icon_name = ICON_CONNECT
                     sub = f"cloud ({env_val}) [tmux]"
                 else:
@@ -7382,12 +7379,10 @@ if (data !== null) {{
             return name[5:]
         return name
 
-    # --- M2: sidebar groups + chrome for AI / Connect in tmux ---------------
-    # Preferred colors for the named system groups (Herdr-like hierarchy).
-    _CATEGORY_GROUP_PREF = {
-        "ai": ("purple", "AI"),
-        "connect": ("teal", "Connect"),
-    }
+    # --- M2: sidebar chrome for AI / Connect in work groups ---------------
+    # Groups are work content (may mix AI, Connect, Serial…). Do NOT auto-
+    # create type mega-groups. Focus inheritance for new tabs lives in
+    # _place_tab_row. Below: recognize AI/Connect rows via icons/labels.
 
     @staticmethod
     def _tmux_session_from_argv(argv):
@@ -7417,71 +7412,6 @@ if (data !== null) {{
                     return m.group(1)
         return None
 
-    def _category_group_color(self, category):
-        """Color id for the named AI / Connect group (create name if needed)."""
-        meta = self._CATEGORY_GROUP_PREF.get(category)
-        if not meta:
-            return None
-        preferred, want_name = meta
-        for color, name in list(self._group_names.items()):
-            if (name or "").strip().upper() == want_name.upper():
-                return color
-        used = {getattr(r, "group_color", None) for r in self._session_rows()}
-        color = preferred if preferred not in used else self._new_group_color()
-        self._group_names[color] = want_name
-        self._save_group_names()
-        return color
-
-    def _is_category_group_color(self, color):
-        """True if color is the named AI or Connect system group."""
-        if not color:
-            return False
-        name = (self._group_names.get(color) or "").strip().upper()
-        want = {meta[1].upper() for meta in self._CATEGORY_GROUP_PREF.values()}
-        return name in want
-
-    def _resolve_new_tab_group(self, row):
-        """Color for a newly placed tab, or None.
-
-        Auto AI/Connect category always wins for ai-*/conn-* (and AI-tmux
-        chrome). Only non-auto tabs may inherit a focused *manual* group —
-        never the named AI/Connect system groups (QA: other stays ungrouped
-        when focus is on AI/Connect).
-        """
-        cat = self._row_auto_group_category(row)
-        if cat:
-            return self._category_group_color(cat)
-        cur_group = self._get_active_group_color()
-        if cur_group and not self._is_category_group_color(cur_group):
-            return cur_group
-        return None
-
-    def _row_auto_group_category(self, row):
-        """'ai' / 'connect' when this tab is AI-or-Connect hosted in tmux."""
-        icon = getattr(row, "icon_name", None)
-        argv = getattr(row, "argv", None) or []
-        _, ai_sess = self._ai_tmux_unwrap(argv)
-        name = ai_sess or self._tmux_session_from_argv(argv)
-        if name and self._tmux_session_category(name) == "ai":
-            return "ai"
-        if icon == ICON_AI_TMUX or ai_sess:
-            return "ai"
-        if name and self._tmux_session_category(name) == "connect":
-            return "connect"
-        return None
-
-    def _auto_group_tmux_categories(self):
-        """Assign ungrouped AI-tmux / Connect tabs to named sidebar groups."""
-        for r in self._session_rows():
-            if getattr(r, "group_color", None):
-                continue
-            cat = self._row_auto_group_category(r)
-            if not cat:
-                continue
-            g = self._category_group_color(cat)
-            if g:
-                self._apply_group(r, g)
-
     def _normalize_tmux_hosted_tab(self, label, argv, icon_name, sub):
         """Upgrade generic tmux attach of ai-*/conn-* to AI/Connect chrome.
 
@@ -7510,7 +7440,7 @@ if (data !== null) {{
 
     def _add_tmux_tab(self, label, argv, sub="tmux", category=None,
                       path="", session_name=""):
-        """Attach/create from +tmux with category-aware icon and AI argv."""
+        """Attach/create from +tmux with AI/Connect chrome (icons + AI argv)."""
         name = session_name or self._tmux_session_from_argv(argv) or ""
         cat = category or (
             self._tmux_session_category(name) if name else "other")
@@ -7753,7 +7683,7 @@ if (data !== null) {{
         resp = dialog.run()
         dialog.destroy()
         if resp == Gtk.ResponseType.OK and chosen:
-            # M2: AI/Connect attaches get proper icons + argv (status + groups)
+            # M2: AI/Connect attaches get proper icons + argv (status chrome)
             self._add_tmux_tab(
                 chosen["label"], chosen["argv"],
                 sub=chosen.get("sub") or "tmux",

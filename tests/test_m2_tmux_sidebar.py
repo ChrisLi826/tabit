@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M2 helpers: tmux session → category / argv parse / chrome normalize."""
+"""M2 helpers: chrome normalize + work-group focus inheritance (no type mega-groups)."""
 import os
 import sys
 import unittest
@@ -18,6 +18,7 @@ from tabit import (  # noqa: E402
 
 class TestM2TmuxSidebarHelpers(unittest.TestCase):
     def test_category(self):
+        # M1 picker filter buckets (list layer — not sidebar grouping)
         self.assertEqual(Tabit._tmux_session_category("ai-claude-x"), "ai")
         self.assertEqual(Tabit._tmux_session_category("conn-ab12"), "connect")
         self.assertEqual(Tabit._tmux_session_category("dev"), "other")
@@ -70,79 +71,67 @@ class _FakeRow:
 
 
 class _FakeWin:
-    """Minimal stand-in to exercise M2 placement resolution without GTK UI."""
-
-    _CATEGORY_GROUP_PREF = Tabit._CATEGORY_GROUP_PREF
-    _tmux_session_category = staticmethod(Tabit._tmux_session_category)
-    _tmux_session_from_argv = staticmethod(Tabit._tmux_session_from_argv)
-    _ai_tmux_unwrap = classmethod(Tabit._ai_tmux_unwrap.__func__)
+    """Mirrors _place_tab_row focus-inheritance rule without GTK UI."""
 
     def __init__(self):
-        self._group_names = {}
         self._active = None
-        self._rows = []
-
-    def _session_rows(self):
-        return list(self._rows)
 
     def _get_active_group_color(self):
         return self._active
 
-    def _new_group_color(self):
-        return "orange"
-
-    def _save_group_names(self):
-        pass
-
-    _is_category_group_color = Tabit._is_category_group_color
-    _category_group_color = Tabit._category_group_color
-    _row_auto_group_category = Tabit._row_auto_group_category
-    _resolve_new_tab_group = Tabit._resolve_new_tab_group
+    def _inherit_new_tab_group(self, _row):
+        """Same rule as Tabit._place_tab_row (non-restore path)."""
+        return self._get_active_group_color()
 
 
-class TestM2NewTabGroupResolve(unittest.TestCase):
+class TestM2WorkGroupFocusInheritance(unittest.TestCase):
+    """Groups = work content; all tab types inherit focused work group.
+
+    When nothing is focused → stay ungrouped (no prompt, no type mega-group).
+    """
+
     def setUp(self):
         self.win = _FakeWin()
-        # Prefill named system groups as restore/auto-group would.
-        self.win._group_names["purple"] = "AI"
-        self.win._group_names["teal"] = "Connect"
 
-    def test_ai_always_ai_even_if_connect_focused(self):
-        self.win._active = "teal"
-        row = _FakeRow(
+    def _ai_row(self):
+        return _FakeRow(
             argv=["tmux", "new-session", "-A", "-s", "ai-claude-proj-deadbeef"],
             icon_name=ICON_AI_TMUX)
-        self.assertEqual(self.win._resolve_new_tab_group(row), "purple")
 
-    def test_connect_not_stolen_by_focused_ai(self):
-        self.win._active = "purple"  # focused AI group (QA failure)
-        row = _FakeRow(
+    def _conn_row(self):
+        return _FakeRow(
             argv=["tmux", "new-session", "-A", "-s", "conn-TESTDEVICE123"],
             icon_name=ICON_CONNECT)
-        self.assertEqual(self.win._resolve_new_tab_group(row), "teal")
 
-    def test_other_not_sucked_into_focused_ai(self):
-        self.win._active = "purple"
-        row = _FakeRow(
+    def _other_row(self):
+        return _FakeRow(
             argv=["tmux", "new-session", "-A", "-s", "misc-build"],
             icon_name=ICON_TMUX)
-        self.assertIsNone(self.win._resolve_new_tab_group(row))
 
-    def test_other_inherits_manual_focused_group(self):
-        self.win._group_names["red"] = "Work"
-        self.win._active = "red"
-        row = _FakeRow(
-            argv=["tmux", "new-session", "-A", "-s", "misc-build"],
-            icon_name=ICON_TMUX)
-        self.assertEqual(self.win._resolve_new_tab_group(row), "red")
+    def test_all_types_inherit_focused_work_group(self):
+        self.win._active = "red"  # work group "Project X"
+        for row in (self._ai_row(), self._conn_row(), self._other_row()):
+            self.assertEqual(self.win._inherit_new_tab_group(row), "red")
 
-    def test_ai_joins_ai_when_nothing_focused(self):
+    def test_no_focus_stays_ungrouped(self):
         self.win._active = None
-        row = _FakeRow(
-            argv=["tmux", "new-session", "-A", "-s", "ai-claude-x"],
-            icon_name=ICON_AI_TMUX)
-        self.assertEqual(self.win._resolve_new_tab_group(row), "purple")
+        for row in (self._ai_row(), self._conn_row(), self._other_row()):
+            self.assertIsNone(self.win._inherit_new_tab_group(row))
 
+    def test_ai_row_keeps_ai_chrome_not_type_group(self):
+        """AI recognition is icon/status chrome — not forced into an AI mega-group."""
+        self.win._active = "teal"  # a work group that happens to use teal
+        row = self._ai_row()
+        self.assertEqual(self.win._inherit_new_tab_group(row), "teal")
+        # Chrome still identifies AI (status badges attach to ICON_AI_TMUX rows)
+        self.assertEqual(row.icon_name, ICON_AI_TMUX)
+        self.assertTrue(row.icon_name.startswith("tabit-ai"))
+
+    def test_connect_row_keeps_connect_icon_in_work_group(self):
+        self.win._active = "purple"
+        row = self._conn_row()
+        self.assertEqual(self.win._inherit_new_tab_group(row), "purple")
+        self.assertEqual(row.icon_name, ICON_CONNECT)
 
 
 if __name__ == "__main__":
