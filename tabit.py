@@ -3029,12 +3029,18 @@ if (data !== null) {{
             sb = 0
         start_row = max(0, crow - sb)
         end_row = crow + vis
+        # Passing -1 as end_col is unsafe with some VTE versions: it can
+        # wrap during size calculation and trigger a multi-GiB allocation.
+        try:
+            end_col = max(0, int(term.get_column_count()) - 1)
+        except Exception:
+            end_col = 500
 
         # Modern API — no attributes callback, works on VTE 0.72+.
         if hasattr(term, "get_text_range_format") and hasattr(Vte, "Format"):
             try:
                 text, _length = term.get_text_range_format(
-                    Vte.Format.TEXT, start_row, 0, end_row, -1)
+                    Vte.Format.TEXT, start_row, 0, end_row, end_col)
                 if text:
                     return text
             except Exception:
@@ -3043,13 +3049,13 @@ if (data !== null) {{
         # Older VTE fallbacks (may still work when attributes are nullable).
         try:
             text, _attrs = term.get_text_range(
-                start_row, 0, end_row, -1, None)
+                start_row, 0, end_row, end_col, None)
             if text:
                 return text
         except TypeError:
             try:
                 text, _attrs = term.get_text_range(
-                    start_row, 0, end_row, -1, lambda *_a: False)
+                    start_row, 0, end_row, end_col, lambda *_a: False)
                 if text:
                     return text
             except Exception:
