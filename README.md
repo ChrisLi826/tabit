@@ -76,6 +76,12 @@ looking elsewhere. When a session's process ends (device unplugged,
 `exit`, picocom quit) the tab stays, greyed and marked `exited`, so
 you keep the scrollback — press its `x` to really close it.
 
+The foot of the sidebar counts **every** AI tab by status — `?` blocked,
+`✓` done, play working, pause idle — next to a clock. The off-viewport
+peeks only cover tabs scrolled out of sight, so with a long list an agent
+waiting on you could still be missed; this row cannot miss one. Click a
+count to jump to that agent, and click again to cycle through the rest.
+
 Serial tool defaults to `screen` — a bundled `screen.sh` wrapper
 (multi-attach + logfile), written to `~/.config/tabit/screen.sh`. `kermit`
 uses `~/senaoenv/kermrc` when present (`-c -E`). `picocom` quit is

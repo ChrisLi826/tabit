@@ -938,6 +938,15 @@ def get_theme_css(theme_key):
     font-weight: 800;
 }}
 .ai-peek-slot:hover {{ opacity: 0.85; }}
+/* docked summary of every AI tab, at the foot of the sidebar */
+.ai-statusbar {{
+    border-top: 1px solid {s['border']};
+    padding: 3px 6px;
+}}
+.ai-statusbar-clock {{
+    color: {s['subtext']};
+    font-size: {sz_sub}pt;
+}}
 .group-ai-summary {{
     margin-left: 4px;
     margin-right: 2px;
@@ -1330,6 +1339,8 @@ class Tabit(Gtk.Window):
 
         adders.pack_start(system_box, False, False, 0)
         self.sidebar.pack_start(adders, False, False, 0)
+        self.ai_status_bar = self._make_ai_status_bar()
+        self.sidebar.pack_start(self.ai_status_bar, False, False, 0)
 
         # Content area: optional left|right split. Each frame packs a header
         # (when split) + exactly one session page. Drag the paned handle.
@@ -4619,6 +4630,45 @@ if (data !== null) {{
         box._peek_slots = slots
         return box
 
+    def _make_ai_status_bar(self):
+        """Foot of the sidebar: every AI tab by status, plus a clock.
+
+        The peek bars only count tabs scrolled out of view; this one counts
+        them all, so a full list never hides an agent waiting on you.
+        """
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        bar.get_style_context().add_class("ai-statusbar")
+        bar.set_can_focus(False)
+        slots_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        slots_box.get_style_context().add_class("ai-peek")  # status colors
+        slots_box.set_can_focus(False)
+        slots_box.set_no_show_all(True)
+        slots_box.hide()
+        slots = {}
+        for st in self._AI_ATTENTION_ORDER:
+            hit, pack = self._ai_agg_slot_widgets(st, for_click=("bar", st))
+            slots_box.pack_start(hit, False, False, 0)
+            slots[st] = (hit, pack)
+        slots_box._peek_slots = slots
+        bar.pack_start(slots_box, False, False, 0)
+        clock = Gtk.Label(label="")
+        clock.get_style_context().add_class("ai-statusbar-clock")
+        clock.set_xalign(1.0)
+        bar.pack_end(clock, True, True, 0)
+        bar._slots_box = slots_box
+        bar._clock = clock
+        clock.set_text(time.strftime("%H:%M"))  # self.ai_status_bar is not set yet
+        # 30s, not 1s: the label has no seconds, so a minute-ish tick is all
+        # the accuracy it can show.
+        GLib.timeout_add_seconds(30, self._tick_sidebar_clock)
+        return bar
+
+    def _tick_sidebar_clock(self):
+        bar = getattr(self, "ai_status_bar", None)
+        if bar is not None:
+            bar._clock.set_text(time.strftime("%H:%M"))
+        return True
+
     def _schedule_ai_summary_refresh(self, from_scroll=False):
         """Coalesce: idle for layout/status; short debounce for scroll."""
         src = getattr(self, "_ai_summary_src", None)
@@ -4677,6 +4727,7 @@ if (data !== null) {{
             return
         above = self._ai_empty_buckets()
         below = self._ai_empty_buckets()
+        overall = self._ai_empty_buckets()  # every AI tab, for the status bar
         by_group = {}  # color -> status -> [rows]
 
         for r in self._session_rows():
@@ -4685,6 +4736,7 @@ if (data !== null) {{
             st = getattr(r, "agent_status", None)
             if st not in self._AI_ATTENTION_ORDER:
                 continue
+            overall[st].append(r)
             g = getattr(r, "group_color", None)
             if g and g in self._collapsed_groups:
                 by_group.setdefault(g, self._ai_empty_buckets())
@@ -4709,9 +4761,13 @@ if (data !== null) {{
                 for st, rows in buckets.items():
                     below[st].extend(rows)
 
-        self._ai_peek_targets = {"above": above, "below": below}
+        self._ai_peek_targets = {"above": above, "below": below,
+                                 "bar": overall}
         self._fill_ai_peek_bar(self.ai_peek_top, above, "above")
         self._fill_ai_peek_bar(self.ai_peek_bottom, below, "below")
+        bar = getattr(self, "ai_status_bar", None)
+        if bar is not None:
+            self._fill_ai_peek_bar(bar._slots_box, overall, "bar")
         self._fill_group_header_ai_summaries(by_group)
 
     def _fill_ai_peek_bar(self, bar, buckets, direction):
@@ -4837,7 +4893,9 @@ if (data !== null) {{
         """Jump to next off-screen AI tab of this status in that direction."""
         if getattr(event, "button", 1) != 1:
             return False
-        direction = "above" if edge == "top" else "below"
+        # "top"/"bottom" are the overlay peeks; any other edge (the docked
+        # status bar) names its own bucket in _ai_peek_targets.
+        direction = {"top": "above", "bottom": "below"}.get(edge, edge)
         buckets = (getattr(self, "_ai_peek_targets", None) or {}).get(
             direction) or {}
         rows = list(buckets.get(status) or [])
