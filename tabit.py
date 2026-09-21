@@ -317,10 +317,10 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v1.8.1"
+APP_VERSION = "v1.8.2"
 # Fresh Taiwan-origin cuisine English name picked at release time (no public
 # future pool). Display: v1.8.0 · Braised Pork Rice
-APP_CODENAME = "Coffin Bread"
+APP_CODENAME = "Iron Egg"
 _VERSION_CODENAME_SEP = " · "
 
 
