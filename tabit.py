@@ -9990,13 +9990,113 @@ if (data !== null) {{
         return label
 
 
+def _nvm_alias_target(nvm_dir, name="default", _depth=0):
+    """Resolve an nvm alias file, which may point at another alias."""
+    if _depth > 4:
+        return ""
+    try:
+        with open(os.path.join(nvm_dir, "alias", name)) as f:
+            val = f.read().strip()
+    except OSError:
+        return ""
+    if not val:
+        return ""
+    head = val.lstrip("v")
+    if head[:1].isdigit():
+        return head
+    return _nvm_alias_target(nvm_dir, val, _depth + 1)  # lts/* or named alias
+
+
+def _nvm_bin_dirs():
+    """Node bin dir nvm would put on PATH, as plain path work.
+
+    nvm is a shell function loaded from .bashrc, so a desktop launch never
+    runs it: no node, and none of the CLIs installed through npm (codex,
+    gemini). The default alias holds a version prefix ("20"), not a
+    directory name, so match on version components — a string prefix would
+    let "20" pick up v22.
+    """
+    nvm_dir = os.environ.get("NVM_DIR") or os.path.join(
+        GLib.get_home_dir(), ".nvm")
+    versions = os.path.join(nvm_dir, "versions", "node")
+    try:
+        installed = [d for d in os.listdir(versions) if d.startswith("v")]
+    except OSError:
+        return []
+
+    def ver(name):
+        out = []
+        for bit in name.lstrip("v").split("."):
+            try:
+                out.append(int(bit))
+            except ValueError:
+                out.append(-1)
+        return out
+
+    installed.sort(key=ver)
+    picked = None
+    alias = _nvm_alias_target(nvm_dir)
+    want = ver(alias) if alias else []
+    if want:
+        for name in reversed(installed):
+            if ver(name)[:len(want)] == want:
+                picked = name
+                break
+    if picked is None and installed:
+        picked = installed[-1]
+    if not picked:
+        return []
+    bin_dir = os.path.join(versions, picked, "bin")
+    return [bin_dir] if os.path.isdir(bin_dir) else []
+
+
 def _ensure_user_path():
-    # Desktop launch gives a stripped PATH. +Command runs non-interactive sh
-    # (no .bashrc), so tools in ~/.local/bin (e.g. screen.sh) are missing.
-    local_bin = os.path.join(GLib.get_home_dir(), ".local", "bin")
+    # Desktop launch gives a stripped PATH. +Command and AI tabs run
+    # non-interactive sh (no .bashrc), so tools in ~/.local/bin (e.g.
+    # screen.sh) are missing, and so is everything nvm exports from
+    # .bashrc (node and the npm-installed agent CLIs).
+    wanted = [os.path.join(GLib.get_home_dir(), ".local", "bin")]
+    wanted += _nvm_bin_dirs()
     path = os.environ.get("PATH", "")
-    if local_bin not in path.split(":"):
-        os.environ["PATH"] = local_bin + (":" + path if path else "")
+    have = path.split(":")
+    add = [d for d in wanted if d not in have]
+    if add:
+        os.environ["PATH"] = ":".join(add) + (":" + path if path else "")
+
+
+def _ensure_tmux_path():
+    """Give an already-running tmux server our PATH additions too.
+
+    AI tabs live in tmux sessions that outlive tabit on purpose, so the
+    server may have been started by an older tabit holding the stripped
+    desktop PATH. New sessions take the server's environment, not ours,
+    so without this an agent CLI stays missing however often tabit is
+    restarted. Merge what the server lacks instead of replacing its PATH:
+    the server may have been started from a real terminal whose PATH is
+    the richer one.
+    """
+    try:
+        out = subprocess.run(["tmux", "show-environment", "-g", "PATH"],
+                             capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return
+    if out.returncode != 0:
+        return  # no server yet; the one tabit starts inherits our env
+    line = out.stdout.strip()
+    if not line.startswith("PATH="):
+        return
+    server_path = line[len("PATH="):]
+    have = server_path.split(":")
+    add = [d for d in os.environ.get("PATH", "").split(":")
+           if d and d not in have]
+    if not add:
+        return
+    merged = ":".join(add) + (":" + server_path if server_path else "")
+    try:
+        subprocess.run(["tmux", "set-environment", "-g", "PATH", merged],
+                       capture_output=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def _ensure_screen_sh():
@@ -10036,6 +10136,7 @@ def main():
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     GLib.set_prgname("tabit")
     _ensure_user_path()
+    _ensure_tmux_path()
     _ensure_screen_sh()
 
     # one instance is enough; the lock dies with the process
