@@ -77,7 +77,7 @@ class TestUrlPattern(unittest.TestCase):
         self.assertIsNone(self.first("[2026-09-21] serial /dev/ttyUSB2 115200"))
 
     def test_no_match_on_email(self):
-        self.assertIsNone(self.first("mail chris@senao.com ok"))
+        self.assertIsNone(self.first("mail someone@example.com ok"))
 
 
 class TestLinkLookupOrder(unittest.TestCase):
