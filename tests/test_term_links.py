@@ -12,6 +12,7 @@ gi.require_version("GtkSource", "4")
 gi.require_version("Vte", "2.91")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import tabit  # noqa: E402
 from tabit import (  # noqa: E402
     TERM_URL_PATTERN, TERM_URL_REGEX, Tabit, _strip_url_tail,
 )
@@ -105,6 +106,35 @@ class TestLinkLookupOrder(unittest.TestCase):
         term = _FakeTerm(match="https://a.io/x.")
         self.assertEqual(Tabit._term_link_at_event(term, None),
                          "https://a.io/x")
+
+
+class TestOpenUri(unittest.TestCase):
+    """A launch context leaves the desktop's busy cursor stuck on tabit.
+
+    Browsers ship StartupNotify=true. Launched with a context, an already
+    running one hands the URL to its existing process and exits without
+    mapping a window, so the startup sequence never completes.
+    """
+
+    def setUp(self):
+        self.calls = []
+        self._real = tabit.Gio.AppInfo.launch_default_for_uri
+
+        def spy(uri, context):
+            self.calls.append((uri, context))
+            return True
+
+        tabit.Gio.AppInfo.launch_default_for_uri = staticmethod(spy)
+        self.addCleanup(setattr, tabit.Gio.AppInfo,
+                        "launch_default_for_uri", self._real)
+
+    def test_passes_the_uri_through(self):
+        Tabit._open_uri("https://herdr.dev/docs")
+        self.assertEqual(self.calls[0][0], "https://herdr.dev/docs")
+
+    def test_never_passes_a_launch_context(self):
+        Tabit._open_uri("https://herdr.dev/docs")
+        self.assertIsNone(self.calls[0][1])
 
 
 if __name__ == "__main__":

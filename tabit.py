@@ -39,7 +39,8 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("GtkSource", "4")
 gi.require_version("Vte", "2.91")
-from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, GtkSource, Pango, Vte
+from gi.repository import (Gdk, GdkPixbuf, Gio, GLib, Gtk, GtkSource, Pango,
+                           Vte)
 
 # WebKit2 4.0 (libsoup2, older Ubuntu) or 4.1 (libsoup3, 24.04+); same API
 # for what we use. Optional: without it the note Markdown preview is off.
@@ -9161,9 +9162,19 @@ if (data !== null) {{
                 uri = None
         return _strip_url_tail(uri)
 
-    def _open_uri(self, uri, timestamp):
+    @staticmethod
+    def _open_uri(uri):
+        """Hand a URI to the desktop's default handler.
+
+        Deliberately without a launch context. Gtk.show_uri_on_window builds
+        a GdkAppLaunchContext, which sets DESKTOP_STARTUP_ID; a browser with
+        StartupNotify=true that is already running then passes the URL to its
+        existing process and exits without mapping a window, so the startup
+        sequence never completes and the desktop leaves a busy cursor over
+        tabit until it times out.
+        """
         try:
-            Gtk.show_uri_on_window(self, uri, timestamp)
+            Gio.AppInfo.launch_default_for_uri(uri, None)
         except GLib.Error:
             pass
 
@@ -9175,7 +9186,7 @@ if (data !== null) {{
             # Plain click has to stay selection/focus, so links take Ctrl.
             url = self._term_link_at_event(term, event)
             if url:
-                self._open_uri(url, event.time)
+                self._open_uri(url)
                 return True
             return False
         if event.button != 3:
@@ -9185,7 +9196,7 @@ if (data !== null) {{
         if url:
             open_link = Gtk.MenuItem(label="Open Link")
             open_link.connect("activate",
-                              lambda *_: self._open_uri(url, event.time))
+                              lambda *_: self._open_uri(url))
             copy_link = Gtk.MenuItem(label="Copy Link")
             copy_link.connect("activate",
                               lambda *_: self._copy_to_clipboard(url))
