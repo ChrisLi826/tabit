@@ -68,6 +68,7 @@ sudo password for apt.
 | `Ctrl+Tab` | Move focus between the left and right pane |
 | `Ctrl+Alt+W` | Swap what the left and right panes show |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |
+| `Ctrl`+click a URL in a terminal | Open it in the browser. Hover underlines the match; right-click a link adds **Open Link** / **Copy Link**. Works on plain `http(s)://` / `ftp://` text and on OSC 8 hyperlinks (tmux hides OSC 8 unless `allow-passthrough` is on; plain URLs still match) |
 | `Shortcuts…` (sidebar) | Edit any of the shortcuts above |
 
 A blue dot on a tab means that session printed output while you were

@@ -458,6 +458,39 @@ def _tmux_apply_user_conf():
         pass
 
 
+# Clickable terminal links. VTE matches with PCRE2, not Python `re`, and
+# PyGObject does not export the PCRE2 constants.
+PCRE2_MULTILINE = 0x00000400
+# Deliberately narrow: terminals here show JSON dumps, serial logs and argv,
+# where a greedy pattern underlines noise. Brackets and quotes stay out so a
+# URL inside them ends at the bracket, and the last character cannot be
+# sentence punctuation, so VTE's hover underline ends where the URL does.
+TERM_URL_PATTERN = (
+    r"(?:https?|ftp)://"
+    r"[^\s'\"<>()\[\]{}|\\^`]*"       # body
+    r"[^\s'\"<>()\[\]{}|\\^`.,;:!?]"  # last char is never sentence punctuation
+)
+TERM_URL_TRAILING = ".,;:!?"
+
+
+def _build_term_url_regex():
+    """Compile the URL matcher once. None when VTE rejects the pattern."""
+    try:
+        return Vte.Regex.new_for_match(TERM_URL_PATTERN, -1, PCRE2_MULTILINE)
+    except (GLib.Error, TypeError):
+        return None
+
+
+TERM_URL_REGEX = _build_term_url_regex()
+
+
+def _strip_url_tail(url):
+    """Drop punctuation a sentence left on the end of a URL."""
+    if not url:
+        return None
+    return url.rstrip(TERM_URL_TRAILING) or url
+
+
 def _tmux_kill_session(name):
     """Drop one tmux session now; missing session is not an error."""
     try:
@@ -1708,6 +1741,12 @@ class Tabit(Gtk.Window):
         # Allow paned to shrink below geometry-hints width (else left half clips)
         term.set_size_request(1, 1)
         term.set_scrollback_lines(10000)
+        # Links: OSC 8 hyperlinks from the child, plus plain URLs in the text.
+        # The pointer cursor is VTE's own hover feedback for a match.
+        term.set_allow_hyperlink(True)
+        if TERM_URL_REGEX is not None:
+            term.match_set_cursor_name(
+                term.match_add_regex(TERM_URL_REGEX, 0), "pointer")
         self._apply_term_colors(term)
         self._apply_term_font(term)
         term.connect("key-press-event", self._on_term_key)
@@ -9007,11 +9046,52 @@ if (data !== null) {{
     def _on_term_key(self, term, event):
         return self._handle_shortcut(event, term=term)
 
+    @staticmethod
+    def _term_link_at_event(term, event):
+        """URL under the pointer: OSC 8 hyperlink first, then a plain match."""
+        uri = None
+        try:
+            uri = term.hyperlink_check_event(event)
+        except (AttributeError, TypeError):
+            uri = None
+        if not uri:
+            try:
+                uri, _tag = term.match_check_event(event)
+            except (AttributeError, TypeError):
+                uri = None
+        return _strip_url_tail(uri)
+
+    def _open_uri(self, uri, timestamp):
+        try:
+            Gtk.show_uri_on_window(self, uri, timestamp)
+        except GLib.Error:
+            pass
+
     def _on_term_button(self, term, event):
-        """Right-click menu for terminals: copy / paste / select all."""
-        if event.button != 3 or event.type != Gdk.EventType.BUTTON_PRESS:
+        """Ctrl+click opens a link; right-click is the terminal menu."""
+        if event.type != Gdk.EventType.BUTTON_PRESS:
+            return False
+        if event.button == 1 and event.state & Gdk.ModifierType.CONTROL_MASK:
+            # Plain click has to stay selection/focus, so links take Ctrl.
+            url = self._term_link_at_event(term, event)
+            if url:
+                self._open_uri(url, event.time)
+                return True
+            return False
+        if event.button != 3:
             return False
         menu = Gtk.Menu()
+        url = self._term_link_at_event(term, event)
+        if url:
+            open_link = Gtk.MenuItem(label="Open Link")
+            open_link.connect("activate",
+                              lambda *_: self._open_uri(url, event.time))
+            copy_link = Gtk.MenuItem(label="Copy Link")
+            copy_link.connect("activate",
+                              lambda *_: self._copy_to_clipboard(url))
+            menu.append(open_link)
+            menu.append(copy_link)
+            menu.append(Gtk.SeparatorMenuItem())
         copy = Gtk.MenuItem(label="Copy")
         copy.set_sensitive(term.get_has_selection())
         copy.connect("activate",
