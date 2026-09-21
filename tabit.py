@@ -63,6 +63,10 @@ except ImportError:
     HAS_MARKDOWN = False
 
 SIDEBAR_WIDTH = 200
+# A tab counts as "stayed on" once it has been selected this long AND Ctrl is
+# no longer held: holding Ctrl through several Ctrl+PageUp/Down presses is one
+# gesture, so the tabs it passes over never become the jump-back target.
+TAB_DWELL_MS = 800
 DEFAULT_BAUD = "115200"
 # custom sidebar icon for +AI tabs (stored as icon_name in sessions.json)
 ICON_AI = "tabit-ai"
@@ -1134,7 +1138,8 @@ KEY_ACTIONS = (
     ("toggle_split", "Toggle right pane", "<Primary><Alt>r", "Split panes"),
     # Ctrl+Tab: free in tabit; not a desktop-wide Linux shortcut (Alt+Tab is).
     # Browsers use it only when focused; VTE does not reserve it.
-    ("focus_other_pane", "Focus other pane", "<Primary>Tab", "Split panes"),
+    ("focus_other_pane", "Focus other pane / last tab",
+     "<Primary>Tab", "Split panes"),
     # Swap left/right content. Avoid Ctrl+Shift+Tab (Claude Code and many IDEs).
     ("swap_panes", "Swap left/right panes", "<Primary><Alt>w", "Split panes"),
     ("pin_right_pane", "Pin session to right pane", "<Primary><Alt>p",
@@ -1224,6 +1229,13 @@ class Tabit(Gtk.Window):
         self.connect("delete-event", self._on_delete_event)
         self.connect("destroy", Gtk.main_quit)
         self.connect("key-press-event", self._on_window_key)
+        self.connect("key-release-event", self._on_window_key_release)
+        self._dwelt_row = None       # tab the user is settled on
+        self._prev_dwelt_row = None  # the one before it — Ctrl+Tab's target
+        self._dwell_row = None       # candidate waiting out TAB_DWELL_MS
+        self._dwell_mods = 0         # modifiers held when it was selected
+        self._dwell_src = None
+        self._dwell_elapsed = False
         # Full app quit must leave tmux sessions alive for painless resume/
         # Attach after restart. Only intentional single-tab close kills them;
         # a tab becoming exited leaves the session for the user to inspect.
@@ -5454,6 +5466,7 @@ if (data !== null) {{
             self.listbox.grab_focus()
             GLib.timeout_add(50, self._scroll_to_row, row)
             return
+        self._start_tab_dwell(row)  # only real tab switches reach here
         # Which pane receives this tab: keyboard nav sets _nav_pane; otherwise
         # follow current focus when split (right focus → update right, etc.).
         nav_pane = getattr(self, "_nav_pane", None)
@@ -5925,6 +5938,86 @@ if (data !== null) {{
             GLib.timeout_add(50, self._scroll_to_row, row)
         finally:
             self._list_sync_only = False
+
+    # --- last-tab jump -----------------------------------------------------
+
+    @staticmethod
+    def _held_mods():
+        """Modifiers physically down now, however we lost the events.
+
+        Read live rather than assuming Ctrl: the navigation shortcuts are
+        user-editable, so the key being held through a gesture is whatever
+        keys.json binds them to.
+        """
+        try:
+            km = Gdk.Keymap.get_for_display(Gdk.Display.get_default())
+            return km.get_modifier_state() & MOD_MASK
+        except Exception:
+            return 0
+
+    def _cancel_tab_dwell(self):
+        if self._dwell_src is not None:
+            GLib.source_remove(self._dwell_src)
+            self._dwell_src = None
+        self._dwell_row = None
+        self._dwell_mods = 0
+        self._dwell_elapsed = False
+
+    def _start_tab_dwell(self, row):
+        """Begin timing whether this tab is being stayed on."""
+        self._cancel_tab_dwell()
+        if row is None or row is self._dwelt_row:
+            return  # already the settled tab; nothing to promote
+        self._dwell_row = row
+        # Whatever is held right now is this gesture's modifier, so holding
+        # it through several presses stays one gesture whatever it is bound to.
+        self._dwell_mods = self._held_mods()
+        self._dwell_src = GLib.timeout_add(TAB_DWELL_MS, self._tab_dwell_done)
+
+    def _tab_dwell_done(self):
+        self._dwell_src = None
+        self._dwell_elapsed = True
+        self._commit_tab_dwell()
+        return False
+
+    def _commit_tab_dwell(self):
+        """Promote the candidate once both the timer and Ctrl are done."""
+        row = self._dwell_row
+        if row is None or not self._dwell_elapsed:
+            return
+        if self._dwell_mods and (self._held_mods() & self._dwell_mods):
+            return  # mid-gesture; _on_window_key_release will call back
+        if row.get_parent() is None:
+            self._cancel_tab_dwell()
+            return
+        self._prev_dwelt_row = self._dwelt_row
+        self._dwelt_row = row
+        self._cancel_tab_dwell()
+
+    _MOD_KEY_NAMES = ("control_l", "control_r", "shift_l", "shift_r",
+                      "alt_l", "alt_r", "super_l", "super_r",
+                      "meta_l", "meta_r")
+
+    def _on_window_key_release(self, _w, event):
+        """Letting go of a modifier can end a navigation gesture."""
+        name = (Gdk.keyval_name(event.keyval) or "").lower()
+        if name in self._MOD_KEY_NAMES:
+            self._commit_tab_dwell()
+        return False
+
+    def _jump_to_last_tab(self):
+        """Ctrl+Tab with no split: back to the last tab stayed on."""
+        row = self._prev_dwelt_row
+        if row is None or row.get_parent() is None:
+            self._prev_dwelt_row = None
+            return False
+        # The jump is itself the switch, so swap now rather than wait out a
+        # dwell — pressing again has to come straight back.
+        self._prev_dwelt_row, self._dwelt_row = self._dwelt_row, row
+        self._cancel_tab_dwell()
+        self.listbox.select_row(row)
+        GLib.timeout_add(50, self._scroll_to_row, row)
+        return True
 
     def _focus_other_pane(self):
         if not self._split_on or self._right_row is None:
@@ -9058,7 +9151,9 @@ if (data !== null) {{
         elif action == "toggle_split":
             return self._toggle_split()
         elif action == "focus_other_pane":
-            return self._focus_other_pane()
+            # With no split there is no other pane, so the same key falls
+            # through to the last tab the user actually stayed on.
+            return self._focus_other_pane() or self._jump_to_last_tab()
         elif action == "swap_panes":
             return self._swap_panes()
         elif action == "pin_right_pane":

@@ -65,7 +65,7 @@ sudo password for apt.
 | `Ctrl+Shift+PageUp` / `Ctrl+Shift+PageDown` | Move current tab up / down |
 | `Ctrl+Alt+R` | Toggle the right content pane (two sessions side by side) |
 | `Ctrl+Alt+P` | Pin the selected session to the right pane |
-| `Ctrl+Tab` | Move focus between the left and right pane |
+| `Ctrl+Tab` | Move focus between the left and right pane; with no right pane open, jump back to the last tab you stayed on (press again to come back). Tabs you only passed through do not count: a tab is "stayed on" once it has been selected for 0.8s **and** the modifier is released, so holding Ctrl through a run of `Ctrl+PageUp`/`PageDown` is one move however long it pauses |
 | `Ctrl+Alt+W` | Swap what the left and right panes show |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |
 | `Ctrl`+click a URL in a terminal | Open it in the browser. Hover underlines the match; right-click a link adds **Open Link** / **Copy Link**. Works on plain `http(s)://` / `ftp://` text and on OSC 8 hyperlinks (tmux hides OSC 8 unless `allow-passthrough` is on; plain URLs still match) |
