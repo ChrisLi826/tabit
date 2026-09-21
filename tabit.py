@@ -9587,10 +9587,7 @@ if (data !== null) {{
         # 更新預覽函數
         def update_preview(*_a):
             t_font = (term_font_combo.get_active_text() or term_font_combo.get_child().get_text() or "").strip() or "Monospace"
-            try:
-                t_sz = int(term_size_spin.entry.get_text() or "12")
-            except ValueError:
-                t_sz = 12
+            t_sz = term_size_spin.get_value()
             font_desc = Pango.FontDescription.from_string(f"{t_font} {t_sz}")
             demo_entry.override_font(font_desc)
 
@@ -9602,34 +9599,46 @@ if (data !== null) {{
             entry = Gtk.Entry(text=str(initial_val), width_chars=4, xalign=0.5)
             inc_btn = Gtk.Button(label="+")
             
-            def on_changed(w):
-                text = w.get_text().strip()
-                clean = "".join(c for c in text if c.isdigit())
-                if clean:
-                    v = int(clean)
-                    if v < min_val: v = min_val
-                    if v > max_val: v = max_val
-                    if clean != text or str(v) != text:
-                        w.set_text(str(v))
-                update_preview()
-                
-            entry.connect("changed", on_changed)
-            
-            def adjust(delta):
+            def get_value():
                 try:
-                    v = int(entry.get_text() or min_val)
+                    v = int(entry.get_text() or initial_val)
                 except ValueError:
                     v = initial_val
-                v = max(min_val, min(max_val, v + delta))
-                entry.set_text(str(v))
+                return max(min_val, min(max_val, v))
+
+            def on_changed(w):
+                # Drop non-digits only. Clamping the range on every keystroke
+                # made the field unusable: with a 100-200 range the first
+                # digit typed is always below min, so it was rewritten to
+                # "100", and the next keystroke landed above max -- whatever
+                # you typed ended up as "200".
+                text = w.get_text().strip()
+                clean = "".join(c for c in text if c.isdigit())
+                if clean != text:
+                    w.set_text(clean)
                 update_preview()
-                
+
+            def commit(*_a):
+                # Settle the range once, when the user leaves the field.
+                entry.set_text(str(get_value()))
+                update_preview()
+
+            entry.connect("changed", on_changed)
+            entry.connect("activate", commit)
+            entry.connect("focus-out-event", lambda *_a: (commit(), False)[1])
+
+            def adjust(delta):
+                entry.set_text(str(max(min_val,
+                                       min(max_val, get_value() + delta))))
+                update_preview()
+
             dec_btn.connect("clicked", lambda _: adjust(-1))
             inc_btn.connect("clicked", lambda _: adjust(1))
             sbox.pack_start(dec_btn, False, False, 0)
             sbox.pack_start(entry, False, False, 0)
             sbox.pack_start(inc_btn, False, False, 0)
             sbox.entry = entry
+            sbox.get_value = get_value
             return sbox
 
         orig_theme = s.get("theme", "tokyo-night")
@@ -9656,10 +9665,7 @@ if (data !== null) {{
         def on_preview_theme(_b):
             sel_theme = theme_keys[theme_combo.get_active()]
             t_font = (term_font_combo.get_active_text() or term_font_combo.get_child().get_text() or "").strip() or "Monospace"
-            try:
-                t_sz = int(term_size_spin.entry.get_text() or "12")
-            except ValueError:
-                t_sz = 12
+            t_sz = term_size_spin.get_value()
             self._apply_theme(sel_theme)
             self._apply_editor_font(t_font, t_sz)
 
@@ -9827,21 +9833,10 @@ if (data !== null) {{
         def _on_settings_response(dlg, resp):
             if resp == Gtk.ResponseType.OK:
                 selected_theme = theme_keys[theme_combo.get_active()]
-                try:
-                    ui_sz = int(ui_font_spin.entry.get_text() or "10")
-                except ValueError:
-                    ui_sz = 10
+                ui_sz = ui_font_spin.get_value()
                 t_font = (term_font_combo.get_active_text() or term_font_combo.get_child().get_text() or "").strip() or "Monospace"
-                try:
-                    t_sz = int(term_size_spin.entry.get_text() or "12")
-                except ValueError:
-                    t_sz = 12
-                try:
-                    t_line_spacing = int(
-                        term_spacing_spin.entry.get_text() or "120") / 100.0
-                except ValueError:
-                    t_line_spacing = 1.20
-                t_line_spacing = max(1.0, min(2.0, t_line_spacing))
+                t_sz = term_size_spin.get_value()
+                t_line_spacing = term_spacing_spin.get_value() / 100.0
                 side_id = side_combo.get_active_id() or "left"
                 if side_id not in ("left", "right", "center"):
                     side_id = "left"
