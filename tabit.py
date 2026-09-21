@@ -16,6 +16,7 @@ Keyboard shortcuts are user-editable (sidebar → Shortcuts…, stored in
 
 import base64
 import fcntl
+import hashlib
 import glob
 import html as html_module
 import json
@@ -1230,6 +1231,7 @@ class Tabit(Gtk.Window):
         self.connect("destroy", Gtk.main_quit)
         self.connect("key-press-event", self._on_window_key)
         self.connect("key-release-event", self._on_window_key_release)
+        self.connect("focus-out-event", self._on_window_focus_out)
         self._dwelt_row = None       # tab the user is settled on
         self._prev_dwelt_row = None  # the one before it — Ctrl+Tab's target
         self._dwell_row = None       # candidate waiting out TAB_DWELL_MS
@@ -5955,6 +5957,11 @@ if (data !== null) {{
         except Exception:
             return 0
 
+    @staticmethod
+    def _live_row(row):
+        """The row, or None once its tab has been closed."""
+        return row if row is not None and row.get_parent() is not None else None
+
     def _cancel_tab_dwell(self):
         if self._dwell_src is not None:
             GLib.source_remove(self._dwell_src)
@@ -5980,19 +5987,31 @@ if (data !== null) {{
         self._commit_tab_dwell()
         return False
 
-    def _commit_tab_dwell(self):
-        """Promote the candidate once both the timer and Ctrl are done."""
-        row = self._dwell_row
+    def _commit_tab_dwell(self, ignore_mods=False):
+        """Promote the candidate once both the timer and the keys are done.
+
+        ignore_mods ends the gesture regardless: a key held while the window
+        is losing focus is released somewhere else, so the release event
+        never arrives here and the candidate would wait for ever.
+        """
+        row = self._live_row(self._dwell_row)
         if row is None or not self._dwell_elapsed:
+            if self._dwell_row is not None and row is None:
+                self._cancel_tab_dwell()  # the candidate tab was closed
             return
-        if self._dwell_mods and (self._held_mods() & self._dwell_mods):
+        if not ignore_mods and self._dwell_mods and (
+                self._held_mods() & self._dwell_mods):
             return  # mid-gesture; _on_window_key_release will call back
-        if row.get_parent() is None:
-            self._cancel_tab_dwell()
-            return
-        self._prev_dwelt_row = self._dwelt_row
+        # A closed tab cannot be jumped to, so it must not displace the one
+        # before it as the target.
+        self._prev_dwelt_row = (self._live_row(self._dwelt_row)
+                                or self._live_row(self._prev_dwelt_row))
         self._dwelt_row = row
         self._cancel_tab_dwell()
+
+    def _on_window_focus_out(self, _w, _event):
+        self._commit_tab_dwell(ignore_mods=True)
+        return False
 
     _MOD_KEY_NAMES = ("control_l", "control_r", "shift_l", "shift_r",
                       "alt_l", "alt_r", "super_l", "super_r",
@@ -6007,13 +6026,20 @@ if (data !== null) {{
 
     def _jump_to_last_tab(self):
         """Ctrl+Tab with no split: back to the last tab stayed on."""
-        row = self._prev_dwelt_row
-        if row is None or row.get_parent() is None:
-            self._prev_dwelt_row = None
+        if self._dwell_row is not None:
+            # Still waiting out its dwell, so this is the tab being shown:
+            # go back to the last committed one, not the one before that.
+            target, came_from = self._dwelt_row, self._dwell_row
+        else:
+            target, came_from = self._prev_dwelt_row, self._dwelt_row
+        row = self._live_row(target)
+        if row is None:
+            self._prev_dwelt_row = self._live_row(self._prev_dwelt_row)
             return False
         # The jump is itself the switch, so swap now rather than wait out a
         # dwell — pressing again has to come straight back.
-        self._prev_dwelt_row, self._dwelt_row = self._dwelt_row, row
+        self._dwelt_row = row
+        self._prev_dwelt_row = self._live_row(came_from)
         self._cancel_tab_dwell()
         self.listbox.select_row(row)
         GLib.timeout_add(50, self._scroll_to_row, row)
@@ -8431,8 +8457,11 @@ if (data !== null) {{
         base = os.path.basename(os.path.normpath(path)) or "home"
         slug = re.sub(r"[^A-Za-z0-9_-]", "-", f"{cli}-{base}")[:32].strip("-")
         # tmux rejects "." and ":" in names; the digest keeps two folders with
-        # the same basename apart
-        digest = f"{abs(hash((cli, os.path.normpath(path)))):x}"[:6]
+        # the same basename apart. sha1, not hash(): Python randomises string
+        # hashing per process, so the "stable" name differed on every start
+        # and Resume opened a second agent instead of attaching to the first.
+        key = f"{cli}\0{os.path.normpath(path)}".encode()
+        digest = hashlib.sha1(key).hexdigest()[:6]
         name = f"ai-{slug}-{digest}"
         if unique:
             name = f"{name}-{os.urandom(2).hex()}"
@@ -9245,16 +9274,18 @@ if (data !== null) {{
     @staticmethod
     def _term_link_at_event(term, event):
         """URL under the pointer: OSC 8 hyperlink first, then a plain match."""
-        uri = None
         try:
             uri = term.hyperlink_check_event(event)
         except (AttributeError, TypeError):
             uri = None
-        if not uri:
-            try:
-                uri, _tag = term.match_check_event(event)
-            except (AttributeError, TypeError):
-                uri = None
+        if uri:
+            # OSC 8 states where the URI ends, so trailing punctuation in it
+            # belongs to the URI — trimming would change what is opened.
+            return uri
+        try:
+            uri, _tag = term.match_check_event(event)
+        except (AttributeError, TypeError):
+            uri = None
         return _strip_url_tail(uri)
 
     @staticmethod
@@ -9446,11 +9477,16 @@ if (data !== null) {{
 
                 GLib.idle_add(on_done)
             except Exception as e:
+                # Bind the text now: Python clears `e` when the except block
+                # ends, and this callback runs later on the GTK thread.
+                err = str(e)
+
                 def on_err():
                     if status_label:
                         status_label.set_text("Check failed (network error).")
                     if manual:
-                        self._note_msg(Gtk.MessageType.ERROR, "Update Check Failed", str(e), parent=parent_dialog)
+                        self._note_msg(Gtk.MessageType.ERROR, "Update Check Failed",
+                                       err, parent=parent_dialog)
                 GLib.idle_add(on_err)
 
         threading.Thread(target=thread_fn, daemon=True).start()
@@ -9803,10 +9839,15 @@ if (data !== null) {{
 
                 GLib.idle_add(on_success)
             except Exception as ex:
+                # Same reason as on_err above: `ex` is gone by the time this
+                # runs, so keep the message, not the exception object.
+                err = str(ex)
+
                 def on_fail():
                     status_lbl.set_markup(
-                        f"<span color='#f7768e'><b>❌ Update Failed:</b> {ex}</span>")
-                    append_log(f"\n[ERROR] {ex}")
+                        f"<span color='#f7768e'><b>❌ Update Failed:</b> "
+                        f"{GLib.markup_escape_text(err)}</span>")
+                    append_log(f"\n[ERROR] {err}")
                     close_btn.set_sensitive(True)
                     restart_btn.hide()
 

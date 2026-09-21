@@ -42,6 +42,7 @@ class _Win:
     _commit_tab_dwell = Tabit._commit_tab_dwell
     _jump_to_last_tab = Tabit._jump_to_last_tab
     _tab_dwell_done = Tabit._tab_dwell_done
+    _live_row = staticmethod(Tabit._live_row)
 
     def __init__(self):
         self._dwelt_row = None
@@ -152,6 +153,23 @@ class TestDwell(_NoTimers, unittest.TestCase):
         self.w.wait()
         self.assertIs(self.w._dwelt_row, self.b)
 
+    def test_losing_focus_ends_the_gesture(self):
+        """Ctrl let go in another window: its release never reaches us."""
+        self.w.visit(self.a); self.w.wait()
+        self.w.held = CTRL
+        self.w.visit(self.b)
+        self.w.wait()                       # deferred, Ctrl still down
+        self.assertIs(self.w._dwelt_row, self.a)
+        self.w._commit_tab_dwell(ignore_mods=True)   # focus-out
+        self.assertIs(self.w._dwelt_row, self.b)
+
+    def test_closing_the_settled_tab_keeps_the_older_target(self):
+        self.w.visit(self.a); self.w.wait()
+        self.w.visit(self.b); self.w.wait()  # dwelt=B prev=A
+        self.b.close()
+        self.w.visit(self.c); self.w.wait()
+        self.assertIs(self.w._prev_dwelt_row, self.a)  # not the closed B
+
     def test_reselecting_the_same_tab_changes_nothing(self):
         self.w.visit(self.a); self.w.wait()
         self.w.visit(self.b); self.w.wait()
@@ -181,6 +199,15 @@ class TestJump(_NoTimers, unittest.TestCase):
             self.w._jump_to_last_tab()
             seen.append(self.w.selected)
         self.assertEqual(seen, [self.a, self.b, self.a, self.b])
+
+    def test_jump_before_the_new_tab_settles(self):
+        """On C but not settled yet: Ctrl+Tab belongs back on B, not A."""
+        c = _Row("C")
+        self.w.visit(c)                      # no wait — still a candidate
+        self.assertTrue(self.w._jump_to_last_tab())
+        self.assertIs(self.w.selected, self.b)
+        self.w._jump_to_last_tab()           # and straight back to C
+        self.assertIs(self.w.selected, c)
 
     def test_no_target_yet(self):
         self.assertFalse(_Win()._jump_to_last_tab())
