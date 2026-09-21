@@ -1092,46 +1092,88 @@ menuitem.grp-menu-item:hover {{ background-color: {s['selection']}; color: #ffff
 
 CSS_PROVIDER = Gtk.CssProvider()
 
-# (action_id, label, default GTK accelerator string)
+# (action_id, label, default GTK accelerator string, group)
+# The group is the section header in the Shortcuts dialog and fixes the order
+# there. Entries of one group stay adjacent; _key_action_groups relies on it.
 KEY_ACTIONS = (
-    ("new_shell", "New shell", "<Primary><Shift>t"),
-    ("new_serial", "New serial", "<Primary><Shift>s"),
-    ("new_ai", "New AI session", "<Primary><Shift>a"),
-    ("new_note", "New note", "<Primary><Shift>n"),
-    ("save_note", "Save note", "<Primary>s"),
-    ("note_b64_enc", "Note: Base64 encode", "<Primary><Alt>b"),
-    ("note_b64_dec", "Note: Base64 decode", "<Primary><Alt><Shift>b"),
-    ("note_json_fmt", "Note: JSON format", "<Primary><Alt>j"),
-    ("note_preview", "Note: Markdown preview", "<Primary><Alt>m"),
-    ("note_yaml_browser", "Note: YAML browser", "<Primary><Alt>y"),
-    ("note_find", "Note: Find text", "<Primary>f"),
-    ("note_find_next", "Note: Find next", "F3"),
-    ("note_find_prev", "Note: Find previous", "<Shift>F3"),
-    ("term_find", "Terminal: Find text", "<Primary><Shift>f"),
-    ("close_session", "Close session", "<Primary><Shift>w"),
-    ("rename_session", "Rename session", "F2"),
-    ("prev_session", "Previous session", "<Primary>Page_Up"),
-    ("next_session", "Next session", "<Primary>Page_Down"),
-    ("move_tab_up", "Move tab up", "<Primary><Shift>Page_Up"),
-    ("move_tab_down", "Move tab down", "<Primary><Shift>Page_Down"),
-    ("move_group_up", "Move group up", "<Primary><Alt><Shift>Page_Up"),
-    ("move_group_down", "Move group down", "<Primary><Alt><Shift>Page_Down"),
+    ("new_shell", "New shell", "<Primary><Shift>t", "New session"),
+    ("new_serial", "New serial", "<Primary><Shift>s", "New session"),
+    ("new_ai", "New AI session", "<Primary><Shift>a", "New session"),
+    ("new_note", "New note", "<Primary><Shift>n", "New session"),
+
+    ("close_session", "Close session", "<Primary><Shift>w", "Session"),
+    ("rename_session", "Rename session", "F2", "Session"),
+    ("prev_session", "Previous session", "<Primary>Page_Up", "Session"),
+    ("next_session", "Next session", "<Primary>Page_Down", "Session"),
+
+    ("move_tab_up", "Move tab up", "<Primary><Shift>Page_Up", "Order & groups"),
+    ("move_tab_down", "Move tab down", "<Primary><Shift>Page_Down",
+     "Order & groups"),
+    ("move_group_up", "Move group up", "<Primary><Alt><Shift>Page_Up",
+     "Order & groups"),
+    ("move_group_down", "Move group down", "<Primary><Alt><Shift>Page_Down",
+     "Order & groups"),
     # Ctrl+Alt+G: fold/unfold the group of the focused tab or header
-    ("toggle_group_collapse", "Toggle group collapse", "<Primary><Alt>g"),
-    ("group_session", "Group session", "<Primary>g"),
-    ("ungroup_session", "Ungroup session", "<Primary><Shift>g"),
+    ("toggle_group_collapse", "Toggle group collapse", "<Primary><Alt>g",
+     "Order & groups"),
+    ("group_session", "Group session", "<Primary>g", "Order & groups"),
+    ("ungroup_session", "Ungroup session", "<Primary><Shift>g",
+     "Order & groups"),
+
     # Left|right content split (primary list selection | pinned right)
-    ("toggle_split", "Toggle right pane", "<Primary><Alt>r"),
+    ("toggle_split", "Toggle right pane", "<Primary><Alt>r", "Split panes"),
     # Ctrl+Tab: free in tabit; not a desktop-wide Linux shortcut (Alt+Tab is).
     # Browsers use it only when focused; VTE does not reserve it.
-    ("focus_other_pane", "Focus other pane", "<Primary>Tab"),
+    ("focus_other_pane", "Focus other pane", "<Primary>Tab", "Split panes"),
     # Swap left/right content. Avoid Ctrl+Shift+Tab (Claude Code and many IDEs).
-    ("swap_panes", "Swap left/right panes", "<Primary><Alt>w"),
-    ("pin_right_pane", "Pin session to right pane", "<Primary><Alt>p"),
-    ("copy", "Copy", "<Primary><Shift>c"),
-    ("paste", "Paste", "<Primary><Shift>v"),
+    ("swap_panes", "Swap left/right panes", "<Primary><Alt>w", "Split panes"),
+    ("pin_right_pane", "Pin session to right pane", "<Primary><Alt>p",
+     "Split panes"),
+
+    ("save_note", "Save note", "<Primary>s", "Note"),
+    ("note_b64_enc", "Note: Base64 encode", "<Primary><Alt>b", "Note"),
+    ("note_b64_dec", "Note: Base64 decode", "<Primary><Alt><Shift>b", "Note"),
+    ("note_json_fmt", "Note: JSON format", "<Primary><Alt>j", "Note"),
+    ("note_preview", "Note: Markdown preview", "<Primary><Alt>m", "Note"),
+    ("note_yaml_browser", "Note: YAML browser", "<Primary><Alt>y", "Note"),
+
+    ("term_find", "Terminal: Find text", "<Primary><Shift>f", "Find"),
+    ("note_find", "Note: Find text", "<Primary>f", "Find"),
+    ("note_find_next", "Note: Find next", "F3", "Find"),
+    ("note_find_prev", "Note: Find previous", "<Shift>F3", "Find"),
+
+    ("copy", "Copy", "<Primary><Shift>c", "Clipboard"),
+    ("paste", "Paste", "<Primary><Shift>v", "Clipboard"),
 )
-DEFAULT_KEYS = {a: d for a, _label, d in KEY_ACTIONS}
+
+
+def _key_action_groups():
+    """KEY_ACTIONS bucketed by group, in declaration order."""
+    groups = []
+    for action, label, default, group in KEY_ACTIONS:
+        if not groups or groups[-1][0] != group:
+            groups.append((group, []))
+        groups[-1][1].append((action, label, default))
+    return groups
+
+
+def _split_key_groups(groups):
+    """Split groups into two dialog columns with the evenest row counts.
+
+    A group costs a header row plus its shortcuts and never straddles the
+    columns — keeping it whole is the whole point of grouping them.
+    """
+    rows = [1 + len(items) for _name, items in groups]
+    total = sum(rows)
+    best, best_diff = 1, None
+    for i in range(1, len(groups)):
+        left = sum(rows[:i])
+        diff = abs(left - (total - left))
+        if best_diff is None or diff < best_diff:
+            best, best_diff = i, diff
+    return groups[:best], groups[best:]
+
+DEFAULT_KEYS = {a: d for a, _label, d, _group in KEY_ACTIONS}
 MOD_MASK = (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK |
             Gdk.ModifierType.MOD1_MASK | Gdk.ModifierType.SUPER_MASK |
             Gdk.ModifierType.META_MASK)
@@ -9947,6 +9989,42 @@ if (data !== null) {{
         dialog.connect("response", _on_settings_response)
         dialog.show_all()
 
+    def _add_key_row(self, grid, dialog, col, r, action, label, accels,
+                     buttons):
+        """One shortcut row: its name plus the button that re-binds it."""
+        lbl = Gtk.Label(label=label, xalign=0)
+        lbl.set_margin_start(36 if col else 12)  # indent under the group header
+        grid.attach(lbl, col, r, 1, 1)
+        btn = Gtk.Button(label=self._accel_label_from_name(accels[action]))
+        btn.set_hexpand(True)
+        buttons[action] = btn
+        grid.attach(btn, col + 1, r, 1, 1)
+
+        def capture(_b, act=action, b=btn):
+            b.set_label("Press a key…")
+            # grab keyboard on the dialog for one key
+            def on_key(_w, event):
+                if event.type != Gdk.EventType.KEY_PRESS:
+                    return True
+                name = (Gdk.keyval_name(event.keyval) or "").lower()
+                if name in ("escape",):
+                    b.set_label(self._accel_label_from_name(accels[act]))
+                    dialog.disconnect(handler_id)
+                    return True
+                if name in ("control_l", "control_r", "shift_l", "shift_r",
+                            "alt_l", "alt_r", "super_l", "super_r",
+                            "meta_l", "meta_r"):
+                    return True  # wait for the real key
+                mods = event.state & MOD_MASK
+                key = event.keyval
+                accels[act] = Gtk.accelerator_name(key, mods)
+                b.set_label(self._accel_label(key, mods))
+                dialog.disconnect(handler_id)
+                return True
+            handler_id = dialog.connect("key-press-event", on_key)
+
+        btn.connect("clicked", capture)
+
     def _on_edit_keys(self, _btn):
         if self._raise_open_dialog("keys"):
             return
@@ -9960,47 +10038,29 @@ if (data !== null) {{
         grid = Gtk.Grid(row_spacing=8, column_spacing=12, margin=12)
         # store GTK accel names; show human labels on buttons
         accels = {}
-        for action, _label, default in KEY_ACTIONS:
+        for action, _label, default, _group in KEY_ACTIONS:
             key, mods = self._keys.get(action, self._parse_accel(default))
             accels[action] = Gtk.accelerator_name(key, mods)
 
         buttons = {}
-        half = (len(KEY_ACTIONS) + 1) // 2  # split into two columns
-        for i, (action, label, _default) in enumerate(KEY_ACTIONS):
-            col, r = (0, i) if i < half else (2, i - half)
-            lbl = Gtk.Label(label=label, xalign=0)
-            if col == 2:
-                lbl.set_margin_start(24)  # gap between the two columns
-            grid.attach(lbl, col, r, 1, 1)
-            btn = Gtk.Button(label=self._accel_label_from_name(accels[action]))
-            btn.set_hexpand(True)
-            buttons[action] = btn
-            grid.attach(btn, col + 1, r, 1, 1)
-
-            def capture(_b, act=action, b=btn):
-                b.set_label("Press a key…")
-                # grab keyboard on the dialog for one key
-                def on_key(_w, event):
-                    if event.type != Gdk.EventType.KEY_PRESS:
-                        return True
-                    name = (Gdk.keyval_name(event.keyval) or "").lower()
-                    if name in ("escape",):
-                        b.set_label(self._accel_label_from_name(accels[act]))
-                        dialog.disconnect(handler_id)
-                        return True
-                    if name in ("control_l", "control_r", "shift_l", "shift_r",
-                                "alt_l", "alt_r", "super_l", "super_r",
-                                "meta_l", "meta_r"):
-                        return True  # wait for the real key
-                    mods = event.state & MOD_MASK
-                    key = event.keyval
-                    accels[act] = Gtk.accelerator_name(key, mods)
-                    b.set_label(self._accel_label(key, mods))
-                    dialog.disconnect(handler_id)
-                    return True
-                handler_id = dialog.connect("key-press-event", on_key)
-
-            btn.connect("clicked", capture)
+        # Two columns of whole groups, so related shortcuts stay together;
+        # a flat split down the middle used to separate them.
+        for col_index, column in enumerate(
+                _split_key_groups(_key_action_groups())):
+            col = col_index * 2
+            r = 0
+            for group_name, items in column:
+                header = self._section(group_name)
+                if col:
+                    header.set_margin_start(24)  # gap between the two columns
+                if r:
+                    header.set_margin_top(10)    # air above the next group
+                grid.attach(header, col, r, 2, 1)
+                r += 1
+                for action, label, _default in items:
+                    self._add_key_row(grid, dialog, col, r, action, label,
+                                      accels, buttons)
+                    r += 1
 
         hint = Gtk.Label(
             label="Click a shortcut, then press the new key combo.\n"
@@ -10010,7 +10070,7 @@ if (data !== null) {{
         box = dialog.get_content_area()
         box.add(grid)
         box.add(hint)
-        action_labels = {a: lab for a, lab, _d in KEY_ACTIONS}
+        action_labels = {a: lab for a, lab, _d, _g in KEY_ACTIONS}
 
         def collisions():
             """[(accel text, [action names])] for combos bound more than once.
@@ -10020,7 +10080,7 @@ if (data !== null) {{
             would silently shadow the other.
             """
             seen = {}
-            for action, _label, _d in KEY_ACTIONS:
+            for action, _label, _d, _g in KEY_ACTIONS:
                 pair = self._parse_accel(accels[action])
                 if pair is None:
                     continue
@@ -10032,7 +10092,7 @@ if (data !== null) {{
 
         def _on_keys_response(dlg, resp):
             if resp == Gtk.ResponseType.APPLY:
-                for action, _label, default in KEY_ACTIONS:
+                for action, _label, default, _group in KEY_ACTIONS:
                     accels[action] = default
                     buttons[action].set_label(self._accel_label_from_name(default))
                 return  # Keep dialog open for further edits
@@ -10048,7 +10108,7 @@ if (data !== null) {{
                                     for accel, acts in dups),
                         parent=dlg)
                     return  # keep the dialog open so the user can fix it
-                self._save_keys({a: accels[a] for a, _l, _d in KEY_ACTIONS})
+                self._save_keys({a: accels[a] for a, _l, _d, _g in KEY_ACTIONS})
             self._open_dialogs.discard(dlg)
             dlg.destroy()
 
