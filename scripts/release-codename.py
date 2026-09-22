@@ -160,11 +160,9 @@ def cmd_record(args):
         )
 
     if args.force:
-        items[:] = [
-            c for c in items
-            if c.get("version") != version
-            and (c.get("english") or "").strip().lower() != name.lower()
-        ]
+        # Replace this version's entry, nothing else. Dropping every entry
+        # with the same name deleted the release a hotfix was fixing.
+        items[:] = [c for c in items if c.get("version") != version]
 
     items.append({"version": version, "english": name})
     # Keep chronological-ish order by version string (good enough for semver tags).

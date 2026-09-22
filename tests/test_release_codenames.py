@@ -2,6 +2,9 @@
 """Release cuisine-codename label helpers and shipped-history consistency."""
 import json
 import os
+import shutil
+import subprocess
+import tempfile
 import re
 import sys
 import unittest
@@ -134,3 +137,50 @@ class TestCodenameHistory(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRecordForce(unittest.TestCase):
+    """--force replaces one version's entry, and only that one.
+
+    It used to drop every entry sharing the new name too, so recording a
+    hotfix under the name it inherits deleted the release it was fixing.
+    """
+
+    SCRIPT = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "scripts", "release-codename.py")
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d)
+        os.makedirs(os.path.join(self.d, "scripts"))
+        shutil.copy(self.SCRIPT, os.path.join(self.d, "scripts"))
+        self.write([{"version": "v1.8.2", "english": "Iron Egg"},
+                    {"version": "v1.8.3", "english": "Tube Rice Pudding"}])
+
+    def write(self, shipped):
+        with open(os.path.join(self.d, "release-codenames.json"), "w") as f:
+            json.dump({"_comment": "test", "shipped": shipped}, f)
+
+    def read(self):
+        with open(os.path.join(self.d, "release-codenames.json")) as f:
+            return json.load(f)["shipped"]
+
+    def record(self, version, name, force=True):
+        cmd = [sys.executable, "scripts/release-codename.py", "record",
+               version, "--name", name]
+        if force:
+            cmd.append("--force")
+        return subprocess.run(cmd, cwd=self.d, capture_output=True, text=True)
+
+    def test_a_hotfix_does_not_delete_the_release_it_fixes(self):
+        self.record("v1.8.3.1", "Tube Rice Pudding")
+        versions = [e["version"] for e in self.read()]
+        self.assertIn("v1.8.3", versions)
+        self.assertIn("v1.8.3.1", versions)
+
+    def test_force_still_replaces_the_same_version(self):
+        self.record("v1.8.3", "Pineapple Cake")
+        entries = {e["version"]: e["english"] for e in self.read()}
+        self.assertEqual(entries["v1.8.3"], "Pineapple Cake")
+        self.assertEqual(len(self.read()), 2)  # no second v1.8.3
