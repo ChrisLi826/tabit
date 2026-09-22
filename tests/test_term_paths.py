@@ -267,7 +267,7 @@ class TestOpenPathRouting(unittest.TestCase):
     def test_a_sentence_period_does_not_stop_the_open(self):
         # Agent output ends sentences with paths, and the matcher keeps the
         # period because a file may really end in one.
-        src = self.write("notes.md", "hello\n")
+        src = self.write("notes.txt", "hello\n")
         Tabit._open_path(self.sink, src + ".")
         self.assertEqual(self.sink.calls, [("note", src)])
 
@@ -285,9 +285,16 @@ class TestOpenPathRouting(unittest.TestCase):
                          [("note", page), ("preview", True)])
 
     def test_a_plain_text_file_gets_no_preview(self):
-        src = self.write("notes.md", "hello\n")
+        src = self.write("notes.txt", "hello\n")
         Tabit._open_path(self.sink, src)
         self.assertEqual(self.sink.calls, [("note", src)])
+
+    def test_markdown_opens_showing_the_document(self):
+        # Markdown is written to be read, so the preview is on, and it
+        # takes the whole tab the way a page does.
+        src = self.write("notes.md", "# hello\n")
+        Tabit._open_path(self.sink, src)
+        self.assertEqual(self.sink.calls, [("note", src), ("preview", True)])
 
     def test_a_zero_stat_file_never_reaches_a_note(self):
         # /proc reports size 0 and still reads 15MB, so the size check has
@@ -416,7 +423,7 @@ class TestPreviewSurvivesATabSwitch(unittest.TestCase):
 
         class App:
             _note_set_preview = Tabit._note_set_preview
-            _is_browser_page = staticmethod(lambda p: True)
+            _opens_full_width = staticmethod(lambda p: True)
 
             @staticmethod
             def _note_render_preview(_row):
@@ -584,3 +591,29 @@ class TestStitchRows(unittest.TestCase):
         path_end = len("/tmp/aabb.txt")
         self.assertTrue(path_end <= lo)  # the path stops before that row
 
+
+class TestFullWidthRule(unittest.TestCase):
+    """What takes the whole tab rather than sharing it with the editor."""
+
+    def setUp(self):
+        self.d = tempfile.TemporaryDirectory()
+        self.addCleanup(self.d.cleanup)
+
+    def make(self, name):
+        path = os.path.join(self.d.name, name)
+        open(path, "w").close()
+        return path
+
+    def test_pages_pictures_and_markdown_fill_the_tab(self):
+        for name in ("a.html", "a.svg", "a.png", "a.pdf",
+                     "a.md", "a.markdown"):
+            self.assertTrue(Tabit._opens_full_width(self.make(name)), name)
+
+    def test_plain_text_keeps_the_split(self):
+        for name in ("a.txt", "Makefile", "a.py", "a.json"):
+            self.assertFalse(Tabit._opens_full_width(self.make(name)), name)
+
+    def test_markdown_is_still_rendered_as_markdown(self):
+        # _is_browser_page decides raw-vs-converted in the renderer, so
+        # markdown must stay out of it or its source would show as HTML.
+        self.assertFalse(Tabit._is_browser_page("/x/a.md"))

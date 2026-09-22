@@ -483,6 +483,8 @@ RENDER_SUFFIXES = (".html", ".htm", ".xhtml", ".svg", ".pdf",
                    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico")
 # The ones that are also source you may want to read and edit.
 HTML_SUFFIXES = (".html", ".htm", ".xhtml", ".svg")
+# Markdown is written to be read as a document, so it opens as one.
+MARKDOWN_SUFFIXES = (".md", ".markdown", ".mdown", ".mkd")
 # Absolute (or ~-relative) file paths in terminal output, with an optional
 # `:line` suffix as compilers and `grep -n` print it. The lookbehind keeps it
 # out of the "//" inside a URL and off the tail of a longer word; `3/4` needs
@@ -2856,7 +2858,7 @@ if (data !== null) {{
                 btn.set_active(on)
             finally:
                 row._preview_syncing = False
-        rendered = self._is_browser_page(row.file_path or "")
+        rendered = self._opens_full_width(row.file_path or "")
         source = row.content_paned.get_child1()
         if on:
             self._note_render_preview(row)
@@ -2882,7 +2884,10 @@ if (data !== null) {{
             row.webview.set_no_show_all(True)
             row.webview.hide()
             source.set_no_show_all(False)
-            source.show()
+            # show_all, not show: while no_show_all was set the editor
+            # inside was never shown, so showing only the scroller would
+            # bring back an empty pane.
+            source.show_all()
         if on and rendered:
             row.webview.grab_focus()
         else:
@@ -9615,6 +9620,17 @@ if (data !== null) {{
         return os.path.isfile(path) and path.lower().endswith(RENDER_SUFFIXES)
 
     @staticmethod
+    def _opens_full_width(path):
+        """Whether the preview takes the whole tab rather than half of it.
+
+        Anything opened to be read does: a page, a picture, and markdown,
+        which is written as a document even though it is also text. The
+        preview toggle still brings the source back where there is one.
+        """
+        return (Tabit._is_browser_page(path)
+                or path.lower().endswith(MARKDOWN_SUFFIXES))
+
+    @staticmethod
     def _has_source(path):
         """Whether a rendered file also has text worth showing beside it."""
         return path.lower().endswith(HTML_SUFFIXES)
@@ -9639,16 +9655,18 @@ if (data !== null) {{
         if in_browser:
             return self._open_in_browser(path)
         render = HAS_WEBKIT and self._is_browser_page(path)
+        reading = render or (HAS_WEBKIT and
+                             path.lower().endswith(MARKDOWN_SUFFIXES))
         if render or (os.path.isfile(path) and _is_text_file(path)
                       and not self._note_file_too_big(path)):
             row = self._add_note_session(path=path)
             if row is None:
                 return True
-            if render:
-                # It is meant to be looked at, so it opens looked at. The
-                # preview toggle still swaps in the source where there is one.
+            if reading:
+                # It is meant to be read, so it opens read. The preview
+                # toggle still swaps in the source where there is one.
                 self._note_set_preview(row, True)
-            elif line:
+            if line and not render:
                 row._goto_src = GLib.timeout_add(
                     80, self._note_goto_line, row, line)
             return True
