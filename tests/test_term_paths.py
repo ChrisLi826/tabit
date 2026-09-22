@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tabit import (  # noqa: E402
     TERM_PATH_PATTERN, TERM_PATH_REGEX, TERM_URL_PATTERN, TERM_URL_REGEX,
     Tabit, _is_text_file, _rejoin_wrapped, _split_path_line,
+    _stitch_rows,
 )
 import tabit  # noqa: E402
 
@@ -549,3 +550,37 @@ class TestRejoinWrappedPath(unittest.TestCase):
         screen = "/tmp/a" + "\nx" * 9 + "\n"
         self.assertEqual(self.rejoin(screen, "/tmp/a", ["/tmp/axxxxxxxxx"]),
                          "/tmp/a")
+
+
+class TestStitchRows(unittest.TestCase):
+    """Rows of a folded line, put back the way the text ran.
+
+    VTE only matches inside one row once an app has folded its own output,
+    so a click on the second or third row of a long path finds nothing.
+    Stitching the rows back gives the click something to match against.
+    """
+
+    def test_the_first_row_keeps_its_left_side(self):
+        text, _ = _stitch_rows(["  saved /tmp/a", "b/c.txt"])
+        self.assertEqual(text, "  saved /tmp/ab/c.txt")
+
+    def test_padding_and_indent_both_go(self):
+        text, _ = _stitch_rows(["/tmp/a     ", "     b/c.txt   "])
+        self.assertEqual(text, "/tmp/ab/c.txt")
+
+    def test_spans_say_which_row_each_piece_came_from(self):
+        text, spans = _stitch_rows(["abc  ", "  de", "f"])
+        self.assertEqual(text, "abcdef")
+        self.assertEqual(spans, [(0, 3), (3, 5), (5, 6)])
+
+    def test_no_rows(self):
+        self.assertEqual(_stitch_rows([]), ("", []))
+
+    def test_a_span_locates_a_match_for_the_clicked_row(self):
+        # The rule the click uses: a match must run through the row that
+        # was clicked, or a neighbouring line would open it too.
+        text, spans = _stitch_rows(["/tmp/aa", "bb.txt", "cd /somewhere"])
+        lo, hi = spans[2]
+        path_end = len("/tmp/aabb.txt")
+        self.assertTrue(path_end <= lo)  # the path stops before that row
+

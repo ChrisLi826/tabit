@@ -538,6 +538,23 @@ _PATH_TAIL = re.compile(
 PATH_REJOIN_LINES = 3
 
 
+def _stitch_rows(rows):
+    """Rows of a fold joined as (text, spans), the way the text ran before.
+
+    The first row keeps its left side, since that is where the path starts;
+    every later row is a continuation, so its indent and the padding the app
+    left behind both go. spans says which slice of the result came from
+    which row, so a match can be checked against the row that was clicked.
+    """
+    parts, spans, at = [], [], 0
+    for i, row in enumerate(rows):
+        piece = row.rstrip() if i == 0 else row.strip()
+        parts.append(piece)
+        spans.append((at, at + len(piece)))
+        at += len(piece)
+    return "".join(parts), spans
+
+
 def _rejoin_wrapped(screen, raw, exists):
     """Put back a path that an app split across lines, or return it as it was.
 
@@ -9457,11 +9474,14 @@ if (data !== null) {{
         except (AttributeError, TypeError):
             text, tag = None, -1
         if not text:
-            return None, False
+            # A fold leaves the later rows of a long path unmatchable, so a
+            # click on the filename at the end finds nothing at all.
+            stitched = Tabit._path_near_pointer(term, event)
+            return (stitched, True) if stitched else (None, False)
         if tag == getattr(term, "tabit_path_tag", -1):
             # Verbatim: a file may really end in a dot, and `..` is a real
             # directory. _open_path decides what a trailing period meant.
-            return Tabit._rejoin_path(term, text), True
+            return Tabit._rejoin_path_at(term, event, text), True
         return _strip_url_tail(text), False
 
     @staticmethod
@@ -9480,6 +9500,59 @@ if (data !== null) {{
         except (AttributeError, TypeError):
             return ""
         return (got[0] if isinstance(got, tuple) else got) or ""
+
+    @staticmethod
+    def _term_row_text(term, row, cols):
+        """One row of the terminal, without its trailing newline."""
+        try:
+            got = term.get_text_range(row, 0, row, cols - 1, None)
+        except (AttributeError, TypeError):
+            return ""
+        return ((got[0] if isinstance(got, tuple) else got) or "").rstrip("\n")
+
+    @staticmethod
+    def _path_near_pointer(term, event):
+        """A folded path covering the clicked row, or None.
+
+        VTE only matches within one row once an app has folded its own
+        output, so a click on the second or third row of a long path finds
+        nothing at all. A regex cannot reach the next row either, however
+        it is written -- measured -- so the row index is the only way in.
+        Stitch the rows around the pointer back together and see whether a
+        real file falls out.
+        """
+        try:
+            height = term.get_char_height() or 1
+            top = int(term.get_vadjustment().get_value())
+            cols = term.get_column_count()
+            style = term.get_style_context()
+            pad = style.get_padding(style.get_state()).top
+        except (AttributeError, TypeError):
+            return None
+        # Take the border off first: a click in the top pixel of a row would
+        # otherwise read as the row above, which is a different line.
+        row = top + int(max(0, event.y - pad) // height)
+        span = PATH_REJOIN_LINES
+        for start in range(max(0, row - span), row + 1):
+            p_row = row
+            rows = [Tabit._term_row_text(term, r, cols)
+                    for r in range(start, start + span + 1)]
+            text, spans = _stitch_rows(rows)
+            lo, hi = spans[p_row - start]
+            best = None
+            for m in re.finditer(TERM_PATH_PATTERN, text):
+                # The path has to run through the row that was clicked, or
+                # a click on a neighbouring line would open it too.
+                if m.start() >= hi or m.end() <= lo:
+                    continue
+                cand = m.group(0)
+                found = Tabit._resolve_term_path(cand)
+                if found is not None and os.path.isfile(found[0]):
+                    if best is None or len(cand) > len(best):
+                        best = cand
+            if best is not None:
+                return best
+        return None
 
     @staticmethod
     def _rejoin_path(term, raw):
@@ -9619,6 +9692,17 @@ if (data !== null) {{
         buf.place_cursor(it)
         view.scroll_to_iter(it, 0.0, True, 0.0, 0.3)
         return False
+
+    @staticmethod
+    def _rejoin_path_at(term, event, raw):
+        """Rejoin by text first, then by the rows under the pointer."""
+        joined = Tabit._rejoin_path(term, raw)
+        if joined != raw:
+            return joined
+        found = Tabit._resolve_term_path(joined)
+        if found is not None and os.path.isfile(found[0]):
+            return joined
+        return Tabit._path_near_pointer(term, event) or joined
 
     def _on_term_button(self, term, event):
         """Ctrl+click opens a link; right-click is the terminal menu."""
