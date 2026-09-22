@@ -69,6 +69,7 @@ sudo password for apt.
 | `Ctrl+Alt+W` | Swap what the left and right panes show |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |
 | `Ctrl`+click a URL in a terminal | Open it in the browser. Hover underlines the match; right-click a link adds **Open Link** / **Copy Link**. Works on plain `http(s)://` / `ftp://` text and on OSC 8 hyperlinks (tmux hides OSC 8 unless `allow-passthrough` is on; plain URLs still match) |
+| `Ctrl`+click a file path in a terminal | Open it. A text file (decided by reading it, not by its suffix — `Makefile` counts) opens as a note tab; a `path:line` lands on that line; an `.html` page opens in your browser, and right-click → **Open as Note** shows its source instead. Anything else goes to the desktop's handler. Absolute or `~/` paths only — a relative one would resolve against tabit's directory, not the terminal's. Paths with spaces or non-ASCII characters match up to the first such character, deliberately: a wider pattern underlines half of every JSON dump and serial log. Right-click adds **Open Path** / **Copy Path**, which is what a `.bin` usually wants |
 | `Shortcuts…` (sidebar) | Edit any of the shortcuts above |
 
 A blue dot on a tab means that session printed output while you were

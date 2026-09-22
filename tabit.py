@@ -473,10 +473,81 @@ PCRE2_MULTILINE = 0x00000400
 # sentence punctuation, so VTE's hover underline ends where the URL does.
 TERM_URL_PATTERN = (
     r"(?:https?|ftp)://"
+    r"(?:\[[^\]\s]+\])?"               # IPv6 host, zone ID and all
     r"[^\s'\"<>()\[\]{}|\\^`]*"       # body
     r"[^\s'\"<>()\[\]{}|\\^`.,;:!?]"  # last char is never sentence punctuation
 )
 TERM_URL_TRAILING = ".,;:!?"
+# Opened in the browser rather than as a note: these are meant to render.
+HTML_SUFFIXES = (".html", ".htm", ".xhtml")
+# Absolute (or ~-relative) file paths in terminal output, with an optional
+# `:line` suffix as compilers and `grep -n` print it. The lookbehind keeps it
+# out of the "//" inside a URL and off the tail of a longer word; `3/4` needs
+# two components to match, so it does not.
+TERM_PATH_PATTERN = (
+    r"(?<![\w:/~.-])"
+    r"~?/"
+    r"(?:[A-Za-z0-9._+@~-]+/)*"
+    r"[A-Za-z0-9._+@~-]+"
+    r"(?::\d+)?"
+)
+# Read this much to decide text vs binary. A NUL byte settles it either way
+# long before this, so it only has to be big enough to be representative.
+PATH_TEXT_PROBE = 8192
+
+
+def _build_term_path_regex():
+    """Compile the path matcher once. None when VTE rejects the pattern."""
+    try:
+        return Vte.Regex.new_for_match(TERM_PATH_PATTERN, -1, PCRE2_MULTILINE)
+    except (GLib.Error, TypeError):
+        return None
+
+
+TERM_PATH_REGEX = _build_term_path_regex()
+
+
+def _split_path_line(raw):
+    """`/a/b.c:42` -> ('/a/b.c', 42). A real file wins over the split."""
+    if os.path.exists(os.path.expanduser(raw)):
+        return raw, 0
+    m = re.search(r":(\d{1,9})$", raw)
+    if not m:
+        return raw, 0
+    base = raw[:m.start()]
+    # A `:number` tail is a line number only when what is left is a file we
+    # would open as a note. `/dev/ttyUSB0:115200` is a baud rate, and handing
+    # a live serial port to the desktop would disturb the port.
+    head = os.path.expanduser(base)
+    if not (os.path.isfile(head) and _is_text_file(head)):
+        return raw, 0
+    return base, int(m.group(1))
+
+
+def _is_text_file(path, probe=PATH_TEXT_PROBE):
+    """Whether this opens sensibly in a note tab, by looking, not by suffix.
+
+    Extensions miss the files that matter here — Makefile, snweb.cc.init —
+    so read the head instead: a NUL byte means binary, and anything that
+    decodes as UTF-8 is text.
+    """
+    try:
+        with open(path, "rb") as f:
+            chunk = f.read(probe)
+    except OSError:
+        return False
+    if b"\0" in chunk:
+        return False
+    try:
+        chunk.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        # The probe can cut a multi-byte character in half, but only when it
+        # filled up. UTF-8 runs to at most 4 bytes, so in a full probe a break
+        # that late is the cut; a short file has no cut, so it is binary.
+        if len(chunk) < probe or exc.start < len(chunk) - 4:
+            return False
+    return True
+
 
 
 def _build_term_url_regex():
@@ -1812,9 +1883,13 @@ class Tabit(Gtk.Window):
         # Links: OSC 8 hyperlinks from the child, plus plain URLs in the text.
         # The pointer cursor is VTE's own hover feedback for a match.
         term.set_allow_hyperlink(True)
-        if TERM_URL_REGEX is not None:
-            term.match_set_cursor_name(
-                term.match_add_regex(TERM_URL_REGEX, 0), "pointer")
+        for rx, is_path in ((TERM_URL_REGEX, False), (TERM_PATH_REGEX, True)):
+            if rx is None:
+                continue
+            tag = term.match_add_regex(rx, 0)
+            term.match_set_cursor_name(tag, "pointer")
+            if is_path:
+                term.tabit_path_tag = tag
         self._apply_term_colors(term)
         self._apply_term_font(term)
         term.connect("key-press-event", self._on_term_key)
@@ -5401,7 +5476,7 @@ if (data !== null) {{
         rows = self._session_rows()
         idx = rows.index(row)
         # drop pending note timers so they don't fire on a destroyed widget
-        for attr in ("_preview_src", "_tune_src", "_yaml_src"):
+        for attr in ("_preview_src", "_tune_src", "_yaml_src", "_goto_src"):
             src = getattr(row, attr, None)
             if src:
                 GLib.source_remove(src)
@@ -7108,7 +7183,10 @@ if (data !== null) {{
             if os.path.getsize(path) > NOTE_MAX_OPEN_SIZE:
                 return True
             with open(path, "rb") as f:
-                data = f.read()
+                # Not getsize alone: a /proc file reports 0 and reads 15MB.
+                data = f.read(NOTE_MAX_OPEN_SIZE + 1)
+            if len(data) > NOTE_MAX_OPEN_SIZE:
+                return True
             return max((len(ln) for ln in data.split(b"\n")),
                        default=0) > NOTE_MAX_OPEN_LINE
         except OSError:
@@ -9273,7 +9351,12 @@ if (data !== null) {{
 
     @staticmethod
     def _term_link_at_event(term, event):
-        """URL under the pointer: OSC 8 hyperlink first, then a plain match."""
+        """Link under the pointer as (target, is_path).
+
+        OSC 8 names its own target, so it is always a URI. A hyperlink whose
+        text reads like help and whose target is a local file must not turn
+        into a file open.
+        """
         try:
             uri = term.hyperlink_check_event(event)
         except (AttributeError, TypeError):
@@ -9281,12 +9364,18 @@ if (data !== null) {{
         if uri:
             # OSC 8 states where the URI ends, so trailing punctuation in it
             # belongs to the URI — trimming would change what is opened.
-            return uri
+            return uri, False
         try:
-            uri, _tag = term.match_check_event(event)
+            text, tag = term.match_check_event(event)
         except (AttributeError, TypeError):
-            uri = None
-        return _strip_url_tail(uri)
+            text, tag = None, -1
+        if not text:
+            return None, False
+        if tag == getattr(term, "tabit_path_tag", -1):
+            # Verbatim: a file may really end in a dot, and `..` is a real
+            # directory. _open_path decides what a trailing period meant.
+            return text, True
+        return _strip_url_tail(text), False
 
     @staticmethod
     def _open_uri(uri):
@@ -9304,30 +9393,124 @@ if (data !== null) {{
         except GLib.Error:
             pass
 
+    @staticmethod
+    def _resolve_term_path(raw):
+        """Terminal text -> (path, line), or None when no such file exists."""
+        path, line = _split_path_line(raw)
+        path = os.path.abspath(os.path.expanduser(path))
+        if not os.path.exists(path):
+            # A file may really end in a dot, so the exact string wins; this
+            # only catches the period a sentence left on a path.
+            trimmed = path.rstrip(TERM_URL_TRAILING)
+            if trimmed == path or not os.path.exists(trimmed):
+                return None
+            path = trimmed
+        return path, line
+
+    @staticmethod
+    def _is_browser_page(path):
+        """Whether Ctrl+click would render this rather than edit it."""
+        return os.path.isfile(path) and path.lower().endswith(HTML_SUFFIXES)
+
+    def _open_path(self, raw, as_note=False):
+        """Open a path from terminal text. False when there is nothing there.
+
+        A text file becomes a note tab, which is instant and stays inside
+        tabit; anything else goes to the desktop's own handler. as_note is
+        the right-click escape hatch for reading a page's source.
+        """
+        got = self._resolve_term_path(raw)
+        if got is None:
+            return False
+        path, line = got
+        if not as_note and self._is_browser_page(path):
+            return self._open_in_browser(path)
+        if (os.path.isfile(path) and _is_text_file(path)
+                and not self._note_file_too_big(path)):
+            row = self._add_note_session(path=path)
+            if row is not None and line:
+                row._goto_src = GLib.timeout_add(
+                    80, self._note_goto_line, row, line)
+            return True
+        try:
+            self._open_uri(GLib.filename_to_uri(path))
+        except GLib.Error:
+            return False
+        return True
+
+    @staticmethod
+    def _open_in_browser(path):
+        """Show a local page in the browser, not in the text/html handler.
+
+        Another app can claim text/html — on this desktop Grok Bot does —
+        and then the generic handler opens a local page somewhere the user
+        never meant. The browser that handles http is what "open it" means.
+        """
+        try:
+            uri = GLib.filename_to_uri(path)
+        except GLib.Error:
+            return False
+        app = Gio.AppInfo.get_default_for_uri_scheme("http")
+        if app is None:
+            Tabit._open_uri(uri)
+            return True
+        try:
+            app.launch_uris([uri], None)
+        except GLib.Error:
+            Tabit._open_uri(uri)
+        return True
+
+    @staticmethod
+    def _note_goto_line(row, line):
+        """Put the cursor on a 1-based line of a note that just opened."""
+        row._goto_src = None
+        buf = getattr(row, "buffer", None)
+        view = getattr(row, "view", None)
+        if buf is None or view is None:
+            return False
+        it = buf.get_iter_at_line(max(0, line - 1))
+        buf.place_cursor(it)
+        view.scroll_to_iter(it, 0.0, True, 0.0, 0.3)
+        return False
+
     def _on_term_button(self, term, event):
         """Ctrl+click opens a link; right-click is the terminal menu."""
         if event.type != Gdk.EventType.BUTTON_PRESS:
             return False
         if event.button == 1 and event.state & Gdk.ModifierType.CONTROL_MASK:
             # Plain click has to stay selection/focus, so links take Ctrl.
-            url = self._term_link_at_event(term, event)
-            if url:
-                self._open_uri(url)
+            target, is_path = self._term_link_at_event(term, event)
+            if target:
+                if is_path:
+                    self._open_path(target)
+                else:
+                    self._open_uri(target)
                 return True
             return False
         if event.button != 3:
             return False
         menu = Gtk.Menu()
-        url = self._term_link_at_event(term, event)
-        if url:
-            open_link = Gtk.MenuItem(label="Open Link")
-            open_link.connect("activate",
-                              lambda *_: self._open_uri(url))
-            copy_link = Gtk.MenuItem(label="Copy Link")
-            copy_link.connect("activate",
-                              lambda *_: self._copy_to_clipboard(url))
-            menu.append(open_link)
-            menu.append(copy_link)
+        target, is_path = self._term_link_at_event(term, event)
+        if target:
+            open_it = Gtk.MenuItem(
+                label="Open Path" if is_path else "Open Link")
+            open_it.connect(
+                "activate",
+                lambda *_: (self._open_path(target) if is_path
+                            else self._open_uri(target)))
+            copy_it = Gtk.MenuItem(
+                label="Copy Path" if is_path else "Copy Link")
+            copy_it.connect("activate",
+                            lambda *_: self._copy_to_clipboard(target))
+            menu.append(open_it)
+            found = self._resolve_term_path(target) if is_path else None
+            if found is not None and self._is_browser_page(found[0]):
+                note_it = Gtk.MenuItem(label="Open as Note")
+                note_it.connect(
+                    "activate",
+                    lambda *_: self._open_path(target, as_note=True))
+                menu.append(note_it)
+            menu.append(copy_it)
             menu.append(Gtk.SeparatorMenuItem())
         copy = Gtk.MenuItem(label="Copy")
         copy.set_sensitive(term.get_has_selection())

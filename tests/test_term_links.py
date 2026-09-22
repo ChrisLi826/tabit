@@ -21,10 +21,13 @@ from tabit import (  # noqa: E402
 class _FakeTerm:
     """Stands in for Vte.Terminal: VTE does the matching, we test the glue."""
 
-    def __init__(self, hyperlink=None, match=None, hyperlink_raises=False):
+    def __init__(self, hyperlink=None, match=None, hyperlink_raises=False,
+                 path_tag=None):
         self._hyperlink = hyperlink
         self._match = match
         self._raises = hyperlink_raises
+        if path_tag is not None:
+            self.tabit_path_tag = path_tag
 
     def hyperlink_check_event(self, _event):
         if self._raises:
@@ -87,25 +90,46 @@ class TestLinkLookupOrder(unittest.TestCase):
         term = _FakeTerm(hyperlink="https://osc8.example/real",
                          match="https://text.example/other")
         self.assertEqual(Tabit._term_link_at_event(term, None),
-                         "https://osc8.example/real")
+                         ("https://osc8.example/real", False))
 
     def test_falls_back_to_text_match(self):
         term = _FakeTerm(hyperlink=None, match="https://text.example/x")
         self.assertEqual(Tabit._term_link_at_event(term, None),
-                         "https://text.example/x")
+                         ("https://text.example/x", False))
 
     def test_none_when_nothing_under_pointer(self):
-        self.assertIsNone(Tabit._term_link_at_event(_FakeTerm(), None))
+        self.assertEqual(Tabit._term_link_at_event(_FakeTerm(), None),
+                         (None, False))
 
     def test_survives_vte_without_hyperlink_support(self):
         term = _FakeTerm(match="https://text.example/x", hyperlink_raises=True)
         self.assertEqual(Tabit._term_link_at_event(term, None),
-                         "https://text.example/x")
+                         ("https://text.example/x", False))
+
+    def test_an_osc8_target_is_never_a_local_path(self):
+        """A hyperlink names its own target, so it stays a URI.
+
+        Terminal output can carry an OSC 8 link whose text reads like help
+        and whose target is a local file; opening that as a note would show
+        the user a file they never asked for.
+        """
+        for target in ("/home/you/.ssh/id_rsa", "mailto:dev@example.com",
+                       "file:/etc/hosts"):
+            term = _FakeTerm(hyperlink=target, path_tag=0)
+            self.assertEqual(Tabit._term_link_at_event(term, None),
+                             (target, False))
+
+    def test_a_path_tag_match_comes_back_verbatim(self):
+        # A file may really end in a dot, and `..` is a real directory, so
+        # the URL tail trim must not run on a path.
+        term = _FakeTerm(match="/tmp/foo.", path_tag=0)
+        self.assertEqual(Tabit._term_link_at_event(term, None),
+                         ("/tmp/foo.", True))
 
     def test_strips_tail_from_text_match(self):
         term = _FakeTerm(match="https://a.io/x.")
         self.assertEqual(Tabit._term_link_at_event(term, None),
-                         "https://a.io/x")
+                         ("https://a.io/x", False))
 
 
 class TestOpenUri(unittest.TestCase):
