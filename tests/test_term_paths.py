@@ -15,8 +15,9 @@ gi.require_version("Vte", "2.91")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tabit import (  # noqa: E402
     TERM_PATH_PATTERN, TERM_PATH_REGEX, TERM_URL_PATTERN, TERM_URL_REGEX,
-    Tabit, _is_text_file, _split_path_line,
+    Tabit, _is_text_file, _rejoin_wrapped, _split_path_line,
 )
+import tabit  # noqa: E402
 
 
 class TestPathPattern(unittest.TestCase):
@@ -244,7 +245,10 @@ class _Sink:
 
     def _add_note_session(self, path=None):
         self.calls.append(("note", path))
-        return None
+        return object()
+
+    def _note_set_preview(self, _row, on):
+        self.calls.append(("preview", bool(on)))
 
 
 class TestOpenPathRouting(unittest.TestCase):
@@ -271,10 +275,18 @@ class TestOpenPathRouting(unittest.TestCase):
         Tabit._open_path(self.sink, odd)
         self.assertEqual(self.sink.calls, [("note", odd)])
 
-    def test_html_goes_to_the_browser(self):
+    def test_html_renders_in_a_note_tab(self):
+        # A page is meant to be looked at, so the preview opens beside the
+        # source rather than handing the file to the browser.
         page = self.write("page.html", "<html><body>hi</body></html>")
         Tabit._open_path(self.sink, page)
-        self.assertEqual(self.sink.calls, [("browser", page)])
+        self.assertEqual(self.sink.calls,
+                         [("note", page), ("preview", True)])
+
+    def test_a_plain_text_file_gets_no_preview(self):
+        src = self.write("notes.md", "hello\n")
+        Tabit._open_path(self.sink, src)
+        self.assertEqual(self.sink.calls, [("note", src)])
 
     def test_a_zero_stat_file_never_reaches_a_note(self):
         # /proc reports size 0 and still reads 15MB, so the size check has
@@ -282,20 +294,258 @@ class TestOpenPathRouting(unittest.TestCase):
         Tabit._open_path(self.sink, "/proc/kallsyms")
         self.assertEqual(self.sink.calls, [("uri", "file:///proc/kallsyms")])
 
+    def test_a_binary_file_is_never_written_back(self):
+        """Neither Save nor Save As may write the empty buffer to an image.
+
+        Nothing was read into the buffer, and the Save As chooser opens on
+        the image's own path, so both would replace it with an empty file.
+        """
+        class Row:
+            kind = "note"
+
+        row = Row()
+        row.file_path = os.path.join(self.d.name, "shot.png")
+        with open(row.file_path, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n" + b"\0" * 40)
+        size = os.path.getsize(row.file_path)
+
+        class App:
+            _save_note = Tabit._save_note
+            _is_binary_render = staticmethod(Tabit._is_binary_render)
+        app = App()
+        self.assertTrue(app._save_note(row))
+        self.assertTrue(app._save_note(row, save_as=True))
+        self.assertEqual(os.path.getsize(row.file_path), size)
+
     def test_a_serial_port_click_does_nothing(self):
         # `open /dev/ttyUSB0:115200 failed` must not hand the port to the
         # desktop, which could change its settings.
         self.assertFalse(Tabit._open_path(self.sink, "/dev/ttyUSB0:115200"))
         self.assertEqual(self.sink.calls, [])
 
-    def test_open_as_note_reads_the_html_source(self):
-        # Ctrl+click renders a page; the right-click item shows its source.
+    def test_open_in_browser_hands_the_page_over(self):
+        # Ctrl+click renders a page in tabit; right-click sends it out.
         page = self.write("page.html", "<html><body>hi</body></html>")
-        Tabit._open_path(self.sink, page, as_note=True)
-        self.assertEqual(self.sink.calls, [("note", page)])
+        Tabit._open_path(self.sink, page, in_browser=True)
+        self.assertEqual(self.sink.calls, [("browser", page)])
 
     def test_only_a_page_gets_the_escape_hatch(self):
         # A binary has no readable source, so the menu must not offer one.
         plain = self.write("notes.md", "hello\n")
         self.assertTrue(Tabit._is_browser_page(self.write("p.html", "<i>x")))
         self.assertFalse(Tabit._is_browser_page(plain))
+
+    def test_an_image_renders_without_a_source_pane(self):
+        # A PNG has no text behind it, so it opens as a picture.
+        png = os.path.join(self.d.name, "shot.png")
+        with open(png, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n" + b"\0" * 40)
+        Tabit._open_path(self.sink, png)
+        self.assertEqual(self.sink.calls, [("note", png), ("preview", True)])
+
+    def test_a_pdf_renders_too(self):
+        pdf = os.path.join(self.d.name, "a.pdf")
+        with open(pdf, "wb") as f:
+            f.write(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+        Tabit._open_path(self.sink, pdf)
+        self.assertEqual(self.sink.calls, [("note", pdf), ("preview", True)])
+
+    def test_svg_counts_as_source_as_well_as_a_picture(self):
+        self.assertTrue(Tabit._has_source("/x/a.svg"))
+        self.assertFalse(Tabit._is_binary_render("/x/a.svg"))
+        self.assertTrue(Tabit._is_binary_render("/x/a.png"))
+        self.assertTrue(Tabit._is_binary_render("/x/a.pdf"))
+
+    def test_a_line_number_is_ignored_on_a_rendered_file(self):
+        # `report.html:42` means the page, not line 42 of its markup.
+        page = self.write("page.html", "<html><body>hi</body></html>")
+        Tabit._open_path(self.sink, page + ":42")
+        self.assertEqual(self.sink.calls, [("note", page), ("preview", True)])
+
+
+class _Pane:
+    """Stands in for Gtk widgets: only visibility and no_show_all matter."""
+
+    def __init__(self):
+        self.visible = True
+        self.no_show_all = False
+
+    def hide(self):
+        self.visible = False
+
+    def show(self):
+        self.visible = True
+
+    show_all = show
+
+    def set_no_show_all(self, v):
+        self.no_show_all = bool(v)
+
+    def grab_focus(self):
+        pass
+
+    def get_child1(self):
+        return self.source
+
+
+class TestPreviewSurvivesATabSwitch(unittest.TestCase):
+    """Switching tabs runs show_all on the page.
+
+    hide() alone does not survive that, so a rendered page came back as
+    plain markup with the Preview button still lit.
+    """
+
+    def setUp(self):
+        self.source = _Pane()
+        self.webview = _Pane()
+        self.webview.visible = False
+        self.paned = _Pane()
+        self.paned.source = self.source
+
+        class Row:
+            pass
+        self.row = Row()
+        self.row.file_path = "/x/report.html"
+        self.row.webview = self.webview
+        self.row.content_paned = self.paned
+        self.row.view = _Pane()
+        self.row.preview_on = False
+        self.row._preview_pos_set = False
+        self.row.preview_btn = None
+
+        class App:
+            _note_set_preview = Tabit._note_set_preview
+            _is_browser_page = staticmethod(lambda p: True)
+
+            @staticmethod
+            def _note_render_preview(_row):
+                pass
+        self.app = App()
+
+    def switch_away_and_back(self):
+        # what Gtk does to the page when the tab is selected again
+        for w in (self.source, self.webview):
+            if not w.no_show_all:
+                w.show_all()
+
+    def test_a_rendered_page_stays_rendered(self):
+        self.app._note_set_preview(self.row, True)
+        self.switch_away_and_back()
+        self.assertFalse(self.source.visible)
+        self.assertTrue(self.webview.visible)
+
+    def test_preview_off_stays_off(self):
+        self.app._note_set_preview(self.row, True)
+        self.app._note_set_preview(self.row, False)
+        self.switch_away_and_back()
+        self.assertTrue(self.source.visible)
+        self.assertFalse(self.webview.visible)
+
+
+class TestRejoinWrappedPath(unittest.TestCase):
+    """An app that wraps its own output writes a real newline.
+
+    VTE matches straight through a fold the terminal made, but not through
+    one the app made, so the match ends early. The rejoin is only tried on
+    a path that does not resolve, and only kept if the result does.
+    """
+
+    def rejoin(self, screen, raw, real=()):
+        return _rejoin_wrapped(screen, raw, lambda p: p in set(real))
+
+    def test_a_split_path_comes_back_together(self):
+        screen = "saved /tmp/a/b/fig3.\npng\ndone\n"
+        self.assertEqual(
+            self.rejoin(screen, "/tmp/a/b/fig3.", ["/tmp/a/b/fig3.png"]),
+            "/tmp/a/b/fig3.png")
+
+    def test_a_path_split_twice_comes_back_together(self):
+        screen = "/tmp/aaa\nbbb\nccc.png\n"
+        self.assertEqual(
+            self.rejoin(screen, "/tmp/aaa", ["/tmp/aaabbbccc.png"]),
+            "/tmp/aaabbbccc.png")
+
+    def test_a_log_line_keeps_its_own_meaning(self):
+        # /etc/hosts resolves by itself, so the caller never gets here --
+        # but even reaching here, `retry` must not be swallowed.
+        screen = "ERROR in /etc/hosts\nretry now\n"
+        self.assertEqual(self.rejoin(screen, "/etc/hosts"), "/etc/hosts")
+
+    def test_no_join_when_the_result_is_not_a_file(self):
+        screen = "cd /home/chris\nls -la\n"
+        self.assertEqual(self.rejoin(screen, "/home/chris"), "/home/chris")
+
+    def test_an_indented_continuation_is_followed(self):
+        # Claude Code aligns its wrap under the start of the line, so the
+        # rest of the path arrives behind a run of spaces.
+        screen = "saved /tmp/a/b/scratchpad/\n      fig3.png\n"
+        self.assertEqual(
+            self.rejoin(screen, "/tmp/a/b/scratchpad",
+                        ["/tmp/a/b/scratchpad/fig3.png"]),
+            "/tmp/a/b/scratchpad/fig3.png")
+
+    def test_the_cut_component_is_carried_over(self):
+        # The match stops before a trailing slash, which is still on the
+        # first line and has to come along.
+        screen = "/tmp/x/y/\nz.txt\n"
+        self.assertEqual(self.rejoin(screen, "/tmp/x/y", ["/tmp/x/y/z.txt"]),
+                         "/tmp/x/y/z.txt")
+
+    def test_a_longer_path_elsewhere_on_screen_is_not_borrowed(self):
+        """The same text can be a prefix of another path further up.
+
+        Clicking /home/you in `cd /home/you` must not pick up the tail of
+        /home/you/deep/file.txt printed on an earlier line.
+        """
+        screen = ("saved /home/you/deep/\n      file.txt\n"
+                  "cd /home/you\n   ls -la\n")
+        self.assertEqual(
+            self.rejoin(screen, "/home/you", ["/home/you/deep/file.txt"]),
+            "/home/you")
+
+    def test_a_directory_left_by_the_fold_is_completed(self):
+        # A fold on a slash leaves a real directory behind, so resolving is
+        # not enough to stop -- only landing on a file is.
+        screen = "saved /home/you/deep/\n      file.txt\n"
+        self.assertEqual(
+            self.rejoin(screen, "/home/you/deep", ["/home/you/deep/file.txt"]),
+            "/home/you/deep/file.txt")
+
+    def test_tmux_pads_the_row_out_to_the_right_edge(self):
+        """tmux clears to the edge, so the fold is behind a run of spaces.
+
+        Captured from a real terminal: the row holding the path is padded
+        to the full width before the newline, which is why matching the
+        newline straight after the path found nothing.
+        """
+        screen = ("  saved /home/you/deep/" + " " * 60 + "\n"
+                  "     file.txt" + "\n")
+        self.assertEqual(
+            self.rejoin(screen, "/home/you/deep", ["/home/you/deep/file.txt"]),
+            "/home/you/deep/file.txt")
+
+    def test_a_fold_in_the_middle_of_a_name(self):
+        # The same capture, folded mid-component rather than on a slash.
+        screen = ("     saved /home/you/de" + " " * 60 + "\n"
+                  "     ep/file.txt" + " " * 60 + "\n")
+        self.assertEqual(
+            self.rejoin(screen, "/home/you/de", ["/home/you/deep/file.txt"]),
+            "/home/you/deep/file.txt")
+
+    def test_an_indented_next_line_still_needs_the_file(self):
+        screen = "see /etc/fstab\n   and reboot\n"
+        self.assertEqual(self.rejoin(screen, "/etc/fstab"), "/etc/fstab")
+
+    def test_a_second_occurrence_is_tried_too(self):
+        # The same text can be on screen twice; only one of them is split.
+        screen = "/tmp/x.\nnope\nagain /tmp/x.\ntxt\n"
+        self.assertEqual(self.rejoin(screen, "/tmp/x.", ["/tmp/x.txt"]),
+                         "/tmp/x.txt")
+
+    def test_a_raw_that_is_not_on_screen_is_left_alone(self):
+        self.assertEqual(self.rejoin("nothing here\n", "/tmp/a"), "/tmp/a")
+
+    def test_it_stops_after_a_few_lines(self):
+        screen = "/tmp/a" + "\nx" * 9 + "\n"
+        self.assertEqual(self.rejoin(screen, "/tmp/a", ["/tmp/axxxxxxxxx"]),
+                         "/tmp/a")

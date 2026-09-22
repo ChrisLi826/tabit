@@ -478,8 +478,11 @@ TERM_URL_PATTERN = (
     r"[^\s'\"<>()\[\]{}|\\^`.,;:!?]"  # last char is never sentence punctuation
 )
 TERM_URL_TRAILING = ".,;:!?"
-# Opened in the browser rather than as a note: these are meant to render.
-HTML_SUFFIXES = (".html", ".htm", ".xhtml")
+# Shown rendered rather than as text: WebKit paints all of these.
+RENDER_SUFFIXES = (".html", ".htm", ".xhtml", ".svg", ".pdf",
+                   ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico")
+# The ones that are also source you may want to read and edit.
+HTML_SUFFIXES = (".html", ".htm", ".xhtml", ".svg")
 # Absolute (or ~-relative) file paths in terminal output, with an optional
 # `:line` suffix as compilers and `grep -n` print it. The lookbehind keeps it
 # out of the "//" inside a URL and off the tail of a longer word; `3/4` needs
@@ -522,6 +525,41 @@ def _split_path_line(raw):
     if not (os.path.isfile(head) and _is_text_file(head)):
         return raw, 0
     return base, int(m.group(1))
+
+
+# What a fold leaves behind. The match ends where it does because the next
+# character is a slash or the line ended, so at most one slash stays behind
+# -- more than that and this is a different, longer path on screen, not the
+# one that was cut. Then tmux's padding out to the right edge, the newline,
+# the indent the app aligns its wrap to, and the start of the next line.
+_PATH_TAIL = re.compile(
+    r"(/?)[ \t]*\n[ \t]*([/A-Za-z0-9._+@~-]+)")
+# How many folds to follow: enough for a path several times the width.
+PATH_REJOIN_LINES = 3
+
+
+def _rejoin_wrapped(screen, raw, exists):
+    """Put back a path that an app split across lines, or return it as it was.
+
+    A terminal folds a long line itself and VTE matches straight through the
+    fold. An app that wraps its own output writes a real newline instead,
+    which ends the match early. Rejoining is only tried on a path that does
+    not resolve, and only kept if the result does, so `ERROR in /etc/hosts`
+    followed by `retry` keeps meaning /etc/hosts.
+    """
+    at = screen.find(raw)
+    while at != -1:
+        joined, tail = raw, screen[at + len(raw):]
+        for _ in range(PATH_REJOIN_LINES):
+            m = _PATH_TAIL.match(tail)
+            if not m:
+                break
+            joined += m.group(1) + m.group(2)
+            tail = tail[m.end():]
+            if exists(joined):
+                return joined
+        at = screen.find(raw, at + 1)
+    return raw
 
 
 def _is_text_file(path, probe=PATH_TEXT_PROBE):
@@ -1389,7 +1427,7 @@ class Tabit(Gtk.Window):
         if HAS_SSH_TOOL:
             button_items.append(("+ Connect", ICON_CONNECT, self._on_add_connect))
         button_items.extend([
-            ("+ Note", ICON_NOTE, self._on_add_note),
+            ("+ Open", ICON_NOTE, self._on_add_note),
             ("+ Command", ICON_COMMAND, self._on_add_command),
             ("+ tmux", ICON_TMUX, self._on_add_tmux),
         ])
@@ -1494,6 +1532,9 @@ class Tabit(Gtk.Window):
                         lab = lab[:-2]
                     r = self._add_note_session(path=path, label=lab,
                                                sub=s.get("sub"))
+                    if r is not None and s.get("preview"):
+                        # A file reopens showing what it was showing.
+                        self._note_set_preview(r, True)
                 else:
                     argv = s["argv"]
                     if ai_fresh and _is_ai_icon(s.get("icon")):
@@ -1625,6 +1666,8 @@ class Tabit(Gtk.Window):
                 entry["cwd"] = cwd
             if getattr(r, "group_color", None):
                 entry["color"] = r.group_color
+            if getattr(r, "preview_on", False):
+                entry["preview"] = True
             data.append(entry)
         os.makedirs(os.path.dirname(SESSIONS_FILE), exist_ok=True)
         with open(SESSIONS_FILE, "w") as f:
@@ -2175,18 +2218,25 @@ class Tabit(Gtk.Window):
 
         wanted_lang = None
         if path and os.path.isfile(path):
-            try:
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
-                    text = f.read()
-            except OSError as e:
-                text = ""
-                sub = sub or f"open failed: {e}"
-            buf.begin_not_undoable_action()
-            buf.set_text(text)
-            buf.end_not_undoable_action()
-            buf.set_modified(False)
-            wanted_lang = GtkSource.LanguageManager.get_default().guess_language(
-                path, None)
+            if Tabit._is_binary_render(path):
+                # An image or a PDF has no text to edit. The buffer stays
+                # empty and the preview shows the file itself, but the tab
+                # still belongs to that path.
+                buf.set_modified(False)
+            else:
+                try:
+                    with open(path, "r", encoding="utf-8",
+                              errors="replace") as f:
+                        text = f.read()
+                except OSError as e:
+                    text = ""
+                    sub = sub or f"open failed: {e}"
+                buf.begin_not_undoable_action()
+                buf.set_text(text)
+                buf.end_not_undoable_action()
+                buf.set_modified(False)
+                wanted_lang = (GtkSource.LanguageManager.get_default()
+                               .guess_language(path, None))
             base = os.path.basename(path)
             label = label or base
             sub = sub if sub is not None else os.path.dirname(path)
@@ -2413,12 +2463,24 @@ class Tabit(Gtk.Window):
 </style></head><body>{body}</body></html>"""
 
     def _note_render_preview(self, row):
+        path = row.file_path or ""
+        page = self._is_browser_page(path)
+        wset = row.webview.get_settings()
+        # A file from terminal output is not necessarily yours. Scripts stay
+        # on, because a real report needs them, but they may not read the
+        # rest of the disk and post it somewhere.
+        wset.set_allow_file_access_from_file_urls(not page)
+        row.webview.set_settings(wset)
+        if page and not self._has_source(path):
+            # An image or a PDF has nothing in the buffer to render from.
+            row.webview.load_uri(GLib.filename_to_uri(path))
+            return
         start, end = row.buffer.get_bounds()
         text = row.buffer.get_text(start, end, True)
-        doc = self._md_to_html(text, row.file_path)
+        doc = text if page else self._md_to_html(text, path)
         base = "file:///"
-        if row.file_path:
-            base = "file://" + os.path.dirname(row.file_path) + "/"
+        if path:
+            base = "file://" + os.path.dirname(path) + "/"
         row.webview.load_html(doc, base)
 
     @staticmethod
@@ -2777,20 +2839,37 @@ if (data !== null) {{
                 btn.set_active(on)
             finally:
                 row._preview_syncing = False
+        rendered = self._is_browser_page(row.file_path or "")
+        source = row.content_paned.get_child1()
         if on:
             self._note_render_preview(row)
             row.webview.set_no_show_all(False)
             row.webview.show_all()
-            # place the divider in the middle the first time only, so a
-            # user's later drag is kept across toggles
-            if not row._preview_pos_set:
+            if rendered:
+                # A page opens as a page. Toggling off brings the markup back
+                # where there is any; an image has none to bring back.
+                # no_show_all as well as hide: switching tabs calls show_all
+                # on the page, which would otherwise put the source back.
+                source.set_no_show_all(True)
+                source.hide()
+            elif not row._preview_pos_set:
+                # place the divider in the middle the first time only, so a
+                # user's later drag is kept across toggles
                 w = row.content_paned.get_allocated_width()
                 if w > 0:
                     row.content_paned.set_position(w // 2)
                     row._preview_pos_set = True
         else:
+            # no_show_all as well as hide, or the next show_all on this page
+            # brings the preview back after it was switched off.
+            row.webview.set_no_show_all(True)
             row.webview.hide()
-        row.view.grab_focus()
+            source.set_no_show_all(False)
+            source.show()
+        if on and rendered:
+            row.webview.grab_focus()
+        else:
+            row.view.grab_focus()
 
     def _note_set_yaml_browser(self, row, on):
         if not HAS_WEBKIT or getattr(row, "webview", None) is None:
@@ -2832,6 +2911,9 @@ if (data !== null) {{
                     row.content_paned.set_position(w // 2)
                     row._preview_pos_set = True
         else:
+            # no_show_all as well as hide, or the next show_all on this page
+            # brings the browser back after it was switched off.
+            row.webview.set_no_show_all(True)
             row.webview.hide()
         row.view.grab_focus()
 
@@ -3530,6 +3612,11 @@ if (data !== null) {{
         if getattr(row, "kind", None) != "note":
             return False
         path = row.file_path
+        if path and self._is_binary_render(path):
+            # The buffer was never filled from this file, so writing it back
+            # would replace an image with an empty text file. Save As is no
+            # safer: its chooser opens on this very path.
+            return True
         if save_as or not path:
             chooser = Gtk.FileChooserDialog(
                 title="Save note", parent=self,
@@ -7139,14 +7226,14 @@ if (data !== null) {{
     def _on_add_note(self, _btn):
         if self._raise_open_dialog("note"):
             return
-        dialog = Gtk.Dialog(title="New note", transient_for=self, modal=True)
+        dialog = Gtk.Dialog(title="Open", transient_for=self, modal=True)
         self._register_dialog("note", dialog)
         dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                            "Blank note", Gtk.ResponseType.YES,
                            "Open file…", Gtk.ResponseType.OK)
         dialog.set_default_response(Gtk.ResponseType.YES)
         lab = Gtk.Label(
-            label="GtkSourceView note: blank buffer or open a file.",
+            label="Blank buffer to type in, or open a file to read.",
             margin=12, xalign=0)
         dialog.get_content_area().add(lab)
         def _on_note_choice_resp(dlg, resp):
@@ -9374,8 +9461,50 @@ if (data !== null) {{
         if tag == getattr(term, "tabit_path_tag", -1):
             # Verbatim: a file may really end in a dot, and `..` is a real
             # directory. _open_path decides what a trailing period meant.
-            return text, True
+            return Tabit._rejoin_path(term, text), True
         return _strip_url_tail(text), False
+
+    @staticmethod
+    def _term_screen_text(term):
+        """Everything on screen as one string, with a newline between rows.
+
+        Rows are numbered from the top of the scrollback, so the visible
+        screen starts wherever the scrollbar is. Reading from row 0 gets the
+        oldest history instead, which is only the screen on a fresh tab.
+        """
+        try:
+            first = int(term.get_vadjustment().get_value())
+            got = term.get_text_range(first, 0,
+                                      first + term.get_row_count() - 1,
+                                      term.get_column_count() - 1, None)
+        except (AttributeError, TypeError):
+            return ""
+        return (got[0] if isinstance(got, tuple) else got) or ""
+
+    @staticmethod
+    def _rejoin_path(term, raw):
+        """A path an app broke over two lines, as one path again.
+
+        A fold often lands on a slash, which leaves a real directory behind
+        -- `.../scratchpad` of `.../scratchpad/fig3.png`. That resolves, so
+        resolving is not enough to stop here; only a file is.
+        """
+        got = Tabit._resolve_term_path(raw)
+        if got is not None and os.path.isfile(got[0]):
+            return raw
+        # A fold that landed on a slash leaves a real directory behind, so
+        # only a file is worth trading it for. A fold mid-name leaves
+        # nothing, and then any real path is an improvement.
+        want_file = got is not None
+
+        def better(cand):
+            found = Tabit._resolve_term_path(cand)
+            if found is None:
+                return False
+            return os.path.isfile(found[0]) or not want_file
+
+        return _rejoin_wrapped(
+            Tabit._term_screen_text(term), raw, better) or raw
 
     @staticmethod
     def _open_uri(uri):
@@ -9410,25 +9539,43 @@ if (data !== null) {{
     @staticmethod
     def _is_browser_page(path):
         """Whether Ctrl+click would render this rather than edit it."""
-        return os.path.isfile(path) and path.lower().endswith(HTML_SUFFIXES)
+        return os.path.isfile(path) and path.lower().endswith(RENDER_SUFFIXES)
 
-    def _open_path(self, raw, as_note=False):
+    @staticmethod
+    def _has_source(path):
+        """Whether a rendered file also has text worth showing beside it."""
+        return path.lower().endswith(HTML_SUFFIXES)
+
+    @staticmethod
+    def _is_binary_render(path):
+        """A rendered file with no text behind it: an image, or a PDF."""
+        return (path.lower().endswith(RENDER_SUFFIXES)
+                and not path.lower().endswith(HTML_SUFFIXES))
+
+    def _open_path(self, raw, in_browser=False):
         """Open a path from terminal text. False when there is nothing there.
 
         A text file becomes a note tab, which is instant and stays inside
-        tabit; anything else goes to the desktop's own handler. as_note is
-        the right-click escape hatch for reading a page's source.
+        tabit; anything else goes to the desktop's own handler. in_browser
+        is the right-click escape hatch for handing a page to the browser.
         """
         got = self._resolve_term_path(raw)
         if got is None:
             return False
         path, line = got
-        if not as_note and self._is_browser_page(path):
+        if in_browser:
             return self._open_in_browser(path)
-        if (os.path.isfile(path) and _is_text_file(path)
-                and not self._note_file_too_big(path)):
+        render = HAS_WEBKIT and self._is_browser_page(path)
+        if render or (os.path.isfile(path) and _is_text_file(path)
+                      and not self._note_file_too_big(path)):
             row = self._add_note_session(path=path)
-            if row is not None and line:
+            if row is None:
+                return True
+            if render:
+                # It is meant to be looked at, so it opens looked at. The
+                # preview toggle still swaps in the source where there is one.
+                self._note_set_preview(row, True)
+            elif line:
                 row._goto_src = GLib.timeout_add(
                     80, self._note_goto_line, row, line)
             return True
@@ -9505,11 +9652,11 @@ if (data !== null) {{
             menu.append(open_it)
             found = self._resolve_term_path(target) if is_path else None
             if found is not None and self._is_browser_page(found[0]):
-                note_it = Gtk.MenuItem(label="Open as Note")
-                note_it.connect(
+                web_it = Gtk.MenuItem(label="Open in Browser")
+                web_it.connect(
                     "activate",
-                    lambda *_: self._open_path(target, as_note=True))
-                menu.append(note_it)
+                    lambda *_: self._open_path(target, in_browser=True))
+                menu.append(web_it)
             menu.append(copy_it)
             menu.append(Gtk.SeparatorMenuItem())
         copy = Gtk.MenuItem(label="Copy")
