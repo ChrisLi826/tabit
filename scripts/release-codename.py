@@ -132,6 +132,19 @@ def cmd_title(args):
     )
 
 
+def version_key(version):
+    """v1.8.10 comes after v1.8.3, which a string sort gets backwards.
+
+    A hotfix sorts after the release it fixes, since v1.8.3 is (1, 8, 3)
+    and v1.8.3.1 is (1, 8, 3, 1). A part that is not a number sorts last,
+    so a stray tag cannot crash the sort.
+    """
+    out = []
+    for bit in version.lstrip("v").split("."):
+        out.append((0, int(bit)) if bit.isdigit() else (1, 0))
+    return out
+
+
 def cmd_record(args):
     data, items = load()
     version = args.version.strip()
@@ -165,8 +178,7 @@ def cmd_record(args):
         items[:] = [c for c in items if c.get("version") != version]
 
     items.append({"version": version, "english": name})
-    # Keep chronological-ish order by version string (good enough for semver tags).
-    items.sort(key=lambda c: c.get("version") or "")
+    items.sort(key=lambda c: version_key(c.get("version") or ""))
     data["shipped"] = items
     save(data)
     label = format_label(version, name)

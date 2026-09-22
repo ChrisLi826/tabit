@@ -184,3 +184,19 @@ class TestRecordForce(unittest.TestCase):
         entries = {e["version"]: e["english"] for e in self.read()}
         self.assertEqual(entries["v1.8.3"], "Pineapple Cake")
         self.assertEqual(len(self.read()), 2)  # no second v1.8.3
+
+    def test_a_two_digit_patch_sorts_after_a_one_digit_one(self):
+        # A string sort puts v1.8.10 before v1.8.2, which reads as history
+        # running backwards.
+        self.write([{"version": "v1.8.2", "english": "Iron Egg"}])
+        self.record("v1.8.10", "Pineapple Cake", force=False)
+        self.record("v1.8.3", "Sun Cake", force=False)
+        self.assertEqual([e["version"] for e in self.read()],
+                         ["v1.8.2", "v1.8.3", "v1.8.10"])
+
+    def test_a_hotfix_sorts_after_the_release_it_fixes(self):
+        self.write([{"version": "v1.8.3", "english": "Tube Rice Pudding"}])
+        self.record("v1.8.4", "Sun Cake", force=False)
+        self.record("v1.8.3.1", "Tube Rice Pudding")
+        self.assertEqual([e["version"] for e in self.read()],
+                         ["v1.8.3", "v1.8.3.1", "v1.8.4"])
