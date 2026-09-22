@@ -159,7 +159,7 @@ That same string appears in:
 | Major / minor | 1st and 2nd version digits → more **internationally known** names |
 | Patch | 3rd digit → more **obscure** names |
 | Language | **English** display name in the public label; optional Chinese only in private notes if needed — never a browsable public catalog |
-| Reuse | Do not reuse a name already in shipped history |
+| Reuse | Do not reuse a name already in shipped history — except a **hotfix**, which is the same release with bugs taken out and keeps its name (`v1.8.3` → `v1.8.3.1`) |
 
 ### Files
 

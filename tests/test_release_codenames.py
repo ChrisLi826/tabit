@@ -94,8 +94,21 @@ class TestCodenameHistory(unittest.TestCase):
             self.assertNotIn("used_by", c)
 
     def test_no_duplicate_english(self):
-        names = [c["english"].strip().lower() for c in self.items]
-        self.assertEqual(len(names), len(set(names)))
+        """A name belongs to one release, hotfixes of it aside.
+
+        v1.8.3.1 is v1.8.3 with the bugs taken out, so it ships under the
+        same name; a different release may not borrow it.
+        """
+        seen = {}
+        for c in self.items:
+            name = c["english"].strip().lower()
+            base = ".".join(c["version"].lstrip("v").split(".")[:3])
+            if name in seen:
+                self.assertEqual(
+                    seen[name], base,
+                    "%r is used by %s and by %s" % (name, seen[name], base))
+            else:
+                seen[name] = base
 
     def test_no_duplicate_versions(self):
         vers = [c["version"] for c in self.items]
