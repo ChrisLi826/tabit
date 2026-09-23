@@ -540,21 +540,25 @@ _PATH_TAIL = re.compile(
 PATH_REJOIN_LINES = 3
 
 
-def _stitch_rows(rows):
-    """Rows of a fold joined as (text, spans), the way the text ran before.
+def _rejoin_wrapped_n(screen, raw, exists):
+    """_rejoin_wrapped, plus how many line breaks it had to cross.
 
-    The first row keeps its left side, since that is where the path starts;
-    every later row is a continuation, so its indent and the padding the app
-    left behind both go. spans says which slice of the result came from
-    which row, so a match can be checked against the row that was clicked.
+    The count is what tells a click on the third row of a fold from a
+    click on a blank line below it.
     """
-    parts, spans, at = [], [], 0
-    for i, row in enumerate(rows):
-        piece = row.rstrip() if i == 0 else row.strip()
-        parts.append(piece)
-        spans.append((at, at + len(piece)))
-        at += len(piece)
-    return "".join(parts), spans
+    at = screen.find(raw)
+    while at != -1:
+        joined, tail = raw, screen[at + len(raw):]
+        for step in range(1, PATH_REJOIN_LINES + 1):
+            m = _PATH_TAIL.match(tail)
+            if not m:
+                break
+            joined += m.group(1) + m.group(2)
+            tail = tail[m.end():]
+            if exists(joined):
+                return joined, step
+        at = screen.find(raw, at + 1)
+    return raw, 0
 
 
 def _rejoin_wrapped(screen, raw, exists):
@@ -566,19 +570,7 @@ def _rejoin_wrapped(screen, raw, exists):
     not resolve, and only kept if the result does, so `ERROR in /etc/hosts`
     followed by `retry` keeps meaning /etc/hosts.
     """
-    at = screen.find(raw)
-    while at != -1:
-        joined, tail = raw, screen[at + len(raw):]
-        for _ in range(PATH_REJOIN_LINES):
-            m = _PATH_TAIL.match(tail)
-            if not m:
-                break
-            joined += m.group(1) + m.group(2)
-            tail = tail[m.end():]
-            if exists(joined):
-                return joined
-        at = screen.find(raw, at + 1)
-    return raw
+    return _rejoin_wrapped_n(screen, raw, exists)[0]
 
 
 def _is_text_file(path, probe=PATH_TEXT_PROBE):
@@ -9493,42 +9485,58 @@ if (data !== null) {{
     def _term_screen_text(term):
         """Everything on screen as one string, with a newline between rows.
 
-        Rows are numbered from the top of the scrollback, so the visible
-        screen starts wherever the scrollbar is. Reading from row 0 gets the
-        oldest history instead, which is only the screen on a fresh tab.
+        Two windows, because one anchor is not enough. get_text_range
+        numbers rows from the start of the buffer, primary scrollback
+        included, but the scrollbar reads 0 for as long as the alternate
+        screen is up -- which is the whole time in a tmux tab, so the
+        scrollbar alone reads the shell history from before tmux started.
+        The cursor is the one row VTE reports in get_text_range's own
+        numbering, and it is always on screen, so it anchors the second
+        window. _term_get_all_text already anchors on the cursor for the
+        same reason.
+
+        Both windows are bounded by the screen height, so a deep history
+        costs nothing. The seam between them is a blank line: _PATH_TAIL
+        crosses exactly one newline, so nothing rejoins across it.
         """
         try:
+            rows = term.get_row_count()
+            cols = term.get_column_count()
             first = int(term.get_vadjustment().get_value())
-            got = term.get_text_range(first, 0,
-                                      first + term.get_row_count() - 1,
-                                      term.get_column_count() - 1, None)
-        except (AttributeError, TypeError):
+            cursor = int(term.get_cursor_position()[1])
+        except (AttributeError, TypeError, IndexError):
             return ""
-        return (got[0] if isinstance(got, tuple) else got) or ""
 
-    @staticmethod
-    def _term_row_text(term, row, cols):
-        """One row of the terminal, without its trailing newline."""
-        try:
-            got = term.get_text_range(row, 0, row, cols - 1, None)
-        except (AttributeError, TypeError):
-            return ""
-        return ((got[0] if isinstance(got, tuple) else got) or "").rstrip("\n")
+        def window(lo, hi):
+            try:
+                # end_col is exclusive, so it is the column count, not the
+                # last column. Off by one drops the last character of a row
+                # the text fills, which is where a long path folds.
+                got = term.get_text_range(max(0, lo), 0, hi, cols, None)
+            except (AttributeError, TypeError):
+                return ""
+            return (got[0] if isinstance(got, tuple) else got) or ""
+
+        text = window(first, first + rows - 1)
+        if not first <= cursor <= first + rows - 1:
+            text += "\n\n" + window(cursor - rows + 1, cursor + rows - 1)
+        return text
 
     @staticmethod
     def _path_near_pointer(term, event):
-        """A folded path covering the clicked row, or None.
+        """A folded path that reaches the clicked row, or None.
 
-        VTE only matches within one row once an app has folded its own
-        output, so a click on the second or third row of a long path finds
-        nothing at all. A regex cannot reach the next row either, however
-        it is written -- measured -- so the row index is the only way in.
-        Stitch the rows around the pointer back together and see whether a
-        real file falls out.
+        VTE matches one logical line at a time, so once an app has folded
+        its own output the rows after the break carry no match at all, and
+        no regex can reach them however it is written -- measured. Ask VTE
+        for the match on the rows above instead: match_check takes screen
+        coordinates, the one numbering that needs no anchor of ours.
+
+        The rejoin has to reach this row to count, or a click on a blank
+        line under a folded path would open it too.
         """
         try:
             height = term.get_char_height() or 1
-            top = int(term.get_vadjustment().get_value())
             cols = term.get_column_count()
             style = term.get_style_context()
             pad = style.get_padding(style.get_state()).top
@@ -9536,32 +9544,44 @@ if (data !== null) {{
             return None
         # Take the border off first: a click in the top pixel of a row would
         # otherwise read as the row above, which is a different line.
-        row = top + int(max(0, event.y - pad) // height)
-        span = PATH_REJOIN_LINES
-        for start in range(max(0, row - span), row + 1):
-            p_row = row
-            rows = [Tabit._term_row_text(term, r, cols)
-                    for r in range(start, start + span + 1)]
-            text, spans = _stitch_rows(rows)
-            lo, hi = spans[p_row - start]
-            best = None
-            for m in re.finditer(TERM_PATH_PATTERN, text):
-                # The path has to run through the row that was clicked, or
-                # a click on a neighbouring line would open it too.
-                if m.start() >= hi or m.end() <= lo:
+        row = int(max(0, event.y - pad) // height)
+        want = getattr(term, "tabit_path_tag", -1)
+        # Any column inside the path returns the same match, so probe a
+        # stride rather than every column. The right margin can be blank
+        # and the left is the app's own indent, so neither edge alone does.
+        stride = max(1, cols // 12)
+        # Every column inside one match returns the same text, so the
+        # rejoin below would otherwise run a dozen times on it.
+        tried = set()
+        for up in range(1, PATH_REJOIN_LINES + 1):
+            head = row - up
+            if head < 0:
+                break
+            for col in range(cols - 1, 0, -stride):
+                try:
+                    got = term.match_check(col, head)
+                except (AttributeError, TypeError):
+                    return None
+                text, tag = got if isinstance(got, tuple) else (got, -1)
+                if not text or tag != want or (text, up) in tried:
                     continue
-                cand = m.group(0)
-                found = Tabit._resolve_term_path(cand)
+                tried.add((text, up))
+                joined, lines = Tabit._rejoin_path_n(term, text)
+                if lines < up:
+                    continue
+                found = Tabit._resolve_term_path(joined)
                 if found is not None and os.path.isfile(found[0]):
-                    if best is None or len(cand) > len(best):
-                        best = cand
-            if best is not None:
-                return best
+                    return joined
         return None
 
     @staticmethod
     def _rejoin_path(term, raw):
-        """A path an app broke over two lines, as one path again.
+        """A path an app broke over two lines, as one path again."""
+        return Tabit._rejoin_path_n(term, raw)[0]
+
+    @staticmethod
+    def _rejoin_path_n(term, raw):
+        """_rejoin_path, plus how many line breaks it crossed.
 
         A fold often lands on a slash, which leaves a real directory behind
         -- `.../scratchpad` of `.../scratchpad/fig3.png`. That resolves, so
@@ -9569,7 +9589,7 @@ if (data !== null) {{
         """
         got = Tabit._resolve_term_path(raw)
         if got is not None and os.path.isfile(got[0]):
-            return raw
+            return raw, 0
         # A fold that landed on a slash leaves a real directory behind, so
         # only a file is worth trading it for. A fold mid-name leaves
         # nothing, and then any real path is an improvement.
@@ -9581,8 +9601,8 @@ if (data !== null) {{
                 return False
             return os.path.isfile(found[0]) or not want_file
 
-        return _rejoin_wrapped(
-            Tabit._term_screen_text(term), raw, better) or raw
+        return _rejoin_wrapped_n(
+            Tabit._term_screen_text(term), raw, better)
 
     @staticmethod
     def _open_uri(uri):
