@@ -48,11 +48,11 @@ sudo password for apt.
 |---|---|
 | `+ Serial` | Pick device, baud (default 115200), and tool: `screen` (bundled `screen.sh`) / `kermit` / `picocom`; or `ssh` / `telnet` to a host + port (for network console servers) |
 | `+ Terminal` | New tab running your login shell |
-| `+ AI` | Pick AI CLI and working directory; an optional **Session ID** resumes that exact session (tried first, normal continue/resume stays as fallback). **Run inside tmux** keeps the agent alive across restarts and lists the ones still running. **Edit list…** manages CLI names and per-CLI continue/resume tries (`~/.config/tabit/ai_clis.json`) |
+| `+ AI` | Pick AI CLI and working directory; an optional **Session ID** resumes that exact session (tried first, normal continue/resume stays as fallback). **Run inside tmux** keeps the agent alive across restarts and lists the ones still running, each marked with the tab holding it where there is one. **Edit list…** manages CLI names and per-CLI continue/resume tries (`~/.config/tabit/ai_clis.json`) |
 | `+ Open` | Blank buffer to type in, or open a file to read. GtkSourceView editor + **Markdown Preview** (WebKit); an image, PDF or HTML page opens rendered, full width; bottom tools: Base64 / JSON Format; wrap in **Settings…**; huge-line guards. The preview toggle is remembered across restarts |
 | `Settings…` | Theme, fonts, terminal line spacing, note wrap, and other prefs (`settings.json`) |
 | `+ Command` | Run anything (e.g. `ssh root@192.168.1.1`) in a new tab |
-| `+ tmux` | Attach to a running tmux session or create one; rename / kill sessions from the list |
+| `+ tmux` | Attach to a running tmux session or create one; rename / kill sessions from the list. A session a tab already holds is marked with that tab's group and name |
 | Click a tab | Switch to that session |
 | Double-click a tab / right-click → Rename… / `F2` | Rename (popover bubble to the right of the tab) |
 | `x` on a tab (shown on hover) | Close that session |

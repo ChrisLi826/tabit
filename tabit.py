@@ -8352,6 +8352,11 @@ if (data !== null) {{
                 kill.set_tooltip_text("Kill this screen session")
                 kill.connect("clicked", lambda _b, n=name: do_kill(n))
                 r.pack_start(lbl, True, True, 0)
+                # `screen -ls` says whether a session is attached, but not
+                # by what; a tab of ours is the half worth naming.
+                tag = self._session_open_tag(name, False)
+                if tag is not None:
+                    r.pack_start(tag, False, False, 0)
                 r.pack_start(kill, False, False, 0)
                 screens_box.pack_start(r, False, False, 0)
             screens_box.show_all()
@@ -8904,6 +8909,55 @@ if (data !== null) {{
             return sess
         return self._tmux_session_from_argv(argv)
 
+    def _row_session_name(self, row):
+        """The named session a tab is attached to, tmux or screen, or None."""
+        sess = self._row_tmux_session(row)
+        if sess:
+            return sess
+        argv = getattr(row, "argv", None) or []
+        # screen.sh names its session after the device it opened:
+        # /dev/ttyUSB0 -> ap-ttyUSB0.
+        if len(argv) > 1 and argv[0] == SCREEN_SH_PATH:
+            return "ap-" + os.path.basename(argv[1])
+        return None
+
+    def _session_tab_name(self, name):
+        """Which tab holds a named session, spelled as the sidebar spells it.
+
+        None when no tab of ours has it: a session can be attached from a
+        terminal outside tabit, and naming a tab for that one is exactly
+        what this cannot do.
+        """
+        if not name:
+            return None
+        for row in self._session_rows():
+            if self._row_session_name(row) == name:
+                return self._agent_notify_title(
+                    self._row_group_name(row),
+                    getattr(row, "title_text", None))
+        return None
+
+    def _session_open_tag(self, name, attached):
+        """The marker for a session already in use, naming the tab if ours.
+
+        A list of running sessions is read to decide which one to open,
+        and the answer usually is "that one, it is the board I was just
+        on" -- which the session's own name does not say and the tab's
+        does. Falls back to the plain marker for a session attached from
+        somewhere else, which is still worth knowing.
+        """
+        where = self._session_tab_name(name)
+        if where is None and not attached:
+            return None
+        tag = Gtk.Label(label="\u25cf %s" % (where or "open"), xalign=0)
+        tag.get_style_context().add_class("session-sub")
+        tag.set_ellipsize(Pango.EllipsizeMode.END)
+        tag.set_max_width_chars(26)
+        tag.set_tooltip_text(
+            "Open in this tab" if where
+            else "A tab is attached to this session")
+        return tag
+
     def _kill_row_tmux_session(self, row):
         """Kill this tab's tmux session on intentional single-tab close.
 
@@ -9151,11 +9205,8 @@ if (data !== null) {{
                     tag.get_style_context().add_class("session-sub")
                     text_col.pack_start(tag, False, False, 0)
                 row.pack_start(text_col, True, True, 0)
-                if sess["attached"]:
-                    open_tag = Gtk.Label(label="● open")
-                    open_tag.get_style_context().add_class("session-sub")
-                    open_tag.set_tooltip_text(
-                        "A tab is attached to this session")
+                open_tag = self._session_open_tag(name, sess["attached"])
+                if open_tag is not None:
                     row.pack_start(open_tag, False, False, 0)
                 att = Gtk.Button(label="Attach")
                 att.set_can_focus(False)
@@ -9988,10 +10039,8 @@ if (data !== null) {{
                 lbl.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
                 lbl.set_tooltip_text(f"{name}\n{spath}")
                 r.pack_start(lbl, True, True, 0)
-                if attached:
-                    tag = Gtk.Label(label="● open")
-                    tag.get_style_context().add_class("session-sub")
-                    tag.set_tooltip_text("A tab is attached to this session")
+                tag = self._session_open_tag(name, attached)
+                if tag is not None:
                     r.pack_start(tag, False, False, 0)
                 att = Gtk.Button(label="Attach")
                 att.set_can_focus(False)

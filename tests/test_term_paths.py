@@ -859,6 +859,81 @@ class TestNotifyDelayOutlastsAPoll(unittest.TestCase):
                            Tabit._AGENT_POLL_SEC)
 
 
+class _SessionSink:
+    """Stands in for the window: a fixed set of tabs to look through."""
+
+    # _ai_tmux_unwrap is a classmethod, so it arrives already bound;
+    # _tmux_session_from_argv is static and has to stay static here.
+    _ai_tmux_unwrap = Tabit._ai_tmux_unwrap
+    _tmux_session_from_argv = staticmethod(Tabit._tmux_session_from_argv)
+    _row_tmux_session = Tabit._row_tmux_session
+    _row_session_name = Tabit._row_session_name
+    _session_tab_name = Tabit._session_tab_name
+    _agent_notify_title = staticmethod(Tabit._agent_notify_title)
+
+    def __init__(self, rows=(), groups=None):
+        self.rows = list(rows)
+        self._group_names = dict(groups or {})
+
+    def _session_rows(self):
+        return self.rows
+
+    def _row_group_name(self, row):
+        return Tabit._row_group_name(self, row)
+
+
+class _SessionRow:
+    def __init__(self, argv, title=None, group=None):
+        self.argv = argv
+        self.title_text = title
+        self.group_color = group
+
+
+class TestRowSessionName(unittest.TestCase):
+    """Which named session a tab is holding, if any."""
+
+    def test_a_serial_tab_is_named_after_its_device(self):
+        # screen.sh: /dev/ttyUSB0 -> ap-ttyUSB0
+        row = _SessionRow([tabit.SCREEN_SH_PATH, "/dev/ttyUSB3", "115200"])
+        self.assertEqual(_SessionSink()._row_session_name(row), "ap-ttyUSB3")
+
+    def test_a_tmux_tab_gives_its_session(self):
+        row = _SessionRow(["tmux", "new-session", "-A", "-s", "ai-claude-1",
+                           "claude"])
+        self.assertEqual(_SessionSink()._row_session_name(row), "ai-claude-1")
+
+    def test_a_plain_shell_holds_no_session(self):
+        for argv in ([], ["bash"], [tabit.SCREEN_SH_PATH]):
+            self.assertIsNone(_SessionSink()._row_session_name(
+                _SessionRow(argv)), argv)
+
+
+class TestSessionTabName(unittest.TestCase):
+    """Naming the tab that already holds a session, for the pick lists."""
+
+    def _sink(self, group=None):
+        row = _SessionRow([tabit.SCREEN_SH_PATH, "/dev/ttyUSB3", "115200"],
+                          title="ttyUSB3", group=group)
+        return _SessionSink([row], {"red": "QCA2ECW536"})
+
+    def test_it_reads_as_the_sidebar_reads(self):
+        self.assertEqual(self._sink("red")._session_tab_name("ap-ttyUSB3"),
+                         "QCA2ECW536 · ttyUSB3")
+
+    def test_an_ungrouped_tab_is_just_its_name(self):
+        self.assertEqual(self._sink()._session_tab_name("ap-ttyUSB3"),
+                         "ttyUSB3")
+
+    def test_a_session_no_tab_of_ours_holds(self):
+        # It can be attached from a terminal outside tabit, and naming a
+        # tab for that one is what this must not do.
+        self.assertIsNone(self._sink("red")._session_tab_name("ap-ttyUSB9"))
+
+    def test_no_session_name_names_no_tab(self):
+        for name in ("", None):
+            self.assertIsNone(self._sink("red")._session_tab_name(name), name)
+
+
 class _ToastSink:
     """Stands in for the window: holds the note list and counts redraws."""
 
