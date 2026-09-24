@@ -67,6 +67,16 @@ try:
 except (ValueError, ImportError):
     pass
 
+# X11 only, and only for one thing: the server's clock, which is the
+# timestamp a window manager will accept for a raise it did not see the
+# user ask for. Wayland has no equivalent and needs none.
+GdkX11 = None
+try:
+    gi.require_version("GdkX11", "3.0")
+    from gi.repository import GdkX11
+except (ValueError, ImportError):
+    pass
+
 try:
     import markdown as markdown_lib
     HAS_MARKDOWN = True
@@ -6284,11 +6294,28 @@ if (data !== null) {{
         self._toast_overlay.set_overlay_pass_through(
             self._toast_stack, not scrolling)
 
+    def _raise_time(self):
+        """A timestamp a window manager will act on.
+
+        Gdk.CURRENT_TIME is zero, which reads as "no timestamp at all",
+        and a raise with no timestamp is what focus-stealing prevention
+        exists to refuse: GNOME puts up its own "window is ready"
+        notification instead, so the notification has to be clicked
+        twice. The X server's own clock is a timestamp it accepts.
+        """
+        win = self.get_window()
+        if GdkX11 is not None and isinstance(win, GdkX11.X11Window):
+            try:
+                return GdkX11.x11_get_server_time(win)
+            except (GLib.Error, TypeError):
+                pass
+        return Gdk.CURRENT_TIME
+
     def _notify_switch_to(self, row):
         """Bring tabit forward on that tab, from a notification button."""
         if row.get_parent() is None:
             return
-        self.present_with_time(Gdk.CURRENT_TIME)
+        self.present_with_time(self._raise_time())
         # Selecting expands a collapsed group and scrolls (_on_row_selected).
         self.listbox.select_row(row)
         GLib.timeout_add(50, self._scroll_to_row, row)
