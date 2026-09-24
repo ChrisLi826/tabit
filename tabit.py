@@ -8293,6 +8293,15 @@ if (data !== null) {{
         target_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         target_box.pack_start(combo, True, True, 0)
         target_box.pack_start(host, True, True, 0)
+        # Under the dropdown rather than inside it: what is selected there
+        # is used as the device path, so it has to stay the path alone.
+        dev_note = Gtk.Label(xalign=0)
+        dev_note.get_style_context().add_class("session-sub")
+        dev_note.set_ellipsize(Pango.EllipsizeMode.END)
+        dev_note.set_no_show_all(True)
+        target_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        target_col.pack_start(target_box, False, False, 0)
+        target_col.pack_start(dev_note, False, False, 0)
 
         baud = Gtk.Entry(text=DEFAULT_BAUD)
         port = Gtk.Entry()
@@ -8310,7 +8319,7 @@ if (data !== null) {{
         for w in (target_box, field2_box, backend):
             w.set_hexpand(True)  # fill the width so there's no right-side gap
         grid.attach(target_label, 0, 0, 1, 1)
-        grid.attach(target_box, 1, 0, 1, 1)
+        grid.attach(target_col, 1, 0, 1, 1)
         grid.attach(field2_label, 0, 1, 1, 1)
         grid.attach(field2_box, 1, 1, 1, 1)
         grid.attach(Gtk.Label(label="Tool", xalign=0), 0, 2, 1, 1)
@@ -8376,7 +8385,26 @@ if (data !== null) {{
         dialog.get_content_area().add(grid)
         refresh_screens()
 
+        def refresh_dev_note(*_a):
+            """Name the tab already holding the selected device, if one is."""
+            if backend.get_active_text() in SERIAL_NET_BACKENDS:
+                dev_note.hide()
+                return
+            dev = (combo.get_active_text()
+                   or combo.get_child().get_text() or "").strip()
+            where = self._device_tab_name(dev)
+            if where is None:
+                dev_note.hide()
+                return
+            dev_note.set_text("\u25cf %s already has this device" % where)
+            dev_note.show()
+
+        combo.connect("changed", refresh_dev_note)
+        combo.get_child().connect("changed", refresh_dev_note)
+        refresh_dev_note()
+
         def on_backend_changed(*_a):
+            refresh_dev_note()
             net = backend.get_active_text() in SERIAL_NET_BACKENDS
             target_label.set_text("Host" if net else "Device")
             field2_label.set_text("Port" if net else "Baud")
@@ -8932,6 +8960,26 @@ if (data !== null) {{
             return None
         for row in self._session_rows():
             if self._row_session_name(row) == name:
+                return self._agent_notify_title(
+                    self._row_group_name(row),
+                    getattr(row, "title_text", None))
+        return None
+
+    def _device_tab_name(self, dev):
+        """Which tab has a serial device open, or None.
+
+        By the device rather than by a session name: all three tools name
+        it on their own command line, where only screen has a session
+        name to match on. A serial line takes one reader at a time, so
+        this is worth saying before a second tab is opened on it.
+        """
+        # A device path, or nothing: the dropdown takes typed text too,
+        # and a bare "115200" would otherwise match the baud rate that
+        # sits on every one of these command lines.
+        if not dev or not dev.startswith("/dev/"):
+            return None
+        for row in self._session_rows():
+            if dev in (getattr(row, "argv", None) or []):
                 return self._agent_notify_title(
                     self._row_group_name(row),
                     getattr(row, "title_text", None))

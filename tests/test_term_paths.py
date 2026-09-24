@@ -908,6 +908,36 @@ class TestRowSessionName(unittest.TestCase):
                 _SessionRow(argv)), argv)
 
 
+class TestDeviceTabName(unittest.TestCase):
+    """Which tab has a serial line open -- it takes one reader at a time."""
+
+    def _sink(self, argv):
+        return _SessionSink([_SessionRow(argv, title="ttyUSB3", group="red")],
+                            {"red": "QCA2ECW536"})
+
+    def test_every_tool_names_the_device_on_its_command_line(self):
+        for argv in ([tabit.SCREEN_SH_PATH, "/dev/ttyUSB3", "115200"],
+                     ["kermit", "-l", "/dev/ttyUSB3", "-b", "115200"],
+                     ["picocom", "-b", "115200", "/dev/ttyUSB3"]):
+            self.assertEqual(
+                Tabit._device_tab_name(self._sink(argv), "/dev/ttyUSB3"),
+                "QCA2ECW536 · ttyUSB3", argv[0])
+
+    def test_a_device_no_tab_has(self):
+        sink = self._sink(["picocom", "-b", "115200", "/dev/ttyUSB3"])
+        self.assertIsNone(Tabit._device_tab_name(sink, "/dev/ttyUSB9"))
+
+    def test_no_device_names_no_tab(self):
+        sink = self._sink(["picocom", "-b", "115200", "/dev/ttyUSB3"])
+        for dev in ("", None):
+            self.assertIsNone(Tabit._device_tab_name(sink, dev), dev)
+
+    def test_a_baud_rate_is_not_a_device(self):
+        # Every argv carries the rate too; only the device may match.
+        sink = self._sink(["picocom", "-b", "115200", "/dev/ttyUSB3"])
+        self.assertIsNone(Tabit._device_tab_name(sink, "115200"))
+
+
 class TestSessionTabName(unittest.TestCase):
     """Naming the tab that already holds a session, for the pick lists."""
 

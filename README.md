@@ -46,7 +46,7 @@ sudo password for apt.
 
 | Action | Result |
 |---|---|
-| `+ Serial` | Pick device, baud (default 115200), and tool: `screen` (bundled `screen.sh`) / `kermit` / `picocom`; or `ssh` / `telnet` to a host + port (for network console servers) |
+| `+ Serial` | Pick device, baud (default 115200), and tool (a device a tab already has open says which tab): `screen` (bundled `screen.sh`) / `kermit` / `picocom`; or `ssh` / `telnet` to a host + port (for network console servers) |
 | `+ Terminal` | New tab running your login shell |
 | `+ AI` | Pick AI CLI and working directory; an optional **Session ID** resumes that exact session (tried first, normal continue/resume stays as fallback). **Run inside tmux** keeps the agent alive across restarts and lists the ones still running, each marked with the tab holding it where there is one. **Edit list…** manages CLI names and per-CLI continue/resume tries (`~/.config/tabit/ai_clis.json`) |
 | `+ Open` | Blank buffer to type in, or open a file to read. GtkSourceView editor + **Markdown Preview** (WebKit); an image, PDF or HTML page opens rendered, full width; bottom tools: Base64 / JSON Format; wrap in **Settings…**; huge-line guards. The preview toggle is remembered across restarts |
