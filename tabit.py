@@ -9108,10 +9108,16 @@ if (data !== null) {{
         where = tabs.get((kind, name))
         if where is None and not attached:
             return None
-        tag = Gtk.Label(label="\u25cf %s" % (where or "open"), xalign=0)
+        tag = Gtk.Label(label="\u25cf %s" % (where or "open"), xalign=1)
         tag.get_style_context().add_class("session-sub")
         tag.set_ellipsize(Pango.EllipsizeMode.END)
-        tag.set_max_width_chars(26)
+        # Which tab holds it is the half of the row that gets read, and
+        # the path on the left is the half that survives being cut. The
+        # floor matters as much as the cap: the label beside this one
+        # expands and this one does not, so without a width of its own
+        # this is the one a narrow dialog starves.
+        tag.set_width_chars(20)
+        tag.set_max_width_chars(38)
         tag.set_tooltip_text(
             "Open in this tab" if where
             else "Attached from outside tabit")
@@ -9355,6 +9361,7 @@ if (data !== null) {{
                 nl = Gtk.Label(label=sess["label"], xalign=0)
                 nl.set_hexpand(True)
                 nl.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+                nl.set_max_width_chars(26)
                 tip = name
                 if sess["path"]:
                     tip = f"{name}\n{sess['path']}"
@@ -10200,6 +10207,7 @@ if (data !== null) {{
                 lbl = Gtk.Label(label=text, xalign=0)
                 lbl.set_hexpand(True)
                 lbl.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+                lbl.set_max_width_chars(26)
                 lbl.set_tooltip_text(f"{name}\n{spath}")
                 r.pack_start(lbl, True, True, 0)
                 tag = self._session_open_tag("tmux", name, attached, tabs)
