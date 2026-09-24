@@ -859,6 +859,138 @@ class TestNotifyDelayOutlastsAPoll(unittest.TestCase):
                            Tabit._AGENT_POLL_SEC)
 
 
+class _ToastSink:
+    """Stands in for the window: holds the note list and counts redraws."""
+
+    _AGENT_NOTIFY = Tabit._AGENT_NOTIFY
+    _TOAST_SHOWN = Tabit._TOAST_SHOWN
+    _follow_toast_status = Tabit._follow_toast_status
+    _clear_toasts_for = Tabit._clear_toasts_for
+    _toast_shown = Tabit._toast_shown
+
+    def __init__(self, notes=None, expanded=False):
+        self._toast_notes = list(notes or [])
+        self._toast_expanded = expanded
+        self.draws = 0
+
+    def _render_toasts(self):
+        self.draws += 1
+
+
+def _note(row, status="ready"):
+    return {"row": row, "status": status, "at": 0.0,
+            "sticky": True, "left": None}
+
+
+class TestShouldArmNotify(unittest.TestCase):
+    """Which status changes are worth telling anyone about."""
+
+    def test_stopping_work_is_news(self):
+        for status in ("ready", "blocked"):
+            self.assertTrue(
+                Tabit._should_arm_notify("working", status, False), status)
+
+    def test_going_back_to_work_is_not(self):
+        for status in ("working", "idle", "exited", None):
+            self.assertFalse(
+                Tabit._should_arm_notify("blocked", status, False), status)
+
+    def test_saying_it_twice_is_noise(self):
+        # Already told: swapping one kind of waiting for the other adds
+        # nothing the tab row is not already showing.
+        self.assertFalse(Tabit._should_arm_notify("blocked", "ready", False))
+        self.assertFalse(Tabit._should_arm_notify("ready", "blocked", False))
+
+    def test_but_not_while_it_is_still_only_pending(self):
+        # Nothing has been shown yet, so the popup has to follow the
+        # change instead of being dropped as a repeat -- both used to be
+        # lost, the armed one to a status that no longer matched.
+        self.assertTrue(Tabit._should_arm_notify("blocked", "ready", True))
+        self.assertTrue(Tabit._should_arm_notify("ready", "blocked", True))
+
+    def test_a_pending_one_still_dies_when_it_goes_back_to_work(self):
+        self.assertFalse(Tabit._should_arm_notify("ready", "working", True))
+
+
+class TestFollowToastStatus(unittest.TestCase):
+    """A popup says what its tab says, or it goes."""
+
+    def test_it_follows_a_change_worth_a_popup(self):
+        row = object()
+        sink = _ToastSink([_note(row, "ready")])
+        Tabit._follow_toast_status(sink, row, "blocked")
+        self.assertEqual(sink._toast_notes[0]["status"], "blocked")
+        self.assertEqual(sink.draws, 1)
+
+    def test_back_to_work_takes_the_popup_with_it(self):
+        row = object()
+        for status in ("working", "idle", "exited"):
+            sink = _ToastSink([_note(row, "ready")])
+            Tabit._follow_toast_status(sink, row, status)
+            self.assertEqual(sink._toast_notes, [], status)
+            self.assertEqual(sink.draws, 1, status)
+
+    def test_the_same_status_again_redraws_nothing(self):
+        row = object()
+        sink = _ToastSink([_note(row, "ready")])
+        Tabit._follow_toast_status(sink, row, "ready")
+        self.assertEqual(sink.draws, 0)
+
+    def test_a_row_with_no_popup_redraws_nothing(self):
+        sink = _ToastSink([_note(object(), "ready")])
+        Tabit._follow_toast_status(sink, object(), "blocked")
+        self.assertEqual(sink.draws, 0)
+        self.assertEqual(len(sink._toast_notes), 1)
+
+
+class TestClearToastsFor(unittest.TestCase):
+    """Opening a tab answers its popup, wherever the popup is."""
+
+    def test_it_drops_by_identity_not_by_equal_contents(self):
+        # Two tabs that have got no further than a default title hold
+        # equal dicts; only one of them has been opened.
+        a, b = object(), object()
+        sink = _ToastSink([_note(a), _note(b)])
+        Tabit._clear_toasts_for(sink, a)
+        self.assertEqual(len(sink._toast_notes), 1)
+        self.assertIs(sink._toast_notes[0]["row"], b)
+
+    def test_it_reaches_one_that_has_no_card(self):
+        rows = [object() for _ in range(5)]
+        sink = _ToastSink([_note(r) for r in rows])
+        Tabit._clear_toasts_for(sink, rows[0])   # oldest, so not shown
+        self.assertEqual(len(sink._toast_notes), 4)
+        self.assertEqual(sink.draws, 1)
+
+    def test_a_tab_with_no_popup_redraws_nothing(self):
+        sink = _ToastSink([_note(object())])
+        Tabit._clear_toasts_for(sink, object())
+        self.assertEqual(sink.draws, 0)
+
+    def test_an_empty_list_is_left_alone(self):
+        sink = _ToastSink()
+        Tabit._clear_toasts_for(sink, object())
+        self.assertEqual(sink.draws, 0)
+
+
+class TestToastShown(unittest.TestCase):
+    """Which notifications have a card."""
+
+    def test_folded_shows_the_newest_few(self):
+        notes = [_note(object()) for _ in range(5)]
+        sink = _ToastSink(notes)
+        self.assertEqual(Tabit._toast_shown(sink), notes[-3:])
+
+    def test_fewer_than_the_limit_all_show(self):
+        notes = [_note(object()) for _ in range(2)]
+        self.assertEqual(Tabit._toast_shown(_ToastSink(notes)), notes)
+
+    def test_opened_shows_every_one_oldest_first(self):
+        notes = [_note(object()) for _ in range(9)]
+        sink = _ToastSink(notes, expanded=True)
+        self.assertEqual(Tabit._toast_shown(sink), notes)
+
+
 class TestToastListHeight(unittest.TestCase):
     """How tall a list of cards is, worked out rather than asked for.
 

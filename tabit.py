@@ -4829,8 +4829,12 @@ if (data !== null) {{
                     glyph.set_no_show_all(True)
                     glyph.hide()
                 continue
+            # Cleared first so the widgets are rebuilt from scratch.
+            # Not a change of status, though, and it must not read as
+            # one: notifying here re-armed a popup the user had already
+            # dismissed, every time the sidebar was laid out again.
             r.agent_status = None
-            self._set_agent_status(r, st)
+            self._set_agent_status(r, st, notify=False)
         self._schedule_ai_summary_refresh()
 
     # --- AI attention summaries (viewport peeks + collapsed headers) -------
@@ -5729,11 +5733,34 @@ if (data !== null) {{
         -- the point of the popup is that nobody is watching -- and it also
         lets someone who switches to the tab in the meantime never see it.
         """
-        if self._agent_notify_text(prev, status) is None:
+        pending = getattr(row, "_notify_src", None) is not None
+        if not self._should_arm_notify(prev, status, pending):
+            if status not in self._AGENT_NOTIFY:
+                # Back at work, or gone: whatever was queued to be said
+                # about it stopping is not true any more.
+                self._cancel_agent_notify(row)
             return
         self._cancel_agent_notify(row)
         row._notify_src = GLib.timeout_add_seconds(
             self._AGENT_NOTIFY_DELAY_S, self._agent_notify_fire, row, status)
+
+    @classmethod
+    def _should_arm_notify(cls, prev, status, pending):
+        """Whether this change of status is worth a notification.
+
+        On the way in only: an agent that was working now wants you.
+        Once it is already waiting, saying so again is noise, and so is
+        moving between the two ways of waiting -- but only once the
+        first one has actually been shown. A wait that changes kind
+        inside the delay used to lose both of them, the armed one
+        because its status no longer matched by the time it fired, and
+        the new one because it looked like a repeat.
+        """
+        if status not in cls._AGENT_NOTIFY:
+            return False
+        if prev in cls._AGENT_NOTIFY and not pending:
+            return False
+        return True
 
     @staticmethod
     def _cancel_agent_notify(row):
@@ -5905,7 +5932,8 @@ if (data !== null) {{
                       "left": None if sticky else self._TOAST_SECONDS})
         self._toast_notes = notes
         self._render_toasts()
-        if getattr(self, "_toast_tick_src", None) is None:
+        if (notes[-1]["left"] is not None
+                and getattr(self, "_toast_tick_src", None) is None):
             self._toast_tick_src = GLib.timeout_add_seconds(1,
                                                             self._toast_tick)
 
@@ -5959,10 +5987,13 @@ if (data !== null) {{
         next popup under the click.
         """
         notes = getattr(self, "_toast_notes", [])
-        if not notes:
+        if not any(n["left"] is not None for n in notes):
+            # Every popup left is one that waits to be dismissed, which
+            # is the default; there is nothing for a clock to do.
             self._toast_tick_src = None
             return False
-        if self.is_active() and not self._toast_hovered():
+        if (self.is_active() and not self._toast_hovered()
+                and not getattr(self, "_toast_expanded", False)):
             shown = {id(n) for n in self._toast_shown()}
             done = [n for n in notes
                     if not n["sticky"] and id(n) in shown
@@ -5988,9 +6019,12 @@ if (data !== null) {{
             return False
         seat = Gdk.Display.get_default().get_default_seat()
         win = self.get_window()
-        if seat is None or win is None:
+        # A seat can be there with no pointer on it, and asking for the
+        # position of None raises -- once a second, in a timer.
+        dev = seat.get_pointer() if seat is not None else None
+        if dev is None or win is None:
             return False
-        got = win.get_device_position(seat.get_pointer())
+        got = win.get_device_position(dev)
         at = self._toast_stack.translate_coordinates(self, 0, 0)
         if at is None:
             return False
@@ -6033,35 +6067,50 @@ if (data !== null) {{
         self._render_toasts()
 
     def _on_toast_scroll(self, _w, event):
-        """Hand the wheel to the terminal under the pointer.
+        """Hand the wheel to whatever the popup is covering.
 
-        The stack hangs about 99px past a narrow tab list, so a wheel
-        there is meant for the terminal -- and measured, an overlay child
-        takes the scroll whether or not it wants it, the popup that
-        shipped first swallowing it and doing nothing. The event goes on
-        as it arrived rather than moving the scrollbar: an agent usually
-        has the alternate screen up, where scrolling is the program's
-        decision and there is no scrollback position to move.
+        Measured: an overlay child takes the scroll whether or not it
+        wants it, so a popup that did nothing with the event ate it. The
+        event goes on as it arrived rather than moving a scrollbar --
+        an agent usually has the alternate screen up, where scrolling is
+        the program's decision and there is no scrollback position to
+        move.
+
+        Under the popup is the tab list on one side and a terminal on
+        the other, because the stack is wider than a narrow list; both
+        are worth scrolling, so the pointer decides which.
         """
-        term = self._toast_term_under(event)
-        if term is not None:
-            term.event(event)
+        target = self._toast_scroll_target(event)
+        if target is not None:
+            target.event(event)
         return True
 
-    def _toast_term_under(self, event):
-        """The terminal the pointer is over, or None over the tab list."""
+    def _toast_scroll_target(self, event):
+        """The widget under the pointer that the wheel belongs to.
+
+        Terminals first: where the stack overhangs one, that is what the
+        wheel was aimed at. The tab list is the fallback, since the rest
+        of the stack sits over it.
+        """
+        seen = []
         for row in (getattr(self, "_left_row", None),
                     getattr(self, "_right_row", None),
                     self.listbox.get_selected_row()):
             term = getattr(row, "term", None) if row is not None else None
-            win = term.get_window() if term is not None else None
-            if win is None or not term.get_mapped():
+            if term is not None and term not in seen:
+                seen.append(term)
+        seen.append(getattr(self, "sidebar_scroll", None))
+        for widget in seen:
+            if widget is None or not widget.get_mapped():
+                continue
+            win = widget.get_window()
+            if win is None:
                 continue
             _, ox, oy = win.get_origin()
-            alloc = term.get_allocation()
+            alloc = widget.get_allocation()
             if (ox <= event.x_root < ox + alloc.width
                     and oy <= event.y_root < oy + alloc.height):
-                return term
+                return widget
         return None
 
     def _toast_card(self, note, forward_scroll):
@@ -6166,20 +6215,30 @@ if (data !== null) {{
             self._toast_stack.set_no_show_all(True)
             self._toast_stack.hide()
             return
+        if len(notes) <= self._TOAST_SHOWN:
+            # They all have cards, so there is no list to be open.
+            self._toast_expanded = False
         expanded = getattr(self, "_toast_expanded", False)
         self._toast_room_seen = self._toast_room()
         shown = self._toast_shown()
         hidden = len(notes) - len(shown)
 
+        # One question, asked once: is the opened list long enough to
+        # scroll itself? Both the cards' handling of the wheel and the
+        # overlay's pass-through hang off the answer, and keying them on
+        # `expanded` instead left the wheel dead whenever the opened
+        # list happened to fit -- measured.
+        cap = self._toast_expanded_height(self._toast_room())
+        scrolling = expanded and self._toast_list_height(len(shown)) > cap
+
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
                         spacing=self._TOAST_GAP)
         for note in shown:
-            # Inside the scroller the wheel belongs to the list; the
-            # cards hand it on only when the list cannot use it.
-            inner.pack_start(self._toast_card(note, not expanded),
+            # Inside a scroller the wheel belongs to the list; otherwise
+            # the cards hand it on to what they are covering.
+            inner.pack_start(self._toast_card(note, not scrolling),
                              False, False, 0)
-        cap = self._toast_expanded_height(self._toast_room())
-        if expanded and self._toast_list_height(len(shown)) > cap:
+        if scrolling:
             # Only once the list outgrows its ceiling. A scroller asked
             # to hold a shorter list keeps the box open at the ceiling
             # anyway, and that empty strip is what lifts the stack off
@@ -6216,7 +6275,7 @@ if (data !== null) {{
         # The stack hangs over the terminal, so the gaps between cards let
         # the wheel and the click through; expanded, the list needs them.
         self._toast_overlay.set_overlay_pass_through(
-            self._toast_stack, not expanded)
+            self._toast_stack, not scrolling)
 
     def _notify_switch_to(self, row):
         """Bring tabit forward on that tab, from a notification button."""
@@ -6227,7 +6286,7 @@ if (data !== null) {{
         self.listbox.select_row(row)
         GLib.timeout_add(50, self._scroll_to_row, row)
 
-    def _set_agent_status(self, row, status):
+    def _set_agent_status(self, row, status, notify=True):
         """Update sidebar status icon/glyph for an AI tab."""
         img = getattr(row, "agent_status_lbl", None)
         glyph = getattr(row, "agent_status_glyph", None)
@@ -6242,7 +6301,8 @@ if (data !== null) {{
             return
         prev_status = getattr(row, "agent_status", None)
         row.agent_status = status
-        self._notify_agent_status(row, prev_status, status)
+        if notify:
+            self._notify_agent_status(row, prev_status, status)
         self._follow_toast_status(row, status)
         css_class = "done" if status in ("done", "exited") else status
         tips = {
@@ -6326,6 +6386,18 @@ if (data !== null) {{
             if src:
                 GLib.source_remove(src)
                 setattr(row, attr, None)
+        # Both halves of the notification are about a tab that will not
+        # be there to open: the in-app popup, which would otherwise sit
+        # in the stack counting toward `N more`, and the desktop one,
+        # whose Switch button would do nothing.
+        self._clear_toasts_for(row)
+        note = getattr(row, "_agent_note", None)
+        if note is not None:
+            try:
+                note.close()
+            except GLib.Error:
+                pass
+            row._agent_note = None
         row.preview_on = False
         self._marked.discard(row)
         self.listbox.remove(row)
@@ -6378,6 +6450,9 @@ if (data !== null) {{
         # Sync list highlight only (e.g. after Ctrl+Tab pane switch)
         if getattr(self, "_list_sync_only", False):
             if row is not None:
+                # Focusing the pane a tab is in reaches it as surely as
+                # clicking its row does, so its popup is answered too.
+                self._clear_toasts_for(row)
                 GLib.timeout_add(50, self._scroll_to_row, row)
             return
         self._clear_marks()  # a plain tab switch drops any Ctrl+click marks
