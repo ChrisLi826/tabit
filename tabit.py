@@ -6458,8 +6458,6 @@ if (data !== null) {{
         self._clear_marks()  # a plain tab switch drops any Ctrl+click marks
         if row is None:
             return
-        # Reaching the tab any other way answers its popup too.
-        self._clear_toasts_for(row)
         if getattr(row, "kind", None) == "group_header":
             # Focus header for rename / Enter expand — do not open group here
             self.listbox.grab_focus()
@@ -6748,6 +6746,12 @@ if (data !== null) {{
         """Clear sticky ✔ when the session is shown in either pane."""
         if row is None or not _is_ai_icon(getattr(row, "icon_name", None)):
             return
+        # Shown is shown, however it got there: a popup about a tab now
+        # on screen has been answered. This is the one place every pane
+        # that displays a tab passes through, so pinning one to the
+        # right pane is covered too -- that path never reaches the
+        # row-selection handler.
+        self._clear_toasts_for(row)
         as_ = self._agent_status_mod()
         disp = getattr(row, "_agent_display", None)
         if as_ is not None and disp is not None:
