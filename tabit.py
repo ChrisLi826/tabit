@@ -5818,6 +5818,13 @@ if (data !== null) {{
         try:
             note = Notify.Notification.new(title, what, "tabit")
             note.set_urgency(self._notify_urgency(level))
+            # "default" is the action a notification server invokes when
+            # the popup itself is clicked, rather than one of its
+            # buttons, and it is not drawn as a button. Without it a
+            # click on the body does nothing and the only way through is
+            # to hit the button, which is the smaller target of the two.
+            note.add_action("default", "Switch to it",
+                            lambda *_a: self._notify_switch_to(row), None)
             note.add_action("switch", "Switch to it",
                             lambda *_a: self._notify_switch_to(row), None)
             note.show()
