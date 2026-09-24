@@ -251,6 +251,9 @@ class _Sink:
     def _note_set_preview(self, _row, on):
         self.calls.append(("preview", bool(on)))
 
+    def _open_big_file(self, path):
+        self.calls.append(("big", path))
+
 
 class TestOpenPathRouting(unittest.TestCase):
     def setUp(self):
@@ -296,11 +299,25 @@ class TestOpenPathRouting(unittest.TestCase):
         Tabit._open_path(self.sink, src)
         self.assertEqual(self.sink.calls, [("note", src), ("preview", True)])
 
+    def test_a_huge_single_line_file_is_not_thrown_at_the_desktop(self):
+        # The note editor freezes on one long line, and so does whatever
+        # the desktop opens it with -- it is a GtkSourceView too. Ask.
+        src = self.write("acl.txt", "x" * (tabit.NOTE_MAX_OPEN_LINE + 1))
+        Tabit._open_path(self.sink, src)
+        self.assertEqual(self.sink.calls, [("big", src)])
+
+    def test_a_binary_file_still_goes_to_the_desktop(self):
+        src = self.write("blob.bin", "\x00\xff\xfe" * 40)
+        Tabit._open_path(self.sink, src)
+        self.assertEqual([c[0] for c in self.sink.calls], ["uri"])
+
     def test_a_zero_stat_file_never_reaches_a_note(self):
         # /proc reports size 0 and still reads 15MB, so the size check has
-        # to read rather than trust stat.
+        # to read rather than trust stat. It is text, so it goes to the
+        # big-file question, not to the desktop, which would freeze on it
+        # just as the note editor would.
         Tabit._open_path(self.sink, "/proc/kallsyms")
-        self.assertEqual(self.sink.calls, [("uri", "file:///proc/kallsyms")])
+        self.assertEqual(self.sink.calls, [("big", "/proc/kallsyms")])
 
     def test_a_binary_file_is_never_written_back(self):
         """Neither Save nor Save As may write the empty buffer to an image.

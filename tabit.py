@@ -9751,6 +9751,14 @@ if (data !== null) {{
                 row._goto_src = GLib.timeout_add(
                     80, self._note_goto_line, row, line)
             return True
+        if os.path.isfile(path) and _is_text_file(path):
+            # Text, but too big or too long-lined for the note editor.
+            # Handing it to the desktop hands the same freeze to whatever
+            # opens it, which is another GtkSourceView -- and that is what
+            # happened: a 1.4MB single-line file locked up Text Editor.
+            # The chooser already asks what to do with one of these.
+            self._open_big_file(path)
+            return True
         try:
             self._open_uri(GLib.filename_to_uri(path))
         except GLib.Error:
