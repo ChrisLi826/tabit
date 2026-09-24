@@ -8345,12 +8345,13 @@ if (data !== null) {{
             for c in screens_box.get_children():
                 screens_box.remove(c)
             sess = self._screen_sessions()
+            tabs = self._session_tab_map()
             hdr = Gtk.Label(
                 label="Running screens (kill to reopen fresh):" if sess
                 else "No running screen sessions", xalign=0)
             hdr.get_style_context().add_class("session-sub")
             screens_box.pack_start(hdr, False, False, 0)
-            for name in sess:
+            for name, attached in sess:
                 r = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
                 lbl = Gtk.Label(label=name, xalign=0)
                 lbl.set_hexpand(True)
@@ -8363,7 +8364,7 @@ if (data !== null) {{
                 r.pack_start(lbl, True, True, 0)
                 # `screen -ls` says whether a session is attached, but not
                 # by what; a tab of ours is the half worth naming.
-                tag = self._session_open_tag(name, False)
+                tag = self._session_open_tag("screen", name, attached, tabs)
                 if tag is not None:
                     r.pack_start(tag, False, False, 0)
                 r.pack_start(kill, False, False, 0)
@@ -8377,6 +8378,17 @@ if (data !== null) {{
                            capture_output=True)
             subprocess.run(["screen", "-wipe"], capture_output=True)
             refresh_screens()
+            # The tab on that session is still alive this instant: its
+            # child-exited handler cannot run until this one returns.
+            # Come back once it has, so the device note below stops
+            # naming a tab that no longer holds the line.
+            GLib.timeout_add(400, after_kill)
+
+        def after_kill():
+            if dialog.get_mapped():
+                refresh_screens()
+                refresh_dev_note()
+            return False
 
         grid.attach(screens_box, 0, 3, 2, 1)
         grid.attach(btns, 0, 4, 2, 1)
@@ -8399,6 +8411,9 @@ if (data !== null) {{
             dev_note.set_text("\u25cf %s already has this device" % where)
             dev_note.show()
 
+        # Both, deliberately: the dropdown fires for a pick and the entry
+        # for typing, and a pick fires both. Running twice costs a walk
+        # over the tab list; missing one leaves the note stale.
         combo.connect("changed", refresh_dev_note)
         combo.get_child().connect("changed", refresh_dev_note)
         refresh_dev_note()
@@ -8762,18 +8777,24 @@ if (data !== null) {{
 
     @staticmethod
     def _screen_sessions():
-        """Names of running GNU screen sessions (e.g. ap-ttyUSB0)."""
+        """Running GNU screen sessions as (name, attached) pairs.
+
+        `screen -ls` marks each one (Attached) or (Detached); a session
+        somebody is on is worth saying so, since the pick list offers to
+        kill it.
+        """
         try:
             out = subprocess.run(["screen", "-ls"], capture_output=True,
                                  text=True, timeout=2)
         except (OSError, subprocess.SubprocessError):
             return []
-        names = []
+        found = []
         for line in out.stdout.splitlines():
-            m = re.match(r"^\s*\d+\.(\S+)", line)  # "12345.ap-ttyUSB0  (...)"
+            # "\t12345.ap-ttyUSB0\t(date)\t(Attached)"
+            m = re.match(r"^\s*\d+\.(\S+)", line)
             if m:
-                names.append(m.group(1))
-        return names
+                found.append((m.group(1), "(Attached)" in line))
+        return found
 
     @staticmethod
     def _copy_to_clipboard(text):
@@ -8937,33 +8958,107 @@ if (data !== null) {{
             return sess
         return self._tmux_session_from_argv(argv)
 
+    @staticmethod
+    def _screen_name_from_argv(argv):
+        """Session name out of a screen client's own argv, or None.
+
+        A client either joined a session (`-x 4062.ap-ttyUSB0`, where the
+        pid prefix is optional) or created one (`-S ap-ttyUSB0`).
+        """
+        for i, arg in enumerate(argv[:-1]):
+            if arg == "-x":
+                head, _, tail = argv[i + 1].partition(".")
+                return tail if head.isdigit() and tail else argv[i + 1]
+            if arg == "-S":
+                return argv[i + 1]
+        return None
+
+    @classmethod
+    def _screen_name_of_pid(cls, pid):
+        """The screen session a tab's own child is on, read off /proc.
+
+        screen.sh ends in `exec screen`, so the process tabit spawned is
+        the screen client itself and its live command line names the
+        session it joined. That is the only place the name exists:
+        screen.sh attaches to whatever session already holds the device,
+        under that session's own name, which is nowhere on the command
+        line tabit spawned. Deriving "ap-<dev>" from the device instead
+        does not just miss that session, it claims an unrelated one that
+        happens to carry the derived name.
+        """
+        if not pid:
+            return None
+        try:
+            with open("/proc/%d/cmdline" % pid, "rb") as f:
+                raw = f.read()
+        except OSError:
+            return None
+        argv = [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
+        return cls._screen_name_from_argv(argv)
+
     def _row_session_name(self, row):
-        """The named session a tab is attached to, tmux or screen, or None."""
+        """The named session a tab holds, as (kind, name), or None.
+
+        The kind matters: screen and tmux name sessions in two separate
+        namespaces, and a tmux session called "ap-ttyUSB3" is not the
+        screen session of that name.
+        """
         sess = self._row_tmux_session(row)
         if sess:
-            return sess
+            return ("tmux", sess)
         argv = getattr(row, "argv", None) or []
-        # screen.sh names its session after the device it opened:
-        # /dev/ttyUSB0 -> ap-ttyUSB0.
         if len(argv) > 1 and argv[0] == SCREEN_SH_PATH:
-            return "ap-" + os.path.basename(argv[1])
+            name = self._screen_name_of_pid(getattr(row, "pid", None))
+            return ("screen", name) if name else None
         return None
 
-    def _session_tab_name(self, name):
-        """Which tab holds a named session, spelled as the sidebar spells it.
+    def _session_tab_map(self):
+        """Every named session a live tab holds: {(kind, name): tab label}.
 
-        None when no tab of ours has it: a session can be attached from a
-        terminal outside tabit, and naming a tab for that one is exactly
-        what this cannot do.
+        Built once per list refresh. Asking per entry instead re-parsed
+        every AI tab's tmux wrapper once for every row in the list, which
+        measured 122ms at 30 tabs and 1.3s at 100.
+
+        A session missing from this map is not ours: it can be attached
+        from a terminal outside tabit, and naming a tab for that one is
+        exactly what this cannot do.
         """
-        if not name:
-            return None
+        held = {}
         for row in self._session_rows():
-            if self._row_session_name(row) == name:
-                return self._agent_notify_title(
-                    self._row_group_name(row),
-                    getattr(row, "title_text", None))
-        return None
+            # An exited tab keeps its row and its argv, but holds nothing.
+            if getattr(row, "dead", False):
+                continue
+            key = self._row_session_name(row)
+            if key is None:
+                continue
+            held.setdefault(key, []).append(self._agent_notify_title(
+                self._row_group_name(row),
+                getattr(row, "title_text", None)))
+        # Sharing one session is the point of `screen -x`, so more than
+        # one tab on it is normal and naming only the first hides the
+        # rest. The row has space for one name and a count.
+        return {k: (v[0] if len(v) == 1 else "%s +%d" % (v[0], len(v) - 1))
+                for k, v in held.items()}
+
+    def _retarget_tmux_rows(self, old, new):
+        """Point tabs at a tmux session that was just renamed.
+
+        A tab's argv is how tabit knows which session it holds, so a
+        rename leaves it naming a session that is gone -- or worse, one
+        that someone creates later under the freed name.
+        """
+        if not old or not new or old == new:
+            return
+        for row in self._session_rows():
+            if self._row_tmux_session(row) != old:
+                continue
+            argv = list(getattr(row, "argv", None) or [])
+            inner, sess = self._ai_tmux_unwrap(argv)
+            if sess is not None:
+                row.argv = self._ai_tmux_argv(inner, new)
+            else:
+                row.argv = [new if a == old else a for a in argv]
+        self._save_sessions_soon()
 
     def _device_tab_name(self, dev):
         """Which tab has a serial device open, or None.
@@ -8978,14 +9073,28 @@ if (data !== null) {{
         # sits on every one of these command lines.
         if not dev or not dev.startswith("/dev/"):
             return None
+        # /dev/serial/by-id/... and /dev/ttyUSB0 can be the same line, and
+        # a tab opened under one name is asked about under the other.
+        want = os.path.realpath(dev)
         for row in self._session_rows():
-            if dev in (getattr(row, "argv", None) or []):
+            # An exited tab keeps its row and its argv, but not the line:
+            # reopening the board it died on is the usual next move.
+            if getattr(row, "dead", False):
+                continue
+            argv = getattr(row, "argv", None) or []
+            # Only the three tools that open a line on this machine. An
+            # ssh or telnet tab carries whatever was typed in the target
+            # field, and "ssh box /dev/ttyUSB0" is not holding our line.
+            if not argv or argv[0] not in (SCREEN_SH_PATH, "kermit", "picocom"):
+                continue
+            if any(a.startswith("/dev/") and os.path.realpath(a) == want
+                   for a in argv[1:]):
                 return self._agent_notify_title(
                     self._row_group_name(row),
                     getattr(row, "title_text", None))
         return None
 
-    def _session_open_tag(self, name, attached):
+    def _session_open_tag(self, kind, name, attached, tabs):
         """The marker for a session already in use, naming the tab if ours.
 
         A list of running sessions is read to decide which one to open,
@@ -8993,8 +9102,10 @@ if (data !== null) {{
         on" -- which the session's own name does not say and the tab's
         does. Falls back to the plain marker for a session attached from
         somewhere else, which is still worth knowing.
+
+        `tabs` is one `_session_tab_map()` for the whole list.
         """
-        where = self._session_tab_name(name)
+        where = tabs.get((kind, name))
         if where is None and not attached:
             return None
         tag = Gtk.Label(label="\u25cf %s" % (where or "open"), xalign=0)
@@ -9003,7 +9114,7 @@ if (data !== null) {{
         tag.set_max_width_chars(26)
         tag.set_tooltip_text(
             "Open in this tab" if where
-            else "A tab is attached to this session")
+            else "Attached from outside tabit")
         return tag
 
     def _kill_row_tmux_session(self, row):
@@ -9209,6 +9320,7 @@ if (data !== null) {{
             if new and new != name:
                 subprocess.run(["tmux", "rename-session", "-t", name, new],
                                capture_output=True)
+                self._retarget_tmux_rows(name, new)
                 refresh()
 
         def do_kill(name):
@@ -9224,6 +9336,7 @@ if (data !== null) {{
             for c in listbox.get_children():
                 listbox.remove(c)
             sessions = self._tmux_sessions()
+            tabs = self._session_tab_map()
             want = filter_state["value"]
             if want != "all":
                 sessions = [s for s in sessions if s["category"] == want]
@@ -9253,7 +9366,8 @@ if (data !== null) {{
                     tag.get_style_context().add_class("session-sub")
                     text_col.pack_start(tag, False, False, 0)
                 row.pack_start(text_col, True, True, 0)
-                open_tag = self._session_open_tag(name, sess["attached"])
+                open_tag = self._session_open_tag(
+                    "tmux", name, sess["attached"], tabs)
                 if open_tag is not None:
                     row.pack_start(open_tag, False, False, 0)
                 att = Gtk.Button(label="Attach")
@@ -10074,6 +10188,7 @@ if (data !== null) {{
             for c in live_box.get_children():
                 live_box.remove(c)
             rows = self._ai_tmux_sessions()
+            tabs = self._session_tab_map()
             head = Gtk.Label(
                 label="Running AI sessions (tmux):" if rows
                 else "No AI sessions running in tmux", xalign=0)
@@ -10087,7 +10202,7 @@ if (data !== null) {{
                 lbl.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
                 lbl.set_tooltip_text(f"{name}\n{spath}")
                 r.pack_start(lbl, True, True, 0)
-                tag = self._session_open_tag(name, attached)
+                tag = self._session_open_tag("tmux", name, attached, tabs)
                 if tag is not None:
                     r.pack_start(tag, False, False, 0)
                 att = Gtk.Button(label="Attach")

@@ -866,14 +866,23 @@ class _SessionSink:
     # _tmux_session_from_argv is static and has to stay static here.
     _ai_tmux_unwrap = Tabit._ai_tmux_unwrap
     _tmux_session_from_argv = staticmethod(Tabit._tmux_session_from_argv)
+    _ai_tmux_argv = Tabit._ai_tmux_argv
     _row_tmux_session = Tabit._row_tmux_session
     _row_session_name = Tabit._row_session_name
-    _session_tab_name = Tabit._session_tab_name
+    _session_tab_map = Tabit._session_tab_map
+    _retarget_tmux_rows = Tabit._retarget_tmux_rows
     _agent_notify_title = staticmethod(Tabit._agent_notify_title)
 
-    def __init__(self, rows=(), groups=None):
+    def __init__(self, rows=(), groups=None, screens=None):
         self.rows = list(rows)
         self._group_names = dict(groups or {})
+        # Stands in for /proc: pid -> the session that pid's screen
+        # client is actually on.
+        self._screens = dict(screens or {})
+        self.saved = 0
+
+    def _screen_name_of_pid(self, pid):
+        return self._screens.get(pid)
 
     def _session_rows(self):
         return self.rows
@@ -881,26 +890,94 @@ class _SessionSink:
     def _row_group_name(self, row):
         return Tabit._row_group_name(self, row)
 
+    def _save_sessions_soon(self):
+        self.saved += 1
+
 
 class _SessionRow:
-    def __init__(self, argv, title=None, group=None):
+    def __init__(self, argv, title=None, group=None, pid=None):
         self.argv = argv
         self.title_text = title
         self.group_color = group
+        self.pid = pid
+
+
+class TestScreenSessionsParse(unittest.TestCase):
+    """`screen -ls` says who is attached; the list needs to pass it on."""
+
+    def _run(self, stdout):
+        import subprocess as sp
+        real = sp.run
+        sp.run = lambda *a, **k: type("R", (), {"stdout": stdout})()
+        try:
+            return Tabit._screen_sessions()
+        finally:
+            sp.run = real
+
+    def test_it_reads_the_attached_marker(self):
+        out = ("There are screens on:\n"
+               "\t1012362.ap-ttyUSB1\t(09/24/2026 03:50:55 PM)\t(Attached)\n"
+               "\t102479.ap-ttyUSB2\t(09/04/2026 05:37:56 PM)\t(Detached)\n")
+        self.assertEqual(self._run(out),
+                         [("ap-ttyUSB1", True), ("ap-ttyUSB2", False)])
+
+    def test_no_sessions_is_no_rows(self):
+        self.assertEqual(self._run("No Sockets found in /run/screen/S-you.\n"),
+                         [])
+
+
+class TestScreenNameFromArgv(unittest.TestCase):
+    """A screen client's own command line is where the session name is."""
+
+    def test_a_joined_session_drops_the_pid_prefix(self):
+        self.assertEqual(
+            Tabit._screen_name_from_argv(["screen", "-x", "5482.ap-ttyUSB0"]),
+            "ap-ttyUSB0")
+
+    def test_a_joined_session_may_carry_no_pid(self):
+        self.assertEqual(
+            Tabit._screen_name_from_argv(["screen", "-x", "board-3"]),
+            "board-3")
+
+    def test_a_dot_in_the_name_survives(self):
+        for arg, want in (("12.my.rig", "my.rig"), ("my.rig", "my.rig")):
+            self.assertEqual(
+                Tabit._screen_name_from_argv(["screen", "-x", arg]), want, arg)
+
+    def test_a_created_session_is_named_by_dash_s(self):
+        self.assertEqual(Tabit._screen_name_from_argv(
+            ["screen", "-c", "/tmp/tabit-screenrc", "-A", "-S", "ap-ttyUSB1",
+             "-L", "/dev/ttyUSB1", "115200"]), "ap-ttyUSB1")
+
+    def test_a_command_line_with_no_session(self):
+        for argv in ([], ["screen"], ["screen", "/dev/ttyUSB0", "115200"],
+                     ["screen", "-x"]):
+            self.assertIsNone(Tabit._screen_name_from_argv(argv), argv)
 
 
 class TestRowSessionName(unittest.TestCase):
     """Which named session a tab is holding, if any."""
 
-    def test_a_serial_tab_is_named_after_its_device(self):
-        # screen.sh: /dev/ttyUSB0 -> ap-ttyUSB0
-        row = _SessionRow([tabit.SCREEN_SH_PATH, "/dev/ttyUSB3", "115200"])
-        self.assertEqual(_SessionSink()._row_session_name(row), "ap-ttyUSB3")
+    def test_a_serial_tab_is_read_off_its_live_client(self):
+        # screen.sh joins whatever session already holds the device,
+        # under that session's own name. Deriving "ap-ttyUSB3" from the
+        # device would claim an unrelated session of that name.
+        row = _SessionRow([tabit.SCREEN_SH_PATH, "/dev/ttyUSB3", "115200"],
+                          pid=4242)
+        sink = _SessionSink([row], screens={4242: "board-3"})
+        self.assertEqual(sink._row_session_name(row), ("screen", "board-3"))
+
+    def test_a_serial_tab_with_nothing_to_read_holds_nothing(self):
+        # No pid yet, or /proc gone: unnamed is the safe way to be wrong.
+        row = _SessionRow([tabit.SCREEN_SH_PATH, "/dev/ttyUSB3", "115200"],
+                          pid=4242)
+        self.assertIsNone(_SessionSink([row])._row_session_name(row))
 
     def test_a_tmux_tab_gives_its_session(self):
         row = _SessionRow(["tmux", "new-session", "-A", "-s", "ai-claude-1",
                            "claude"])
-        self.assertEqual(_SessionSink()._row_session_name(row), "ai-claude-1")
+        self.assertEqual(_SessionSink()._row_session_name(row),
+                         ("tmux", "ai-claude-1"))
 
     def test_a_plain_shell_holds_no_session(self):
         for argv in ([], ["bash"], [tabit.SCREEN_SH_PATH]):
@@ -932,38 +1009,171 @@ class TestDeviceTabName(unittest.TestCase):
         for dev in ("", None):
             self.assertIsNone(Tabit._device_tab_name(sink, dev), dev)
 
+    def test_a_dead_tab_does_not_hold_the_line(self):
+        # An exited tab keeps its row and its argv; the board it died on
+        # is exactly the one about to be reopened.
+        sink = self._sink(["picocom", "-b", "115200", "/dev/ttyUSB3"])
+        sink.rows[0].dead = True
+        self.assertIsNone(Tabit._device_tab_name(sink, "/dev/ttyUSB3"))
+
     def test_a_baud_rate_is_not_a_device(self):
         # Every argv carries the rate too; only the device may match.
         sink = self._sink(["picocom", "-b", "115200", "/dev/ttyUSB3"])
         self.assertIsNone(Tabit._device_tab_name(sink, "115200"))
 
+    def test_the_same_line_under_another_name(self):
+        # /dev/serial/by-id/... and /dev/ttyUSB3 can be one line, and a
+        # tab opened under one name is asked about under the other.
+        alias = "/dev/serial/by-id/usb-cp2102-if00-port0"
+        sink = self._sink(["picocom", "-b", "115200", alias])
+        real = os.path.realpath
+        os.path.realpath = lambda p: ("/dev/ttyUSB3" if p == alias else real(p))
+        try:
+            self.assertEqual(Tabit._device_tab_name(sink, "/dev/ttyUSB3"),
+                             "QCA2ECW536 · ttyUSB3")
+        finally:
+            os.path.realpath = real
 
-class TestSessionTabName(unittest.TestCase):
+    def test_a_remote_tab_is_not_holding_our_line(self):
+        # The serial dialog's target field takes free text for ssh and
+        # telnet, so "/dev/ttyUSB3" lands on those command lines too --
+        # naming a device on another machine.
+        for argv in (["ssh", "box", "/dev/ttyUSB3"],
+                     ["telnet", "box", "/dev/ttyUSB3"]):
+            self.assertIsNone(
+                Tabit._device_tab_name(self._sink(argv), "/dev/ttyUSB3"),
+                argv[0])
+
+
+class TestSessionTabMap(unittest.TestCase):
     """Naming the tab that already holds a session, for the pick lists."""
 
     def _sink(self, group=None):
         row = _SessionRow([tabit.SCREEN_SH_PATH, "/dev/ttyUSB3", "115200"],
-                          title="ttyUSB3", group=group)
-        return _SessionSink([row], {"red": "QCA2ECW536"})
+                          title="ttyUSB3", group=group, pid=7)
+        return _SessionSink([row], {"red": "QCA2ECW536"},
+                            screens={7: "ap-ttyUSB3"})
 
     def test_it_reads_as_the_sidebar_reads(self):
-        self.assertEqual(self._sink("red")._session_tab_name("ap-ttyUSB3"),
-                         "QCA2ECW536 · ttyUSB3")
+        self.assertEqual(self._sink("red")._session_tab_map(),
+                         {("screen", "ap-ttyUSB3"): "QCA2ECW536 · ttyUSB3"})
 
     def test_an_ungrouped_tab_is_just_its_name(self):
-        self.assertEqual(self._sink()._session_tab_name("ap-ttyUSB3"),
-                         "ttyUSB3")
+        self.assertEqual(self._sink()._session_tab_map(),
+                         {("screen", "ap-ttyUSB3"): "ttyUSB3"})
 
-    def test_a_session_no_tab_of_ours_holds(self):
+    def test_a_dead_tab_holds_no_session(self):
+        sink = self._sink("red")
+        sink.rows[0].dead = True
+        self.assertEqual(sink._session_tab_map(), {})
+
+    def test_a_session_no_tab_of_ours_holds_is_absent(self):
         # It can be attached from a terminal outside tabit, and naming a
         # tab for that one is what this must not do.
-        self.assertIsNone(self._sink("red")._session_tab_name("ap-ttyUSB9"))
+        self.assertIsNone(
+            self._sink("red")._session_tab_map().get(("screen", "ap-ttyUSB9")))
 
-    def test_no_session_name_names_no_tab(self):
-        for name in ("", None):
-            self.assertIsNone(self._sink("red")._session_tab_name(name), name)
+    def test_screen_and_tmux_names_do_not_collide(self):
+        # Two namespaces. A tmux session called "ap-ttyUSB3" is not the
+        # screen session of that name.
+        sink = self._sink("red")
+        sink.rows.append(_SessionRow(
+            ["tmux", "new-session", "-A", "-s", "ap-ttyUSB3"],
+            title="notes"))
+        self.assertEqual(sink._session_tab_map(),
+                         {("screen", "ap-ttyUSB3"): "QCA2ECW536 · ttyUSB3",
+                          ("tmux", "ap-ttyUSB3"): "notes"})
+
+    def test_tabs_sharing_a_session_are_counted(self):
+        # `screen -x` shares one session on purpose, so naming only the
+        # first tab hides the others.
+        sink = self._sink("red")
+        for i, name in ((8, "second"), (9, "third")):
+            sink.rows.append(_SessionRow(
+                [tabit.SCREEN_SH_PATH, "/dev/ttyUSB3", "115200"],
+                title=name, pid=i))
+            sink._screens[i] = "ap-ttyUSB3"
+        self.assertEqual(
+            sink._session_tab_map(),
+            {("screen", "ap-ttyUSB3"): "QCA2ECW536 · ttyUSB3 +2"})
+
+    def test_a_dead_sharer_is_not_counted(self):
+        sink = self._sink("red")
+        sink.rows.append(_SessionRow(
+            [tabit.SCREEN_SH_PATH, "/dev/ttyUSB3", "115200"],
+            title="second", pid=8))
+        sink._screens[8] = "ap-ttyUSB3"
+        sink.rows[1].dead = True
+        self.assertEqual(sink._session_tab_map(),
+                         {("screen", "ap-ttyUSB3"): "QCA2ECW536 · ttyUSB3"})
 
 
+class TestSessionOpenTag(unittest.TestCase):
+    """The marker on a pick-list row, and what it is allowed to claim."""
+
+    def _tag(self, kind, name, attached, tabs):
+        return Tabit._session_open_tag(None, kind, name, attached, tabs)
+
+    def test_a_session_of_ours_is_named(self):
+        tag = self._tag("screen", "ap-ttyUSB3", True,
+                        {("screen", "ap-ttyUSB3"): "QCA2ECW536 · ttyUSB3"})
+        self.assertEqual(tag.get_text(), "● QCA2ECW536 · ttyUSB3")
+        self.assertEqual(tag.get_tooltip_text(), "Open in this tab")
+
+    def test_a_session_attached_elsewhere_says_only_that(self):
+        # It is attached, but by something outside tabit; claiming a tab
+        # of ours has it would be a lie.
+        tag = self._tag("tmux", "work", True, {})
+        self.assertEqual(tag.get_text(), "● open")
+        self.assertEqual(tag.get_tooltip_text(), "Attached from outside tabit")
+
+    def test_a_session_nobody_is_on_gets_no_marker(self):
+        self.assertIsNone(self._tag("tmux", "work", False, {}))
+
+    def test_a_tab_of_ours_shows_even_when_screen_says_detached(self):
+        # `screen -ls` can lag; our own tab is the better witness.
+        tag = self._tag("screen", "ap-ttyUSB3", False,
+                        {("screen", "ap-ttyUSB3"): "ttyUSB3"})
+        self.assertEqual(tag.get_text(), "● ttyUSB3")
+
+    def test_the_other_namespace_does_not_answer(self):
+        tabs = {("tmux", "ap-ttyUSB3"): "notes"}
+        self.assertIsNone(self._tag("screen", "ap-ttyUSB3", False, tabs))
+
+
+class TestRetargetTmuxRows(unittest.TestCase):
+    """A renamed tmux session must take our tabs with it."""
+
+    def test_a_plain_tmux_tab_follows_the_rename(self):
+        row = _SessionRow(["tmux", "new-session", "-A", "-s", "work"])
+        sink = _SessionSink([row])
+        sink._retarget_tmux_rows("work", "lab")
+        self.assertEqual(sink._row_session_name(row), ("tmux", "lab"))
+        self.assertEqual(sink.saved, 1)
+
+    def test_a_wrapped_ai_tab_follows_the_rename(self):
+        argv = Tabit._ai_tmux_argv(["/bin/sh", "-c", "cd /x; exec claude"],
+                                   "ai-claude-1")
+        row = _SessionRow(argv)
+        sink = _SessionSink([row])
+        sink._retarget_tmux_rows("ai-claude-1", "ai-claude-2")
+        self.assertEqual(sink._row_session_name(row), ("tmux", "ai-claude-2"))
+
+    def test_other_tabs_are_left_alone(self):
+        keep = ["tmux", "new-session", "-A", "-s", "other"]
+        row = _SessionRow(list(keep))
+        sink = _SessionSink([row])
+        sink._retarget_tmux_rows("work", "lab")
+        self.assertEqual(row.argv, keep)
+
+    def test_a_rename_to_nothing_changes_nothing(self):
+        keep = ["tmux", "new-session", "-A", "-s", "work"]
+        row = _SessionRow(list(keep))
+        sink = _SessionSink([row])
+        for old, new in (("work", "work"), ("", "lab"), ("work", "")):
+            sink._retarget_tmux_rows(old, new)
+        self.assertEqual(row.argv, keep)
+        self.assertEqual(sink.saved, 0)
 class _ToastSink:
     """Stands in for the window: holds the note list and counts redraws."""
 
