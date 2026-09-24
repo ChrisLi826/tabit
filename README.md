@@ -38,6 +38,7 @@ sudo password for apt.
 
 - Linux with GTK3 + VTE + GtkSourceView 4 (X11 or Wayland)
 - WebKit2 + `python3-markdown` for note Markdown preview
+- libnotify (`gir1.2-notify-0.7`) for AI status notifications
 - `picocom` for serial sessions
 - Tested on Ubuntu / Xubuntu
 
@@ -72,6 +73,37 @@ sudo password for apt.
 | `Ctrl`+click a URL in a terminal | Open it in the browser. Hover underlines the match; right-click a link adds **Open Link** / **Copy Link**. Works on plain `http(s)://` / `ftp://` text and on OSC 8 hyperlinks (tmux hides OSC 8 unless `allow-passthrough` is on; plain URLs still match) |
 | `Ctrl`+click a file path in a terminal | Open it. A text file (decided by reading it, not by its suffix — `Makefile` counts) opens as a note tab; a `path:line` lands on that line; an `.html` page, an image (`.png` `.jpg` `.gif` `.webp` `.bmp` `.ico` `.svg`) or a `.pdf` opens rendered and full width, and so does a `.md`, which is written to be read even though it is also text. `Ctrl+Alt+M` swaps to the source where there is any, and right-click → **Open in Browser** hands a page over. A path an app wrapped onto a second line is put back together, as long as the result is a real file. A text file too big or too long-lined for the editor asks what to do — `$EDITOR` in a tab, or Base64 decode — rather than going to the desktop, which freezes on it just the same. Anything else goes to the desktop's handler. Absolute or `~/` paths only — a relative one would resolve against tabit's directory, not the terminal's. Paths with spaces or non-ASCII characters match up to the first such character, deliberately: a wider pattern underlines half of every JSON dump and serial log. Right-click adds **Open Path** / **Copy Path**, which is what a `.bin` usually wants |
 | `Shortcuts…` (sidebar) | Edit any of the shortcuts above. Each sidebar button marks its own key the way a menu does — `+ (S)erial`, `+ t(M)ux`, and the letter on the end where the word has none — and follows an edit here. The modifiers are the same on all of them, so only the letter is shown |
+
+When an AI tab stops working — it finished, or it wants input — a popup
+inside tabit says so, **at the foot of the tab list**, shaped like the tab
+row it is about: the group's colour bar, the same status glyph, the group
+and tab names, and the time. Click anywhere on it to switch to that tab.
+When tabit is **not** the window in front, the same news also goes to the
+desktop as a system notification, so it reaches you either way — the popup
+is what is still waiting when you come back. Nothing pops for the tab you
+are already looking at, and nothing pops for a status that changes back
+within a few seconds, which is a detection wobble rather than news.
+
+Opening a tab any other way takes its popup down too, and one tab never
+has two: a second one replaces the first. **Nothing is ever thrown away
+to make room.** Three of them show at a time, newest at the bottom; the
+rest wait behind `3 more · 1 need input ▴`, which opens the whole list
+oldest-first and folds it back again. **Clear all** takes down the
+waiting ones as well. The AI counts in the row just below are never
+covered, whatever the stack is doing.
+
+One that goes away on its own only counts down while it is on screen and
+tabit is in front, and never under the pointer — a popup that expired
+where nobody could read it was never shown. The wheel over a popup
+reaches the terminal underneath, since the stack hangs past a narrow tab
+list.
+
+It stays until you dismiss it, because urgency is the only say an app has
+over the desktop half: GNOME gives every other notification four seconds
+and ignores the timeout an app asks for. **Settings… → AI** turns it off
+or drops it to one that goes away on its own. The desktop half needs
+`gir1.2-notify-0.7`, which the installer pulls in; the in-app half works
+without it.
 
 A blue dot on a tab means that session printed output while you were
 looking elsewhere. When a session's process ends (device unplugged,

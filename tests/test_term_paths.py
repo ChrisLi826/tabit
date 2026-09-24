@@ -11,6 +11,7 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("GtkSource", "4")
 gi.require_version("Vte", "2.91")
+from gi.repository import Gtk  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tabit import (  # noqa: E402
@@ -776,3 +777,176 @@ class TestDefaultKeysAreUnique(unittest.TestCase):
                 "%s and %s both default to %s" % (seen.get(accel), action,
                                                   accel))
             seen[accel] = action
+
+
+class TestAgentNotifyRule(unittest.TestCase):
+    """Which change of agent status earns a desktop popup."""
+
+    def test_leaving_work_for_a_wait_is_news(self):
+        for prev in ("working", "idle", "unknown", None):
+            self.assertIsNotNone(Tabit._agent_notify_text(prev, "ready"), prev)
+            self.assertIsNotNone(Tabit._agent_notify_text(prev, "blocked"),
+                                 prev)
+
+    def test_staying_put_is_not_news(self):
+        # The status is re-applied whenever the icon has to be redrawn.
+        self.assertIsNone(Tabit._agent_notify_text("ready", "ready"))
+        self.assertIsNone(Tabit._agent_notify_text("blocked", "blocked"))
+
+    def test_one_kind_of_waiting_to_the_other_is_not_news(self):
+        self.assertIsNone(Tabit._agent_notify_text("blocked", "ready"))
+        self.assertIsNone(Tabit._agent_notify_text("ready", "blocked"))
+
+    def test_going_back_to_work_is_not_news(self):
+        for status in ("working", "idle", "exited", "unknown"):
+            self.assertIsNone(Tabit._agent_notify_text("ready", status),
+                              status)
+
+
+class TestAgentNotifyTitle(unittest.TestCase):
+    """Which tab the popup is about: group first, as the sidebar reads."""
+
+    def test_the_group_comes_first(self):
+        self.assertEqual(
+            Tabit._agent_notify_title("QCA2ECW536", "[claude] ACL 6K test"),
+            "QCA2ECW536 · [claude] ACL 6K test")
+
+    def test_an_ungrouped_tab_is_just_its_name(self):
+        self.assertEqual(Tabit._agent_notify_title("", "[claude] build"),
+                         "[claude] build")
+
+    def test_a_tab_with_no_name_still_says_something(self):
+        self.assertEqual(Tabit._agent_notify_title("BUILD", None),
+                         "BUILD · AI session")
+        self.assertEqual(Tabit._agent_notify_title("", None), "AI session")
+
+
+class TestNotifyUrgency(unittest.TestCase):
+    """The settings string picks how hard the popup insists."""
+
+    def setUp(self):
+        if not tabit.HAS_NOTIFY:
+            self.skipTest("libnotify not installed")
+        from gi.repository import Notify
+        self.N = Notify
+
+    def test_each_name_maps_to_its_level(self):
+        for name, want in (("critical", "CRITICAL"), ("normal", "NORMAL"),
+                           ("low", "LOW")):
+            self.assertEqual(Tabit._notify_urgency(name),
+                             getattr(self.N.Urgency, want), name)
+
+    def test_anything_unreadable_stays_critical(self):
+        # A hand-edited settings.json must not quietly silence the popup
+        # an agent blocked on you depends on.
+        for name in (None, "", "  ", "URGENT", "true", 5):
+            self.assertEqual(Tabit._notify_urgency(name),
+                             self.N.Urgency.CRITICAL, repr(name))
+
+    def test_the_name_is_read_loosely(self):
+        self.assertEqual(Tabit._notify_urgency("  Normal "),
+                         self.N.Urgency.NORMAL)
+
+
+class TestNotifyDelayOutlastsAPoll(unittest.TestCase):
+    """The wait before believing a status change has to outlast one poll."""
+
+    def test_the_delay_clears_the_poll_interval(self):
+        # Statuses come from a poll over terminal text. A delay shorter
+        # than the gap between polls confirms nothing, because no second
+        # reading has happened yet.
+        self.assertGreater(Tabit._AGENT_NOTIFY_DELAY_S,
+                           Tabit._AGENT_POLL_SEC)
+
+
+class TestToastListHeight(unittest.TestCase):
+    """How tall a list of cards is, worked out rather than asked for.
+
+    An unshown card reports a size it does not keep, so the opened list
+    decides whether it needs a scroller from arithmetic.
+    """
+
+    def test_no_cards_no_height(self):
+        for n in (0, -1):
+            self.assertEqual(Tabit._toast_list_height(n), 0)
+
+    def test_one_card_has_no_gap_under_it(self):
+        self.assertEqual(Tabit._toast_list_height(1), Tabit._TOAST_CARD_H)
+
+    def test_the_gaps_are_between_them_only(self):
+        for n in (2, 3, 12):
+            self.assertEqual(
+                Tabit._toast_list_height(n),
+                n * Tabit._TOAST_CARD_H + (n - 1) * Tabit._TOAST_GAP, n)
+
+    def test_a_short_list_stays_under_the_open_ceiling(self):
+        # Four cards is what the user had open; it must not need a
+        # scroller, whose empty part is what lifted the stack before.
+        cap = Tabit._toast_expanded_height(1000)
+        self.assertLessEqual(Tabit._toast_list_height(4), cap)
+        self.assertGreater(Tabit._toast_list_height(12), cap)
+
+
+class TestToastExpandedHeight(unittest.TestCase):
+    """The opened list's height, which is where its constants are used."""
+
+    def test_a_tall_window_still_stops_at_the_cap(self):
+        want = (Tabit._TOAST_EXPANDED_MAX - Tabit._TOAST_CTRL_H
+                - Tabit._TOAST_GAP)
+        for room in (Tabit._TOAST_EXPANDED_MAX, 900, 5000):
+            self.assertEqual(Tabit._toast_expanded_height(room), want, room)
+
+    def test_a_short_window_gives_what_it_has(self):
+        self.assertEqual(Tabit._toast_expanded_height(200),
+                         200 - Tabit._TOAST_CTRL_H - Tabit._TOAST_GAP)
+
+    def test_it_never_opens_to_less_than_one_card(self):
+        for room in (0, 30, 60):
+            self.assertEqual(Tabit._toast_expanded_height(room),
+                             Tabit._TOAST_CARD_H, room)
+
+
+class TestToastMoreLabel(unittest.TestCase):
+    """The control row says what the AI status row below cannot."""
+
+    def test_nothing_hidden_says_nothing(self):
+        self.assertEqual(Tabit._toast_more_label(0, 0, False), "")
+
+    def test_it_counts_what_has_no_card(self):
+        self.assertEqual(Tabit._toast_more_label(3, 0, False),
+                         "3 more \u25b4")
+
+    def test_someone_waiting_is_worth_saying_in_words(self):
+        # Words, not the ? glyph: the status row below counts every AI
+        # tab with that glyph, and this one counts hidden popups.
+        got = Tabit._toast_more_label(5, 2, False)
+        self.assertEqual(got, "5 more \u00b7 2 need input \u25b4")
+        self.assertNotIn("?", got)
+        self.assertNotIn("\u2714", got)
+
+    def test_expanded_offers_the_way_back(self):
+        for hidden, blocked in ((0, 0), (5, 2)):
+            self.assertEqual(Tabit._toast_more_label(hidden, blocked, True),
+                             "Collapse \u25be")
+
+    def test_the_arrow_points_the_way_the_stack_moves(self):
+        # Pinned to the foot of the tab list: opening grows upward.
+        self.assertTrue(Tabit._toast_more_label(3, 0, False).endswith("\u25b4"))
+        self.assertTrue(Tabit._toast_more_label(3, 0, True).endswith("\u25be"))
+
+
+class TestToastAlign(unittest.TestCase):
+    """The in-app popup lines up on whichever side the tab list is on."""
+
+    def test_it_follows_the_list(self):
+        self.assertEqual(Tabit._toast_align("left"), Gtk.Align.START)
+        self.assertEqual(Tabit._toast_align("right"), Gtk.Align.END)
+
+    def test_a_centered_list_centers_it(self):
+        # The list sits between the two content panes there.
+        self.assertEqual(Tabit._toast_align("center"), Gtk.Align.CENTER)
+
+    def test_an_unreadable_side_reads_as_left(self):
+        # sidebar_position comes from a hand-editable settings file.
+        for bad in ("middle", "", None, 3):
+            self.assertEqual(Tabit._toast_align(bad), Gtk.Align.START, bad)

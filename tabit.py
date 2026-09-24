@@ -56,6 +56,17 @@ for _wk in ("4.0", "4.1"):
     except (ValueError, ImportError):
         continue
 
+# libnotify: a desktop popup when an agent finishes or asks for something.
+# Optional: without it the AI tabs still show their status in the sidebar.
+Notify = None
+HAS_NOTIFY = False
+try:
+    gi.require_version("Notify", "0.7")
+    from gi.repository import Notify
+    HAS_NOTIFY = True
+except (ValueError, ImportError):
+    pass
+
 try:
     import markdown as markdown_lib
     HAS_MARKDOWN = True
@@ -1057,6 +1068,76 @@ def get_theme_css(theme_key):
 .agent-status.unknown, .agent-status-glyph.unknown {{ color: {s['subtext']}; }}
 /* off-viewport AI peeks (overlay) + collapsed group header aggregates.
    Right-aligned like per-tab agent status icons. */
+/* In-app notification popups, stacked at the foot of the tab list. Shaped like the
+   tab row they are about -- the group's own colour bar, the same status
+   glyph -- so one reads as the tab list leaning out over the terminal
+   rather than as a second widget with a vocabulary of its own. The surface
+   is the sidebar's for the same reason; the shadow is what lifts it off a
+   terminal whose background is nearly the same tone. */
+.ai-toast {{
+    background-color: {s['sidebar_bg']};
+    border: 1px solid {s['border']};
+    border-radius: 6px;
+    padding: 6px;
+    min-width: 260px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.72);
+}}
+/* The tinted hover goes on the button inside, which is painted over the
+   card's own opaque surface -- on the card itself an rgba() tint would
+   let the terminal text underneath show through. */
+.ai-toast-open {{
+    padding: 0;
+    min-width: 0;
+    min-height: 0;
+    background-image: none;
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+    text-shadow: none;
+    border-radius: 4px;
+}}
+.ai-toast-open:hover {{ background-color: {s['hover']}; }}
+.ai-toast .ai-toast-title {{ color: {s['text']}; }}
+.ai-toast .ai-toast-group,
+.ai-toast .ai-toast-state {{
+    font-size: {sz_sub}pt;
+    font-weight: 600;
+    color: {s['subtext']};
+}}
+/* The same two colours the glyph beside them already uses, from the
+   .agent-status-glyph rules above: amber for ready, red for blocked.
+   Not the green -- that one is idle, a different thing entirely. */
+.ai-toast-ready .ai-toast-state {{ color: #e0af68; }}
+.ai-toast-blocked .ai-toast-state {{ color: #f7768e; }}
+.ai-toast .ai-toast-time {{
+    font-size: {sz_sub}pt;
+    color: {s['subtext']};
+}}
+.ai-toast-close {{
+    padding: 2px;
+    min-width: 0;
+    min-height: 0;
+    color: {s['subtext']};
+}}
+.ai-toast-close:hover {{ color: {s['text']}; }}
+/* Sits above the stack, so it reads as a control over them rather than
+   as one more popup. Quiet until pointed at: it is never the thing the
+   notification is for. */
+.ai-toast-clear {{
+    font-size: {sz_sub}pt;
+    padding: 1px 8px;
+    min-width: 0;
+    min-height: 0;
+    color: {s['subtext']};
+    background-color: {s['sidebar_bg']};
+    border: 1px solid {s['border']};
+    border-radius: 10px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6);
+}}
+.ai-toast-clear:hover {{
+    color: {s['text']};
+    background-color: {s['border']};
+}}
 .ai-peek {{
     background-color: {s['sidebar_bg']};
     padding: 2px 6px 2px 8px;
@@ -1338,6 +1419,8 @@ DEFAULT_SETTINGS = {
     "theme": "tokyo-night",
     "note_wrap": True,
     "shell_inherit_cwd": False,  # new shell opens in the focused tab's path
+    "ai_notify": True,           # desktop popup when an agent wants you
+    "ai_notify_urgency": "critical",  # critical | normal | low
     "ai_fresh_on_restore": False,  # restored AI tabs start fresh (no continue)
     "ai_use_tmux": True,           # +AI dialog: run inside tmux (can uncheck)
     "ai_claude_bypass": False,     # +AI: launch claude with --dangerously-skip-permissions
@@ -1549,7 +1632,50 @@ class Tabit(Gtk.Window):
         self._paned.connect(
             "button-release-event", self._on_sidebar_paned_released)
         self._paned.connect("notify::position", self._on_outer_position)
-        self.add(self._paned)
+        # In-app popups float over the whole window, so they can be lined
+        # up on the tab list's edge whichever way the panes are arranged.
+        # Nothing ever unparents _paned, so the overlay is a one-off
+        # wrapper.
+        self._toast_overlay = Gtk.Overlay()
+        self._toast_overlay.add(self._paned)
+        # The control row sits over the popups rather than among them, so
+        # it stays out of the list the popups are counted in.
+        self._toast_stack = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                                    spacing=4)
+        self._toast_stack.get_style_context().add_class("ai-toast-stack")
+        for side in ("top", "bottom", "start", "end"):
+            getattr(self._toast_stack, "set_margin_" + side)(10)
+        ctrl = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        ctrl.set_halign(Gtk.Align.END)
+        # Two targets, not one row that does both: Clear all next to an
+        # expander that covers the whole row is a button you cannot hit.
+        self._toast_more = Gtk.Button()
+        self._toast_more.set_relief(Gtk.ReliefStyle.NONE)
+        self._toast_more.get_style_context().add_class("ai-toast-clear")
+        self._toast_more.set_no_show_all(True)
+        self._toast_more.connect("clicked", self._on_toast_more)
+        ctrl.pack_start(self._toast_more, False, False, 0)
+        self._toast_clear = Gtk.Button(label="Clear all")
+        self._toast_clear.set_relief(Gtk.ReliefStyle.NONE)
+        self._toast_clear.get_style_context().add_class("ai-toast-clear")
+        self._toast_clear.set_no_show_all(True)
+        self._toast_clear.connect("clicked", lambda *_a: self._clear_toasts())
+        ctrl.pack_start(self._toast_clear, False, False, 0)
+        self._toast_stack.pack_start(ctrl, False, False, 0)
+        self._toast_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                                  spacing=4)
+        self._toast_stack.pack_start(self._toast_box, False, False, 0)
+        self._toast_stack.set_no_show_all(True)
+        self._toast_stack.hide()
+        self._toast_overlay.add_overlay(self._toast_stack)
+        # Notifications are one ordered list, oldest first; the stack is
+        # drawn from it. Nothing is ever dropped to make room.
+        self._toast_notes = []
+        self._toast_expanded = False
+        self._toast_tick_src = None
+        self._toast_room_seen = -1
+        self.connect("size-allocate", self._on_toast_resize)
+        self.add(self._toast_overlay)
         self._sidebar_position = self._load_settings().get(
             "sidebar_position", "left") or "left"
         self._apply_sidebar_layout()
@@ -5407,7 +5533,13 @@ if (data !== null) {{
         term = getattr(row, "term", None)
         text = self._term_tail_text(term, max_lines=self._AGENT_TAIL_LINES)
         now = time.time()
-        selected = self.listbox.get_selected_row() is row
+        # Selected means the user is watching, which a tab in a window
+        # behind something else is not. The FSM holds a selected tab at
+        # idle rather than letting it reach ready, so without this a tab
+        # left selected while tabit sat in the background never reported
+        # that its agent had finished.
+        selected = (self.listbox.get_selected_row() is row
+                    and self.is_active())
 
         if as_ is None:
             raw = self._detect_agent_status(
@@ -5512,6 +5644,589 @@ if (data !== null) {{
         "unknown": "·",
     }
 
+    # What a change of status is worth telling the desktop about.
+    _AGENT_NOTIFY = {
+        "ready": "Finished — open the tab to review.",
+        "blocked": "Waiting for input or approval.",
+    }
+    # How hard the popup insists, which is the only lever an app has over
+    # how long it stays: GNOME gives every non-critical notification four
+    # seconds and ignores any timeout an app asks for. Critical stays until
+    # it is dismissed, and shows through Do Not Disturb. Default, because
+    # four seconds is easy to miss while looking at something else -- which
+    # is the whole point of the notification.
+    _AGENT_NOTIFY_URGENCY = ("critical", "normal", "low")
+    # Wait past one status poll (3s) before believing a change enough to
+    # tell the desktop about it.
+    _AGENT_NOTIFY_DELAY_S = 5
+    # One popup per tab, oldest first. Three have cards at a time and the
+    # rest wait in the same list rather than being thrown away: the popup
+    # waiting on your return is the only record that a finished agent has
+    # not been looked at, and the status row below counts it as done
+    # whether or not anyone has.
+    _TOAST_GAP = 4
+    # Measured in a running window at the default UI font. Only the opened
+    # list needs them, to take the control row off its height cap.
+    _TOAST_CARD_H = 44
+    _TOAST_CTRL_H = 17
+    # Three cards, always. Two reviewers asked for a ladder down to two
+    # and one card on a short window; measured, tabit's own minimum
+    # window is 249px tall, which leaves 209px above the AI status row
+    # where three need 161, so that ladder could never run. An overlong
+    # stack grows upward anyway -- it is pinned above the status row by
+    # its margin -- so the cost of being wrong here is terminal area.
+    _TOAST_SHOWN = 3
+    _TOAST_EXPANDED_MAX = 334
+    _TOAST_SECONDS = 6        # only for the urgency that goes away by itself
+
+    @staticmethod
+    def _toast_align(sidebar_pos):
+        """Which edge the popups line up on: the tab list's own.
+
+        A popup is about a tab, so it belongs at the foot of the list of
+        tabs, not in the far corner of the window. It covers the row of
+        new-session buttons there, which is the trade: the buttons are
+        still where they were the moment the popup goes.
+        """
+        return {"right": Gtk.Align.END,
+                "center": Gtk.Align.CENTER}.get(sidebar_pos, Gtk.Align.START)
+
+    @classmethod
+    def _agent_notify_text(cls, prev, status):
+        """The popup body for a status change worth one, or None.
+
+        Only on the way in: an agent that was working now wants you. Once
+        it is already waiting, saying so again is noise, and so is moving
+        between the two ways of waiting.
+        """
+        if status not in cls._AGENT_NOTIFY or prev in cls._AGENT_NOTIFY:
+            return None
+        return cls._AGENT_NOTIFY[status]
+
+    def _row_group_name(self, row):
+        """The group a tab sits under, spelled as its header spells it."""
+        color = getattr(row, "group_color", None)
+        if not color:
+            return ""
+        return (self._group_names.get(color) or color).upper()
+
+    @staticmethod
+    def _agent_notify_title(group, title):
+        """Which tab this is about: the group first, as the sidebar reads.
+
+        Several agents run at once and their tab names repeat, so the
+        group is what tells them apart at a glance.
+        """
+        title = title or "AI session"
+        return "%s · %s" % (group, title) if group else title
+
+    def _notify_agent_status(self, row, prev, status):
+        """Arm a desktop notification for an agent that stopped working.
+
+        Not straight away: statuses come from a poll over terminal text, so
+        a detection wobble that clears at the next poll would otherwise pop
+        a notification about nothing. Waiting past one poll costs nothing
+        -- the point of the popup is that nobody is watching -- and it also
+        lets someone who switches to the tab in the meantime never see it.
+        """
+        if self._agent_notify_text(prev, status) is None:
+            return
+        self._cancel_agent_notify(row)
+        row._notify_src = GLib.timeout_add_seconds(
+            self._AGENT_NOTIFY_DELAY_S, self._agent_notify_fire, row, status)
+
+    @staticmethod
+    def _cancel_agent_notify(row):
+        """Drop a notification still waiting out its delay."""
+        src = getattr(row, "_notify_src", None)
+        if src is not None:
+            GLib.source_remove(src)
+        row._notify_src = None
+
+    def _agent_notify_fire(self, row, status):
+        """The delay is up: notify, unless the reason has gone away."""
+        row._notify_src = None
+        if row.get_parent() is None:
+            return False
+        # Re-read it: the wobble this delay exists to absorb shows up as a
+        # status that has moved on again.
+        if getattr(row, "agent_status", None) != status:
+            return False
+        what = self._agent_notify_text(None, status)
+        if what is None:
+            return False
+        conf = self._load_settings()
+        if not conf.get("ai_notify", True):
+            return False
+        level = self._notify_urgency_name(conf.get("ai_notify_urgency"))
+        # Nothing to tell someone who is already looking straight at it --
+        # including someone who opened the tab while the delay ran.
+        if self.is_active() and self.listbox.get_selected_row() is row:
+            return False
+        if level != "low":
+            # The popup inside tabit goes up either way. In front it is
+            # the whole notification, because a desktop one would be
+            # talking over tabit's own window. Behind, it is what is
+            # still there on coming back -- so it waits to be dismissed
+            # whatever the urgency says, since a timer would run out
+            # while nobody was looking. Quiet means the sidebar is enough.
+            self._show_toast(row, status,
+                             level == "critical" or not self.is_active())
+        if self.is_active():
+            return False
+        if not HAS_NOTIFY:
+            return False
+        # Lazily, and here: notify_notification_show aborts the process
+        # rather than failing when the library was never initialised.
+        if not Notify.is_initted() and not Notify.init("tabit"):
+            return False
+        title = self._agent_notify_title(
+            self._row_group_name(row), getattr(row, "title_text", None))
+        old = getattr(row, "_agent_note", None)
+        if old is not None:
+            try:
+                old.close()
+            except GLib.Error:
+                pass
+        try:
+            note = Notify.Notification.new(title, what, "tabit")
+            note.set_urgency(self._notify_urgency(level))
+            note.add_action("switch", "Switch to it",
+                            lambda *_a: self._notify_switch_to(row), None)
+            note.show()
+        except (GLib.Error, TypeError):
+            return False
+        # The callback only fires while the object is alive.
+        row._agent_note = note
+        return False
+
+    @classmethod
+    def _notify_urgency_name(cls, name):
+        """Settings string -> one of the urgency names, critical by default.
+
+        Separate from the libnotify constant because the in-app popup
+        obeys the same setting and has to work without libnotify.
+        """
+        # settings.json is hand-editable, so anything can arrive here.
+        want = name.strip().lower() if isinstance(name, str) else ""
+        return want if want in cls._AGENT_NOTIFY_URGENCY else "critical"
+
+    @classmethod
+    def _notify_urgency(cls, name):
+        """Settings string -> libnotify urgency, critical when unreadable."""
+        want = cls._notify_urgency_name(name)
+        return {
+            "critical": Notify.Urgency.CRITICAL,
+            "normal": Notify.Urgency.NORMAL,
+            "low": Notify.Urgency.LOW,
+        }[want]
+
+    def _place_toast_box(self):
+        """Park the stack at the foot of the tab list, whichever side it is on.
+
+        It stops just above the AI status row rather than on it. The
+        new-session buttons it does cover can wait; that row cannot,
+        because it is what accounts for the agents with no card.
+        """
+        self._toast_stack.set_valign(Gtk.Align.END)
+        self._toast_stack.set_halign(
+            self._toast_align(self._effective_sidebar_position()))
+        self._toast_stack.set_margin_bottom(10 + self._toast_bar_height())
+
+    def _toast_bar_height(self):
+        """How tall the AI status row is, or 0 when it is not showing."""
+        bar = getattr(self, "ai_status_bar", None)
+        if bar is None or not bar.get_visible():
+            return 0
+        return bar.get_allocated_height()
+
+    def _toast_room(self):
+        """Pixels the stack may use, the AI status row and margins taken off."""
+        return max(0, self.get_allocated_height()
+                   - self._toast_bar_height() - 20)
+
+    @staticmethod
+    def _toast_more_label(hidden, blocked, expanded):
+        """What the control row says about the popups with no card.
+
+        Words, never the glyphs the AI status row uses. That row counts
+        every AI tab and this one counts unshown popups; two rows of
+        `? N` ten pixels apart that disagree is a display that lies.
+
+        The arrow points the way the list moves, not the way a menu
+        would open: this stack is pinned to the foot of the tab list, so
+        opening it grows upward and folding it drops back down.
+        """
+        if expanded:
+            return "Collapse \u25be"
+        if hidden <= 0:
+            return ""
+        text = "%d more" % hidden
+        if blocked:
+            text += " \u00b7 %d need input" % blocked
+        return text + " \u25b4"
+
+    @classmethod
+    def _toast_list_height(cls, cards):
+        """How tall that many cards stack up, gaps between them counted."""
+        if cards <= 0:
+            return 0
+        return cards * cls._TOAST_CARD_H + (cards - 1) * cls._TOAST_GAP
+
+    @classmethod
+    def _toast_expanded_height(cls, room):
+        """How tall the opened list may be, the control row taken off.
+
+        Capped so that opening it covers a known piece of the terminal
+        rather than as much as the window happens to allow, and floored
+        at one card so a short window opens to something readable.
+        """
+        tall = min(cls._TOAST_EXPANDED_MAX, room)
+        return max(cls._TOAST_CARD_H,
+                   tall - cls._TOAST_CTRL_H - cls._TOAST_GAP)
+
+    def _toast_shown(self):
+        """The notifications with a card right now, oldest of them first."""
+        notes = getattr(self, "_toast_notes", [])
+        if getattr(self, "_toast_expanded", False):
+            return list(notes)
+        return notes[-self._TOAST_SHOWN:]
+
+    def _show_toast(self, row, status, sticky):
+        """Queue the notification drawn inside tabit, and draw it.
+
+        It sits at the foot of the tab list, because it is about a tab.
+        """
+        # One popup per tab: a second one is the same tab asking twice.
+        notes = [n for n in getattr(self, "_toast_notes", [])
+                 if n["row"] is not row]
+        notes.append({"row": row, "status": status, "at": time.time(),
+                      "sticky": sticky,
+                      "left": None if sticky else self._TOAST_SECONDS})
+        self._toast_notes = notes
+        self._render_toasts()
+        if getattr(self, "_toast_tick_src", None) is None:
+            self._toast_tick_src = GLib.timeout_add_seconds(1,
+                                                            self._toast_tick)
+
+    def _clear_toasts(self):
+        """Take every popup down at once, the waiting ones included."""
+        self._toast_notes = []
+        self._toast_expanded = False
+        self._render_toasts()
+
+    def _follow_toast_status(self, row, status):
+        """Keep a popup saying what its tab says, or take it down.
+
+        A popup records a moment, but it sits next to a tab list showing
+        the present, and the two disagreeing is the popup being wrong:
+        an agent that has gone back to work did not finish. Once the
+        status is not one worth a popup at all, neither is the popup.
+        """
+        notes = getattr(self, "_toast_notes", None)
+        if not notes:
+            return
+        note = next((n for n in notes if n["row"] is row), None)
+        if note is None or note["status"] == status:
+            return
+        if status in self._AGENT_NOTIFY:
+            note["status"] = status
+        else:
+            self._toast_notes = [n for n in notes if n is not note]
+        self._render_toasts()
+
+    def _clear_toasts_for(self, row):
+        """Take down the popup about one tab, shown or waiting.
+
+        Opening the tab answers the popup as well as clicking it does, and
+        it has to leave the list rather than the box: a popup cleared from
+        the screen alone would come back the moment a slot freed up.
+        """
+        notes = getattr(self, "_toast_notes", None)
+        if not notes:
+            return
+        keep = [n for n in notes if n["row"] is not row]
+        if len(keep) != len(notes):
+            self._toast_notes = keep
+            self._render_toasts()
+
+    def _toast_tick(self):
+        """Count down the popups that go away by themselves.
+
+        Only while the card is on screen and tabit is in front, and never
+        under the pointer: one that runs out where nobody could read it
+        was never shown, and one that goes while being aimed at moves the
+        next popup under the click.
+        """
+        notes = getattr(self, "_toast_notes", [])
+        if not notes:
+            self._toast_tick_src = None
+            return False
+        if self.is_active() and not self._toast_hovered():
+            shown = {id(n) for n in self._toast_shown()}
+            done = [n for n in notes
+                    if not n["sticky"] and id(n) in shown
+                    and self._toast_count_down(n)]
+            if done:
+                self._toast_notes = [n for n in notes if n not in done]
+                self._render_toasts()
+        return True
+
+    @staticmethod
+    def _toast_count_down(note):
+        """One second off a popup's life; True once it is out."""
+        note["left"] -= 1
+        return note["left"] <= 0
+
+    def _toast_hovered(self):
+        """Is the pointer inside the stack?
+
+        Asked of the pointer rather than tracked with enter and leave,
+        because a redraw destroys the cards those would have fired on.
+        """
+        if not self._toast_stack.get_mapped():
+            return False
+        seat = Gdk.Display.get_default().get_default_seat()
+        win = self.get_window()
+        if seat is None or win is None:
+            return False
+        got = win.get_device_position(seat.get_pointer())
+        at = self._toast_stack.translate_coordinates(self, 0, 0)
+        if at is None:
+            return False
+        alloc = self._toast_stack.get_allocation()
+        return (at[0] <= got[1] < at[0] + alloc.width
+                and at[1] <= got[2] < at[1] + alloc.height)
+
+    def _on_toast_resize(self, *_a):
+        """Redraw the opened list when the window changes what it may use.
+
+        Only while it is open: folded, the stack is three cards whatever
+        the window does, and re-rendering on every allocation would be
+        work for nothing.
+        """
+        if not getattr(self, "_toast_expanded", False):
+            return
+        room = self._toast_room()
+        if room == getattr(self, "_toast_room_seen", -1):
+            return
+        self._toast_room_seen = room
+        # Out of the allocation pass: redrawing inside one re-enters it.
+        GLib.idle_add(self._render_toasts)
+
+    def _on_toast_more(self, _btn):
+        """Open the whole list, or fold it back to the newest few."""
+        self._toast_expanded = not getattr(self, "_toast_expanded", False)
+        self._render_toasts()
+
+    def _on_toast_click(self, note):
+        """Go to the tab a popup is about."""
+        self._notify_switch_to(note["row"])
+        # Selecting a row already clears it, but not when it was the row
+        # selected all along -- a tab in the pane behind the window.
+        self._clear_toasts_for(note["row"])
+
+    def _on_toast_drop(self, note):
+        """Dismiss one popup without going to its tab."""
+        self._toast_notes = [n for n in getattr(self, "_toast_notes", [])
+                             if n is not note]
+        self._render_toasts()
+
+    def _on_toast_scroll(self, _w, event):
+        """Hand the wheel to the terminal under the pointer.
+
+        The stack hangs about 99px past a narrow tab list, so a wheel
+        there is meant for the terminal -- and measured, an overlay child
+        takes the scroll whether or not it wants it, the popup that
+        shipped first swallowing it and doing nothing. The event goes on
+        as it arrived rather than moving the scrollbar: an agent usually
+        has the alternate screen up, where scrolling is the program's
+        decision and there is no scrollback position to move.
+        """
+        term = self._toast_term_under(event)
+        if term is not None:
+            term.event(event)
+        return True
+
+    def _toast_term_under(self, event):
+        """The terminal the pointer is over, or None over the tab list."""
+        for row in (getattr(self, "_left_row", None),
+                    getattr(self, "_right_row", None),
+                    self.listbox.get_selected_row()):
+            term = getattr(row, "term", None) if row is not None else None
+            win = term.get_window() if term is not None else None
+            if win is None or not term.get_mapped():
+                continue
+            _, ox, oy = win.get_origin()
+            alloc = term.get_allocation()
+            if (ox <= event.x_root < ox + alloc.width
+                    and oy <= event.y_root < oy + alloc.height):
+                return term
+        return None
+
+    def _toast_card(self, note, forward_scroll):
+        """One popup, shaped like the tab row it is about.
+
+        A Box around two buttons rather than one button holding another:
+        the surface has to be something that reserves its CSS padding,
+        which an EventBox does not -- measured, a 32px label in one asks
+        for 32px and draws 50px, and the window edge cuts off the rest.
+        """
+        row, status = note["row"], note["status"]
+        card = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        card.get_style_context().add_class("ai-toast")
+        card.get_style_context().add_class("ai-toast-" + status)
+
+        open_btn = Gtk.Button()
+        open_btn.set_relief(Gtk.ReliefStyle.NONE)
+        open_btn.get_style_context().add_class("ai-toast-open")
+        open_btn.connect("clicked", lambda *_a: self._on_toast_click(note))
+        open_btn.set_tooltip_text(self._AGENT_NOTIFY[status])
+        card.pack_start(open_btn, True, True, 0)
+
+        body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        open_btn.add(body)
+        # The same two marks the tab row carries: the group's colour, and
+        # the status glyph. Both classes are the sidebar's own, so neither
+        # colour is written down twice.
+        bar = Gtk.Box()
+        bar.set_size_request(4, -1)
+        bar.get_style_context().add_class("group-bar")
+        if getattr(row, "group_color", None):
+            bar.get_style_context().add_class("grp-" + row.group_color)
+        body.pack_start(bar, False, False, 0)
+        glyph = Gtk.Label(label=self._AGENT_STATUS_GLYPHS.get(status, "\u00b7"))
+        glyph.get_style_context().add_class("agent-status-glyph")
+        glyph.get_style_context().add_class(status)
+        # A fixed column, or the text beside it starts at a different
+        # place in each popup, because ? and the check are not one width.
+        glyph.set_size_request(16, -1)
+        glyph.set_xalign(0.5)
+        body.pack_start(glyph, False, False, 0)
+
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        body.pack_start(text, True, True, 0)
+        # Group over tab name, as the sidebar stacks them, rather than
+        # joined by a separator: only the tab name can run long, so only
+        # the tab name needs to be the one that shortens.
+        head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        text.pack_start(head, False, False, 0)
+        group = self._row_group_name(row)
+        if group:
+            grp_lbl = Gtk.Label(label=group, xalign=0.0)
+            grp_lbl.get_style_context().add_class("ai-toast-group")
+            head.pack_start(grp_lbl, False, False, 0)
+        state = Gtk.Label(label=self._AI_AGG_TIPS.get(status, ""), xalign=1.0)
+        state.get_style_context().add_class("ai-toast-state")
+        head.pack_start(state, True, True, 0)
+        title = Gtk.Label(
+            label=getattr(row, "title_text", None) or "AI session", xalign=0.0)
+        title.get_style_context().add_class("ai-toast-title")
+        title.set_ellipsize(Pango.EllipsizeMode.END)
+        title.set_max_width_chars(30)
+        line = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        line.pack_start(title, True, True, 0)
+        # When it happened, which a popup left up over a lunch break needs
+        # and a fresh one costs nothing. Same clock as the sidebar's.
+        when = Gtk.Label(label=time.strftime("%H:%M", time.localtime(note["at"])),
+                         xalign=1.0)
+        when.get_style_context().add_class("ai-toast-time")
+        line.pack_start(when, False, False, 0)
+        text.pack_start(line, False, False, 0)
+
+        shut = Gtk.Button.new_from_icon_name("window-close-symbolic",
+                                             Gtk.IconSize.MENU)
+        shut.set_relief(Gtk.ReliefStyle.NONE)
+        shut.set_valign(Gtk.Align.CENTER)
+        shut.get_style_context().add_class("ai-toast-close")
+        shut.set_tooltip_text("Dismiss")
+        shut.connect("clicked", lambda *_a: self._on_toast_drop(note))
+        card.pack_start(shut, False, False, 0)
+
+        if forward_scroll:
+            for btn in (open_btn, shut):
+                btn.add_events(Gdk.EventMask.SCROLL_MASK
+                               | Gdk.EventMask.SMOOTH_SCROLL_MASK)
+                btn.connect("scroll-event", self._on_toast_scroll)
+        return card
+
+    def _render_toasts(self):
+        """Draw the stack from the list of notifications, which is the truth.
+
+        Rebuilt rather than patched: the cards and the ones still waiting
+        are one ordered list, so there is no second container to keep in
+        step with it.
+        """
+        notes = getattr(self, "_toast_notes", [])
+        for kid in self._toast_box.get_children():
+            self._toast_box.remove(kid)
+            kid.destroy()
+        if not notes:
+            self._toast_expanded = False
+            self._toast_stack.set_no_show_all(True)
+            self._toast_stack.hide()
+            return
+        expanded = getattr(self, "_toast_expanded", False)
+        self._toast_room_seen = self._toast_room()
+        shown = self._toast_shown()
+        hidden = len(notes) - len(shown)
+
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                        spacing=self._TOAST_GAP)
+        for note in shown:
+            # Inside the scroller the wheel belongs to the list; the
+            # cards hand it on only when the list cannot use it.
+            inner.pack_start(self._toast_card(note, not expanded),
+                             False, False, 0)
+        cap = self._toast_expanded_height(self._toast_room())
+        if expanded and self._toast_list_height(len(shown)) > cap:
+            # Only once the list outgrows its ceiling. A scroller asked
+            # to hold a shorter list keeps the box open at the ceiling
+            # anyway, and that empty strip is what lifts the stack off
+            # the foot of the tab list -- measured, it took 1px of the
+            # 313 it asked for and left the rest blank. The height is
+            # worked out rather than asked for: a card that has not been
+            # shown yet reports a size it does not keep.
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_policy(Gtk.PolicyType.NEVER,
+                                Gtk.PolicyType.AUTOMATIC)
+            scroller.set_size_request(-1, cap)
+            scroller.add(inner)
+            self._toast_box.pack_start(scroller, False, False, 0)
+        else:
+            self._toast_box.pack_start(inner, False, False, 0)
+
+        # By identity: two notifications can hold equal dicts.
+        on_screen = {id(n) for n in shown}
+        blocked = sum(1 for n in notes
+                      if n["status"] == "blocked" and id(n) not in on_screen)
+        more = self._toast_more_label(hidden, blocked, expanded)
+        self._toast_more.set_label(more)
+        self._toast_more.set_no_show_all(not more)
+        # Clear all only once there is more than one to clear.
+        self._toast_clear.set_no_show_all(len(notes) < 2)
+
+        self._place_toast_box()
+        self._toast_stack.set_no_show_all(False)
+        self._toast_stack.show_all()
+        if not more:
+            self._toast_more.hide()
+        if len(notes) < 2:
+            self._toast_clear.hide()
+        # The stack hangs over the terminal, so the gaps between cards let
+        # the wheel and the click through; expanded, the list needs them.
+        self._toast_overlay.set_overlay_pass_through(
+            self._toast_stack, not expanded)
+
+    def _notify_switch_to(self, row):
+        """Bring tabit forward on that tab, from a notification button."""
+        if row.get_parent() is None:
+            return
+        self.present_with_time(Gdk.CURRENT_TIME)
+        # Selecting expands a collapsed group and scrolls (_on_row_selected).
+        self.listbox.select_row(row)
+        GLib.timeout_add(50, self._scroll_to_row, row)
+
     def _set_agent_status(self, row, status):
         """Update sidebar status icon/glyph for an AI tab."""
         img = getattr(row, "agent_status_lbl", None)
@@ -5525,7 +6240,10 @@ if (data !== null) {{
         )
         if getattr(row, "agent_status", None) == status and visible_now:
             return
+        prev_status = getattr(row, "agent_status", None)
         row.agent_status = status
+        self._notify_agent_status(row, prev_status, status)
+        self._follow_toast_status(row, status)
         css_class = "done" if status in ("done", "exited") else status
         tips = {
             "working": "▶ Working",
@@ -5601,8 +6319,9 @@ if (data !== null) {{
         was_right = self._right_row is row
         rows = self._session_rows()
         idx = rows.index(row)
-        # drop pending note timers so they don't fire on a destroyed widget
-        for attr in ("_preview_src", "_tune_src", "_yaml_src", "_goto_src"):
+        # drop this row's pending timers so none fires on a dead widget
+        for attr in ("_preview_src", "_tune_src", "_yaml_src", "_goto_src",
+                     "_notify_src"):
             src = getattr(row, attr, None)
             if src:
                 GLib.source_remove(src)
@@ -5664,6 +6383,8 @@ if (data !== null) {{
         self._clear_marks()  # a plain tab switch drops any Ctrl+click marks
         if row is None:
             return
+        # Reaching the tab any other way answers its popup too.
+        self._clear_toasts_for(row)
         if getattr(row, "kind", None) == "group_header":
             # Focus header for rename / Enter expand — do not open group here
             self.listbox.grab_focus()
@@ -10625,6 +11346,40 @@ if (data !== null) {{
         ai_tmux.set_tooltip_text(
             "Pre-ticks “Run inside tmux” in the +AI dialog. "
             "You can still uncheck it there for one session. Default is on.")
+        ai_notify = Gtk.CheckButton(
+            label="Notify me when an agent finishes or needs input")
+        ai_notify.set_active(bool(s.get("ai_notify", True)))
+        ai_notify.set_tooltip_text(
+            "A desktop popup when an AI tab goes from working to done or "
+            "to needs-input, with a button that switches to it. Nothing "
+            "pops for the tab you are looking at. Default is on.")
+        urg_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        urg_lbl = Gtk.Label(label="Notification urgency:", xalign=0)
+        urg_combo = Gtk.ComboBoxText()
+        urg_opts = [
+            ("critical", "Stays until you dismiss it"),
+            ("normal", "Goes away on its own"),
+            ("low", "Quiet — straight to the tray"),
+        ]
+        cur_urg = (s.get("ai_notify_urgency") or "critical").lower()
+        if cur_urg not in [o for o, _ in urg_opts]:
+            cur_urg = "critical"
+        urg_active = 0
+        for i, (uid, lab) in enumerate(urg_opts):
+            urg_combo.append(uid, lab)
+            if uid == cur_urg:
+                urg_active = i
+        urg_combo.set_active(urg_active)
+        urg_combo.set_tooltip_text(
+            "How hard the popup insists, which is what decides how long it "
+            "stays.\n"
+            "• Stays until you dismiss it: shows through Do Not Disturb "
+            "too. Default — an agent blocked on you should not scroll past\n"
+            "• Goes away on its own: the desktop decides how long "
+            "(4 seconds on GNOME)\n"
+            "• Quiet: no banner on some desktops, just the tray")
+        urg_box.pack_start(urg_lbl, False, False, 0)
+        urg_box.pack_start(urg_combo, True, True, 0)
         ai_bypass = Gtk.CheckButton(
             label="Claude +AI: --dangerously-skip-permissions (bypass)")
         ai_bypass.set_active(bool(s.get("ai_claude_bypass", False)))
@@ -10674,6 +11429,8 @@ if (data !== null) {{
         box.pack_start(ai_head, False, False, 0)
         box.pack_start(ai_fresh, False, False, 0)
         box.pack_start(ai_tmux, False, False, 0)
+        box.pack_start(ai_notify, False, False, 0)
+        box.pack_start(urg_box, False, False, 0)
         box.pack_start(ai_bypass, False, False, 0)
         box.pack_start(hint, False, False, 0)
         update_preview()
@@ -10694,6 +11451,10 @@ if (data !== null) {{
                                      "shell_inherit_cwd": inherit.get_active(),
                                      "ai_fresh_on_restore": ai_fresh.get_active(),
                                      "ai_use_tmux": ai_tmux.get_active(),
+                                     "ai_notify": ai_notify.get_active(),
+                                     "ai_notify_urgency":
+                                         urg_combo.get_active_id()
+                                         or "critical",
                                      "ai_claude_bypass": ai_bypass.get_active(),
                                      "ui_font_size": ui_sz,
                                      "term_font": t_font,
