@@ -540,6 +540,23 @@ _PATH_TAIL = re.compile(
 PATH_REJOIN_LINES = 3
 
 
+def _mnemonic_label(text, key):
+    """Button text with its shortcut key marked, the way a menu marks one.
+
+    The key is bracketed where the text already has that letter, so the
+    reminder costs no width at all: `+ Serial` with S is `+ (S)erial`. A
+    key the text does not contain goes on the end instead, `+ tmux` with
+    K would be `+ tmux(K)`, and so does a key that is not one letter.
+    """
+    if not key:
+        return text
+    if len(key) == 1:
+        at = text.lower().find(key.lower())
+        if at != -1:
+            return "%s(%s)%s" % (text[:at], key.upper(), text[at + 1:])
+    return "%s(%s)" % (text, key)
+
+
 def _rejoin_wrapped_n(screen, raw, exists):
     """_rejoin_wrapped, plus how many line breaks it had to cross.
 
@@ -1231,10 +1248,13 @@ CSS_PROVIDER = Gtk.CssProvider()
 # The group is the section header in the Shortcuts dialog and fixes the order
 # there. Entries of one group stay adjacent; _key_action_groups relies on it.
 KEY_ACTIONS = (
-    ("new_shell", "New shell", "<Primary><Shift>t", "New session"),
+    ("new_shell", "New terminal", "<Primary><Shift>t", "New session"),
     ("new_serial", "New serial", "<Primary><Shift>s", "New session"),
     ("new_ai", "New AI session", "<Primary><Shift>a", "New session"),
     ("new_note", "New note", "<Primary><Shift>n", "New session"),
+    ("new_connect", "New connect", "<Primary><Shift>e", "New session"),
+    ("new_command", "New command", "<Primary><Shift>d", "New session"),
+    ("new_tmux", "New tmux", "<Primary><Shift>m", "New session"),
 
     ("close_session", "Close session", "<Primary><Shift>w", "Session"),
     ("rename_session", "Rename session", "F2", "Session"),
@@ -1431,23 +1451,27 @@ class Tabit(Gtk.Window):
 
         action_grid = Gtk.Grid(row_spacing=2, column_spacing=4)
         button_items = [
-            ("+ Serial", "network-wired-symbolic", self._on_add_serial),
-            ("+ Shell", "utilities-terminal-symbolic", self._on_add_shell),
-            ("+ AI", ICON_AI, self._on_add_ai),
+            ("+ Serial", "network-wired-symbolic", self._on_add_serial,
+             "new_serial"),
+            ("+ Terminal", "utilities-terminal-symbolic",
+             self._on_add_shell,
+             "new_shell"),
+            ("+ AI", ICON_AI, self._on_add_ai, "new_ai"),
         ]
         if HAS_SSH_TOOL:
-            button_items.append(("+ Connect", ICON_CONNECT, self._on_add_connect))
+            button_items.append(("+ Connect", ICON_CONNECT,
+                                 self._on_add_connect, "new_connect"))
         button_items.extend([
-            ("+ Open", ICON_NOTE, self._on_add_note),
-            ("+ Command", ICON_COMMAND, self._on_add_command),
-            ("+ tmux", ICON_TMUX, self._on_add_tmux),
+            ("+ Open", ICON_NOTE, self._on_add_note, "new_note"),
+            ("+ Command", ICON_COMMAND, self._on_add_command, "new_command"),
+            ("+ tmux", ICON_TMUX, self._on_add_tmux, "new_tmux"),
         ])
 
-        for i, (text, icon, handler) in enumerate(button_items):
-            btn = Gtk.Button(label=text)
-            btn.set_image(self._session_icon(icon))
-            btn.set_always_show_image(True)
-            btn.set_image_position(Gtk.PositionType.LEFT)
+        # action -> the label showing its key, so Shortcuts… can refresh them.
+        self._accel_labels = {}
+        for i, (text, icon, handler, action) in enumerate(button_items):
+            btn = Gtk.Button()
+            btn.add(self._adder_button_box(text, icon, action))
             btn.connect("clicked", handler)
             btn.set_hexpand(True)
             col = i % 2
@@ -1455,6 +1479,7 @@ class Tabit(Gtk.Window):
             action_grid.attach(btn, col, row_idx, 1, 1)
 
         adders.pack_start(action_grid, False, False, 0)
+        self._refresh_accel_labels()
 
         system_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         system_box.set_margin_top(6)
@@ -9261,6 +9286,7 @@ if (data !== null) {{
             pair = self._parse_accel(accel)
             if pair:
                 self._keys[action] = pair
+        self._refresh_accel_labels()
 
     def _match_action(self, event):
         key = self._norm_keyval(event.keyval)
@@ -9283,6 +9309,31 @@ if (data !== null) {{
             return left
         return self.listbox.get_selected_row()
 
+    def _adder_button_box(self, text, icon, action):
+        """A sidebar button: an icon and a label that carries its key."""
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box.pack_start(self._session_icon(icon), False, False, 0)
+        label = Gtk.Label(label=text, xalign=0.0)
+        box.pack_start(label, False, False, 0)
+        self._accel_labels[action] = (label, text)
+        return box
+
+    def _refresh_accel_labels(self):
+        """Mark the current key on each sidebar button, after an edit too.
+
+        The key on its own, without the modifiers. Every one of these is a
+        Ctrl+Shift chord, so spelling that out on all seven buttons costs
+        five times the width and says nothing. This is a reminder of which
+        letter, not a statement of the binding -- Shortcuts... has that.
+        """
+        for action, (label, text) in getattr(self, "_accel_labels",
+                                             {}).items():
+            pair = self._keys.get(action)
+            key = ""
+            if pair is not None:
+                key = self._accel_label(pair[0], 0).replace("_", " ")
+            label.set_text(_mnemonic_label(text, key))
+
     def _run_action(self, action, term=None):
         row = self._action_target_row()
         if action == "new_shell":
@@ -9293,6 +9344,16 @@ if (data !== null) {{
             self._on_add_ai(None)
         elif action == "new_note":
             self._on_add_note(None)
+        elif action == "new_connect":
+            # The button is only built when the tool is there, so the key
+            # should not work when the button does not.
+            if not HAS_SSH_TOOL:
+                return False
+            self._on_add_connect(None)
+        elif action == "new_command":
+            self._on_add_command(None)
+        elif action == "new_tmux":
+            self._on_add_tmux(None)
         elif action == "save_note":
             if row is not None and getattr(row, "kind", None) == "note":
                 self._save_note(row)
@@ -10508,11 +10569,11 @@ if (data !== null) {{
         term_head = Gtk.Label(xalign=0)
         term_head.set_markup("<b>Terminals</b>")
         inherit = Gtk.CheckButton(
-            label="New shell / AI opens in the current tab's path")
+            label="New terminal / AI opens in the current tab's path")
         inherit.set_active(bool(s.get("shell_inherit_cwd", False)))
         inherit.set_tooltip_text(
-            "+ Shell (Ctrl+Shift+T) and + AI start in the focused tab's "
-            "working directory instead of home. Default is off.")
+            "+ Terminal (Ctrl+Shift+T) and + AI start in the focused "
+            "tab's working directory instead of home. Default is off.")
 
         layout_head = Gtk.Label(xalign=0)
         layout_head.set_markup("<b>Layout</b>")

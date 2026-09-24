@@ -46,7 +46,7 @@ sudo password for apt.
 | Action | Result |
 |---|---|
 | `+ Serial` | Pick device, baud (default 115200), and tool: `screen` (bundled `screen.sh`) / `kermit` / `picocom`; or `ssh` / `telnet` to a host + port (for network console servers) |
-| `+ Shell` | New tab running your login shell |
+| `+ Terminal` | New tab running your login shell |
 | `+ AI` | Pick AI CLI and working directory; an optional **Session ID** resumes that exact session (tried first, normal continue/resume stays as fallback). **Run inside tmux** keeps the agent alive across restarts and lists the ones still running. **Edit list…** manages CLI names and per-CLI continue/resume tries (`~/.config/tabit/ai_clis.json`) |
 | `+ Open` | Blank buffer to type in, or open a file to read. GtkSourceView editor + **Markdown Preview** (WebKit); an image, PDF or HTML page opens rendered, full width; bottom tools: Base64 / JSON Format; wrap in **Settings…**; huge-line guards. The preview toggle is remembered across restarts |
 | `Settings…` | Theme, fonts, terminal line spacing, note wrap, and other prefs (`settings.json`) |
@@ -55,7 +55,8 @@ sudo password for apt.
 | Click a tab | Switch to that session |
 | Double-click a tab / right-click → Rename… / `F2` | Rename (popover bubble to the right of the tab) |
 | `x` on a tab (shown on hover) | Close that session |
-| `Ctrl+Shift+S` / `Ctrl+Shift+T` / `Ctrl+Shift+A` / `Ctrl+Shift+N` | New serial / shell / AI / open |
+| `Ctrl+Shift+S` / `Ctrl+Shift+T` / `Ctrl+Shift+A` / `Ctrl+Shift+N` | New serial / terminal / AI / open |
+| `Ctrl+Shift+E` / `Ctrl+Shift+D` / `Ctrl+Shift+M` | New connect / command / tmux |
 | `Ctrl+S` | Save note (when a note tab is selected) |
 | `Ctrl+Alt+B` / `Ctrl+Alt+Shift+B` | Note Base64 encode / decode |
 | `Ctrl+Alt+J` | Note JSON format (also validates) |
@@ -70,7 +71,7 @@ sudo password for apt.
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |
 | `Ctrl`+click a URL in a terminal | Open it in the browser. Hover underlines the match; right-click a link adds **Open Link** / **Copy Link**. Works on plain `http(s)://` / `ftp://` text and on OSC 8 hyperlinks (tmux hides OSC 8 unless `allow-passthrough` is on; plain URLs still match) |
 | `Ctrl`+click a file path in a terminal | Open it. A text file (decided by reading it, not by its suffix — `Makefile` counts) opens as a note tab; a `path:line` lands on that line; an `.html` page, an image (`.png` `.jpg` `.gif` `.webp` `.bmp` `.ico` `.svg`) or a `.pdf` opens rendered and full width, and so does a `.md`, which is written to be read even though it is also text. `Ctrl+Alt+M` swaps to the source where there is any, and right-click → **Open in Browser** hands a page over. A path an app wrapped onto a second line is put back together, as long as the result is a real file. Anything else goes to the desktop's handler. Absolute or `~/` paths only — a relative one would resolve against tabit's directory, not the terminal's. Paths with spaces or non-ASCII characters match up to the first such character, deliberately: a wider pattern underlines half of every JSON dump and serial log. Right-click adds **Open Path** / **Copy Path**, which is what a `.bin` usually wants |
-| `Shortcuts…` (sidebar) | Edit any of the shortcuts above |
+| `Shortcuts…` (sidebar) | Edit any of the shortcuts above. Each sidebar button marks its own key the way a menu does — `+ (S)erial`, `+ t(M)ux`, and the letter on the end where the word has none — and follows an edit here. The modifiers are the same on all of them, so only the letter is shown |
 
 A blue dot on a tab means that session printed output while you were
 looking elsewhere. When a session's process ends (device unplugged,

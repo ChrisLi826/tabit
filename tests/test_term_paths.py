@@ -15,7 +15,8 @@ gi.require_version("Vte", "2.91")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tabit import (  # noqa: E402
     TERM_PATH_PATTERN, TERM_PATH_REGEX, TERM_URL_PATTERN, TERM_URL_REGEX,
-    Tabit, _is_text_file, _rejoin_wrapped, _split_path_line,
+    Tabit, _is_text_file, _mnemonic_label, _rejoin_wrapped,
+    _split_path_line,
 )
 import tabit  # noqa: E402
 
@@ -712,3 +713,49 @@ class TestFoldedPathInsideTmux(unittest.TestCase):
             Tabit._rejoin_path(self.term, self.path[:len(self.path)
                                                     - len("report.md") - 1]),
             self.path)
+
+
+class TestMnemonicLabel(unittest.TestCase):
+    """The shortcut key marked in the button text, menu style."""
+
+    def test_the_letter_is_bracketed_where_the_text_has_it(self):
+        for text, key, want in (
+                ("+ Serial", "S", "+ (S)erial"),
+                ("+ AI", "A", "+ (A)I"),
+                ("+ Open", "N", "+ Ope(N)"),
+                ("+ tmux", "M", "+ t(M)ux"),
+        ):
+            self.assertEqual(_mnemonic_label(text, key), want)
+
+    def test_a_letter_the_text_lacks_goes_on_the_end(self):
+        for text, key, want in (
+                ("+ Shell", "T", "+ Shell(T)"),
+                ("+ Connect", "K", "+ Connect(K)"),
+                ("+ Command", "R", "+ Command(R)"),
+        ):
+            self.assertEqual(_mnemonic_label(text, key), want)
+
+    def test_the_first_match_wins(self):
+        self.assertEqual(_mnemonic_label("+ Command", "M"), "+ Co(M)mand")
+
+    def test_a_key_that_is_not_one_letter_goes_on_the_end(self):
+        # Rebinding to F5 or Page Up must not bracket a stray character.
+        self.assertEqual(_mnemonic_label("+ tmux", "F5"), "+ tmux(F5)")
+        self.assertEqual(_mnemonic_label("+ Open", "Page Up"),
+                         "+ Open(Page Up)")
+
+    def test_no_key_leaves_the_text_alone(self):
+        self.assertEqual(_mnemonic_label("+ Shell", ""), "+ Shell")
+
+
+class TestDefaultKeysAreUnique(unittest.TestCase):
+    """Two actions on one key means the second never fires."""
+
+    def test_no_two_actions_share_a_default(self):
+        seen = {}
+        for action, _label, accel, _group in tabit.KEY_ACTIONS:
+            self.assertNotIn(
+                accel, seen,
+                "%s and %s both default to %s" % (seen.get(accel), action,
+                                                  accel))
+            seen[accel] = action
