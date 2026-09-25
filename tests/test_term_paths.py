@@ -1070,6 +1070,40 @@ class TestTelegramShort(unittest.TestCase):
         self.assertLess(len(out.encode("utf-8")), 4096)
 
 
+class TestTelegramSafeText(unittest.TestCase):
+    """What goes down a pty must not be able to steer the terminal."""
+
+    def test_ordinary_text_is_untouched(self):
+        self.assertEqual(Tabit._tg_safe_text("run it\nplease\there"),
+                         "run it\nplease\there")
+
+    def test_an_escape_cannot_end_the_paste_early(self):
+        # "ESC[201~" is the end-of-paste marker itself. Left in, the rest
+        # of the message arrives as live keystrokes.
+        out = Tabit._tg_safe_text("ok\x1b[201~rm -rf /\n")
+        self.assertNotIn("\x1b", out)
+
+    def test_other_control_characters_go_too(self):
+        out = Tabit._tg_safe_text("a\x00b\x07c\x7fd")
+        self.assertEqual(out, "abcd")
+
+    def test_carriage_returns_become_line_breaks(self):
+        # A bare CR is an Enter. One goes on the end, and only one.
+        self.assertEqual(Tabit._tg_safe_text("a\r\nb\rc"), "a\nb\nc")
+
+    def test_nothing_is_nothing(self):
+        self.assertEqual(Tabit._tg_safe_text(None), "")
+
+
+class TestTelegramButtonWidth(unittest.TestCase):
+    """A long tab title must not take the whole message down with it."""
+
+    def test_button_text_is_capped(self):
+        t = [("ab12cd", "acl", "G" * 300)]
+        for row in Tabit._tg_keyboard("deadbeef", t)["inline_keyboard"]:
+            self.assertLessEqual(len(row[0]["text"]), 64)
+
+
 class TestTelegramKeyboard(unittest.TestCase):
     """Buttons carry a token and a tab id, and must fit in 64 bytes."""
 
@@ -1193,6 +1227,13 @@ class _ReplySink:
         self._tg_waiting = waiting
         self.sent = []
         self.sends = sends          # False stands in for a failed send
+        self.saved = 0
+
+    def _tg_jobs(self):
+        return self._tg_waiting
+
+    def _tg_save_jobs(self):
+        self.saved += 1
 
     def _tg_send(self, text, markup=None, row_id=None, reply_to=None,
                  after=None):

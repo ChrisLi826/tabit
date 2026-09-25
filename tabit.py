@@ -6019,6 +6019,21 @@ if (data !== null) {{
                             getattr(row, "title_text", None))))
         return out
 
+    # Everything a terminal reads as an instruction rather than as text.
+    _TG_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+    @classmethod
+    def _tg_safe_text(cls, text):
+        """Text with anything the terminal would obey taken out.
+
+        An ESC in the middle of a paste ends the bracketed-paste run --
+        `ESC[201~` is the marker itself -- and everything after it
+        arrives as live keystrokes instead of as pasted text. Tabs and
+        line breaks stay; nothing else in C0 does.
+        """
+        return cls._TG_CONTROL.sub("", (text or "").replace("\r\n", "\n")
+                                   .replace("\r", "\n"))
+
     def _tg_inject(self, row, text):
         """Type a task into a tab, the way a paste would arrive.
 
@@ -6028,7 +6043,7 @@ if (data !== null) {{
         submitted a line at a time. The Enter is separate, and there is
         exactly one -- two makes some programs run it twice.
         """
-        row.term.paste_text(text)
+        row.term.paste_text(self._tg_safe_text(text))
         row.term.feed_child(b"\r")
 
     # --- Telegram: getting the answer back ------------------------------
@@ -6099,11 +6114,27 @@ if (data !== null) {{
 
     def _tg_await_reply(self, token, row, msg_id):
         """Remember that this tab owes us an answer."""
-        waiting = getattr(self, "_tg_waiting", None)
-        if waiting is None:
-            waiting = self._tg_waiting = {}
+        waiting = self._tg_jobs()
         waiting[token] = {"row_id": self._tg_row_id(row), "msg_id": msg_id,
                           "name": row.tg_name}
+        self._tg_save_jobs()
+
+    def _tg_jobs(self):
+        """Tasks still owed an answer, read back from disk once.
+
+        An agent usually lives in tmux and outlives tabit, so a task sent
+        before a restart is still being worked on after it. Keeping this
+        in memory alone meant the answer arrived to nobody.
+        """
+        waiting = getattr(self, "_tg_waiting", None)
+        if waiting is None:
+            raw = self._tg_load_state().get("waiting")
+            waiting = self._tg_waiting = dict(raw) if isinstance(raw, dict) \
+                else {}
+        return waiting
+
+    def _tg_save_jobs(self):
+        self._tg_save_state(waiting=getattr(self, "_tg_waiting", None) or {})
 
     def _tg_deliver_reply(self, token):
         """Send what an agent wrote for a task, and tidy up.
@@ -6117,7 +6148,7 @@ if (data !== null) {{
         window that still holds focus on an empty desk is not a reason to
         withhold it.
         """
-        waiting = getattr(self, "_tg_waiting", None) or {}
+        waiting = self._tg_jobs()
         job = waiting.get(token)
         path = self._tg_reply_path(token)
         if job is None:
@@ -6129,7 +6160,11 @@ if (data !== null) {{
                 pass
             return False
         try:
-            with open(path) as f:
+            # O_NOFOLLOW: the path is written into the agent's own prompt,
+            # and a link left there pointing at, say, telegram.json would
+            # otherwise be read and uploaded as the answer.
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd) as f:
                 body = f.read()
         except OSError:
             return False
@@ -6142,7 +6177,8 @@ if (data !== null) {{
 
         def delivered(_msg_id, t=token, p=path):
             """Only now is it safe to lose the local copy."""
-            (getattr(self, "_tg_waiting", None) or {}).pop(t, None)
+            self._tg_jobs().pop(t, None)
+            self._tg_save_jobs()
             try:
                 os.remove(p)
             except OSError:
@@ -6169,7 +6205,7 @@ if (data !== null) {{
         # the answer it writes once you have replied.
         if status != "ready":
             return
-        waiting = getattr(self, "_tg_waiting", None) or {}
+        waiting = self._tg_jobs()
         rid = getattr(row, "tg_id", None)
         # One task, not all of them: two tasks on one tab cannot both be
         # answered by one screen, and the older one is the one this
@@ -6183,6 +6219,7 @@ if (data !== null) {{
                 self._tg_settle_watch(token)
                 return
             waiting.pop(token, None)
+            self._tg_save_jobs()
             lines = self._tg_quote_lines(
                 self._term_tail_text(getattr(row, "term", None), 20), want=12)
             self._tg_send(
@@ -6193,7 +6230,7 @@ if (data !== null) {{
 
     def _tg_scan_replies(self, *_a):
         """Deliver every answer that has landed."""
-        for token in list(getattr(self, "_tg_waiting", None) or {}):
+        for token in list(self._tg_jobs()):
             if os.path.exists(self._tg_reply_path(token)):
                 self._tg_deliver_reply(token)
         return False
@@ -6205,12 +6242,20 @@ if (data !== null) {{
         for a status change that may be a long way off.
         """
         os.makedirs(TELEGRAM_REPLY_DIR, exist_ok=True)
+        owed = self._tg_jobs()
         for name in os.listdir(TELEGRAM_REPLY_DIR):
-            # Nothing here outlives the run that asked for it.
+            # An answer written while tabit was restarting is still an
+            # answer: the agent is in tmux and never stopped. Only files
+            # nobody is waiting for go.
+            if name.endswith(".md") and name[:-3] in owed:
+                continue
             try:
                 os.remove(os.path.join(TELEGRAM_REPLY_DIR, name))
             except OSError:
                 pass
+        # Anything already written goes out now rather than waiting for
+        # a change event that has been and gone.
+        GLib.idle_add(self._tg_scan_replies)
         gfile = Gio.File.new_for_path(TELEGRAM_REPLY_DIR)
         try:
             monitor = gfile.monitor_directory(Gio.FileMonitorFlags.NONE, None)
@@ -6256,8 +6301,7 @@ if (data !== null) {{
 
     def _tg_settle_tick(self, token):
         pending = getattr(self, "_tg_settling", None) or {}
-        waiting = getattr(self, "_tg_waiting", None) or {}
-        if token not in waiting:
+        if token not in self._tg_jobs():
             # Answered by the status path, or the task is long gone.
             pending.pop(token, None)
             return False
@@ -6358,11 +6402,21 @@ if (data !== null) {{
 
     @classmethod
     def _tg_save_state(cls, **kw):
+        """Write the state, all of it or none of it.
+
+        Written in place, a crash halfway leaves JSON that will not
+        parse, which reads back as no offset at all -- and Telegram then
+        redelivers everything it has been holding.
+        """
         cur = cls._tg_load_state()
         cur.update(kw)
         os.makedirs(CONFIG_DIR, exist_ok=True)
-        with open(TELEGRAM_STATE_FILE, "w") as f:
+        tmp = TELEGRAM_STATE_FILE + ".new"
+        with open(tmp, "w") as f:
             json.dump(cur, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, TELEGRAM_STATE_FILE)
 
     _TG_MSG_MEMORY = 200
 
@@ -6496,49 +6550,60 @@ if (data !== null) {{
     def _tg_poll_worker(self):
         wait = 5
         while True:
-            conf = self._load_settings()
-            sec = self._tg_load_secrets()
-            token = sec.get("bot_token") or ""
-            chat = str(sec.get("chat_id") or "")
-            if not (conf.get("telegram_enabled") and conf.get("telegram_reply")
-                    and token and chat):
+            try:
+                wait = self._tg_poll_once(wait)
+            except Exception as exc:
+                # A disk that filled up while writing the read offset
+                # used to end this thread, and nothing restarts it: the
+                # switch still reads as on and no message is ever
+                # answered again until tabit is restarted.
+                self._tg_last_error = self._tg_error_text(exc)
                 time.sleep(5)
+
+    def _tg_poll_once(self, wait):
+        conf = self._load_settings()
+        sec = self._tg_load_secrets()
+        token = sec.get("bot_token") or ""
+        chat = str(sec.get("chat_id") or "")
+        if not (conf.get("telegram_enabled") and conf.get("telegram_reply")
+                and token and chat):
+            time.sleep(5)
+            return wait
+        started = time.monotonic()
+        res, err = self._tg_call(
+            token, "getUpdates",
+            {"timeout": self._TG_POLL_TIMEOUT,
+             "offset": self._tg_load_state().get("offset", 0),
+             "allowed_updates": json.dumps(["message",
+                                            "callback_query"])},
+            timeout=self._TG_POLL_TIMEOUT + 10)
+        if err is not None:
+            self._tg_last_error = err
+            time.sleep(wait)
+            return min(60, wait * 2)
+        wait = 5
+        if str(self._tg_load_secrets().get("chat_id") or "") != chat:
+            return wait  # answered for a bot that is no longer the one
+        for upd in res or []:
+            # Written before the message is acted on, so a message
+            # that upsets us is lost rather than replayed for ever.
+            self._tg_save_state(offset=int(upd.get("update_id", 0)) + 1)
+            cb = upd.get("callback_query")
+            if cb:
+                # A press carries its own sender and the chat the
+                # message sits in, so the same test fits both.
+                stand_in = {"chat": (cb.get("message") or {}).get("chat"),
+                            "from": cb.get("from")}
+                if self._tg_auth_ok(stand_in, chat):
+                    GLib.idle_add(self._tg_on_callback, cb.get("id"),
+                                  cb.get("data") or "")
                 continue
-            started = time.monotonic()
-            res, err = self._tg_call(
-                token, "getUpdates",
-                {"timeout": self._TG_POLL_TIMEOUT,
-                 "offset": self._tg_load_state().get("offset", 0),
-                 "allowed_updates": json.dumps(["message",
-                                                "callback_query"])},
-                timeout=self._TG_POLL_TIMEOUT + 10)
-            if err is not None:
-                self._tg_last_error = err
-                time.sleep(wait)
-                wait = min(60, wait * 2)
+            msg = upd.get("message") or {}
+            if not self._tg_auth_ok(msg, chat):
                 continue
-            wait = 5
-            if str(self._tg_load_secrets().get("chat_id") or "") != chat:
-                continue  # answered for a bot that is no longer the one
-            for upd in res or []:
-                # Written before the message is acted on, so a message
-                # that upsets us is lost rather than replayed for ever.
-                self._tg_save_state(offset=int(upd.get("update_id", 0)) + 1)
-                cb = upd.get("callback_query")
-                if cb:
-                    # A press carries its own sender and the chat the
-                    # message sits in, so the same test fits both.
-                    stand_in = {"chat": (cb.get("message") or {}).get("chat"),
-                                "from": cb.get("from")}
-                    if self._tg_auth_ok(stand_in, chat):
-                        GLib.idle_add(self._tg_on_callback, cb.get("id"),
-                                      cb.get("data") or "")
-                    continue
-                msg = upd.get("message") or {}
-                if not self._tg_auth_ok(msg, chat):
-                    continue
-                GLib.idle_add(self._tg_on_message, msg)
-            time.sleep(self._tg_poll_gap(time.monotonic() - started))
+            GLib.idle_add(self._tg_on_message, msg)
+        time.sleep(self._tg_poll_gap(time.monotonic() - started))
+        return wait
 
     _TG_HELP = (
         "Write the task, send it, then tap the tab to send it to.\n"
@@ -6559,7 +6624,7 @@ if (data !== null) {{
         else: it has 64 bytes to live in, and the task text belongs in
         tabit where it cannot be replayed by a stale button.
         """
-        keys = [[{"text": "Send to %s \u00b7 %s" % (name, title),
+        keys = [[{"text": ("Send to %s \u00b7 %s" % (name, title))[:56],
                   "callback_data": "s:%s:%s" % (token, rid)}]
                 for rid, name, title in targets]
         keys.append([{"text": "Cancel", "callback_data": "x:%s" % token}])
@@ -6629,10 +6694,11 @@ if (data !== null) {{
 
     def _tg_task_receipt(self, token, msg_id):
         """The receipt arrived, so answers can now hang under it."""
-        job = (getattr(self, "_tg_waiting", None) or {}).get(token)
+        job = self._tg_jobs().get(token)
         if job is None:
             return False
         job["msg_id"] = msg_id
+        self._tg_save_jobs()
         # It may already have been written while Telegram was thinking.
         self._tg_settle_watch(token)
         return False
@@ -6646,23 +6712,27 @@ if (data !== null) {{
         if not (conf.get("telegram_enabled") and conf.get("telegram_reply")):
             return False
         text = (msg.get("text") or "").strip()
-        cmd = self._tg_command(text)
-        if cmd in ("status", "home", "start"):
-            self._tg_send(self._tg_board_text_full())
-            return False
-        if cmd == "help" or cmd is not None:
-            self._tg_send(self._TG_HELP)
-            return False
         if not text:
             return False
 
         # A reply names its tab, so it is already addressed: send it.
+        # Checked before commands are: a task can start with a slash --
+        # "/deploy", a path -- and reading that as a command answered
+        # with the help text instead of sending anything.
         rid = self._tg_replied_row_id(msg)
         if rid:
             bad = self._tg_send_task(self._tg_row_by_id(rid), text,
                                      is_answer=True)
             if bad:
                 self._tg_send("Not sent \u2014 %s." % bad)
+            return False
+
+        cmd = self._tg_command(text)
+        if cmd in ("status", "home", "start"):
+            self._tg_send(self._tg_board_text_full())
+            return False
+        if cmd is not None:
+            self._tg_send(self._TG_HELP)
             return False
 
         targets = self._tg_targets()
@@ -6704,14 +6774,23 @@ if (data !== null) {{
         token, _sep, rid = rest.partition(":")
         # Popped before anything is typed: Telegram redelivers an update
         # it thinks we missed, and a task must not arrive twice.
-        draft = drafts.pop(token, None)
+        draft = drafts.get(token)
         if draft is None:
             self._tg_answer(cb_id, "Already sent, or too old")
             return False
         if rid not in draft.get("rows", []):
             self._tg_answer(cb_id, "That tab was not offered for this")
             return False
-        bad = self._tg_send_task(self._tg_row_by_id(rid), draft["text"])
+        row = self._tg_row_by_id(rid)
+        bad = self._tg_row_trouble(row)
+        if bad:
+            # Kept: the tab went away, the text did not. Another button
+            # on the same message can still take it.
+            self._tg_answer(cb_id, "Not sent \u2014 %s" % bad)
+            self._tg_send("Not sent \u2014 %s." % bad)
+            return False
+        drafts.pop(token, None)  # before anything is typed: press once
+        bad = self._tg_send_task(row, draft["text"])
         self._tg_answer(cb_id, bad and ("Not sent \u2014 %s" % bad) or "Sent")
         if bad:
             self._tg_send("Not sent \u2014 %s." % bad)
