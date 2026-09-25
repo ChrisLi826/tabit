@@ -105,6 +105,17 @@ or drops it to one that goes away on its own. The desktop half needs
 `gir1.2-notify-0.7`, which the installer pulls in; the in-app half works
 without it.
 
+The same news can also reach your **phone**. **Settings… → AI → Also send
+it to Telegram** takes a bot token (from `@BotFather`) and your chat id
+(from `@userinfobot`), and sends one message per agent that finishes or
+wants you. By default it only sends while tabit is not the window in
+front; **Always** sends either way. It is deliberately not tied to the
+desktop popup switch, because "no popup on this screen" and "nothing on
+my phone" are two different wishes. **Send a test message** proves the
+pair before you rely on it. The token is kept in
+`~/.config/tabit/telegram.json`, mode `0600` — not in `settings.json`,
+which is the file you would paste into a bug report.
+
 A blue dot on a tab means that session printed output while you were
 looking elsewhere. When a session's process ends (device unplugged,
 `exit`, picocom quit) the tab stays, greyed and marked `exited`, so

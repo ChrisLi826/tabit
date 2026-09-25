@@ -859,6 +859,119 @@ class TestNotifyDelayOutlastsAPoll(unittest.TestCase):
                            Tabit._AGENT_POLL_SEC)
 
 
+class TestTelegramShouldSend(unittest.TestCase):
+    """Which status changes are worth a buzz on a phone."""
+
+    ON = {"telegram_enabled": True, "telegram_when": "away"}
+
+    def test_off_by_default(self):
+        self.assertFalse(Tabit._tg_should_send({}, False, "blocked"))
+
+    def test_only_the_two_that_want_you(self):
+        for st, want in (("blocked", True), ("ready", True),
+                         ("working", False), ("idle", False),
+                         ("exited", False), ("unknown", False)):
+            self.assertEqual(
+                Tabit._tg_should_send(self.ON, False, st), want, st)
+
+    def test_away_means_nothing_while_you_are_looking(self):
+        self.assertFalse(Tabit._tg_should_send(self.ON, True, "blocked"))
+
+    def test_always_sends_even_in_front(self):
+        conf = {"telegram_enabled": True, "telegram_when": "always"}
+        self.assertTrue(Tabit._tg_should_send(conf, True, "blocked"))
+
+    def test_it_does_not_follow_the_desktop_popup_switch(self):
+        # "No popup on this screen" and "nothing on my phone" are two
+        # different wishes.
+        conf = dict(self.ON, ai_notify=False)
+        self.assertTrue(Tabit._tg_should_send(conf, False, "ready"))
+
+
+class TestTelegramMessage(unittest.TestCase):
+    """The phone says the same words the desktop popup says."""
+
+    def test_it_reuses_the_desktop_wording(self):
+        msg = Tabit._tg_message("QCA2ECW536 · [claude] ACL 6K test",
+                                "blocked")
+        self.assertEqual(msg.splitlines(), [
+            "\u2753 Waiting for you",
+            "QCA2ECW536 · [claude] ACL 6K test",
+            Tabit._AGENT_NOTIFY["blocked"]])
+
+    def test_ready_is_the_other_one(self):
+        msg = Tabit._tg_message("t", "ready")
+        self.assertTrue(msg.startswith("\u2705 Finished"))
+        self.assertTrue(msg.endswith(Tabit._AGENT_NOTIFY["ready"]))
+
+
+class TestTelegramErrorText(unittest.TestCase):
+    """The settings page shows this string, so it must not carry the key."""
+
+    def test_a_url_error_loses_the_token(self):
+        exc = OSError("HTTP Error 404: Not Found for url: "
+                      "https://api.telegram.org/bot99:AAsecretkey/sendMessage")
+        out = Tabit._tg_error_text(exc)
+        self.assertNotIn("AAsecretkey", out)
+        self.assertIn("/bot<token>", out)
+
+    def test_it_keeps_the_part_that_helps(self):
+        out = Tabit._tg_error_text(TimeoutError("timed out"))
+        self.assertIn("TimeoutError", out)
+        self.assertIn("timed out", out)
+
+    def test_a_token_with_punctuation_still_goes(self):
+        exc = OSError("failed: https://api.telegram.org/bot1-2_3:A.B-C_d/x")
+        self.assertNotIn("A.B-C_d", Tabit._tg_error_text(exc))
+
+
+class TestTelegramSecretsFile(unittest.TestCase):
+    """The token is written narrow, and an old wide file is narrowed."""
+
+    def _with_config(self, fn):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            old_dir, old_file = tabit.CONFIG_DIR, tabit.TELEGRAM_FILE
+            tabit.CONFIG_DIR = d
+            tabit.TELEGRAM_FILE = os.path.join(d, "telegram.json")
+            try:
+                return fn(tabit.TELEGRAM_FILE)
+            finally:
+                tabit.CONFIG_DIR, tabit.TELEGRAM_FILE = old_dir, old_file
+
+    def test_a_new_file_is_owner_only(self):
+        def check(path):
+            Tabit._tg_save_secrets("99:AA", "123")
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            self.assertEqual(Tabit._tg_load_secrets(),
+                             {"bot_token": "99:AA", "chat_id": "123"})
+        self._with_config(check)
+
+    def test_a_file_that_was_already_wide_is_narrowed(self):
+        def check(path):
+            with open(path, "w") as f:
+                f.write("{}")
+            os.chmod(path, 0o644)
+            Tabit._tg_save_secrets("99:AA", "123")
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        self._with_config(check)
+
+    def test_a_missing_or_broken_file_is_no_secrets(self):
+        def check(path):
+            self.assertEqual(Tabit._tg_load_secrets(), {})
+            with open(path, "w") as f:
+                f.write("not json")
+            self.assertEqual(Tabit._tg_load_secrets(), {})
+        self._with_config(check)
+
+    def test_whitespace_around_a_pasted_token_is_dropped(self):
+        def check(_path):
+            Tabit._tg_save_secrets("  99:AA\n", " 123 ")
+            self.assertEqual(Tabit._tg_load_secrets(),
+                             {"bot_token": "99:AA", "chat_id": "123"})
+        self._with_config(check)
+
+
 class _SessionSink:
     """Stands in for the window: a fixed set of tabs to look through."""
 

@@ -25,6 +25,7 @@ import random
 import re
 import shlex
 import signal
+import queue
 import subprocess
 import sys
 
@@ -32,6 +33,7 @@ import shutil
 import tarfile
 import threading
 import time
+import urllib.parse
 import urllib.request
 
 import gi
@@ -674,6 +676,10 @@ SCREEN_SH_PATH = os.path.join(CONFIG_DIR, "screen.sh")
 SESSIONS_FILE = os.path.join(CONFIG_DIR, "sessions.json")
 KEYS_FILE = os.path.join(CONFIG_DIR, "keys.json")
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
+# Bot token and chat id live apart from settings.json: that one is
+# rewritten on every settings save and is the file someone pastes
+# into a bug report. This one is written 0600 and never logged.
+TELEGRAM_FILE = os.path.join(CONFIG_DIR, "telegram.json")
 AI_LAST_FILE = os.path.join(CONFIG_DIR, "ai_last.json")
 AI_CLIS_FILE = os.path.join(CONFIG_DIR, "ai_clis.json")
 COMMANDS_FILE = os.path.join(CONFIG_DIR, "commands.json")
@@ -1431,6 +1437,8 @@ DEFAULT_SETTINGS = {
     "shell_inherit_cwd": False,  # new shell opens in the focused tab's path
     "ai_notify": True,           # desktop popup when an agent wants you
     "ai_notify_urgency": "critical",  # critical | normal | low
+    "telegram_enabled": False,   # also send the same news to a Telegram bot
+    "telegram_when": "away",     # away | always
     "ai_fresh_on_restore": False,  # restored AI tabs start fresh (no continue)
     "ai_use_tmux": True,           # +AI dialog: run inside tmux (can uncheck)
     "ai_claude_bypass": False,     # +AI: launch claude with --dangerously-skip-permissions
@@ -5780,6 +5788,127 @@ if (data !== null) {{
             GLib.source_remove(src)
         row._notify_src = None
 
+    # --- Telegram: the same news, on a phone ---------------------------
+
+    _TG_API = "https://api.telegram.org/bot%s/%s"
+    _TG_TIMEOUT = 10
+    _TG_HEAD = {
+        "blocked": "\u2753 Waiting for you",
+        "ready": "\u2705 Finished",
+    }
+
+    @staticmethod
+    def _tg_load_secrets():
+        """The bot token and chat id, or an empty dict."""
+        try:
+            with open(TELEGRAM_FILE) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _tg_save_secrets(token, chat_id):
+        """Write the token narrow, and narrow an existing file too.
+
+        The mode on os.open only applies when it creates the file, so a
+        file written before this rule existed would keep its old mode.
+        """
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        fd = os.open(TELEGRAM_FILE,
+                     os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"bot_token": (token or "").strip(),
+                       "chat_id": (chat_id or "").strip()}, f, indent=2)
+        os.chmod(TELEGRAM_FILE, 0o600)
+
+    @classmethod
+    def _tg_api_url(cls, token, method):
+        return cls._TG_API % (token, method)
+
+    @staticmethod
+    def _tg_error_text(exc):
+        """One error line with the bot token taken out of it.
+
+        The token is a path segment of every request URL, and urllib puts
+        the URL it was given into the text of most errors it raises. The
+        settings page shows this string, so it must not carry the key.
+        """
+        text = "%s: %s" % (type(exc).__name__, exc)
+        return re.sub(r"/bot[^/\s]+", "/bot<token>", text)
+
+    @classmethod
+    def _tg_should_send(cls, conf, app_active, status):
+        """Whether this status change is worth a buzz on the phone.
+
+        Deliberately not tied to the desktop popup switch: "no popup on
+        this screen" and "nothing on my phone" are two different wishes.
+        """
+        if not conf.get("telegram_enabled"):
+            return False
+        if status not in cls._TG_HEAD:
+            return False
+        if conf.get("telegram_when", "away") == "away" and app_active:
+            return False
+        return True
+
+    @classmethod
+    def _tg_message(cls, title, status):
+        """What the phone shows. Same words the desktop popup uses."""
+        return "%s\n%s\n%s" % (cls._TG_HEAD.get(status, status), title,
+                                cls._AGENT_NOTIFY.get(status, ""))
+
+    @classmethod
+    def _tg_post(cls, token, chat, text):
+        """Send one message. None on success, else a line to show."""
+        data = urllib.parse.urlencode({
+            "chat_id": chat,
+            "text": text,
+            "disable_web_page_preview": "true",
+        }).encode("utf-8")
+        req = urllib.request.Request(cls._tg_api_url(token, "sendMessage"),
+                                     data=data)
+        try:
+            with urllib.request.urlopen(req, timeout=cls._TG_TIMEOUT) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:  # urllib raises a family of these
+            return cls._tg_error_text(exc)
+        if body.get("ok"):
+            return None
+        return str(body.get("description") or "rejected")
+
+    def _tg_send(self, text):
+        """Queue one message. Never blocks the UI thread.
+
+        One worker for the whole queue rather than a thread per message:
+        a network that has gone quiet would otherwise pile threads up at
+        one per agent that stops.
+        """
+        q = getattr(self, "_tg_queue", None)
+        if q is None:
+            q = self._tg_queue = queue.Queue()
+            threading.Thread(target=self._tg_worker, args=(q,),
+                             daemon=True).start()
+        q.put(text)
+
+    def _tg_worker(self, q):
+        """Send queued messages until the app quits.
+
+        A failure is kept for the settings page and nothing more. The
+        sidebar and the popup are the record of what happened; this is a
+        copy of it, and a copy that did not arrive is not worth stopping
+        anything over.
+        """
+        while True:
+            text = q.get()
+            sec = self._tg_load_secrets()
+            token = sec.get("bot_token") or ""
+            chat = str(sec.get("chat_id") or "")
+            if not token or not chat:
+                self._tg_last_error = "No bot token or chat id set"
+                continue
+            self._tg_last_error = self._tg_post(token, chat, text)
+
     def _agent_notify_fire(self, row, status):
         """The delay is up: notify, unless the reason has gone away."""
         row._notify_src = None
@@ -5793,6 +5922,13 @@ if (data !== null) {{
         if what is None:
             return False
         conf = self._load_settings()
+        title = self._agent_notify_title(
+            self._row_group_name(row), getattr(row, "title_text", None))
+        # Before the desktop-popup gate on purpose: the phone is a
+        # separate audience, and this is past the settle delay and the
+        # re-read above, so a detection wobble never reaches it.
+        if self._tg_should_send(conf, self.is_active(), status):
+            self._tg_send(self._tg_message(title, status))
         if not conf.get("ai_notify", True):
             return False
         level = self._notify_urgency_name(conf.get("ai_notify_urgency"))
@@ -5817,8 +5953,6 @@ if (data !== null) {{
         # rather than failing when the library was never initialised.
         if not Notify.is_initted() and not Notify.init("tabit"):
             return False
-        title = self._agent_notify_title(
-            self._row_group_name(row), getattr(row, "title_text", None))
         old = getattr(row, "_agent_note", None)
         if old is not None:
             try:
@@ -11713,6 +11847,66 @@ if (data !== null) {{
             "• Quiet: no banner on some desktops, just the tray")
         urg_box.pack_start(urg_lbl, False, False, 0)
         urg_box.pack_start(urg_combo, True, True, 0)
+        tg_sec = self._tg_load_secrets()
+        tg_on = Gtk.CheckButton(label="Also send it to Telegram")
+        tg_on.set_active(bool(s.get("telegram_enabled", False)))
+        tg_on.set_tooltip_text(
+            "The same news, on your phone, through a Telegram bot. The "
+            "token is kept in its own file, not in settings.json.")
+        tg_grid = Gtk.Grid(row_spacing=4, column_spacing=6, margin_start=22)
+        tg_token = Gtk.Entry(text=tg_sec.get("bot_token") or "",
+                             width_chars=30)
+        tg_token.set_visibility(False)          # it is a key, not a name
+        tg_token.set_placeholder_text("123456789:AA…  (from @BotFather)")
+        tg_chat = Gtk.Entry(text=str(tg_sec.get("chat_id") or ""),
+                            width_chars=30)
+        tg_chat.set_placeholder_text("your chat id  (from @userinfobot)")
+        tg_when = Gtk.ComboBoxText()
+        for wid, lab in (("away", "Only when tabit is not in front"),
+                         ("always", "Always")):
+            tg_when.append(wid, lab)
+        tg_when.set_active_id(
+            "always" if s.get("telegram_when") == "always" else "away")
+        tg_test = Gtk.Button(label="Send a test message")
+        tg_result = Gtk.Label(xalign=0)
+        tg_result.get_style_context().add_class("session-sub")
+        tg_result.set_ellipsize(Pango.EllipsizeMode.END)
+
+        def on_tg_test(_b):
+            tok = tg_token.get_text().strip()
+            cid = tg_chat.get_text().strip()
+            if not tok or not cid:
+                tg_result.set_text("Fill in both fields first.")
+                return
+            tg_test.set_sensitive(False)
+            tg_result.set_text("Sending…")
+
+            def work():
+                err = self._tg_post(tok, cid, "tabit: test message")
+                GLib.idle_add(done, err)
+
+            def done(err):
+                tg_test.set_sensitive(True)
+                tg_result.set_text(err or "Sent. Check your phone.")
+                return False
+
+            threading.Thread(target=work, daemon=True).start()
+
+        tg_test.connect("clicked", on_tg_test)
+        for r, (lab, w) in enumerate((("Bot token:", tg_token),
+                                      ("Chat id:", tg_chat),
+                                      ("Send:", tg_when))):
+            tg_grid.attach(Gtk.Label(label=lab, xalign=0), 0, r, 1, 1)
+            tg_grid.attach(w, 1, r, 1, 1)
+        tg_grid.attach(tg_test, 1, 3, 1, 1)
+        tg_grid.attach(tg_result, 1, 4, 1, 1)
+
+        def on_tg_toggled(*_a):
+            tg_grid.set_sensitive(tg_on.get_active())
+
+        tg_on.connect("toggled", on_tg_toggled)
+        on_tg_toggled()
+
         ai_bypass = Gtk.CheckButton(
             label="Claude +AI: --dangerously-skip-permissions (bypass)")
         ai_bypass.set_active(bool(s.get("ai_claude_bypass", False)))
@@ -11764,6 +11958,8 @@ if (data !== null) {{
         box.pack_start(ai_tmux, False, False, 0)
         box.pack_start(ai_notify, False, False, 0)
         box.pack_start(urg_box, False, False, 0)
+        box.pack_start(tg_on, False, False, 0)
+        box.pack_start(tg_grid, False, False, 0)
         box.pack_start(ai_bypass, False, False, 0)
         box.pack_start(hint, False, False, 0)
         update_preview()
@@ -11789,11 +11985,16 @@ if (data !== null) {{
                                          urg_combo.get_active_id()
                                          or "critical",
                                      "ai_claude_bypass": ai_bypass.get_active(),
+                                     "telegram_enabled": tg_on.get_active(),
+                                     "telegram_when":
+                                         tg_when.get_active_id() or "away",
                                      "ui_font_size": ui_sz,
                                      "term_font": t_font,
                                      "term_font_size": t_sz,
                                      "term_line_spacing": t_line_spacing,
                                      "sidebar_position": side_id})
+                self._tg_save_secrets(tg_token.get_text(),
+                                      tg_chat.get_text())
                 self._sidebar_position = side_id
                 self._apply_sidebar_layout()
                 self._apply_note_wrap_setting(wrap.get_active())
