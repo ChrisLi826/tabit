@@ -973,6 +973,8 @@ class TestTelegramSecretsFile(unittest.TestCase):
 
 
 class _TgRow:
+    agent_status = "idle"
+
     def __init__(self, name=None, rid=None, icon=tabit.ICON_AI,
                  dead=False, term=object(), title="t", group=None):
         self.tg_name = name
@@ -1035,6 +1037,39 @@ class TestTelegramShortName(unittest.TestCase):
             self.assertIsNone(Tabit._tg_clean_name(raw), repr(raw))
 
 
+class TestTelegramRowTroubleStatus(unittest.TestCase):
+    """A tab whose agent has gone is not a tab to type commands into."""
+
+    def test_a_tab_with_no_agent_running_is_refused(self):
+        for status in Tabit._TG_NOT_AGENT:
+            row = _TgRow(name="acl")
+            row.agent_status = status
+            self.assertIn("no agent", Tabit._tg_row_trouble(row), status)
+
+    def test_a_working_or_waiting_agent_is_fine(self):
+        for status in ("working", "idle", "blocked", "ready"):
+            row = _TgRow(name="acl")
+            row.agent_status = status
+            self.assertIsNone(Tabit._tg_row_trouble(row), status)
+
+
+class TestTelegramShort(unittest.TestCase):
+    """A quoted task must not push a message past Telegram's own cap."""
+
+    def test_a_short_task_is_quoted_whole(self):
+        self.assertEqual(Tabit._tg_short("run it"), "run it")
+
+    def test_a_long_one_is_cut_and_says_so(self):
+        out = Tabit._tg_short("x" * 9000)
+        self.assertLess(len(out), Tabit._TG_QUOTE_MAX + 40)
+        self.assertIn("shortened", out)
+
+    def test_the_confirm_stays_under_the_cap(self):
+        out = Tabit._tg_confirm_text("x" * 9000,
+                                     [("ab12cd", "acl", "g \u00b7 t")])
+        self.assertLess(len(out.encode("utf-8")), 4096)
+
+
 class TestTelegramKeyboard(unittest.TestCase):
     """Buttons carry a token and a tab id, and must fit in 64 bytes."""
 
@@ -1069,16 +1104,16 @@ class TestTelegramConfirmText(unittest.TestCase):
     TWO = ONE + [("ef34gh", "build", "Router SDK · build")]
 
     def test_one_target_names_it(self):
-        out = Tabit._tg_confirm_text(None, "run it", self.ONE)
+        out = Tabit._tg_confirm_text("run it", self.ONE)
         self.assertTrue(out.startswith("Send to acl · QCA2ECW536"))
 
     def test_several_targets_ask(self):
-        out = Tabit._tg_confirm_text(None, "run it", self.TWO)
+        out = Tabit._tg_confirm_text("run it", self.TWO)
         self.assertTrue(out.startswith("Where should this go?"))
         self.assertIn("Not sent yet", out)
 
     def test_it_quotes_the_task_and_warns_about_the_enter(self):
-        out = Tabit._tg_confirm_text(None, "run it", self.ONE)
+        out = Tabit._tg_confirm_text("run it", self.ONE)
         self.assertIn("run it", out)
         self.assertIn("One Enter", out)
 
@@ -1135,6 +1170,11 @@ class TestTelegramTaskText(unittest.TestCase):
         self.assertIn("phone", out)
         self.assertIn("first line", out)
 
+    def test_an_answer_is_not_a_task(self):
+        # Replying "y" to "Allow Bash(rm -rf build/)?" must arrive as
+        # "y", not as "y" plus four lines about writing a reply file.
+        self.assertEqual(Tabit._tg_task_text("y", "ab12cd34", False), "y")
+
     def test_switched_off_the_task_goes_in_untouched(self):
         self.assertEqual(Tabit._tg_task_text("run it", "ab12cd34", False),
                          "run it")
@@ -1149,13 +1189,17 @@ class _ReplySink:
     _TG_MSG_LIMIT = Tabit._TG_MSG_LIMIT
     _TG_REPLY_PARTS = Tabit._TG_REPLY_PARTS
 
-    def __init__(self, waiting):
+    def __init__(self, waiting, sends=True):
         self._tg_waiting = waiting
         self.sent = []
+        self.sends = sends          # False stands in for a failed send
 
     def _tg_send(self, text, markup=None, row_id=None, reply_to=None,
                  after=None):
         self.sent.append((text, reply_to))
+        # The real worker only calls `after` when Telegram accepted it.
+        if self.sends and callable(after):
+            after(999)
 
 
 class TestTelegramDeliverReply(unittest.TestCase):
@@ -1163,7 +1207,7 @@ class TestTelegramDeliverReply(unittest.TestCase):
 
     JOB = {"row_id": "ab12cd", "msg_id": 802, "name": "acl"}
 
-    def _run(self, body, waiting=None):
+    def _run(self, body, waiting=None, sends=True):
         old = tabit.TELEGRAM_REPLY_DIR
         d = tempfile.mkdtemp()
         tabit.TELEGRAM_REPLY_DIR = d
@@ -1173,7 +1217,7 @@ class TestTelegramDeliverReply(unittest.TestCase):
                 with open(path, "w") as f:
                     f.write(body)
             sink = _ReplySink({"tok": dict(self.JOB)}
-                              if waiting is None else waiting)
+                              if waiting is None else waiting, sends=sends)
             got = sink._tg_deliver_reply("tok")
             return got, sink, os.path.exists(path)
         finally:
@@ -1224,6 +1268,29 @@ class TestTelegramDeliverReply(unittest.TestCase):
                 f.write("now it is written")
             sink._tg_deliver_reply("tok")
             self.assertNotIn("tok", sink._tg_waiting)
+        finally:
+            tabit.TELEGRAM_REPLY_DIR = old
+
+    def test_a_send_that_failed_keeps_the_answer(self):
+        # The local copy is the only copy. Losing it because Telegram
+        # was down loses the answer for good.
+        got, sink, still_there = self._run("all done", sends=False)
+        self.assertTrue(got)
+        self.assertTrue(still_there)
+        self.assertIn("tok", sink._tg_waiting)
+
+    def test_it_does_not_send_the_same_answer_twice(self):
+        # A settle tick and a status change can both reach one file.
+        old = tabit.TELEGRAM_REPLY_DIR
+        d = tempfile.mkdtemp()
+        tabit.TELEGRAM_REPLY_DIR = d
+        try:
+            with open(Tabit._tg_reply_path("tok"), "w") as f:
+                f.write("all done")
+            sink = _ReplySink({"tok": dict(self.JOB)}, sends=False)
+            self.assertTrue(sink._tg_deliver_reply("tok"))
+            self.assertFalse(sink._tg_deliver_reply("tok"))
+            self.assertEqual(len(sink.sent), 1)
         finally:
             tabit.TELEGRAM_REPLY_DIR = old
 
