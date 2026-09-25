@@ -6076,6 +6076,10 @@ if (data !== null) {{
     def _tg_deliver_reply(self, token):
         """Send what an agent wrote for a task, and tidy up.
 
+        Nothing is removed until there is something to send. An empty
+        file is an agent that has opened it and not written yet, and
+        deleting that takes the answer with it.
+
         Sent whatever the "only when tabit is not in front" setting says:
         this is the answer to something asked from the phone, and a
         window that still holds focus on an empty desk is not a reason to
@@ -6084,21 +6088,27 @@ if (data !== null) {{
         waiting = getattr(self, "_tg_waiting", None) or {}
         job = waiting.get(token)
         path = self._tg_reply_path(token)
+        if job is None:
+            # Already answered, or left behind by an older run. Nobody is
+            # waiting for it, so it only has to stop taking up space.
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            return False
         try:
             with open(path) as f:
                 body = f.read()
         except OSError:
             return False
+        chunks = self._tg_chunks(body)
+        if not chunks:
+            return False
+        waiting.pop(token, None)
         try:
             os.remove(path)
         except OSError:
             pass
-        if job is None:
-            return False
-        waiting.pop(token, None)
-        chunks = self._tg_chunks(body)
-        if not chunks:
-            return False
         head = "\u2714 %s answered" % job["name"]
         for i, part in enumerate(chunks):
             self._tg_send(("%s\n\n%s" % (head, part)) if i == 0 else part,
@@ -6157,14 +6167,53 @@ if (data !== null) {{
         monitor.connect("changed", self._on_tg_reply_dir_changed)
         self._tg_reply_monitor = monitor  # a dropped monitor stops firing
 
+    # How long a file has to stop changing before it counts as written.
+    _TG_SETTLE_MS = 600
+
     def _on_tg_reply_dir_changed(self, _mon, gfile, _other, event):
-        if event not in (Gio.FileMonitorEvent.CHANGES_DONE_HINT,
-                         Gio.FileMonitorEvent.CREATED,
-                         Gio.FileMonitorEvent.MOVED_IN):
+        if event in (Gio.FileMonitorEvent.DELETED,
+                     Gio.FileMonitorEvent.PRE_UNMOUNT,
+                     Gio.FileMonitorEvent.UNMOUNTED):
             return
         name = os.path.basename(gfile.get_path() or "")
         if name.endswith(".md"):
-            self._tg_deliver_reply(name[:-3])
+            self._tg_settle_watch(name[:-3])
+
+    def _tg_settle_watch(self, token):
+        """Start watching a file's size until it stops changing.
+
+        Not on the first sight of it. A file that has just appeared is
+        usually empty, and an agent writing a long answer is still
+        filling it; CHANGES_DONE_HINT is a hint by its own documentation
+        and arrives when the backend feels like it. Size that has stopped
+        moving is a fact this end can check.
+        """
+        pending = getattr(self, "_tg_settling", None)
+        if pending is None:
+            pending = self._tg_settling = {}
+        if token in pending:
+            return  # a tick is already running for it
+        pending[token] = -1
+        GLib.timeout_add(self._TG_SETTLE_MS, self._tg_settle_tick, token)
+
+    def _tg_settle_tick(self, token):
+        pending = getattr(self, "_tg_settling", None) or {}
+        waiting = getattr(self, "_tg_waiting", None) or {}
+        if token not in waiting:
+            # Answered by the status path, or the task is long gone.
+            pending.pop(token, None)
+            return False
+        try:
+            size = os.path.getsize(self._tg_reply_path(token))
+        except OSError:
+            pending.pop(token, None)
+            return False
+        if size > 0 and pending.get(token) == size:
+            pending.pop(token, None)
+            self._tg_deliver_reply(token)
+            return False
+        pending[token] = size
+        return True
 
     def _tg_name_dialog(self, row):
         """Turn Telegram tasks on for one tab, by giving it a short name.

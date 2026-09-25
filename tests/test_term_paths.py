@@ -1132,6 +1132,94 @@ class TestTelegramTaskText(unittest.TestCase):
                          "run it")
 
 
+class _ReplySink:
+    """Stands in for the window: records what it would have sent."""
+
+    _tg_deliver_reply = Tabit._tg_deliver_reply
+    _tg_reply_path = staticmethod(Tabit._tg_reply_path)
+    _tg_chunks = Tabit._tg_chunks
+    _TG_MSG_LIMIT = Tabit._TG_MSG_LIMIT
+    _TG_REPLY_PARTS = Tabit._TG_REPLY_PARTS
+
+    def __init__(self, waiting):
+        self._tg_waiting = waiting
+        self.sent = []
+
+    def _tg_send(self, text, markup=None, row_id=None, reply_to=None,
+                 after=None):
+        self.sent.append((text, reply_to))
+
+
+class TestTelegramDeliverReply(unittest.TestCase):
+    """An answer file is only taken away once it has something in it."""
+
+    JOB = {"row_id": "ab12cd", "msg_id": 802, "name": "acl"}
+
+    def _run(self, body, waiting=None):
+        old = tabit.TELEGRAM_REPLY_DIR
+        d = tempfile.mkdtemp()
+        tabit.TELEGRAM_REPLY_DIR = d
+        try:
+            path = Tabit._tg_reply_path("tok")
+            if body is not None:
+                with open(path, "w") as f:
+                    f.write(body)
+            sink = _ReplySink({"tok": dict(self.JOB)}
+                              if waiting is None else waiting)
+            got = sink._tg_deliver_reply("tok")
+            return got, sink, os.path.exists(path)
+        finally:
+            tabit.TELEGRAM_REPLY_DIR = old
+
+    def test_an_answer_is_sent_and_the_file_goes(self):
+        got, sink, still_there = self._run("all done\n")
+        self.assertTrue(got)
+        self.assertFalse(still_there)
+        self.assertIn("acl answered", sink.sent[0][0])
+        self.assertIn("all done", sink.sent[0][0])
+
+    def test_it_hangs_under_the_task_it_answers(self):
+        _got, sink, _s = self._run("all done")
+        self.assertEqual(sink.sent[0][1], 802)
+
+    def test_an_empty_file_is_left_alone(self):
+        # The agent has opened it and not written yet. Deleting it here
+        # takes the answer with it.
+        for body in ("", "   \n\n"):
+            got, sink, still_there = self._run(body)
+            self.assertFalse(got, repr(body))
+            self.assertTrue(still_there, repr(body))
+            self.assertEqual(sink.sent, [], repr(body))
+
+    def test_a_missing_file_is_not_an_error(self):
+        got, sink, _s = self._run(None)
+        self.assertFalse(got)
+        self.assertEqual(sink.sent, [])
+
+    def test_a_file_nobody_is_waiting_for_is_cleared_away(self):
+        got, sink, still_there = self._run("orphan", waiting={})
+        self.assertFalse(got)
+        self.assertFalse(still_there)
+        self.assertEqual(sink.sent, [])
+
+    def test_the_job_is_only_dropped_once_it_is_answered(self):
+        old = tabit.TELEGRAM_REPLY_DIR
+        d = tempfile.mkdtemp()
+        tabit.TELEGRAM_REPLY_DIR = d
+        try:
+            with open(Tabit._tg_reply_path("tok"), "w") as f:
+                f.write("")
+            sink = _ReplySink({"tok": dict(self.JOB)})
+            sink._tg_deliver_reply("tok")
+            self.assertIn("tok", sink._tg_waiting)   # still owed
+            with open(Tabit._tg_reply_path("tok"), "w") as f:
+                f.write("now it is written")
+            sink._tg_deliver_reply("tok")
+            self.assertNotIn("tok", sink._tg_waiting)
+        finally:
+            tabit.TELEGRAM_REPLY_DIR = old
+
+
 class TestTelegramChunks(unittest.TestCase):
     """A long answer has to fit through Telegram."""
 
