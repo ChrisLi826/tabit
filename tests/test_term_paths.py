@@ -972,6 +972,125 @@ class TestTelegramSecretsFile(unittest.TestCase):
         self._with_config(check)
 
 
+class TestTelegramAuth(unittest.TestCase):
+    """Only one chat, and only one person in it, may talk to tabit."""
+
+    def _msg(self, chat_id, from_id, kind="private"):
+        return {"chat": {"id": chat_id, "type": kind},
+                "from": {"id": from_id}}
+
+    def test_the_configured_private_chat_is_let_in(self):
+        self.assertTrue(Tabit._tg_auth_ok(self._msg(424242, 424242), "424242"))
+
+    def test_a_number_that_is_a_string_still_matches(self):
+        self.assertTrue(Tabit._tg_auth_ok(self._msg("424242", 424242), 424242))
+
+    def test_another_chat_is_refused(self):
+        self.assertFalse(Tabit._tg_auth_ok(self._msg(999, 999), "424242"))
+
+    def test_someone_else_in_the_right_chat_is_refused(self):
+        # A chat id says where, not who.
+        self.assertFalse(Tabit._tg_auth_ok(self._msg(424242, 777), "424242"))
+
+    def test_a_group_is_refused_whatever_the_ids(self):
+        for kind in ("group", "supergroup", "channel"):
+            self.assertFalse(
+                Tabit._tg_auth_ok(self._msg(424242, 424242, kind), "424242"),
+                kind)
+
+    def test_no_chat_id_configured_lets_nobody_in(self):
+        for cid in ("", None, 0):
+            self.assertFalse(Tabit._tg_auth_ok(self._msg(1, 1), cid), repr(cid))
+
+    def test_a_message_missing_its_parts(self):
+        for msg in ({}, {"chat": {"type": "private"}}, {"from": {"id": 1}}):
+            self.assertFalse(Tabit._tg_auth_ok(msg, "424242"), msg)
+
+
+class TestTelegramPollGap(unittest.TestCase):
+    """A long poll that answers at once must not become a spin."""
+
+    def test_an_instant_answer_is_made_to_wait(self):
+        self.assertEqual(Tabit._tg_poll_gap(0), Tabit._TG_POLL_MIN)
+
+    def test_a_poll_that_really_blocked_waits_no_longer(self):
+        self.assertEqual(Tabit._tg_poll_gap(Tabit._TG_POLL_TIMEOUT), 0)
+
+    def test_it_makes_up_the_difference(self):
+        self.assertAlmostEqual(Tabit._tg_poll_gap(Tabit._TG_POLL_MIN - 0.5),
+                               0.5)
+
+    def test_a_clock_that_went_backwards_is_not_a_long_sleep(self):
+        self.assertEqual(Tabit._tg_poll_gap(-99), Tabit._TG_POLL_MIN)
+
+
+class TestTelegramCommand(unittest.TestCase):
+    """Reading the verb off a message."""
+
+    def test_a_plain_command(self):
+        self.assertEqual(Tabit._tg_command("/status"), "status")
+
+    def test_arguments_are_not_part_of_it(self):
+        self.assertEqual(Tabit._tg_command("/status now please"), "status")
+
+    def test_the_bot_name_is_stripped(self):
+        self.assertEqual(Tabit._tg_command("/status@tabitbot"), "status")
+
+    def test_case_and_space_do_not_matter(self):
+        self.assertEqual(Tabit._tg_command("  /STATUS  "), "status")
+
+    def test_ordinary_text_is_not_a_command(self):
+        for text in ("status", "", None, "   ", "hi /status"):
+            self.assertIsNone(Tabit._tg_command(text), repr(text))
+
+
+class TestTelegramQuoteLines(unittest.TestCase):
+    """What of a terminal screen is worth carrying to a phone."""
+
+    def test_it_takes_the_last_lines_with_words_in_them(self):
+        screen = "\n".join([
+            "old line", "", "  ", "╭──────────╮", "│          │",
+            "Found 3 failures.", "Analyse first, or rerun?", "", "> "])
+        self.assertEqual(
+            Tabit._tg_quote_lines(screen, want=2),
+            ["Found 3 failures.", "Analyse first, or rerun?"])
+
+    def test_order_is_kept(self):
+        out = Tabit._tg_quote_lines("a\nb\nc", want=3)
+        self.assertEqual(out, ["a", "b", "c"])
+
+    def test_an_empty_screen_gives_nothing(self):
+        for text in ("", None, "\n\n   \n", "--- ---\n===="):
+            self.assertEqual(Tabit._tg_quote_lines(text), [], repr(text))
+
+
+class TestTelegramBoard(unittest.TestCase):
+    """The overview puts the tabs that want you at the top."""
+
+    TABS = [("working", "b · two"), ("blocked", "a · one"),
+            ("idle", "c · three"), ("ready", "d · four"),
+            ("blocked", "a · aaa")]
+
+    def test_worst_news_first_then_by_name(self):
+        lines = Tabit._tg_board_lines(self.TABS)
+        self.assertEqual([l.split(None, 2)[2] for l in lines],
+                         ["a · aaa", "a · one", "d · four", "b · two",
+                          "c · three"])
+
+    def test_every_line_carries_its_glyph_and_state(self):
+        line = Tabit._tg_board_lines([("blocked", "x")])[0]
+        self.assertTrue(line.startswith("? blocked"))
+        self.assertTrue(line.endswith("x"))
+
+    def test_an_unknown_state_still_prints(self):
+        line = Tabit._tg_board_lines([("unknown", "x")])[0]
+        self.assertIn("unknown", line)
+        self.assertTrue(line.startswith("·"))
+
+    def test_no_ai_tabs_says_so(self):
+        self.assertEqual(Tabit._tg_board_lines([]), ["No AI tabs."])
+
+
 class _SessionSink:
     """Stands in for the window: a fixed set of tabs to look through."""
 

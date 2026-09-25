@@ -680,6 +680,9 @@ SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
 # rewritten on every settings save and is the file someone pastes
 # into a bug report. This one is written 0600 and never logged.
 TELEGRAM_FILE = os.path.join(CONFIG_DIR, "telegram.json")
+# Not a secret: which update we have read, and what we have already
+# said. Kept out of the 0600 file so it can be looked at.
+TELEGRAM_STATE_FILE = os.path.join(CONFIG_DIR, "telegram-state.json")
 AI_LAST_FILE = os.path.join(CONFIG_DIR, "ai_last.json")
 AI_CLIS_FILE = os.path.join(CONFIG_DIR, "ai_clis.json")
 COMMANDS_FILE = os.path.join(CONFIG_DIR, "commands.json")
@@ -1439,6 +1442,8 @@ DEFAULT_SETTINGS = {
     "ai_notify_urgency": "critical",  # critical | normal | low
     "telegram_enabled": False,   # also send the same news to a Telegram bot
     "telegram_when": "away",     # away | always
+    "telegram_reply": False,     # answer /status from the phone
+    "telegram_quote": False,     # put the agent's own last lines in it
     "ai_fresh_on_restore": False,  # restored AI tabs start fresh (no continue)
     "ai_use_tmux": True,           # +AI dialog: run inside tmux (can uncheck)
     "ai_claude_bypass": False,     # +AI: launch claude with --dangerously-skip-permissions
@@ -1750,6 +1755,7 @@ class Tabit(Gtk.Window):
         GLib.timeout_add_seconds(self._AGENT_POLL_SEC, self._poll_ai_agent_statuses)
         _tmux_apply_user_conf()
         GLib.idle_add(self._check_weekly_auto_update)
+        self._tg_start_listening()
         # Second launcher click writes tabit.raise — present this window
         GLib.timeout_add(400, self._poll_raise_request)
 
@@ -5859,23 +5865,212 @@ if (data !== null) {{
                                 cls._AGENT_NOTIFY.get(status, ""))
 
     @classmethod
+    def _tg_call(cls, token, method, params, timeout=None):
+        """One Bot API call. Returns (result, error line)."""
+        data = urllib.parse.urlencode(params).encode("utf-8")
+        req = urllib.request.Request(cls._tg_api_url(token, method), data=data)
+        try:
+            with urllib.request.urlopen(
+                    req, timeout=timeout or cls._TG_TIMEOUT) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:  # urllib raises a family of these
+            return None, cls._tg_error_text(exc)
+        if body.get("ok"):
+            return body.get("result"), None
+        return None, str(body.get("description") or "rejected")
+
+    @classmethod
     def _tg_post(cls, token, chat, text):
         """Send one message. None on success, else a line to show."""
-        data = urllib.parse.urlencode({
+        _res, err = cls._tg_call(token, "sendMessage", {
             "chat_id": chat,
             "text": text,
             "disable_web_page_preview": "true",
-        }).encode("utf-8")
-        req = urllib.request.Request(cls._tg_api_url(token, "sendMessage"),
-                                     data=data)
+        })
+        return err
+
+    # --- Telegram: listening ------------------------------------------
+
+    _TG_POLL_TIMEOUT = 30
+    # A long poll is supposed to block at the server for the whole
+    # timeout. Anything that answers at once -- a proxy in the way, an
+    # API that ignores the timeout -- turns this loop into a spin:
+    # measured against a stub that answered immediately, 15,716 calls in
+    # six seconds. This is the floor that cannot happen under.
+    _TG_POLL_MIN = 2
+    _TG_BOARD_GLYPH = {"blocked": "?", "ready": "\u2713", "working": "\u25b6",
+                       "idle": "\u23f8", "exited": "\u2715"}
+    _TG_BOARD_ORDER = {"blocked": 0, "ready": 1, "working": 2, "idle": 3}
+
+    @classmethod
+    def _tg_poll_gap(cls, spent):
+        """How long to wait after a poll that came back in `spent`."""
+        return max(0.0, cls._TG_POLL_MIN - max(0.0, spent))
+
+    @staticmethod
+    def _tg_load_state():
         try:
-            with urllib.request.urlopen(req, timeout=cls._TG_TIMEOUT) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-        except Exception as exc:  # urllib raises a family of these
-            return cls._tg_error_text(exc)
-        if body.get("ok"):
+            with open(TELEGRAM_STATE_FILE) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @classmethod
+    def _tg_save_state(cls, **kw):
+        cur = cls._tg_load_state()
+        cur.update(kw)
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(TELEGRAM_STATE_FILE, "w") as f:
+            json.dump(cur, f, indent=2)
+
+    @staticmethod
+    def _tg_auth_ok(msg, chat_id):
+        """Whether an update came from the one place allowed to talk.
+
+        Both halves are checked. A chat id says where, not who, and the
+        two are only the same number while this is a 1:1 chat -- which is
+        why anything else is refused outright rather than filtered.
+        """
+        chat = msg.get("chat") or {}
+        frm = msg.get("from") or {}
+        if chat.get("type") != "private":
+            return False
+        if not chat_id:
+            return False
+        return (str(chat.get("id")) == str(chat_id)
+                and str(frm.get("id")) == str(chat_id))
+
+    @staticmethod
+    def _tg_command(text):
+        """The verb of a bot command, or None.
+
+        Telegram sticks @botname on a command typed where more than one
+        bot can hear it; a message forwarded from such a chat keeps it.
+        """
+        head = (text or "").strip().split(None, 1)[:1]
+        if not head or not head[0].startswith("/"):
             return None
-        return str(body.get("description") or "rejected")
+        return head[0][1:].split("@", 1)[0].lower()
+
+    @staticmethod
+    def _tg_quote_lines(text, want=6):
+        """The last few lines the agent actually printed.
+
+        Most of a TUI screen is blank space and box drawing. What is
+        worth carrying to a phone is the last handful of lines that have
+        words in them.
+        """
+        out = []
+        for line in reversed((text or "").splitlines()):
+            stripped = line.strip()
+            if not stripped or not any(c.isalnum() for c in stripped):
+                continue
+            out.append(stripped)
+            if len(out) >= want:
+                break
+        out.reverse()
+        return out
+
+    @classmethod
+    def _tg_board_lines(cls, tabs):
+        """The overview body: worst news first, then by name.
+
+        `tabs` is (status, title) pairs, so the sorting and the wording
+        can be checked without a window.
+        """
+        if not tabs:
+            return ["No AI tabs."]
+        ranked = sorted(
+            tabs, key=lambda t: (cls._TG_BOARD_ORDER.get(t[0], 4), t[1]))
+        return ["%s %-7s %s" % (cls._TG_BOARD_GLYPH.get(st, "\u00b7"),
+                                st, title) for st, title in ranked]
+
+    def _tg_tabs(self):
+        """Every AI tab as (status, title)."""
+        out = []
+        for row in self._session_rows():
+            if not _is_ai_icon(getattr(row, "icon_name", None)):
+                continue
+            status = ("exited" if getattr(row, "dead", False)
+                      else getattr(row, "agent_status", None) or "unknown")
+            out.append((status, self._agent_notify_title(
+                self._row_group_name(row), getattr(row, "title_text", None))))
+        return out
+
+    def _tg_board_text(self):
+        return "tabit \u00b7 %s\n%s" % (
+            time.strftime("%H:%M"), "\n".join(self._tg_board_lines(
+                self._tg_tabs())))
+
+    def _tg_push_text(self, row, title, status, conf):
+        """The push. The agent's own words come only if asked for."""
+        msg = self._tg_message(title, status)
+        if not conf.get("telegram_quote"):
+            return msg
+        lines = self._tg_quote_lines(
+            self._term_tail_text(getattr(row, "term", None), 12))
+        return msg + "\n\n" + "\n".join(lines) if lines else msg
+
+    def _tg_start_listening(self):
+        """One long-poll thread for the life of the app.
+
+        It re-reads the settings every time round, so turning the reply
+        side on or off takes effect without a restart.
+        """
+        if getattr(self, "_tg_poll_thread", None) is not None:
+            return
+        self._tg_poll_thread = threading.Thread(
+            target=self._tg_poll_worker, daemon=True)
+        self._tg_poll_thread.start()
+
+    def _tg_poll_worker(self):
+        wait = 5
+        while True:
+            conf = self._load_settings()
+            sec = self._tg_load_secrets()
+            token = sec.get("bot_token") or ""
+            chat = str(sec.get("chat_id") or "")
+            if not (conf.get("telegram_enabled") and conf.get("telegram_reply")
+                    and token and chat):
+                time.sleep(5)
+                continue
+            started = time.monotonic()
+            res, err = self._tg_call(
+                token, "getUpdates",
+                {"timeout": self._TG_POLL_TIMEOUT,
+                 "offset": self._tg_load_state().get("offset", 0),
+                 "allowed_updates": json.dumps(["message"])},
+                timeout=self._TG_POLL_TIMEOUT + 10)
+            if err is not None:
+                self._tg_last_error = err
+                time.sleep(wait)
+                wait = min(60, wait * 2)
+                continue
+            wait = 5
+            for upd in res or []:
+                # Written before the message is acted on, so a message
+                # that upsets us is lost rather than replayed for ever.
+                self._tg_save_state(offset=int(upd.get("update_id", 0)) + 1)
+                msg = upd.get("message") or {}
+                if not self._tg_auth_ok(msg, chat):
+                    continue
+                GLib.idle_add(self._tg_on_message, msg.get("text") or "")
+            time.sleep(self._tg_poll_gap(time.monotonic() - started))
+
+    _TG_HELP = ("/status \u2014 every AI tab and what it is doing\n"
+                "/help \u2014 this")
+
+    def _tg_on_message(self, text):
+        """Answer one message. Runs on the UI thread: GTK is not shared."""
+        cmd = self._tg_command(text)
+        if cmd in ("status", "home", "start"):
+            self._tg_send(self._tg_board_text())
+        elif cmd == "help":
+            self._tg_send(self._TG_HELP)
+        else:
+            self._tg_send("I can only read /status and /help so far.")
+        return False
 
     def _tg_send(self, text):
         """Queue one message. Never blocks the UI thread.
@@ -5928,7 +6123,7 @@ if (data !== null) {{
         # separate audience, and this is past the settle delay and the
         # re-read above, so a detection wobble never reaches it.
         if self._tg_should_send(conf, self.is_active(), status):
-            self._tg_send(self._tg_message(title, status))
+            self._tg_send(self._tg_push_text(row, title, status, conf))
         if not conf.get("ai_notify", True):
             return False
         level = self._notify_urgency_name(conf.get("ai_notify_urgency"))
@@ -11867,6 +12062,20 @@ if (data !== null) {{
             tg_when.append(wid, lab)
         tg_when.set_active_id(
             "always" if s.get("telegram_when") == "always" else "away")
+        tg_reply = Gtk.CheckButton(label="Answer /status from the phone")
+        tg_reply.set_active(bool(s.get("telegram_reply", False)))
+        tg_reply.set_tooltip_text(
+            "Read messages sent to the bot, and reply to /status with "
+            "every AI tab and what it is doing. Only your own 1:1 chat "
+            "is listened to. Nothing can be typed into a tab yet.")
+        tg_quote = Gtk.CheckButton(
+            label="Include the agent's last lines in the message")
+        tg_quote.set_active(bool(s.get("telegram_quote", False)))
+        tg_quote.set_tooltip_text(
+            "Without this a message says an agent wants you, but not what "
+            "it asked, so you cannot answer from the phone. With it, the "
+            "last few lines of that terminal travel through Telegram — "
+            "and a console can have secrets on it. Default is off.")
         tg_test = Gtk.Button(label="Send a test message")
         tg_result = Gtk.Label(xalign=0)
         tg_result.get_style_context().add_class("session-sub")
@@ -11898,8 +12107,10 @@ if (data !== null) {{
                                       ("Send:", tg_when))):
             tg_grid.attach(Gtk.Label(label=lab, xalign=0), 0, r, 1, 1)
             tg_grid.attach(w, 1, r, 1, 1)
-        tg_grid.attach(tg_test, 1, 3, 1, 1)
-        tg_grid.attach(tg_result, 1, 4, 1, 1)
+        tg_grid.attach(tg_reply, 1, 3, 1, 1)
+        tg_grid.attach(tg_quote, 1, 4, 1, 1)
+        tg_grid.attach(tg_test, 1, 5, 1, 1)
+        tg_grid.attach(tg_result, 1, 6, 1, 1)
 
         def on_tg_toggled(*_a):
             tg_grid.set_sensitive(tg_on.get_active())
@@ -11988,6 +12199,8 @@ if (data !== null) {{
                                      "telegram_enabled": tg_on.get_active(),
                                      "telegram_when":
                                          tg_when.get_active_id() or "away",
+                                     "telegram_reply": tg_reply.get_active(),
+                                     "telegram_quote": tg_quote.get_active(),
                                      "ui_font_size": ui_sz,
                                      "term_font": t_font,
                                      "term_font_size": t_sz,

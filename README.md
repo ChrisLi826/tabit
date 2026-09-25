@@ -116,6 +116,15 @@ pair before you rely on it. The token is kept in
 `~/.config/tabit/telegram.json`, mode `0600` — not in `settings.json`,
 which is the file you would paste into a bug report.
 
+Two more switches sit under it. **Answer /status from the phone** makes
+tabit read what you send the bot and reply to `/status` with every AI tab
+and what it is doing; only your own 1:1 chat is listened to, and nothing
+can be typed into a tab yet. **Include the agent's last lines in the
+message** puts the agent's own words in the push, because otherwise a
+message says an agent wants you but not what it asked — and you cannot
+answer from a phone without that. It is off by default: those lines
+travel through Telegram, and a console can have secrets on it.
+
 A blue dot on a tab means that session printed output while you were
 looking elsewhere. When a session's process ends (device unplugged,
 `exit`, picocom quit) the tab stays, greyed and marked `exited`, so
