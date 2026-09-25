@@ -137,9 +137,11 @@ does, so a prompt with line breaks in it is not submitted a line at a
 time, and exactly one Enter goes on the end. A button works once:
 pressing it again says so rather than running the task twice.
 
-**Getting the answer back.** A task sent from Telegram carries one extra
-line telling the agent where to write its reply, and tabit sends that
-file back as a reply to the task — so one task reads as one thread. The
+**Getting the answer back.** A task sent from Telegram carries a short
+footer telling the agent where to write its reply and to keep it to
+about ten lines with the result first — it is going to a phone, and an
+agent given no budget writes a report. tabit sends that file back as a
+reply to the task — so one task reads as one thread. The
 file is the good path: the last lines of a terminal are the last lines
 of a redraw, not an answer to anything. If the agent stops without
 writing one, tabit says so and falls back to the tail of the screen.

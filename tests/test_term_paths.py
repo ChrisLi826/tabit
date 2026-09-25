@@ -1127,6 +1127,14 @@ class TestTelegramTaskText(unittest.TestCase):
         b = Tabit._tg_task_text("x", "bbbbbbbb", True)
         self.assertNotEqual(a, b)
 
+    def test_it_asks_for_something_a_phone_can_read(self):
+        # An agent given no budget writes a report, and a report is four
+        # messages and a "cut here".
+        out = Tabit._tg_task_text("run the test", "ab12cd34", True)
+        self.assertIn(str(Tabit._TG_REPLY_LINES), out)
+        self.assertIn("phone", out)
+        self.assertIn("first line", out)
+
     def test_switched_off_the_task_goes_in_untouched(self):
         self.assertEqual(Tabit._tg_task_text("run it", "ab12cd34", False),
                          "run it")

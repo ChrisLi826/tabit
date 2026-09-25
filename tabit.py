@@ -6023,11 +6023,16 @@ if (data !== null) {{
     # on a line rather than mid-word.
     _TG_MSG_LIMIT = 3500
     _TG_REPLY_PARTS = 4
+    # What to ask for is a phone screen's worth. An agent given no budget
+    # writes a report, and a report is four messages and a "cut here".
+    _TG_REPLY_LINES = 10
     _TG_REPLY_ASK = (
         "\n\n---\n"
-        "This task came from Telegram. When you have finished, write your "
-        "answer to this file so it can be sent back:\n%s\n"
-        "Plain text or short Markdown. Keep it readable on a phone.")
+        "This task came from Telegram, so the answer is going to a phone. "
+        "When you have finished, write your reply to this file:\n%s\n"
+        "Keep it to about %d lines. Put the result in the first line. "
+        "Leave the detail here in the terminal instead \u2014 it is still "
+        "on screen.")
 
     @staticmethod
     def _tg_reply_path(token):
@@ -6038,7 +6043,8 @@ if (data !== null) {{
         """What actually gets typed in: the task, and where to answer."""
         if not ask:
             return text
-        return text + cls._TG_REPLY_ASK % cls._tg_reply_path(token)
+        return text + cls._TG_REPLY_ASK % (cls._tg_reply_path(token),
+                                           cls._TG_REPLY_LINES)
 
     @classmethod
     def _tg_chunks(cls, text):
