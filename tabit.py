@@ -6059,13 +6059,16 @@ if (data !== null) {{
     # What to ask for is a phone screen's worth. An agent given no budget
     # writes a report, and a report is four messages and a "cut here".
     _TG_REPLY_LINES = 10
+    # One line, in the first person, no rule above it. Measured with a
+    # real agent: a footer that announced itself ("This task came from
+    # Telegram") under a "---" read as instructions somebody else had
+    # slipped into the paste, and the agent stopped to ask whether to
+    # obey it instead of answering. Said as part of the request, it is
+    # just the request.
     _TG_REPLY_ASK = (
-        "\n\n---\n"
-        "This task came from Telegram, so the answer is going to a phone. "
-        "When you have finished, write your reply to this file:\n%s\n"
-        "Keep it to about %d lines. Put the result in the first line. "
-        "Leave the detail here in the terminal instead \u2014 it is still "
-        "on screen.")
+        "\n\nWrite your reply to %s (about %d lines, result first) "
+        "\u2014 I am reading it on my phone, so keep the detail in the "
+        "terminal.")
 
     @classmethod
     def _tg_short(cls, text):
@@ -6221,9 +6224,9 @@ if (data !== null) {{
             waiting.pop(token, None)
             self._tg_save_jobs()
             lines = self._tg_quote_lines(
-                self._term_tail_text(getattr(row, "term", None), 20), want=12)
+                self._term_tail_text(getattr(row, "term", None), 20), want=5)
             self._tg_send(
-                "%s stopped without writing an answer. Last of its screen:"
+                "%s finished without writing a reply. Last of its screen:"
                 "\n\n%s" % (job["name"], "\n".join(lines) or "(nothing)"),
                 row_id=rid, reply_to=job["msg_id"])
             return
@@ -6468,18 +6471,40 @@ if (data !== null) {{
             return None
         return head[0][1:].split("@", 1)[0].lower()
 
-    @staticmethod
-    def _tg_quote_lines(text, want=6):
+    # The furniture an agent CLI keeps on screen. None of it is an
+    # answer, and on a phone it is most of the message: measured on a
+    # real reply, four of the six lines sent were the status bar, the
+    # cost line, the user name and the permissions hint.
+    _TG_CHROME = re.compile(
+        r"bypass permissions"
+        r"|shift\+tab"
+        # The bar draws its separators with box characters, not pipes.
+        r"|\b(?:Opus|Sonnet|Haiku|GPT|Gemini|Grok)\b.*[|\u2502\u2503]"
+        r"|^\s*[\u2733*\u2726\u25c6]\s*\w+ for \d"
+        r"|^\s*\u2502?\s*(?:esc|ctrl|tab)\b.*(?:to|for)\b"
+        r"|reading it on my phone"
+        r"|^Write your reply to \S*tg-replies/",
+        re.IGNORECASE)
+
+    @classmethod
+    def _tg_quote_lines(cls, text, want=6):
         """The last few lines the agent actually printed.
 
-        Most of a TUI screen is blank space and box drawing. What is
-        worth carrying to a phone is the last handful of lines that have
-        words in them.
+        Most of a TUI screen is blank space, box drawing and the CLI's
+        own status bar. What is worth carrying to a phone is the last
+        handful of lines that say something -- and never the footer
+        tabit itself typed in, which comes back as an echo.
         """
         out = []
         for line in reversed((text or "").splitlines()):
             stripped = line.strip()
             if not stripped or not any(c.isalnum() for c in stripped):
+                continue
+            if cls._TG_CHROME.search(stripped):
+                continue
+            # The CLI prints who you are under the bar. On its own line
+            # it is furniture; inside a sentence it is not.
+            if stripped == GLib.get_user_name():
                 continue
             out.append(stripped)
             if len(out) >= want:
@@ -6886,7 +6911,12 @@ if (data !== null) {{
         # Before the desktop-popup gate on purpose: the phone is a
         # separate audience, and this is past the settle delay and the
         # re-read above, so a detection wobble never reaches it.
-        if self._tg_should_send(conf, self.is_active(), status):
+        # A task in flight answers itself, in its own thread, and says
+        # more than "Finished" does. Two messages for one event is how a
+        # phone stops being worth looking at.
+        owed = any(j["row_id"] == getattr(row, "tg_id", None)
+                   for j in self._tg_jobs().values())
+        if not owed and self._tg_should_send(conf, self.is_active(), status):
             # With the tab on it, swiping reply on the push answers the
             # agent. Without, the reply falls through to "which tab?" --
             # which is the whole point of the push, missed.

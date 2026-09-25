@@ -1202,7 +1202,16 @@ class TestTelegramTaskText(unittest.TestCase):
         out = Tabit._tg_task_text("run the test", "ab12cd34", True)
         self.assertIn(str(Tabit._TG_REPLY_LINES), out)
         self.assertIn("phone", out)
-        self.assertIn("first line", out)
+        self.assertIn("result first", out)
+
+    def test_it_reads_as_part_of_the_request(self):
+        # A footer that announces where it came from, under a rule,
+        # reads as instructions somebody slipped into the paste, and a
+        # real agent stopped to ask whether to obey it.
+        out = Tabit._tg_task_text("run the test", "ab12cd34", True)
+        self.assertNotIn("---", out)
+        self.assertNotIn("Telegram", out)
+        self.assertEqual(out.count("\n\n"), 1)
 
     def test_an_answer_is_not_a_task(self):
         # Replying "y" to "Allow Bash(rm -rf build/)?" must arrive as
@@ -1460,6 +1469,34 @@ class TestTelegramQuoteLines(unittest.TestCase):
     def test_an_empty_screen_gives_nothing(self):
         for text in ("", None, "\n\n   \n", "--- ---\n===="):
             self.assertEqual(Tabit._tg_quote_lines(text), [], repr(text))
+
+
+class TestTelegramQuoteChrome(unittest.TestCase):
+    """An agent CLI keeps furniture on screen. None of it is an answer."""
+
+    SCREEN = "\n".join([
+        "It is 3:56 PM.",
+        "\u2733 Crunched for 8s \u00b7 done 3:56 PM",
+        "\u25cf Opus 5.5 (1M context) \u2502 4% \u2502 $0.35 \u2502 328m57s",
+        "\u2b1b bypass permissions on (shift+tab to cycle) \u00b7 for agents",
+    ])
+
+    def test_only_the_line_that_says_something_survives(self):
+        self.assertEqual(Tabit._tg_quote_lines(self.SCREEN, want=6),
+                         ["It is 3:56 PM."])
+
+    def test_the_status_bar_uses_box_characters_not_pipes(self):
+        bar = "\u25cf Sonnet 5 (200k) \u2502 12% \u2502 $1.20"
+        self.assertEqual(Tabit._tg_quote_lines(bar), [])
+
+    def test_tabits_own_footer_does_not_come_back(self):
+        # It is typed in, so it is on the screen, so it would be quoted.
+        echo = Tabit._tg_task_text("do it", "ab12cd34", True)
+        self.assertEqual(Tabit._tg_quote_lines(echo, want=6), ["do it"])
+
+    def test_a_model_name_inside_a_sentence_is_kept(self):
+        line = "I used Opus to write the test and it passed."
+        self.assertEqual(Tabit._tg_quote_lines(line), [line])
 
 
 class TestTelegramBoard(unittest.TestCase):
