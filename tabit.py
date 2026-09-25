@@ -1727,6 +1727,10 @@ class Tabit(Gtk.Window):
                     r = self._add_session(s["label"], argv, s["icon"],
                                           s.get("sub"), s.get("cwd"),
                                           s.get("track_cwd", False))
+                if r is not None and s.get("tg"):
+                    r.tg_id = s["tg"]
+                if r is not None and s.get("tgname"):
+                    r.tg_name = s["tgname"]
                 color = s.get("color")
                 if color and r is not None:  # restore the tab-group stripe on the new row
                     self._apply_group(r, color)
@@ -1854,6 +1858,12 @@ class Tabit(Gtk.Window):
                 entry["color"] = r.group_color
             if getattr(r, "preview_on", False):
                 entry["preview"] = True
+            # Telegram addresses a tab by an id that outlives its name,
+            # and only tabs with a short name take tasks at all.
+            if getattr(r, "tg_id", None):
+                entry["tg"] = r.tg_id
+            if getattr(r, "tg_name", None):
+                entry["tgname"] = r.tg_name
             data.append(entry)
         os.makedirs(os.path.dirname(SESSIONS_FILE), exist_ok=True)
         with open(SESSIONS_FILE, "w") as f:
@@ -5889,6 +5899,167 @@ if (data !== null) {{
         })
         return err
 
+    # --- Telegram: which tab, and may it be typed into ------------------
+
+    # No l/1/0/o: these get read off a phone screen and typed back.
+    _TG_ID_ALPHABET = "abcdefghijkmnpqrstuvwxyz23456789"
+    _TG_NAME_MAX = 16
+
+    def _tg_row_id(self, row):
+        """A short id for a tab that outlives its name and a restart.
+
+        Buttons carry this, never the name: a tab renamed between the
+        message going out and the button being pressed must still be the
+        tab the message was about.
+        """
+        rid = getattr(row, "tg_id", None)
+        if rid:
+            return rid
+        taken = {getattr(r, "tg_id", None) for r in self._session_rows()}
+        while True:
+            rid = "".join(random.choice(self._TG_ID_ALPHABET)
+                          for _ in range(6))
+            if rid not in taken:
+                break
+        row.tg_id = rid
+        self._save_sessions_soon()
+        return rid
+
+    def _tg_row_by_id(self, rid):
+        if not rid:
+            return None
+        for row in self._session_rows():
+            if getattr(row, "tg_id", None) == rid:
+                return row
+        return None
+
+    def _tg_row_by_name(self, name):
+        if not name:
+            return None
+        for row in self._session_rows():
+            if getattr(row, "tg_name", None) == name:
+                return row
+        return None
+
+    @classmethod
+    def _tg_clean_name(cls, name):
+        """A usable short name, or None.
+
+        Lower case so what is typed on a phone -- which likes to
+        capitalise the first word of a line -- still matches.
+        """
+        text = (name or "").strip().lower()
+        if not text or len(text) > cls._TG_NAME_MAX:
+            return None
+        if any(c.isspace() for c in text):
+            return None
+        return text
+
+    def _tg_name_free(self, name, keep=None):
+        """Whether a short name is not already some other tab's."""
+        for row in self._session_rows():
+            if row is keep:
+                continue
+            if getattr(row, "tg_name", None) == name:
+                return False
+        return True
+
+    @staticmethod
+    def _tg_row_trouble(row):
+        """Why this tab cannot be typed into from a phone, or None.
+
+        Status is the honest test for "is the agent still there". The
+        process under an AI tab is a tmux client or a shell either way,
+        so its command line cannot tell the two apart.
+        """
+        if row is None:
+            return "that tab is gone"
+        if not _is_ai_icon(getattr(row, "icon_name", None)):
+            return "that is not an AI tab"
+        if getattr(row, "dead", False) or getattr(row, "term", None) is None:
+            return "that tab has exited"
+        if not getattr(row, "tg_name", None):
+            return "that tab does not take tasks from Telegram"
+        return None
+
+    def _tg_targets(self):
+        """Tabs a task may be sent to, as (id, short name, title)."""
+        out = []
+        for row in self._session_rows():
+            if self._tg_row_trouble(row) is not None:
+                continue
+            out.append((self._tg_row_id(row), row.tg_name,
+                        self._agent_notify_title(
+                            self._row_group_name(row),
+                            getattr(row, "title_text", None))))
+        return out
+
+    def _tg_inject(self, row, text):
+        """Type a task into a tab, the way a paste would arrive.
+
+        paste_text is what the paste menu uses: VTE wraps it in the
+        bracketed-paste markers when the program has asked for them, so a
+        prompt with line breaks in it lands as one paste instead of being
+        submitted a line at a time. The Enter is separate, and there is
+        exactly one -- two makes some programs run it twice.
+        """
+        row.term.paste_text(text)
+        row.term.feed_child(b"\r")
+
+    def _tg_name_dialog(self, row):
+        """Turn Telegram tasks on for one tab, by giving it a short name.
+
+        The name is the switch. A tab without one is not offered on the
+        phone and is refused if something tries anyway, so there is one
+        place to look for "can this be typed into from outside".
+        """
+        dialog = Gtk.Dialog(title="Telegram tasks", transient_for=self,
+                            modal=True)
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                           "Save", Gtk.ResponseType.OK)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6,
+                      margin=12)
+        box.pack_start(Gtk.Label(
+            label="A short name for this tab on your phone.", xalign=0),
+            False, False, 0)
+        entry = Gtk.Entry(text=getattr(row, "tg_name", None) or "",
+                          width_chars=20)
+        entry.set_placeholder_text("acl")
+        box.pack_start(entry, False, False, 0)
+        warn = Gtk.Label(xalign=0)
+        warn.get_style_context().add_class("session-sub")
+        warn.set_line_wrap(True)
+        warn.set_max_width_chars(46)
+        warn.set_text(
+            "With a name, anything you send this tab from Telegram is "
+            "typed straight into it and run. Leave it empty to turn that "
+            "off again.")
+        box.pack_start(warn, False, False, 0)
+        dialog.get_content_area().add(box)
+        self._dialog_enter_is_ok(dialog)
+        dialog.show_all()
+        while True:
+            if dialog.run() != Gtk.ResponseType.OK:
+                break
+            raw = entry.get_text().strip()
+            if not raw:
+                row.tg_name = None
+                self._save_sessions_soon()
+                break
+            name = self._tg_clean_name(raw)
+            if name is None:
+                warn.set_text("One word, %d characters at most."
+                              % self._TG_NAME_MAX)
+                continue
+            if not self._tg_name_free(name, keep=row):
+                warn.set_text("Another tab is already called %s." % name)
+                continue
+            row.tg_name = name
+            self._tg_row_id(row)
+            self._save_sessions_soon()
+            break
+        dialog.destroy()
+
     # --- Telegram: listening ------------------------------------------
 
     _TG_POLL_TIMEOUT = 30
@@ -5924,6 +6095,27 @@ if (data !== null) {{
         with open(TELEGRAM_STATE_FILE, "w") as f:
             json.dump(cur, f, indent=2)
 
+    _TG_MSG_MEMORY = 200
+
+    def _tg_remember_msg(self, msg_id, row_id):
+        """Tie a message to a tab, so a reply to it needs no address."""
+        if not msg_id or not row_id:
+            return
+        seen = getattr(self, "_tg_msg_row", None)
+        if seen is None:
+            seen = self._tg_msg_row = {}
+        seen[str(msg_id)] = row_id
+        # Bounded: a chat is a log, and only the recent end of it gets
+        # replied to. Oldest first, which is insertion order here.
+        while len(seen) > self._TG_MSG_MEMORY:
+            seen.pop(next(iter(seen)))
+
+    def _tg_replied_row_id(self, msg):
+        """The tab a replied-to message was about, or None."""
+        parent = (msg or {}).get("reply_to_message") or {}
+        return getattr(self, "_tg_msg_row", {}).get(
+            str(parent.get("message_id")))
+
     @staticmethod
     def _tg_auth_ok(msg, chat_id):
         """Whether an update came from the one place allowed to talk.
@@ -5932,8 +6124,8 @@ if (data !== null) {{
         two are only the same number while this is a 1:1 chat -- which is
         why anything else is refused outright rather than filtered.
         """
-        chat = msg.get("chat") or {}
-        frm = msg.get("from") or {}
+        chat = (msg or {}).get("chat") or {}
+        frm = (msg or {}).get("from") or {}
         if chat.get("type") != "private":
             return False
         if not chat_id:
@@ -5985,6 +6177,14 @@ if (data !== null) {{
             tabs, key=lambda t: (cls._TG_BOARD_ORDER.get(t[0], 4), t[1]))
         return ["%s %-7s %s" % (cls._TG_BOARD_GLYPH.get(st, "\u00b7"),
                                 st, title) for st, title in ranked]
+
+    def _tg_board_text_full(self):
+        """The overview, plus the short names a task can be aimed at."""
+        text = self._tg_board_text()
+        names = ["%s \u00b7 %s" % (n, t) for _i, n, t in self._tg_targets()]
+        if names:
+            text += "\n\nTakes tasks:\n" + "\n".join(names)
+        return text
 
     def _tg_tabs(self):
         """Every AI tab as (status, title)."""
@@ -6040,7 +6240,8 @@ if (data !== null) {{
                 token, "getUpdates",
                 {"timeout": self._TG_POLL_TIMEOUT,
                  "offset": self._tg_load_state().get("offset", 0),
-                 "allowed_updates": json.dumps(["message"])},
+                 "allowed_updates": json.dumps(["message",
+                                                "callback_query"])},
                 timeout=self._TG_POLL_TIMEOUT + 10)
             if err is not None:
                 self._tg_last_error = err
@@ -6052,31 +6253,149 @@ if (data !== null) {{
                 # Written before the message is acted on, so a message
                 # that upsets us is lost rather than replayed for ever.
                 self._tg_save_state(offset=int(upd.get("update_id", 0)) + 1)
+                cb = upd.get("callback_query")
+                if cb:
+                    # A press carries its own sender and the chat the
+                    # message sits in, so the same test fits both.
+                    stand_in = {"chat": (cb.get("message") or {}).get("chat"),
+                                "from": cb.get("from")}
+                    if self._tg_auth_ok(stand_in, chat):
+                        GLib.idle_add(self._tg_on_callback, cb.get("id"),
+                                      cb.get("data") or "")
+                    continue
                 msg = upd.get("message") or {}
                 if not self._tg_auth_ok(msg, chat):
                     continue
-                GLib.idle_add(self._tg_on_message, msg.get("text") or "")
+                GLib.idle_add(self._tg_on_message, msg)
             time.sleep(self._tg_poll_gap(time.monotonic() - started))
 
-    _TG_HELP = ("/status \u2014 every AI tab and what it is doing\n"
-                "/help \u2014 this")
+    _TG_HELP = (
+        "Write the task, send it, then tap the tab to send it to.\n"
+        "Reply to one of my messages and it goes straight to that tab.\n"
+        "Put a tab's short name on the first line to pick it up front.\n\n"
+        "/status \u2014 every AI tab and what it is doing\n"
+        "/help \u2014 this")
 
-    def _tg_on_message(self, text):
+    @staticmethod
+    def _tg_draft_token():
+        return "%08x" % random.getrandbits(32)
+
+    @staticmethod
+    def _tg_keyboard(token, targets):
+        """One row per tab, then Cancel.
+
+        callback_data holds the draft token and the tab id and nothing
+        else: it has 64 bytes to live in, and the task text belongs in
+        tabit where it cannot be replayed by a stale button.
+        """
+        keys = [[{"text": "Send to %s \u00b7 %s" % (name, title),
+                  "callback_data": "s:%s:%s" % (token, rid)}]
+                for rid, name, title in targets]
+        keys.append([{"text": "Cancel", "callback_data": "x:%s" % token}])
+        return {"inline_keyboard": keys}
+
+    def _tg_hold(self, text, row_id=None):
+        """Park a task until a button says where it goes."""
+        drafts = getattr(self, "_tg_drafts", None)
+        if drafts is None:
+            drafts = self._tg_drafts = {}
+        token = self._tg_draft_token()
+        drafts[token] = {"text": text, "row_id": row_id}
+        # A draft each: two tasks in flight must not share a target.
+        while len(drafts) > 20:
+            drafts.pop(next(iter(drafts)))
+        return token
+
+    def _tg_confirm_text(self, text, targets):
+        head = ("Where should this go? Not sent yet."
+                if len(targets) != 1 else
+                "Send to %s \u00b7 %s?" % (targets[0][1], targets[0][2]))
+        return "%s\n\n%s\n\nOne Enter goes on the end." % (head, text)
+
+    def _tg_send_task(self, row, text):
+        """Type a task in and say so. Returns the trouble, or None."""
+        bad = self._tg_row_trouble(row)
+        if bad is not None:
+            return bad
+        self._tg_inject(row, text)
+        self._tg_send("Sent to %s \u00b7 %s\n\n%s" % (
+            row.tg_name, self._agent_notify_title(
+                self._row_group_name(row), getattr(row, "title_text", None)),
+            text), row_id=self._tg_row_id(row))
+        return None
+
+    def _tg_on_message(self, msg):
         """Answer one message. Runs on the UI thread: GTK is not shared."""
+        text = (msg.get("text") or "").strip()
         cmd = self._tg_command(text)
         if cmd in ("status", "home", "start"):
-            self._tg_send(self._tg_board_text())
-        elif cmd == "help":
+            self._tg_send(self._tg_board_text_full())
+            return False
+        if cmd == "help" or cmd is not None:
             self._tg_send(self._TG_HELP)
-        else:
-            self._tg_send("I can only read /status and /help so far.")
+            return False
+        if not text:
+            return False
+
+        # A reply names its tab, so it is already addressed: send it.
+        rid = self._tg_replied_row_id(msg)
+        if rid:
+            bad = self._tg_send_task(self._tg_row_by_id(rid), text)
+            if bad:
+                self._tg_send("Not sent \u2014 %s." % bad)
+            return False
+
+        targets = self._tg_targets()
+        if not targets:
+            self._tg_send("No tab takes tasks from Telegram yet. Turn one "
+                          "on in tabit: right-click the tab \u2192 "
+                          "Telegram tasks\u2026")
+            return False
+
+        # A short name on its own first line narrows it to one button.
+        # It never sends on its own: the tap is the submit, always.
+        lines = text.split("\n")
+        named = (self._tg_row_by_name(self._tg_clean_name(lines[0]))
+                 if len(lines) > 1 else None)
+        if named is not None and self._tg_row_trouble(named) is None:
+            body = "\n".join(lines[1:]).strip()
+            if body:
+                text, targets = body, [t for t in targets
+                                       if t[0] == self._tg_row_id(named)]
+
+        token = self._tg_hold(text)
+        self._tg_send(self._tg_confirm_text(text, targets),
+                      markup=self._tg_keyboard(token, targets))
         return False
 
-    def _tg_send(self, text):
-        """Queue one message. Never blocks the UI thread.
+    def _tg_on_callback(self, cb_id, data):
+        kind, _sep, rest = (data or "").partition(":")
+        drafts = getattr(self, "_tg_drafts", None) or {}
+        if kind == "x":
+            drafts.pop(rest, None)
+            self._tg_answer(cb_id, "Cancelled")
+            return False
+        if kind != "s":
+            self._tg_answer(cb_id)
+            return False
+        token, _sep, rid = rest.partition(":")
+        # Popped before anything is typed: Telegram redelivers an update
+        # it thinks we missed, and a task must not arrive twice.
+        draft = drafts.pop(token, None)
+        if draft is None:
+            self._tg_answer(cb_id, "Already sent, or too old")
+            return False
+        bad = self._tg_send_task(self._tg_row_by_id(rid), draft["text"])
+        self._tg_answer(cb_id, bad and ("Not sent \u2014 %s" % bad) or "Sent")
+        if bad:
+            self._tg_send("Not sent \u2014 %s." % bad)
+        return False
 
-        One worker for the whole queue rather than a thread per message:
-        a network that has gone quiet would otherwise pile threads up at
+    def _tg_enqueue(self, method, params, row_id=None):
+        """Queue one Bot API call. Never blocks the UI thread.
+
+        One worker for the whole queue rather than a thread per call: a
+        network that has gone quiet would otherwise pile threads up at
         one per agent that stops.
         """
         q = getattr(self, "_tg_queue", None)
@@ -6084,10 +6403,24 @@ if (data !== null) {{
             q = self._tg_queue = queue.Queue()
             threading.Thread(target=self._tg_worker, args=(q,),
                              daemon=True).start()
-        q.put(text)
+        q.put((method, params, row_id))
+
+    def _tg_send(self, text, markup=None, row_id=None):
+        """Say something. `row_id` marks the message as being about that
+        tab, so a reply to it needs no address."""
+        params = {"text": text, "disable_web_page_preview": "true"}
+        if markup is not None:
+            params["reply_markup"] = json.dumps(markup)
+        self._tg_enqueue("sendMessage", params, row_id)
+
+    def _tg_answer(self, cb_id, text=""):
+        """Take the spinner off a button. Telegram leaves it turning
+        until the bot says it got the press."""
+        self._tg_enqueue("answerCallbackQuery",
+                         {"callback_query_id": cb_id, "text": text})
 
     def _tg_worker(self, q):
-        """Send queued messages until the app quits.
+        """Send queued calls until the app quits.
 
         A failure is kept for the settings page and nothing more. The
         sidebar and the popup are the record of what happened; this is a
@@ -6095,14 +6428,19 @@ if (data !== null) {{
         anything over.
         """
         while True:
-            text = q.get()
+            method, params, row_id = q.get()
             sec = self._tg_load_secrets()
             token = sec.get("bot_token") or ""
             chat = str(sec.get("chat_id") or "")
             if not token or not chat:
                 self._tg_last_error = "No bot token or chat id set"
                 continue
-            self._tg_last_error = self._tg_post(token, chat, text)
+            if method == "sendMessage":
+                params = dict(params, chat_id=chat)
+            res, err = self._tg_call(token, method, params)
+            self._tg_last_error = err
+            if res and row_id:
+                self._tg_remember_msg(res.get("message_id"), row_id)
 
     def _agent_notify_fire(self, row, status):
         """The delay is up: notify, unless the reason has gone away."""
@@ -8122,6 +8460,14 @@ if (data !== null) {{
                         swap.connect(
                             "activate", lambda *_: self._swap_panes())
                         menu.append(swap)
+                if _is_ai_icon(getattr(row, "icon_name", None)):
+                    tg_it = Gtk.MenuItem(
+                        label="Telegram tasks…"
+                        if not getattr(row, "tg_name", None)
+                        else "Telegram tasks: %s…" % row.tg_name)
+                    tg_it.connect("activate",
+                                  lambda *_, r=row: self._tg_name_dialog(r))
+                    menu.append(tg_it)
                 group_item = Gtk.MenuItem(label="Group color")
                 submenu = Gtk.Menu()
                 used_colors = {getattr(r, "group_color", None) for r in self._session_rows()

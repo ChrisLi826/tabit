@@ -972,6 +972,117 @@ class TestTelegramSecretsFile(unittest.TestCase):
         self._with_config(check)
 
 
+class _TgRow:
+    def __init__(self, name=None, rid=None, icon=tabit.ICON_AI,
+                 dead=False, term=object(), title="t", group=None):
+        self.tg_name = name
+        self.tg_id = rid
+        self.icon_name = icon
+        self.dead = dead
+        self.term = term
+        self.title_text = title
+        self.group_color = group
+
+
+class TestTelegramRowTrouble(unittest.TestCase):
+    """Which tabs a phone may type into, and why not."""
+
+    def test_a_named_live_ai_tab_is_fine(self):
+        self.assertIsNone(Tabit._tg_row_trouble(_TgRow(name="acl")))
+
+    def test_a_tab_with_no_short_name_is_off(self):
+        # The name is the switch, so this is the common "not enabled".
+        self.assertIn("does not take tasks",
+                      Tabit._tg_row_trouble(_TgRow()))
+
+    def test_a_shell_is_refused_even_if_named(self):
+        self.assertIn("not an AI tab", Tabit._tg_row_trouble(
+            _TgRow(name="acl", icon="utilities-terminal")))
+
+    def test_an_exited_tab_is_refused(self):
+        self.assertIn("exited",
+                      Tabit._tg_row_trouble(_TgRow(name="acl", dead=True)))
+
+    def test_a_tab_with_no_terminal_is_refused(self):
+        self.assertIn("exited",
+                      Tabit._tg_row_trouble(_TgRow(name="acl", term=None)))
+
+    def test_nothing_at_all(self):
+        self.assertIn("gone", Tabit._tg_row_trouble(None))
+
+
+class TestTelegramShortName(unittest.TestCase):
+    """The name typed on a phone has to match what was set on the desk."""
+
+    def test_a_plain_name(self):
+        self.assertEqual(Tabit._tg_clean_name("acl"), "acl")
+
+    def test_a_phone_capitalising_the_line_still_matches(self):
+        self.assertEqual(Tabit._tg_clean_name("Acl"), "acl")
+
+    def test_surrounding_space_goes(self):
+        self.assertEqual(Tabit._tg_clean_name("  acl \n"), "acl")
+
+    def test_a_name_with_a_space_in_it_is_not_one(self):
+        self.assertIsNone(Tabit._tg_clean_name("acl test"))
+
+    def test_too_long_is_not_one(self):
+        self.assertIsNone(Tabit._tg_clean_name("x" * 17))
+        self.assertEqual(Tabit._tg_clean_name("x" * 16), "x" * 16)
+
+    def test_nothing_is_not_one(self):
+        for raw in ("", "   ", None):
+            self.assertIsNone(Tabit._tg_clean_name(raw), repr(raw))
+
+
+class TestTelegramKeyboard(unittest.TestCase):
+    """Buttons carry a token and a tab id, and must fit in 64 bytes."""
+
+    T = [("ab12cd", "acl", "QCA2ECW536 · [claude] ACL 6K test"),
+         ("ef34gh", "build", "Router SDK · build")]
+
+    def test_one_row_per_tab_then_cancel(self):
+        kb = Tabit._tg_keyboard("deadbeef", self.T)["inline_keyboard"]
+        self.assertEqual(len(kb), 3)
+        self.assertEqual(kb[-1][0]["text"], "Cancel")
+
+    def test_a_button_says_where_it_sends(self):
+        kb = Tabit._tg_keyboard("deadbeef", self.T)["inline_keyboard"]
+        self.assertTrue(kb[0][0]["text"].startswith("Send to acl · "))
+
+    def test_callback_data_holds_no_task_text(self):
+        kb = Tabit._tg_keyboard("deadbeef", self.T)["inline_keyboard"]
+        self.assertEqual(kb[0][0]["callback_data"], "s:deadbeef:ab12cd")
+        self.assertEqual(kb[-1][0]["callback_data"], "x:deadbeef")
+
+    def test_every_callback_data_fits_telegram(self):
+        long_t = [("x" * 6, "y" * 16, "z" * 80)] * 3
+        for row in Tabit._tg_keyboard("deadbeef", long_t)["inline_keyboard"]:
+            self.assertLessEqual(
+                len(row[0]["callback_data"].encode("utf-8")), 64)
+
+
+class TestTelegramConfirmText(unittest.TestCase):
+    """What the confirmation says before anything is typed."""
+
+    ONE = [("ab12cd", "acl", "QCA2ECW536 · ACL 6K test")]
+    TWO = ONE + [("ef34gh", "build", "Router SDK · build")]
+
+    def test_one_target_names_it(self):
+        out = Tabit._tg_confirm_text(None, "run it", self.ONE)
+        self.assertTrue(out.startswith("Send to acl · QCA2ECW536"))
+
+    def test_several_targets_ask(self):
+        out = Tabit._tg_confirm_text(None, "run it", self.TWO)
+        self.assertTrue(out.startswith("Where should this go?"))
+        self.assertIn("Not sent yet", out)
+
+    def test_it_quotes_the_task_and_warns_about_the_enter(self):
+        out = Tabit._tg_confirm_text(None, "run it", self.ONE)
+        self.assertIn("run it", out)
+        self.assertIn("One Enter", out)
+
+
 class TestTelegramAuth(unittest.TestCase):
     """Only one chat, and only one person in it, may talk to tabit."""
 

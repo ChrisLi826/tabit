@@ -125,6 +125,18 @@ message says an agent wants you but not what it asked — and you cannot
 answer from a phone without that. It is off by default: those lines
 travel through Telegram, and a console can have secrets on it.
 
+**Sending a task back.** Right-click an AI tab → **Telegram tasks…** and
+give it a short name. That name is the switch: a tab without one is not
+offered on the phone and is refused if anything tries. With one, write
+the task in Telegram, send it, and tap the tab to send it to — the tap
+is the submit, and a plain message never goes anywhere on its own.
+**Replying** to one of tabit's messages skips the tap, because the reply
+already says which tab. Putting a tab's short name on the first line
+narrows the buttons to that one tab. The task arrives the way a paste
+does, so a prompt with line breaks in it is not submitted a line at a
+time, and exactly one Enter goes on the end. A button works once:
+pressing it again says so rather than running the task twice.
+
 A blue dot on a tab means that session printed output while you were
 looking elsewhere. When a session's process ends (device unplugged,
 `exit`, picocom quit) the tab stays, greyed and marked `exited`, so
