@@ -11876,8 +11876,6 @@ if (data !== null) {{
         orig_font = s.get("term_font", "Monospace")
         orig_sz = s.get("term_font_size", 12)
 
-        app_head = Gtk.Label(xalign=0)
-        app_head.set_markup("<b>Appearance</b>")
         theme_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         theme_lbl = Gtk.Label(label="Color theme template:", xalign=0)
         theme_combo = Gtk.ComboBoxText()
@@ -11950,15 +11948,11 @@ if (data !== null) {{
         term_spacing_box.pack_start(term_spacing_lbl, False, False, 0)
         term_spacing_box.pack_start(term_spacing_spin, False, False, 0)
 
-        head = Gtk.Label(xalign=0)
-        head.set_markup("<b>Notes</b>")
         wrap = Gtk.CheckButton(label="Word wrap notes (recommended)")
         wrap.set_active(bool(s.get("note_wrap", True)))
         wrap.set_tooltip_text(
             "When off, very long lines may lag. Default is on.")
 
-        term_head = Gtk.Label(xalign=0)
-        term_head.set_markup("<b>Terminals</b>")
         inherit = Gtk.CheckButton(
             label="New terminal / AI opens in the current tab's path")
         inherit.set_active(bool(s.get("shell_inherit_cwd", False)))
@@ -11966,8 +11960,6 @@ if (data !== null) {{
             "+ Terminal (Ctrl+Shift+T) and + AI start in the focused "
             "tab's working directory instead of home. Default is off.")
 
-        layout_head = Gtk.Label(xalign=0)
-        layout_head.set_markup("<b>Layout</b>")
         side_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         side_lbl = Gtk.Label(label="Tab list position:", xalign=0)
         side_combo = Gtk.ComboBoxText()
@@ -11994,8 +11986,6 @@ if (data !== null) {{
         side_box.pack_start(side_lbl, False, False, 0)
         side_box.pack_start(side_combo, True, True, 0)
 
-        ai_head = Gtk.Label(xalign=0)
-        ai_head.set_markup("<b>AI</b>")
         ai_fresh = Gtk.CheckButton(
             label="Start AI tabs fresh after reopening (no continue/resume)")
         ai_fresh.set_active(bool(s.get("ai_fresh_on_restore", False)))
@@ -12150,28 +12140,41 @@ if (data !== null) {{
             label="Stored in ~/.config/tabit/settings.json",
             xalign=0)
         hint.get_style_context().add_class("session-sub")
-        box.pack_start(ver_box, False, False, 0)
-        box.pack_start(app_head, False, False, 0)
-        box.pack_start(theme_box, False, False, 0)
-        box.pack_start(ui_font_box, False, False, 0)
-        box.pack_start(term_font_box, False, False, 0)
-        box.pack_start(term_size_box, False, False, 0)
-        box.pack_start(term_spacing_box, False, False, 0)
-        box.pack_start(demo_frame, False, False, 0)
-        box.pack_start(head, False, False, 0)
-        box.pack_start(wrap, False, False, 0)
-        box.pack_start(term_head, False, False, 0)
-        box.pack_start(inherit, False, False, 0)
-        box.pack_start(layout_head, False, False, 0)
-        box.pack_start(side_box, False, False, 0)
-        box.pack_start(ai_head, False, False, 0)
-        box.pack_start(ai_fresh, False, False, 0)
-        box.pack_start(ai_tmux, False, False, 0)
-        box.pack_start(ai_notify, False, False, 0)
-        box.pack_start(urg_box, False, False, 0)
-        box.pack_start(tg_on, False, False, 0)
-        box.pack_start(tg_grid, False, False, 0)
-        box.pack_start(ai_bypass, False, False, 0)
+        # One page per group instead of one long column. The dialog had
+        # grown past a thousand pixels, which is taller than the window
+        # it settles on some screens; a notebook puts every page at the
+        # height of the tallest one. The section headings come out with
+        # it -- the tab already says what the page is.
+        notebook = Gtk.Notebook()
+        pages = (
+            ("Appearance", (theme_box, ui_font_box, term_font_box,
+                            term_size_box, term_spacing_box, demo_frame,
+                            side_box)),
+            ("Sessions", (wrap, inherit)),
+            ("AI", (ai_fresh, ai_tmux, ai_notify, urg_box, ai_bypass)),
+            ("Telegram", (tg_on, tg_grid)),
+            ("About", (ver_box,)),
+        )
+        for name, widgets in pages:
+            page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                           margin=10)
+            for w in widgets:
+                page.pack_start(w, False, False, 0)
+            notebook.append_page(page, Gtk.Label(label=name))
+
+        # The footer used to sit under one long column where it was true
+        # of everything above it. Under a page it has to say where that
+        # page's answers go, and the bot token is the one that does not
+        # go to settings.json.
+        def on_settings_page(_nb, _page, num):
+            hint.set_text(
+                "Switches here go to ~/.config/tabit/settings.json; the "
+                "bot token to ~/.config/tabit/telegram.json (owner only)"
+                if pages[num][0] == "Telegram"
+                else "Stored in ~/.config/tabit/settings.json")
+
+        notebook.connect("switch-page", on_settings_page)
+        box.pack_start(notebook, True, True, 0)
         box.pack_start(hint, False, False, 0)
         update_preview()
 
