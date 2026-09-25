@@ -683,6 +683,10 @@ TELEGRAM_FILE = os.path.join(CONFIG_DIR, "telegram.json")
 # Not a secret: which update we have read, and what we have already
 # said. Kept out of the 0600 file so it can be looked at.
 TELEGRAM_STATE_FILE = os.path.join(CONFIG_DIR, "telegram-state.json")
+# Where an agent writes the answer to a task that came from a phone.
+# A file, because the last lines of a terminal are the last lines of
+# a redraw, not the answer to anything.
+TELEGRAM_REPLY_DIR = os.path.join(CONFIG_DIR, "tg-replies")
 AI_LAST_FILE = os.path.join(CONFIG_DIR, "ai_last.json")
 AI_CLIS_FILE = os.path.join(CONFIG_DIR, "ai_clis.json")
 COMMANDS_FILE = os.path.join(CONFIG_DIR, "commands.json")
@@ -1444,6 +1448,7 @@ DEFAULT_SETTINGS = {
     "telegram_when": "away",     # away | always
     "telegram_reply": False,     # answer /status from the phone
     "telegram_quote": False,     # put the agent's own last lines in it
+    "telegram_ask_file": True,   # a task asks the agent to write its answer
     "ai_fresh_on_restore": False,  # restored AI tabs start fresh (no continue)
     "ai_use_tmux": True,           # +AI dialog: run inside tmux (can uncheck)
     "ai_claude_bypass": False,     # +AI: launch claude with --dangerously-skip-permissions
@@ -1729,7 +1734,12 @@ class Tabit(Gtk.Window):
                                           s.get("track_cwd", False))
                 if r is not None and s.get("tg"):
                     r.tg_id = s["tg"]
-                if r is not None and s.get("tgname"):
+                # A short name is an address. The dialog will not hand
+                # out a duplicate, but a hand-edited or hand-copied
+                # sessions.json can, and then a task typed on a phone
+                # goes to whichever tab was restored first.
+                if (r is not None and s.get("tgname")
+                        and self._tg_name_free(s["tgname"], keep=r)):
                     r.tg_name = s["tgname"]
                 color = s.get("color")
                 if color and r is not None:  # restore the tab-group stripe on the new row
@@ -1760,6 +1770,7 @@ class Tabit(Gtk.Window):
         _tmux_apply_user_conf()
         GLib.idle_add(self._check_weekly_auto_update)
         self._tg_start_listening()
+        self._tg_watch_replies()
         # Second launcher click writes tabit.raise — present this window
         GLib.timeout_add(400, self._poll_raise_request)
 
@@ -6006,6 +6017,155 @@ if (data !== null) {{
         row.term.paste_text(text)
         row.term.feed_child(b"\r")
 
+    # --- Telegram: getting the answer back ------------------------------
+
+    # Telegram's own cap is 4096; leaving room means a long answer splits
+    # on a line rather than mid-word.
+    _TG_MSG_LIMIT = 3500
+    _TG_REPLY_PARTS = 4
+    _TG_REPLY_ASK = (
+        "\n\n---\n"
+        "This task came from Telegram. When you have finished, write your "
+        "answer to this file so it can be sent back:\n%s\n"
+        "Plain text or short Markdown. Keep it readable on a phone.")
+
+    @staticmethod
+    def _tg_reply_path(token):
+        return os.path.join(TELEGRAM_REPLY_DIR, "%s.md" % token)
+
+    @classmethod
+    def _tg_task_text(cls, text, token, ask):
+        """What actually gets typed in: the task, and where to answer."""
+        if not ask:
+            return text
+        return text + cls._TG_REPLY_ASK % cls._tg_reply_path(token)
+
+    @classmethod
+    def _tg_chunks(cls, text):
+        """Split an answer into messages a phone will accept.
+
+        Broken on line ends where it can be, and cut off rather than sent
+        as twenty messages -- the tab itself is still the full record.
+        """
+        text = (text or "").strip()
+        if not text:
+            return []
+        parts, rest = [], text
+        while rest and len(parts) < cls._TG_REPLY_PARTS:
+            if len(rest) <= cls._TG_MSG_LIMIT:
+                parts.append(rest)
+                rest = ""
+                break
+            cut = rest.rfind("\n", 0, cls._TG_MSG_LIMIT)
+            if cut <= 0:
+                cut = cls._TG_MSG_LIMIT
+            parts.append(rest[:cut].rstrip())
+            rest = rest[cut:].lstrip("\n")
+        if rest:
+            parts[-1] += "\n\n\u2026 cut here. The rest is in the tab."
+        return parts
+
+    def _tg_await_reply(self, token, row, msg_id):
+        """Remember that this tab owes us an answer."""
+        waiting = getattr(self, "_tg_waiting", None)
+        if waiting is None:
+            waiting = self._tg_waiting = {}
+        waiting[token] = {"row_id": self._tg_row_id(row), "msg_id": msg_id,
+                          "name": row.tg_name}
+
+    def _tg_deliver_reply(self, token):
+        """Send what an agent wrote for a task, and tidy up.
+
+        Sent whatever the "only when tabit is not in front" setting says:
+        this is the answer to something asked from the phone, and a
+        window that still holds focus on an empty desk is not a reason to
+        withhold it.
+        """
+        waiting = getattr(self, "_tg_waiting", None) or {}
+        job = waiting.get(token)
+        path = self._tg_reply_path(token)
+        try:
+            with open(path) as f:
+                body = f.read()
+        except OSError:
+            return False
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        if job is None:
+            return False
+        waiting.pop(token, None)
+        chunks = self._tg_chunks(body)
+        if not chunks:
+            return False
+        head = "\u2714 %s answered" % job["name"]
+        for i, part in enumerate(chunks):
+            self._tg_send(("%s\n\n%s" % (head, part)) if i == 0 else part,
+                          row_id=job["row_id"], reply_to=job["msg_id"])
+        return True
+
+    def _tg_task_fallback(self, row, status):
+        """An agent that stopped without writing its answer still owes one.
+
+        The file is the good path. This is what happens when the agent
+        ignored the request, or was never asked: the tail of its screen,
+        which is a redraw rather than an answer, said so plainly.
+        """
+        if status not in self._TG_HEAD:
+            return
+        waiting = getattr(self, "_tg_waiting", None) or {}
+        rid = getattr(row, "tg_id", None)
+        for token, job in list(waiting.items()):
+            if job["row_id"] != rid:
+                continue
+            if self._tg_deliver_reply(token):
+                continue
+            waiting.pop(token, None)
+            lines = self._tg_quote_lines(
+                self._term_tail_text(getattr(row, "term", None), 20), want=12)
+            self._tg_send(
+                "%s stopped without writing an answer. Last of its screen:"
+                "\n\n%s" % (job["name"], "\n".join(lines) or "(nothing)"),
+                row_id=rid, reply_to=job["msg_id"])
+
+    def _tg_scan_replies(self, *_a):
+        """Deliver every answer that has landed."""
+        for token in list(getattr(self, "_tg_waiting", None) or {}):
+            if os.path.exists(self._tg_reply_path(token)):
+                self._tg_deliver_reply(token)
+        return False
+
+    def _tg_watch_replies(self):
+        """Watch the answer folder, and clear out anything left over.
+
+        A file written while the agent keeps working would otherwise wait
+        for a status change that may be a long way off.
+        """
+        os.makedirs(TELEGRAM_REPLY_DIR, exist_ok=True)
+        for name in os.listdir(TELEGRAM_REPLY_DIR):
+            # Nothing here outlives the run that asked for it.
+            try:
+                os.remove(os.path.join(TELEGRAM_REPLY_DIR, name))
+            except OSError:
+                pass
+        gfile = Gio.File.new_for_path(TELEGRAM_REPLY_DIR)
+        try:
+            monitor = gfile.monitor_directory(Gio.FileMonitorFlags.NONE, None)
+        except GLib.Error:
+            return
+        monitor.connect("changed", self._on_tg_reply_dir_changed)
+        self._tg_reply_monitor = monitor  # a dropped monitor stops firing
+
+    def _on_tg_reply_dir_changed(self, _mon, gfile, _other, event):
+        if event not in (Gio.FileMonitorEvent.CHANGES_DONE_HINT,
+                         Gio.FileMonitorEvent.CREATED,
+                         Gio.FileMonitorEvent.MOVED_IN):
+            return
+        name = os.path.basename(gfile.get_path() or "")
+        if name.endswith(".md"):
+            self._tg_deliver_reply(name[:-3])
+
     def _tg_name_dialog(self, row):
         """Turn Telegram tasks on for one tab, by giving it a short name.
 
@@ -6317,11 +6477,19 @@ if (data !== null) {{
         bad = self._tg_row_trouble(row)
         if bad is not None:
             return bad
-        self._tg_inject(row, text)
-        self._tg_send("Sent to %s \u00b7 %s\n\n%s" % (
-            row.tg_name, self._agent_notify_title(
-                self._row_group_name(row), getattr(row, "title_text", None)),
-            text), row_id=self._tg_row_id(row))
+        token = self._tg_draft_token()
+        ask = bool(self._load_settings().get("telegram_ask_file", True))
+        self._tg_inject(row, self._tg_task_text(text, token, ask))
+        self._tg_send(
+            "Sent to %s \u00b7 %s\n\n%s" % (
+                row.tg_name, self._agent_notify_title(
+                    self._row_group_name(row),
+                    getattr(row, "title_text", None)), text),
+            row_id=self._tg_row_id(row),
+            # The answer hangs under this message, so one task reads as
+            # one thread instead of a push that could be about anything.
+            after=(lambda mid, t=token, r=row: self._tg_await_reply(t, r, mid))
+            if ask else None)
         return None
 
     def _tg_on_message(self, msg):
@@ -6391,7 +6559,7 @@ if (data !== null) {{
             self._tg_send("Not sent \u2014 %s." % bad)
         return False
 
-    def _tg_enqueue(self, method, params, row_id=None):
+    def _tg_enqueue(self, method, params, row_id=None, after=None):
         """Queue one Bot API call. Never blocks the UI thread.
 
         One worker for the whole queue rather than a thread per call: a
@@ -6403,15 +6571,20 @@ if (data !== null) {{
             q = self._tg_queue = queue.Queue()
             threading.Thread(target=self._tg_worker, args=(q,),
                              daemon=True).start()
-        q.put((method, params, row_id))
+        q.put((method, params, row_id, after))
 
-    def _tg_send(self, text, markup=None, row_id=None):
+    def _tg_send(self, text, markup=None, row_id=None, reply_to=None,
+                 after=None):
         """Say something. `row_id` marks the message as being about that
-        tab, so a reply to it needs no address."""
+        tab, so a reply to it needs no address. `reply_to` hangs it under
+        an earlier message, which is what turns a pile of pushes into one
+        thread per task."""
         params = {"text": text, "disable_web_page_preview": "true"}
         if markup is not None:
             params["reply_markup"] = json.dumps(markup)
-        self._tg_enqueue("sendMessage", params, row_id)
+        if reply_to:
+            params["reply_to_message_id"] = str(reply_to)
+        self._tg_enqueue("sendMessage", params, row_id, after)
 
     def _tg_answer(self, cb_id, text=""):
         """Take the spinner off a button. Telegram leaves it turning
@@ -6428,7 +6601,7 @@ if (data !== null) {{
         anything over.
         """
         while True:
-            method, params, row_id = q.get()
+            method, params, row_id, after = q.get()
             sec = self._tg_load_secrets()
             token = sec.get("bot_token") or ""
             chat = str(sec.get("chat_id") or "")
@@ -6439,8 +6612,12 @@ if (data !== null) {{
                 params = dict(params, chat_id=chat)
             res, err = self._tg_call(token, method, params)
             self._tg_last_error = err
-            if res and row_id:
+            if not res:
+                continue
+            if row_id:
                 self._tg_remember_msg(res.get("message_id"), row_id)
+            if callable(after):
+                GLib.idle_add(after, res.get("message_id"))
 
     def _agent_notify_fire(self, row, status):
         """The delay is up: notify, unless the reason has gone away."""
@@ -6462,6 +6639,7 @@ if (data !== null) {{
         # re-read above, so a detection wobble never reaches it.
         if self._tg_should_send(conf, self.is_active(), status):
             self._tg_send(self._tg_push_text(row, title, status, conf))
+        self._tg_task_fallback(row, status)
         if not conf.get("ai_notify", True):
             return False
         level = self._notify_urgency_name(conf.get("ai_notify_urgency"))
@@ -12398,6 +12576,12 @@ if (data !== null) {{
             tg_when.append(wid, lab)
         tg_when.set_active_id(
             "always" if s.get("telegram_when") == "always" else "away")
+        tg_when.set_tooltip_text(
+            "“Not in front” means this window does not have the keyboard "
+            "focus. That is not the same as you being away: leave tabit "
+            "focused and walk off, and nothing reaches your phone.\n"
+            "The answer to a task you sent from Telegram comes back "
+            "either way — you asked for it from there.")
         tg_reply = Gtk.CheckButton(label="Answer /status from the phone")
         tg_reply.set_active(bool(s.get("telegram_reply", False)))
         tg_reply.set_tooltip_text(
@@ -12412,6 +12596,15 @@ if (data !== null) {{
             "it asked, so you cannot answer from the phone. With it, the "
             "last few lines of that terminal travel through Telegram — "
             "and a console can have secrets on it. Default is off.")
+        tg_ask = Gtk.CheckButton(
+            label="A task asks the agent to write its answer to a file")
+        tg_ask.set_active(bool(s.get("telegram_ask_file", True)))
+        tg_ask.set_tooltip_text(
+            "A task sent from Telegram gets one line added, telling the "
+            "agent where to write its reply. tabit sends that file back "
+            "under the task. Without it, all that comes back is the last "
+            "lines of the screen, which for a full-screen agent is a "
+            "redraw and not an answer.")
         tg_test = Gtk.Button(label="Send a test message")
         tg_result = Gtk.Label(xalign=0)
         tg_result.get_style_context().add_class("session-sub")
@@ -12445,8 +12638,9 @@ if (data !== null) {{
             tg_grid.attach(w, 1, r, 1, 1)
         tg_grid.attach(tg_reply, 1, 3, 1, 1)
         tg_grid.attach(tg_quote, 1, 4, 1, 1)
-        tg_grid.attach(tg_test, 1, 5, 1, 1)
-        tg_grid.attach(tg_result, 1, 6, 1, 1)
+        tg_grid.attach(tg_ask, 1, 5, 1, 1)
+        tg_grid.attach(tg_test, 1, 6, 1, 1)
+        tg_grid.attach(tg_result, 1, 7, 1, 1)
 
         def on_tg_toggled(*_a):
             tg_grid.set_sensitive(tg_on.get_active())
@@ -12550,6 +12744,7 @@ if (data !== null) {{
                                          tg_when.get_active_id() or "away",
                                      "telegram_reply": tg_reply.get_active(),
                                      "telegram_quote": tg_quote.get_active(),
+                                     "telegram_ask_file": tg_ask.get_active(),
                                      "ui_font_size": ui_sz,
                                      "term_font": t_font,
                                      "term_font_size": t_sz,

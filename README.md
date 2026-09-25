@@ -137,6 +137,19 @@ does, so a prompt with line breaks in it is not submitted a line at a
 time, and exactly one Enter goes on the end. A button works once:
 pressing it again says so rather than running the task twice.
 
+**Getting the answer back.** A task sent from Telegram carries one extra
+line telling the agent where to write its reply, and tabit sends that
+file back as a reply to the task — so one task reads as one thread. The
+file is the good path: the last lines of a terminal are the last lines
+of a redraw, not an answer to anything. If the agent stops without
+writing one, tabit says so and falls back to the tail of the screen.
+Either way it comes back whatever **Send** is set to: "not in front"
+means this window lost the keyboard focus, which is not the same as you
+being away, and an answer you asked for from your phone should not
+depend on it. Turn the extra line off with **A task asks the agent to
+write its answer to a file** if you would rather tabit never touched
+your prompt.
+
 A blue dot on a tab means that session printed output while you were
 looking elsewhere. When a session's process ends (device unplugged,
 `exit`, picocom quit) the tab stays, greyed and marked `exited`, so

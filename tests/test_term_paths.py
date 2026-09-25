@@ -1083,6 +1083,89 @@ class TestTelegramConfirmText(unittest.TestCase):
         self.assertIn("One Enter", out)
 
 
+class _NameSink:
+    _tg_name_free = Tabit._tg_name_free
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def _session_rows(self):
+        return self.rows
+
+
+class TestTelegramNameFree(unittest.TestCase):
+    """A short name is an address, so two tabs must never share one."""
+
+    def test_an_unused_name_is_free(self):
+        sink = _NameSink([_TgRow(name="acl")])
+        self.assertTrue(sink._tg_name_free("build"))
+
+    def test_a_name_another_tab_has_is_not(self):
+        sink = _NameSink([_TgRow(name="acl")])
+        self.assertFalse(sink._tg_name_free("acl"))
+
+    def test_a_tab_keeps_its_own_name(self):
+        row = _TgRow(name="acl")
+        sink = _NameSink([row])
+        self.assertTrue(sink._tg_name_free("acl", keep=row))
+
+    def test_tabs_with_no_name_do_not_block_anything(self):
+        sink = _NameSink([_TgRow(), _TgRow()])
+        self.assertTrue(sink._tg_name_free("acl"))
+
+
+class TestTelegramTaskText(unittest.TestCase):
+    """What gets typed in: the task, and where the answer goes."""
+
+    def test_it_names_a_file_under_the_task(self):
+        out = Tabit._tg_task_text("run the test", "ab12cd34", True)
+        self.assertTrue(out.startswith("run the test"))
+        self.assertIn(Tabit._tg_reply_path("ab12cd34"), out)
+
+    def test_each_task_gets_its_own_file(self):
+        a = Tabit._tg_task_text("x", "aaaaaaaa", True)
+        b = Tabit._tg_task_text("x", "bbbbbbbb", True)
+        self.assertNotEqual(a, b)
+
+    def test_switched_off_the_task_goes_in_untouched(self):
+        self.assertEqual(Tabit._tg_task_text("run it", "ab12cd34", False),
+                         "run it")
+
+
+class TestTelegramChunks(unittest.TestCase):
+    """A long answer has to fit through Telegram."""
+
+    def test_a_short_answer_is_one_message(self):
+        self.assertEqual(Tabit._tg_chunks("all done"), ["all done"])
+
+    def test_nothing_is_no_message(self):
+        for text in ("", "   \n\n", None):
+            self.assertEqual(Tabit._tg_chunks(text), [], repr(text))
+
+    def test_every_part_fits(self):
+        body = "\n".join("line %d" % i for i in range(3000))
+        for part in Tabit._tg_chunks(body):
+            self.assertLessEqual(len(part), Tabit._TG_MSG_LIMIT + 60)
+
+    def test_it_breaks_on_a_line_end(self):
+        body = "\n".join("x" * 80 for _ in range(200))
+        parts = Tabit._tg_chunks(body)
+        self.assertGreater(len(parts), 1)
+        self.assertFalse(parts[0].endswith("x" * 81))
+        self.assertTrue(all(set(l) == {"x"} for l in parts[0].splitlines()))
+
+    def test_a_very_long_answer_is_cut_and_says_so(self):
+        body = "\n".join("line %d" % i for i in range(20000))
+        parts = Tabit._tg_chunks(body)
+        self.assertEqual(len(parts), Tabit._TG_REPLY_PARTS)
+        self.assertIn("cut here", parts[-1])
+
+    def test_one_unbroken_blob_still_splits(self):
+        # No line ends to break on; it must not loop or return one part.
+        parts = Tabit._tg_chunks("y" * (Tabit._TG_MSG_LIMIT * 2))
+        self.assertEqual(len(parts), 2)
+
+
 class TestTelegramAuth(unittest.TestCase):
     """Only one chat, and only one person in it, may talk to tabit."""
 
