@@ -5893,6 +5893,21 @@ if (data !== null) {{
         return "%s\n%s\n%s" % (cls._TG_HEAD.get(status, status), title,
                                 cls._AGENT_NOTIFY.get(status, ""))
 
+    @staticmethod
+    def _tg_chat_from_updates(updates):
+        """The private chat id out of a getUpdates answer, or None.
+
+        Saves a trip to a third-party "what is my id" bot: the id is in
+        the first message the person sends their own bot.
+        """
+        for upd in reversed(list(updates or [])):
+            msg = (upd.get("message") or upd.get("edited_message")
+                   or (upd.get("callback_query") or {}).get("message") or {})
+            chat = msg.get("chat") or {}
+            if chat.get("type") == "private" and chat.get("id") is not None:
+                return str(chat["id"])
+        return None
+
     @classmethod
     def _tg_call(cls, token, method, params, timeout=None):
         """One Bot API call. Returns (result, error line)."""
@@ -12888,6 +12903,67 @@ if (data !== null) {{
             "under the task. Without it, all that comes back is the last "
             "lines of the screen, which for a full-screen agent is a "
             "redraw and not an answer.")
+        tg_find = Gtk.Button(label="Find it")
+        tg_find.set_tooltip_text(
+            "Send your bot any message first, then press this: it reads "
+            "who sent it. Turn off \u201cAnswer /status\u201d while you do, "
+            "or Telegram refuses two readers at once.")
+
+        def on_tg_find(_b):
+            tok = tg_token.get_text().strip()
+            if not tok:
+                tg_result.set_text("Fill in the bot token first.")
+                return
+            tg_find.set_sensitive(False)
+            tg_result.set_text("Looking\u2026")
+
+            def work():
+                res, err = self._tg_call(tok, "getUpdates", {"limit": 10})
+                GLib.idle_add(done, res, err)
+
+            def done(res, err):
+                tg_find.set_sensitive(True)
+                if err:
+                    tg_result.set_text(
+                        "Turn off \u201cAnswer /status\u201d and try again"
+                        if "onflict" in err else err)
+                    return False
+                found = self._tg_chat_from_updates(res)
+                if found is None:
+                    tg_result.set_text(
+                        "Nothing yet \u2014 send your bot a message first.")
+                    return False
+                tg_chat.set_text(found)
+                tg_result.set_text("Found it.")
+                return False
+
+            threading.Thread(target=work, daemon=True).start()
+
+        tg_find.connect("clicked", on_tg_find)
+        tg_help = Gtk.Expander(label="How do I set this up?")
+        steps = Gtk.Label(xalign=0, margin_start=12, margin_top=4)
+        steps.set_line_wrap(True)
+        steps.set_max_width_chars(52)
+        steps.set_markup(
+            "<b>1.</b> In Telegram, open <b>@BotFather</b> and send "
+            "<tt>/newbot</tt>. Answer its two questions. It replies with a "
+            "token like <tt>123456789:AA\u2026</tt> \u2014 paste that "
+            "above.\n"
+            "<b>2.</b> Find your new bot by the name you gave it and send "
+            "it anything. A bot cannot write to you until you have written "
+            "to it once.\n"
+            "<b>3.</b> Press <b>Find it</b> next to Chat id.\n"
+            "<b>4.</b> Press <b>Send a test message</b>. Your phone should "
+            "buzz.\n"
+            "<b>5.</b> Press <b>Save</b>.\n\n"
+            "That is the one-way half: tabit tells you when an agent "
+            "finishes or wants you.\n\n"
+            "To send work back, tick <b>Answer /status from the phone</b>, "
+            "then right-click an AI tab in the tab list and choose "
+            "<b>Telegram tasks\u2026</b> to give it a short name. Only tabs "
+            "with a short name can be typed into from Telegram.")
+        tg_help.add(steps)
+
         tg_test = Gtk.Button(label="Send a test message")
         tg_result = Gtk.Label(xalign=0)
         tg_result.get_style_context().add_class("session-sub")
@@ -12919,6 +12995,7 @@ if (data !== null) {{
                                       ("Send:", tg_when))):
             tg_grid.attach(Gtk.Label(label=lab, xalign=0), 0, r, 1, 1)
             tg_grid.attach(w, 1, r, 1, 1)
+        tg_grid.attach(tg_find, 2, 1, 1, 1)
         tg_grid.attach(tg_reply, 1, 3, 1, 1)
         tg_grid.attach(tg_quote, 1, 4, 1, 1)
         tg_grid.attach(tg_ask, 1, 5, 1, 1)
@@ -12975,7 +13052,9 @@ if (data !== null) {{
                             side_box)),
             ("Sessions", (wrap, inherit)),
             ("AI", (ai_fresh, ai_tmux, ai_notify, urg_box, ai_bypass)),
-            ("Telegram", (tg_on, tg_grid)),
+            # tg_help sits outside the grid on purpose: the grid greys
+            # out when Telegram is off, which is when somebody needs it.
+            ("Telegram", (tg_on, tg_grid, tg_help)),
             ("About", (ver_box,)),
         )
         for name, widgets in pages:

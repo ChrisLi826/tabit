@@ -1379,6 +1379,35 @@ class TestTelegramChunks(unittest.TestCase):
         self.assertEqual(len(parts), 2)
 
 
+class TestTelegramChatFromUpdates(unittest.TestCase):
+    """Finding your own chat id, so nobody has to go and ask a third bot."""
+
+    def _msg(self, cid, kind="private"):
+        return {"message": {"chat": {"id": cid, "type": kind}}}
+
+    def test_it_reads_the_id_off_a_message(self):
+        self.assertEqual(Tabit._tg_chat_from_updates([self._msg(424242)]),
+                         "424242")
+
+    def test_the_newest_message_wins(self):
+        self.assertEqual(
+            Tabit._tg_chat_from_updates([self._msg(111), self._msg(222)]),
+            "222")
+
+    def test_a_group_is_not_your_chat(self):
+        self.assertIsNone(
+            Tabit._tg_chat_from_updates([self._msg(424242, "supergroup")]))
+
+    def test_an_edited_message_counts(self):
+        upd = {"edited_message": {"chat": {"id": 7, "type": "private"}}}
+        self.assertEqual(Tabit._tg_chat_from_updates([upd]), "7")
+
+    def test_nothing_sent_yet(self):
+        for updates in ([], None, [{}], [{"message": {}}]):
+            self.assertIsNone(Tabit._tg_chat_from_updates(updates),
+                              repr(updates))
+
+
 class TestTelegramAuth(unittest.TestCase):
     """Only one chat, and only one person in it, may talk to tabit."""
 

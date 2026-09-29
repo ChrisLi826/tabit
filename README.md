@@ -105,10 +105,12 @@ or drops it to one that goes away on its own. The desktop half needs
 `gir1.2-notify-0.7`, which the installer pulls in; the in-app half works
 without it.
 
-The same news can also reach your **phone**. **Settings… → AI → Also send
-it to Telegram** takes a bot token (from `@BotFather`) and your chat id
-(from `@userinfobot`), and sends one message per agent that finishes or
-wants you. By default it only sends while tabit is not the window in
+The same news can also reach your **phone**. **Settings… → Telegram →
+Also send it to Telegram** takes a bot token (from `@BotFather`) and
+sends one message per agent that finishes or wants you. **How do I set
+this up?** on that page has the five steps, and **Find it** next to Chat
+id reads your own id off the first message you send the bot, so there is
+no second bot to go and ask. By default it only sends while tabit is not the window in
 front; **Always** sends either way. It is deliberately not tied to the
 desktop popup switch, because "no popup on this screen" and "nothing on
 my phone" are two different wishes. **Send a test message** proves the
