@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import tempfile
+from unittest import mock
 import unittest
 
 import gi
@@ -69,6 +70,19 @@ class TestPathPattern(unittest.TestCase):
         """The // inside a URL must not read as an absolute path."""
         self.assertIsNone(self.first("see https://herdr.dev/docs for info"))
         self.assertIsNone(self.first("visit http://a.io/x/y/z now"))
+
+    def test_after_a_colon_in_chinese(self):
+        # Seen: an agent wrote the path right after "文件:" and it did not
+        # open. The colon there is ASCII, not the full-width one.
+        p = ("/home/chris/cloudcamsdk/SENAO/package/repo/libcloudsnipcam/"
+             "docs/live-viewer-admission.html")
+        self.assertEqual(self.first("文件:" + p), p)
+        self.assertEqual(self.first("文件：" + p), p)
+        self.assertEqual(self.first("(see: " + p + ")"), p)
+
+    def test_not_after_a_word_and_a_colon(self):
+        self.assertIsNone(self.first("scp host:/etc/passwd ."))
+        self.assertIsNone(self.first("file:/etc/hosts"))
 
     def test_not_a_fraction(self):
         self.assertIsNone(self.first("ratio 3/4 done"))
@@ -857,6 +871,912 @@ class TestNotifyDelayOutlastsAPoll(unittest.TestCase):
         # reading has happened yet.
         self.assertGreater(Tabit._AGENT_NOTIFY_DELAY_S,
                            Tabit._AGENT_POLL_SEC)
+
+
+class TestTelegramShouldSend(unittest.TestCase):
+    """Which status changes are worth a buzz on a phone."""
+
+    ON = {"telegram_enabled": True, "telegram_when": "away"}
+
+    def test_off_by_default(self):
+        self.assertFalse(Tabit._tg_should_send({}, False, "blocked"))
+
+    def test_only_the_two_that_want_you(self):
+        for st, want in (("blocked", True), ("ready", True),
+                         ("working", False), ("idle", False),
+                         ("exited", False), ("unknown", False)):
+            self.assertEqual(
+                Tabit._tg_should_send(self.ON, False, st), want, st)
+
+    def test_away_means_nothing_while_you_are_looking(self):
+        self.assertFalse(Tabit._tg_should_send(self.ON, True, "blocked"))
+
+    def test_always_sends_even_in_front(self):
+        conf = {"telegram_enabled": True, "telegram_when": "always"}
+        self.assertTrue(Tabit._tg_should_send(conf, True, "blocked"))
+
+    def test_it_does_not_follow_the_desktop_popup_switch(self):
+        # "No popup on this screen" and "nothing on my phone" are two
+        # different wishes.
+        conf = dict(self.ON, ai_notify=False)
+        self.assertTrue(Tabit._tg_should_send(conf, False, "ready"))
+
+
+class TestTelegramMessage(unittest.TestCase):
+    """The phone says the same words the desktop popup says."""
+
+    def test_it_reuses_the_desktop_wording(self):
+        msg = Tabit._tg_message("QCA2ECW536 · [claude] ACL 6K test",
+                                "blocked")
+        self.assertEqual(msg.splitlines(), [
+            "\u2753 Waiting for you",
+            "QCA2ECW536 · [claude] ACL 6K test",
+            Tabit._AGENT_NOTIFY["blocked"]])
+
+    def test_ready_is_the_other_one(self):
+        msg = Tabit._tg_message("t", "ready")
+        self.assertTrue(msg.startswith("\u2705 Finished"))
+        self.assertTrue(msg.endswith(Tabit._AGENT_NOTIFY["ready"]))
+
+
+class TestTelegramErrorText(unittest.TestCase):
+    """The settings page shows this string, so it must not carry the key."""
+
+    def test_a_url_error_loses_the_token(self):
+        exc = OSError("HTTP Error 404: Not Found for url: "
+                      "https://api.telegram.org/bot99:AAsecretkey/sendMessage")
+        out = Tabit._tg_error_text(exc)
+        self.assertNotIn("AAsecretkey", out)
+        self.assertIn("/bot<token>", out)
+
+    def test_it_keeps_the_part_that_helps(self):
+        out = Tabit._tg_error_text(TimeoutError("timed out"))
+        self.assertIn("TimeoutError", out)
+        self.assertIn("timed out", out)
+
+    def test_a_token_with_punctuation_still_goes(self):
+        exc = OSError("failed: https://api.telegram.org/bot1-2_3:A.B-C_d/x")
+        self.assertNotIn("A.B-C_d", Tabit._tg_error_text(exc))
+
+
+class TestTelegramSecretsFile(unittest.TestCase):
+    """The token is written narrow, and an old wide file is narrowed."""
+
+    def _with_config(self, fn):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            old_dir, old_file = tabit.CONFIG_DIR, tabit.TELEGRAM_FILE
+            tabit.CONFIG_DIR = d
+            tabit.TELEGRAM_FILE = os.path.join(d, "telegram.json")
+            try:
+                return fn(tabit.TELEGRAM_FILE)
+            finally:
+                tabit.CONFIG_DIR, tabit.TELEGRAM_FILE = old_dir, old_file
+
+    def test_a_new_file_is_owner_only(self):
+        def check(path):
+            Tabit._tg_save_secrets("99:AA", "123")
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            self.assertEqual(Tabit._tg_load_secrets(),
+                             {"bot_token": "99:AA", "chat_id": "123"})
+        self._with_config(check)
+
+    def test_a_file_that_was_already_wide_is_narrowed(self):
+        def check(path):
+            with open(path, "w") as f:
+                f.write("{}")
+            os.chmod(path, 0o644)
+            Tabit._tg_save_secrets("99:AA", "123")
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        self._with_config(check)
+
+    def test_a_missing_or_broken_file_is_no_secrets(self):
+        def check(path):
+            self.assertEqual(Tabit._tg_load_secrets(), {})
+            with open(path, "w") as f:
+                f.write("not json")
+            self.assertEqual(Tabit._tg_load_secrets(), {})
+        self._with_config(check)
+
+    def test_whitespace_around_a_pasted_token_is_dropped(self):
+        def check(_path):
+            Tabit._tg_save_secrets("  99:AA\n", " 123 ")
+            self.assertEqual(Tabit._tg_load_secrets(),
+                             {"bot_token": "99:AA", "chat_id": "123"})
+        self._with_config(check)
+
+
+class _TgRow:
+    agent_status = "idle"
+
+    def __init__(self, name=None, rid=None, icon=tabit.ICON_AI,
+                 dead=False, term=object(), title="t", group=None):
+        self.tg_name = name
+        self.tg_id = rid
+        self.icon_name = icon
+        self.dead = dead
+        self.term = term
+        self.title_text = title
+        self.group_color = group
+
+
+class TestTelegramRowTrouble(unittest.TestCase):
+    """Which tabs a phone may type into, and why not."""
+
+    def test_a_named_live_ai_tab_is_fine(self):
+        self.assertIsNone(Tabit._tg_row_trouble(_TgRow(name="acl")))
+
+    def test_a_tab_with_no_short_name_is_off(self):
+        # The name is the switch, so this is the common "not enabled".
+        self.assertIn("does not take tasks",
+                      Tabit._tg_row_trouble(_TgRow()))
+
+    def test_a_shell_is_refused_even_if_named(self):
+        self.assertIn("not an AI tab", Tabit._tg_row_trouble(
+            _TgRow(name="acl", icon="utilities-terminal")))
+
+    def test_an_exited_tab_is_refused(self):
+        self.assertIn("exited",
+                      Tabit._tg_row_trouble(_TgRow(name="acl", dead=True)))
+
+    def test_a_tab_with_no_terminal_is_refused(self):
+        self.assertIn("exited",
+                      Tabit._tg_row_trouble(_TgRow(name="acl", term=None)))
+
+    def test_nothing_at_all(self):
+        self.assertIn("gone", Tabit._tg_row_trouble(None))
+
+
+class TestTelegramShortName(unittest.TestCase):
+    """The name typed on a phone has to match what was set on the desk."""
+
+    def test_a_plain_name(self):
+        self.assertEqual(Tabit._tg_clean_name("acl"), "acl")
+
+    def test_a_phone_capitalising_the_line_still_matches(self):
+        self.assertEqual(Tabit._tg_clean_name("Acl"), "acl")
+
+    def test_surrounding_space_goes(self):
+        self.assertEqual(Tabit._tg_clean_name("  acl \n"), "acl")
+
+    def test_a_name_with_a_space_in_it_is_not_one(self):
+        self.assertIsNone(Tabit._tg_clean_name("acl test"))
+
+    def test_too_long_is_not_one(self):
+        self.assertIsNone(Tabit._tg_clean_name("x" * 17))
+        self.assertEqual(Tabit._tg_clean_name("x" * 16), "x" * 16)
+
+    def test_nothing_is_not_one(self):
+        for raw in ("", "   ", None):
+            self.assertIsNone(Tabit._tg_clean_name(raw), repr(raw))
+
+
+class TestTelegramRowTroubleStatus(unittest.TestCase):
+    """A tab whose agent has gone is not a tab to type commands into."""
+
+    def test_a_tab_with_no_agent_running_is_refused(self):
+        for status in Tabit._TG_NOT_AGENT:
+            row = _TgRow(name="acl")
+            row.agent_status = status
+            self.assertIn("no agent", Tabit._tg_row_trouble(row), status)
+
+    def test_a_working_or_waiting_agent_is_fine(self):
+        for status in ("working", "idle", "blocked", "ready"):
+            row = _TgRow(name="acl")
+            row.agent_status = status
+            self.assertIsNone(Tabit._tg_row_trouble(row), status)
+
+
+class TestTelegramShort(unittest.TestCase):
+    """A quoted task must not push a message past Telegram's own cap."""
+
+    def test_a_short_task_is_quoted_whole(self):
+        self.assertEqual(Tabit._tg_short("run it"), "run it")
+
+    def test_a_long_one_is_cut_and_says_so(self):
+        out = Tabit._tg_short("x" * 9000)
+        self.assertLess(len(out), Tabit._TG_QUOTE_MAX + 40)
+        self.assertIn("shortened", out)
+
+    def test_the_confirm_stays_under_the_cap(self):
+        out = Tabit._tg_confirm_text("x" * 9000,
+                                     [("ab12cd", "acl", "g \u00b7 t")])
+        self.assertLess(len(out.encode("utf-8")), 4096)
+
+
+class TestTelegramSafeText(unittest.TestCase):
+    """What goes down a pty must not be able to steer the terminal."""
+
+    def test_ordinary_text_is_untouched(self):
+        self.assertEqual(Tabit._tg_safe_text("run it\nplease\there"),
+                         "run it\nplease\there")
+
+    def test_an_escape_cannot_end_the_paste_early(self):
+        # "ESC[201~" is the end-of-paste marker itself. Left in, the rest
+        # of the message arrives as live keystrokes.
+        out = Tabit._tg_safe_text("ok\x1b[201~rm -rf /\n")
+        self.assertNotIn("\x1b", out)
+
+    def test_other_control_characters_go_too(self):
+        out = Tabit._tg_safe_text("a\x00b\x07c\x7fd")
+        self.assertEqual(out, "abcd")
+
+    def test_carriage_returns_become_line_breaks(self):
+        # A bare CR is an Enter. One goes on the end, and only one.
+        self.assertEqual(Tabit._tg_safe_text("a\r\nb\rc"), "a\nb\nc")
+
+    def test_nothing_is_nothing(self):
+        self.assertEqual(Tabit._tg_safe_text(None), "")
+
+
+class TestTelegramButtonWidth(unittest.TestCase):
+    """A long tab title must not take the whole message down with it."""
+
+    def test_button_text_is_capped(self):
+        t = [("ab12cd", "acl", "G" * 300)]
+        for row in Tabit._tg_keyboard("deadbeef", t)["inline_keyboard"]:
+            self.assertLessEqual(len(row[0]["text"]), 64)
+
+
+class TestTelegramKeyboard(unittest.TestCase):
+    """Buttons carry a token and a tab id, and must fit in 64 bytes."""
+
+    T = [("ab12cd", "acl", "QCA2ECW536 · [claude] ACL 6K test"),
+         ("ef34gh", "build", "Router SDK · build")]
+
+    def test_one_row_per_tab_then_cancel(self):
+        kb = Tabit._tg_keyboard("deadbeef", self.T)["inline_keyboard"]
+        self.assertEqual(len(kb), 3)
+        self.assertEqual(kb[-1][0]["text"], "Cancel")
+
+    def test_a_button_says_where_it_sends(self):
+        kb = Tabit._tg_keyboard("deadbeef", self.T)["inline_keyboard"]
+        self.assertTrue(kb[0][0]["text"].startswith("Send to acl · "))
+
+    def test_callback_data_holds_no_task_text(self):
+        kb = Tabit._tg_keyboard("deadbeef", self.T)["inline_keyboard"]
+        self.assertEqual(kb[0][0]["callback_data"], "s:deadbeef:ab12cd")
+        self.assertEqual(kb[-1][0]["callback_data"], "x:deadbeef")
+
+    def test_every_callback_data_fits_telegram(self):
+        long_t = [("x" * 6, "y" * 16, "z" * 80)] * 3
+        for row in Tabit._tg_keyboard("deadbeef", long_t)["inline_keyboard"]:
+            self.assertLessEqual(
+                len(row[0]["callback_data"].encode("utf-8")), 64)
+
+
+class TestTelegramConfirmText(unittest.TestCase):
+    """What the confirmation says before anything is typed."""
+
+    ONE = [("ab12cd", "acl", "QCA2ECW536 · ACL 6K test")]
+    TWO = ONE + [("ef34gh", "build", "Router SDK · build")]
+
+    def test_one_target_names_it(self):
+        out = Tabit._tg_confirm_text("run it", self.ONE)
+        self.assertTrue(out.startswith("Send to acl · QCA2ECW536"))
+
+    def test_several_targets_ask(self):
+        out = Tabit._tg_confirm_text("run it", self.TWO)
+        self.assertTrue(out.startswith("Where should this go?"))
+        self.assertIn("Not sent yet", out)
+
+    def test_it_quotes_the_task_and_warns_about_the_enter(self):
+        out = Tabit._tg_confirm_text("run it", self.ONE)
+        self.assertIn("run it", out)
+        self.assertIn("One Enter", out)
+
+
+class _NameSink:
+    _tg_name_free = Tabit._tg_name_free
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def _session_rows(self):
+        return self.rows
+
+
+class TestTelegramNameFree(unittest.TestCase):
+    """A short name is an address, so two tabs must never share one."""
+
+    def test_an_unused_name_is_free(self):
+        sink = _NameSink([_TgRow(name="acl")])
+        self.assertTrue(sink._tg_name_free("build"))
+
+    def test_a_name_another_tab_has_is_not(self):
+        sink = _NameSink([_TgRow(name="acl")])
+        self.assertFalse(sink._tg_name_free("acl"))
+
+    def test_a_tab_keeps_its_own_name(self):
+        row = _TgRow(name="acl")
+        sink = _NameSink([row])
+        self.assertTrue(sink._tg_name_free("acl", keep=row))
+
+    def test_tabs_with_no_name_do_not_block_anything(self):
+        sink = _NameSink([_TgRow(), _TgRow()])
+        self.assertTrue(sink._tg_name_free("acl"))
+
+
+class TestTelegramTaskText(unittest.TestCase):
+    """What gets typed in: the task, and where the answer goes."""
+
+    def test_it_names_a_file_under_the_task(self):
+        out = Tabit._tg_task_text("run the test", "ab12cd34", True)
+        self.assertTrue(out.startswith("run the test"))
+        self.assertIn(Tabit._tg_reply_path("ab12cd34"), out)
+
+    def test_each_task_gets_its_own_file(self):
+        a = Tabit._tg_task_text("x", "aaaaaaaa", True)
+        b = Tabit._tg_task_text("x", "bbbbbbbb", True)
+        self.assertNotEqual(a, b)
+
+    def test_it_asks_for_something_a_phone_can_read(self):
+        # An agent given no budget writes a report, and a report is four
+        # messages and a "cut here".
+        out = Tabit._tg_task_text("run the test", "ab12cd34", True)
+        self.assertIn(str(Tabit._TG_REPLY_LINES), out)
+        self.assertIn("phone", out)
+        self.assertIn("result first", out)
+
+    def test_it_reads_as_part_of_the_request(self):
+        # A footer that announces where it came from, under a rule,
+        # reads as instructions somebody slipped into the paste, and a
+        # real agent stopped to ask whether to obey it.
+        out = Tabit._tg_task_text("run the test", "ab12cd34", True)
+        self.assertNotIn("---", out)
+        self.assertNotIn("Telegram", out)
+        self.assertEqual(out.count("\n\n"), 1)
+
+    def test_an_answer_is_not_a_task(self):
+        # Replying "y" to "Allow Bash(rm -rf build/)?" must arrive as
+        # "y", not as "y" plus four lines about writing a reply file.
+        self.assertEqual(Tabit._tg_task_text("y", "ab12cd34", False), "y")
+
+    def test_switched_off_the_task_goes_in_untouched(self):
+        self.assertEqual(Tabit._tg_task_text("run it", "ab12cd34", False),
+                         "run it")
+
+
+class _ReplySink:
+    """Stands in for the window: records what it would have sent."""
+
+    _tg_deliver_reply = Tabit._tg_deliver_reply
+    _tg_reply_path = staticmethod(Tabit._tg_reply_path)
+    _tg_chunks = Tabit._tg_chunks
+    _TG_MSG_LIMIT = Tabit._TG_MSG_LIMIT
+    _TG_REPLY_PARTS = Tabit._TG_REPLY_PARTS
+
+    _TG_RETRY_SEC = Tabit._TG_RETRY_SEC
+    _tg_job_dest = staticmethod(Tabit._tg_job_dest)
+
+    def __init__(self, waiting, sends=True):
+        self._tg_waiting = waiting
+        self.sent = []
+        self.sends = sends          # False stands in for a failed send
+        self.saved = 0
+        self.retried = []
+        self.retry = True           # False: the bot changed under it
+
+    def _tg_settle_watch(self, token):
+        self.retried.append(token)
+
+    def _tg_jobs(self):
+        return self._tg_waiting
+
+    def _tg_save_jobs(self):
+        self.saved += 1
+
+    def _tg_send(self, text, markup=None, row_id=None, reply_to=None,
+                 after=None, failed=None, dest=None):
+        self.sent.append((text, reply_to))
+        self.dest = dest
+        # `sends` is True, False, or a list saying it per part.
+        ok = (self.sends if not isinstance(self.sends, list)
+              else self.sends[len(self.sent) - 1])
+        if ok and callable(after):
+            after(999)
+        elif ok is False and callable(failed):
+            failed(self.retry)
+
+
+class TestTelegramDeliverReply(unittest.TestCase):
+    """An answer file is only taken away once it has something in it."""
+
+    JOB = {"row_id": "ab12cd", "msg_id": 802, "name": "acl"}
+
+    def _run(self, body, waiting=None, sends=True):
+        old = tabit.TELEGRAM_REPLY_DIR
+        d = tempfile.mkdtemp()
+        tabit.TELEGRAM_REPLY_DIR = d
+        try:
+            path = Tabit._tg_reply_path("tok")
+            if body is not None:
+                with open(path, "w") as f:
+                    f.write(body)
+            sink = _ReplySink({"tok": dict(self.JOB)}
+                              if waiting is None else waiting, sends=sends)
+            got = sink._tg_deliver_reply("tok")
+            return got, sink, os.path.exists(path)
+        finally:
+            tabit.TELEGRAM_REPLY_DIR = old
+
+    def test_an_answer_is_sent_and_the_file_goes(self):
+        got, sink, still_there = self._run("all done\n")
+        self.assertTrue(got)
+        self.assertFalse(still_there)
+        self.assertIn("acl answered", sink.sent[0][0])
+        self.assertIn("all done", sink.sent[0][0])
+
+    def test_it_hangs_under_the_task_it_answers(self):
+        _got, sink, _s = self._run("all done")
+        self.assertEqual(sink.sent[0][1], 802)
+
+    def test_an_empty_file_is_left_alone(self):
+        # The agent has opened it and not written yet. Deleting it here
+        # takes the answer with it.
+        for body in ("", "   \n\n"):
+            got, sink, still_there = self._run(body)
+            self.assertFalse(got, repr(body))
+            self.assertTrue(still_there, repr(body))
+            self.assertEqual(sink.sent, [], repr(body))
+
+    def test_a_missing_file_is_not_an_error(self):
+        got, sink, _s = self._run(None)
+        self.assertFalse(got)
+        self.assertEqual(sink.sent, [])
+
+    def test_a_file_nobody_is_waiting_for_is_cleared_away(self):
+        got, sink, still_there = self._run("orphan", waiting={})
+        self.assertFalse(got)
+        self.assertFalse(still_there)
+        self.assertEqual(sink.sent, [])
+
+    def test_the_job_is_only_dropped_once_it_is_answered(self):
+        old = tabit.TELEGRAM_REPLY_DIR
+        d = tempfile.mkdtemp()
+        tabit.TELEGRAM_REPLY_DIR = d
+        try:
+            with open(Tabit._tg_reply_path("tok"), "w") as f:
+                f.write("")
+            sink = _ReplySink({"tok": dict(self.JOB)})
+            sink._tg_deliver_reply("tok")
+            self.assertIn("tok", sink._tg_waiting)   # still owed
+            with open(Tabit._tg_reply_path("tok"), "w") as f:
+                f.write("now it is written")
+            sink._tg_deliver_reply("tok")
+            self.assertNotIn("tok", sink._tg_waiting)
+        finally:
+            tabit.TELEGRAM_REPLY_DIR = old
+
+    def test_a_send_that_failed_keeps_the_answer(self):
+        # The local copy is the only copy. Losing it because Telegram
+        # was down loses the answer for good.
+        got, sink, still_there = self._run("all done", sends=False)
+        self.assertTrue(got)
+        self.assertTrue(still_there)
+        self.assertIn("tok", sink._tg_waiting)
+
+    def test_a_failed_send_can_be_sent_again(self):
+        # Wi-Fi drops as the agent finishes. The answer must not be
+        # stuck as "sending" for ever.
+        old = tabit.TELEGRAM_REPLY_DIR
+        d = tempfile.mkdtemp()
+        tabit.TELEGRAM_REPLY_DIR = d
+        try:
+            with open(Tabit._tg_reply_path("tok"), "w") as f:
+                f.write("all done")
+            sink = _ReplySink({"tok": dict(self.JOB)}, sends=False)
+            with mock.patch.object(tabit.GLib, "timeout_add_seconds",
+                                   lambda _s, fn: fn()):
+                self.assertTrue(sink._tg_deliver_reply("tok"))
+            self.assertEqual(sink.retried, ["tok"])
+            self.assertNotIn("sending", sink._tg_waiting["tok"])
+            sink.sends = True
+            self.assertTrue(sink._tg_deliver_reply("tok"))
+            self.assertNotIn("tok", sink._tg_waiting)
+        finally:
+            tabit.TELEGRAM_REPLY_DIR = old
+
+    def test_an_answer_for_an_old_bot_is_dropped_not_resent(self):
+        # Sent again, it would go to whoever the new chat is.
+        old = tabit.TELEGRAM_REPLY_DIR
+        d = tempfile.mkdtemp()
+        tabit.TELEGRAM_REPLY_DIR = d
+        try:
+            with open(Tabit._tg_reply_path("tok"), "w") as f:
+                f.write("all done")
+            sink = _ReplySink({"tok": dict(self.JOB)}, sends=False)
+            sink.retry = False
+            sink._tg_deliver_reply("tok")
+            self.assertEqual(sink.retried, [])
+            self.assertNotIn("tok", sink._tg_waiting)
+            self.assertFalse(os.path.exists(Tabit._tg_reply_path("tok")))
+        finally:
+            tabit.TELEGRAM_REPLY_DIR = old
+
+    def test_the_answer_goes_where_the_task_came_from(self):
+        job = dict(self.JOB, chat="424242", bot="b0t")
+        _got, sink, _s = self._run("all done", waiting={"tok": job})
+        self.assertEqual(sink.dest, ("424242", "b0t"))
+
+    def test_one_retry_timer_per_answer(self):
+        # Two failures before the first timer fires must not become two
+        # timers, or the answer goes out twice every time.
+        old = tabit.TELEGRAM_REPLY_DIR
+        d = tempfile.mkdtemp()
+        tabit.TELEGRAM_REPLY_DIR = d
+        timers = []
+        try:
+            with open(Tabit._tg_reply_path("tok"), "w") as f:
+                f.write("all done")
+            sink = _ReplySink({"tok": dict(self.JOB)}, sends=False)
+            with mock.patch.object(tabit.GLib, "timeout_add_seconds",
+                                   lambda _s, fn: timers.append(fn)):
+                sink._tg_deliver_reply("tok")
+                sink._tg_deliver_reply("tok")
+            self.assertEqual(len(timers), 1)
+            timers[0]()
+            self.assertEqual(sink.retried, ["tok"])
+        finally:
+            tabit.TELEGRAM_REPLY_DIR = old
+
+    def test_a_lost_first_part_keeps_the_answer(self):
+        # Part one fails, the last part lands: the file must stay.
+        old = tabit.TELEGRAM_REPLY_DIR
+        d = tempfile.mkdtemp()
+        tabit.TELEGRAM_REPLY_DIR = d
+        try:
+            body = "\n".join("x" * 80 for _ in range(100))
+            with open(Tabit._tg_reply_path("tok"), "w") as f:
+                f.write(body)
+            self.assertEqual(len(Tabit._tg_chunks(body)), 3)
+            sink = _ReplySink({"tok": dict(self.JOB)},
+                              sends=[False, True, True])
+            with mock.patch.object(tabit.GLib, "timeout_add_seconds",
+                                   lambda _s, fn: fn()):
+                sink._tg_deliver_reply("tok")
+            self.assertIn("tok", sink._tg_waiting)
+            self.assertTrue(os.path.exists(Tabit._tg_reply_path("tok")))
+        finally:
+            tabit.TELEGRAM_REPLY_DIR = old
+
+    def test_it_does_not_send_the_same_answer_twice(self):
+        # A settle tick and a status change can both reach one file.
+        old = tabit.TELEGRAM_REPLY_DIR
+        d = tempfile.mkdtemp()
+        tabit.TELEGRAM_REPLY_DIR = d
+        try:
+            with open(Tabit._tg_reply_path("tok"), "w") as f:
+                f.write("all done")
+            # None: still in the queue, neither sent nor failed yet
+            sink = _ReplySink({"tok": dict(self.JOB)}, sends=None)
+            self.assertTrue(sink._tg_deliver_reply("tok"))
+            self.assertFalse(sink._tg_deliver_reply("tok"))
+            self.assertEqual(len(sink.sent), 1)
+        finally:
+            tabit.TELEGRAM_REPLY_DIR = old
+
+
+class TestTelegramWorkerDest(unittest.TestCase):
+    """A queued message goes only to the chat and bot it was meant for."""
+
+    def _run_one(self, meant_for):
+        import queue as _q
+        import threading
+        calls, idles = [], []
+        done = threading.Event()
+
+        class W:
+            _tg_bot_key = staticmethod(Tabit._tg_bot_key)
+            _tg_last_error = None
+
+            def _load_settings(self):
+                return {"telegram_enabled": True}
+
+            def _tg_load_secrets(self):
+                return {"bot_token": "123:new", "chat_id": "424242"}
+
+            def _tg_call(self, token, method, params):
+                calls.append(params)
+                return {"message_id": 1}, None
+
+        def idle(fn, *a):
+            idles.append((fn, a))
+            done.set()
+
+        q = _q.Queue()
+        q.put(("sendMessage", {"text": "x"}, None, lambda _m: None,
+               meant_for, lambda retry: None))
+        with mock.patch.object(tabit.GLib, "idle_add", idle):
+            threading.Thread(target=Tabit._tg_worker, args=(W(), q),
+                             daemon=True).start()
+            done.wait(2)
+        return calls, idles
+
+    def test_same_chat_and_bot_is_sent(self):
+        calls, _i = self._run_one(("424242", Tabit._tg_bot_key("123:new")))
+        self.assertEqual(len(calls), 1)
+
+    def test_another_chat_is_dropped_for_good(self):
+        calls, idles = self._run_one(("111", Tabit._tg_bot_key("123:new")))
+        self.assertEqual(calls, [])
+        self.assertEqual(idles[0][1], (False,))
+
+    def test_another_bot_is_dropped_for_good(self):
+        calls, idles = self._run_one(("424242", Tabit._tg_bot_key("9:old")))
+        self.assertEqual(calls, [])
+        self.assertEqual(idles[0][1], (False,))
+
+    def test_an_old_sending_mark_is_cleared_on_load(self):
+        old = tabit.TELEGRAM_STATE_FILE
+        d = tempfile.mkdtemp()
+        tabit.TELEGRAM_STATE_FILE = os.path.join(d, "state.json")
+        try:
+            Tabit._tg_save_state(waiting={"tok": {"row_id": "r",
+                                                  "sending": True}})
+
+            class J:
+                _tg_load_state = staticmethod(Tabit._tg_load_state)
+            got = Tabit._tg_jobs(J())
+            self.assertEqual(got, {"tok": {"row_id": "r"}})
+        finally:
+            tabit.TELEGRAM_STATE_FILE = old
+
+    def test_no_token_in_the_state_file(self):
+        self.assertNotIn("123:new", Tabit._tg_bot_key("123:new"))
+
+
+class TestTelegramStateLock(unittest.TestCase):
+    """The poll thread and the UI thread share one state file."""
+
+    def test_two_writers_do_not_undo_each_other(self):
+        import threading
+        old = tabit.TELEGRAM_STATE_FILE
+        d = tempfile.mkdtemp()
+        tabit.TELEGRAM_STATE_FILE = os.path.join(d, "state.json")
+        try:
+            went_back = []
+
+            def offsets():
+                for i in range(1, 201):
+                    Tabit._tg_save_state(offset=i)
+                    # An offset that goes back redelivers a message.
+                    if Tabit._tg_load_state().get("offset", 0) < i:
+                        went_back.append(i)
+
+            def jobs():
+                for i in range(1, 201):
+                    Tabit._tg_save_state(waiting={"t%d" % i: {}})
+
+            a = threading.Thread(target=offsets)
+            b = threading.Thread(target=jobs)
+            a.start(); b.start(); a.join(); b.join()
+            self.assertEqual(went_back, [])
+            got = Tabit._tg_load_state()
+            self.assertEqual(got.get("offset"), 200)
+            self.assertEqual(got.get("waiting"), {"t200": {}})
+        finally:
+            tabit.TELEGRAM_STATE_FILE = old
+
+
+class TestTelegramChunks(unittest.TestCase):
+    """A long answer has to fit through Telegram."""
+
+    def test_a_short_answer_is_one_message(self):
+        self.assertEqual(Tabit._tg_chunks("all done"), ["all done"])
+
+    def test_nothing_is_no_message(self):
+        for text in ("", "   \n\n", None):
+            self.assertEqual(Tabit._tg_chunks(text), [], repr(text))
+
+    def test_every_part_fits(self):
+        body = "\n".join("line %d" % i for i in range(3000))
+        for part in Tabit._tg_chunks(body):
+            self.assertLessEqual(len(part), Tabit._TG_MSG_LIMIT + 60)
+
+    def test_it_breaks_on_a_line_end(self):
+        body = "\n".join("x" * 80 for _ in range(200))
+        parts = Tabit._tg_chunks(body)
+        self.assertGreater(len(parts), 1)
+        self.assertFalse(parts[0].endswith("x" * 81))
+        self.assertTrue(all(set(l) == {"x"} for l in parts[0].splitlines()))
+
+    def test_a_very_long_answer_is_cut_and_says_so(self):
+        body = "\n".join("line %d" % i for i in range(20000))
+        parts = Tabit._tg_chunks(body)
+        self.assertEqual(len(parts), Tabit._TG_REPLY_PARTS)
+        self.assertIn("cut here", parts[-1])
+
+    def test_one_unbroken_blob_still_splits(self):
+        # No line ends to break on; it must not loop or return one part.
+        parts = Tabit._tg_chunks("y" * (Tabit._TG_MSG_LIMIT * 2))
+        self.assertEqual(len(parts), 2)
+
+
+class TestTelegramChatFromUpdates(unittest.TestCase):
+    """Finding your own chat id, so nobody has to go and ask a third bot."""
+
+    def _msg(self, cid, kind="private", **who):
+        return {"message": {"chat": dict({"id": cid, "type": kind}, **who)}}
+
+    def ids(self, updates):
+        return [c for c, _w in Tabit._tg_chats_from_updates(updates)]
+
+    def test_it_reads_the_id_off_a_message(self):
+        self.assertEqual(self.ids([self._msg(424242)]), ["424242"])
+
+    def test_a_stranger_writing_after_you_is_not_picked(self):
+        # Anyone can write to a bot. Both come back, so nobody is chosen
+        # for you.
+        self.assertEqual(self.ids([self._msg(111), self._msg(222)]),
+                         ["222", "111"])
+
+    def test_one_person_twice_is_one_chat(self):
+        self.assertEqual(self.ids([self._msg(111), self._msg(111)]),
+                         ["111"])
+
+    def test_it_says_who_wrote(self):
+        got = Tabit._tg_chats_from_updates([self._msg(
+            5, first_name="Ann", last_name="Lee", username="ann")])
+        self.assertEqual(got, [("5", "Ann Lee @ann")])
+
+    def test_a_group_is_not_your_chat(self):
+        self.assertEqual(self.ids([self._msg(424242, "supergroup")]), [])
+
+    def test_an_edited_message_counts(self):
+        upd = {"edited_message": {"chat": {"id": 7, "type": "private"}}}
+        self.assertEqual(self.ids([upd]), ["7"])
+
+    def test_nothing_sent_yet(self):
+        for updates in ([], None, [{}], [{"message": {}}]):
+            self.assertEqual(self.ids(updates), [], repr(updates))
+
+
+class TestTelegramAuth(unittest.TestCase):
+    """Only one chat, and only one person in it, may talk to tabit."""
+
+    def _msg(self, chat_id, from_id, kind="private"):
+        return {"chat": {"id": chat_id, "type": kind},
+                "from": {"id": from_id}}
+
+    def test_the_configured_private_chat_is_let_in(self):
+        self.assertTrue(Tabit._tg_auth_ok(self._msg(424242, 424242), "424242"))
+
+    def test_a_number_that_is_a_string_still_matches(self):
+        self.assertTrue(Tabit._tg_auth_ok(self._msg("424242", 424242), 424242))
+
+    def test_another_chat_is_refused(self):
+        self.assertFalse(Tabit._tg_auth_ok(self._msg(999, 999), "424242"))
+
+    def test_someone_else_in_the_right_chat_is_refused(self):
+        # A chat id says where, not who.
+        self.assertFalse(Tabit._tg_auth_ok(self._msg(424242, 777), "424242"))
+
+    def test_a_group_is_refused_whatever_the_ids(self):
+        for kind in ("group", "supergroup", "channel"):
+            self.assertFalse(
+                Tabit._tg_auth_ok(self._msg(424242, 424242, kind), "424242"),
+                kind)
+
+    def test_no_chat_id_configured_lets_nobody_in(self):
+        for cid in ("", None, 0):
+            self.assertFalse(Tabit._tg_auth_ok(self._msg(1, 1), cid), repr(cid))
+
+    def test_a_message_missing_its_parts(self):
+        for msg in ({}, {"chat": {"type": "private"}}, {"from": {"id": 1}}):
+            self.assertFalse(Tabit._tg_auth_ok(msg, "424242"), msg)
+
+
+class TestTelegramPollGap(unittest.TestCase):
+    """A long poll that answers at once must not become a spin."""
+
+    def test_an_instant_answer_is_made_to_wait(self):
+        self.assertEqual(Tabit._tg_poll_gap(0), Tabit._TG_POLL_MIN)
+
+    def test_a_poll_that_really_blocked_waits_no_longer(self):
+        self.assertEqual(Tabit._tg_poll_gap(Tabit._TG_POLL_TIMEOUT), 0)
+
+    def test_it_makes_up_the_difference(self):
+        self.assertAlmostEqual(Tabit._tg_poll_gap(Tabit._TG_POLL_MIN - 0.5),
+                               0.5)
+
+    def test_a_clock_that_went_backwards_is_not_a_long_sleep(self):
+        self.assertEqual(Tabit._tg_poll_gap(-99), Tabit._TG_POLL_MIN)
+
+
+class TestTelegramCommand(unittest.TestCase):
+    """Reading the verb off a message."""
+
+    def test_a_plain_command(self):
+        self.assertEqual(Tabit._tg_command("/status"), "status")
+
+    def test_arguments_are_not_part_of_it(self):
+        self.assertEqual(Tabit._tg_command("/status now please"), "status")
+
+    def test_the_bot_name_is_stripped(self):
+        self.assertEqual(Tabit._tg_command("/status@tabitbot"), "status")
+
+    def test_case_and_space_do_not_matter(self):
+        self.assertEqual(Tabit._tg_command("  /STATUS  "), "status")
+
+    def test_ordinary_text_is_not_a_command(self):
+        for text in ("status", "", None, "   ", "hi /status"):
+            self.assertIsNone(Tabit._tg_command(text), repr(text))
+
+
+class TestTelegramQuoteLines(unittest.TestCase):
+    """What of a terminal screen is worth carrying to a phone."""
+
+    def test_it_takes_the_last_lines_with_words_in_them(self):
+        screen = "\n".join([
+            "old line", "", "  ", "╭──────────╮", "│          │",
+            "Found 3 failures.", "Analyse first, or rerun?", "", "> "])
+        self.assertEqual(
+            Tabit._tg_quote_lines(screen, want=2),
+            ["Found 3 failures.", "Analyse first, or rerun?"])
+
+    def test_order_is_kept(self):
+        out = Tabit._tg_quote_lines("a\nb\nc", want=3)
+        self.assertEqual(out, ["a", "b", "c"])
+
+    def test_an_empty_screen_gives_nothing(self):
+        for text in ("", None, "\n\n   \n", "--- ---\n===="):
+            self.assertEqual(Tabit._tg_quote_lines(text), [], repr(text))
+
+
+class TestTelegramQuoteChrome(unittest.TestCase):
+    """An agent CLI keeps furniture on screen. None of it is an answer."""
+
+    SCREEN = "\n".join([
+        "It is 3:56 PM.",
+        "\u2733 Crunched for 8s \u00b7 done 3:56 PM",
+        "\u25cf Opus 5.5 (1M context) \u2502 4% \u2502 $0.35 \u2502 328m57s",
+        "\u2b1b bypass permissions on (shift+tab to cycle) \u00b7 for agents",
+    ])
+
+    def test_only_the_line_that_says_something_survives(self):
+        self.assertEqual(Tabit._tg_quote_lines(self.SCREEN, want=6),
+                         ["It is 3:56 PM."])
+
+    def test_the_status_bar_uses_box_characters_not_pipes(self):
+        bar = "\u25cf Sonnet 5 (200k) \u2502 12% \u2502 $1.20"
+        self.assertEqual(Tabit._tg_quote_lines(bar), [])
+
+    def test_tabits_own_footer_does_not_come_back(self):
+        # It is typed in, so it is on the screen, so it would be quoted.
+        echo = Tabit._tg_task_text("do it", "ab12cd34", True)
+        self.assertEqual(Tabit._tg_quote_lines(echo, want=6), ["do it"])
+
+    def test_a_model_name_inside_a_sentence_is_kept(self):
+        line = "I used Opus to write the test and it passed."
+        self.assertEqual(Tabit._tg_quote_lines(line), [line])
+
+
+class TestTelegramBoard(unittest.TestCase):
+    """The overview puts the tabs that want you at the top."""
+
+    TABS = [("working", "b · two"), ("blocked", "a · one"),
+            ("idle", "c · three"), ("ready", "d · four"),
+            ("blocked", "a · aaa")]
+
+    def test_worst_news_first_then_by_name(self):
+        lines = Tabit._tg_board_lines(self.TABS)
+        self.assertEqual([l.split(None, 2)[2] for l in lines],
+                         ["a · aaa", "a · one", "d · four", "b · two",
+                          "c · three"])
+
+    def test_every_line_carries_its_glyph_and_state(self):
+        line = Tabit._tg_board_lines([("blocked", "x")])[0]
+        self.assertTrue(line.startswith("? blocked"))
+        self.assertTrue(line.endswith("x"))
+
+    def test_an_unknown_state_still_prints(self):
+        line = Tabit._tg_board_lines([("unknown", "x")])[0]
+        self.assertIn("unknown", line)
+        self.assertTrue(line.startswith("·"))
+
+    def test_no_ai_tabs_says_so(self):
+        self.assertEqual(Tabit._tg_board_lines([]), ["No AI tabs."])
 
 
 class _SessionSink:

@@ -48,7 +48,7 @@ sudo password for apt.
 |---|---|
 | `+ Serial` | Pick device, baud (default 115200), and tool (a device a tab already has open says which tab): `screen` (bundled `screen.sh`) / `kermit` / `picocom`; or `ssh` / `telnet` to a host + port (for network console servers) |
 | `+ Terminal` | New tab running your login shell |
-| `+ AI` | Pick AI CLI and working directory; an optional **Session ID** resumes that exact session (tried first, normal continue/resume stays as fallback). **Run inside tmux** keeps the agent alive across restarts and lists the ones still running, each marked with the tab holding it where there is one. **Edit list…** manages CLI names and per-CLI continue/resume tries (`~/.config/tabit/ai_clis.json`) |
+| `+ AI` | Pick AI CLI and working directory. Two separate choices: **Create new session** (on by default; untick to continue the last one), and **Resume when tabit reopens** (what the tab does after a restart; the rename popover changes it later). A tab comes back to its own session, not just the newest one in the folder: claude and the xAI grok start with an id tabit picks (`--session-id`, used only when the CLI's `--help` lists it); codex and agy pick their own, and tabit reads it from the session file the running agent holds open, once the first message has been sent. An optional **Session ID** resumes that exact session (tried first, normal continue/resume stays as fallback). **Run inside tmux** keeps the agent alive across restarts and lists the ones still running, each marked with the tab holding it where there is one. **Edit list…** manages CLI names and per-CLI continue/resume tries (`~/.config/tabit/ai_clis.json`) |
 | `+ Open` | Blank buffer to type in, or open a file to read. GtkSourceView editor + **Markdown Preview** (WebKit); an image, PDF or HTML page opens rendered, full width; bottom tools: Base64 / JSON Format; wrap in **Settings…**; huge-line guards. The preview toggle is remembered across restarts |
 | `Settings…` | Theme, fonts, terminal line spacing, note wrap, and other prefs (`settings.json`) |
 | `+ Command` | Run anything (e.g. `ssh root@192.168.1.1`) in a new tab |
@@ -104,6 +104,55 @@ and ignores the timeout an app asks for. **Settings… → AI** turns it off
 or drops it to one that goes away on its own. The desktop half needs
 `gir1.2-notify-0.7`, which the installer pulls in; the in-app half works
 without it.
+
+The same news can also reach your **phone**. **Settings… → Telegram →
+Also send it to Telegram** takes a bot token (from `@BotFather`) and
+sends one message per agent that finishes or wants you. **How do I set
+this up?** on that page has the five steps, and **Find it** next to Chat
+id reads your own id off the first message you send the bot, so there is
+no second bot to go and ask. By default it only sends while tabit is not the window in
+front; **Always** sends either way. It is deliberately not tied to the
+desktop popup switch, because "no popup on this screen" and "nothing on
+my phone" are two different wishes. **Send a test message** proves the
+pair before you rely on it. The token is kept in
+`~/.config/tabit/telegram.json`, mode `0600` — not in `settings.json`,
+which is the file you would paste into a bug report.
+
+Two more switches sit under it. **Answer /status from the phone** makes
+tabit read what you send the bot and reply to `/status` with every AI tab
+and what it is doing; only your own 1:1 chat is listened to, and nothing
+can be typed into a tab yet. **Include the agent's last lines in the
+message** puts the agent's own words in the push, because otherwise a
+message says an agent wants you but not what it asked — and you cannot
+answer from a phone without that. It is off by default: those lines
+travel through Telegram, and a console can have secrets on it.
+
+**Sending a task back.** Right-click an AI tab → **Telegram tasks…** and
+give it a short name. That name is the switch: a tab without one is not
+offered on the phone and is refused if anything tries. With one, write
+the task in Telegram, send it, and tap the tab to send it to — the tap
+is the submit, and a plain message never goes anywhere on its own.
+**Replying** to one of tabit's messages skips the tap, because the reply
+already says which tab. Putting a tab's short name on the first line
+narrows the buttons to that one tab. The task arrives the way a paste
+does, so a prompt with line breaks in it is not submitted a line at a
+time, and exactly one Enter goes on the end. A button works once:
+pressing it again says so rather than running the task twice.
+
+**Getting the answer back.** A task sent from Telegram carries a short
+footer telling the agent where to write its reply and to keep it to
+about ten lines with the result first — it is going to a phone, and an
+agent given no budget writes a report. tabit sends that file back as a
+reply to the task — so one task reads as one thread. The
+file is the good path: the last lines of a terminal are the last lines
+of a redraw, not an answer to anything. If the agent stops without
+writing one, tabit says so and falls back to the tail of the screen.
+Either way it comes back whatever **Send** is set to: "not in front"
+means this window lost the keyboard focus, which is not the same as you
+being away, and an answer you asked for from your phone should not
+depend on it. Turn the extra line off with **A task asks the agent to
+write its answer to a file** if you would rather tabit never touched
+your prompt.
 
 A blue dot on a tab means that session printed output while you were
 looking elsewhere. When a session's process ends (device unplugged,

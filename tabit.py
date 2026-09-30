@@ -25,6 +25,7 @@ import random
 import re
 import shlex
 import signal
+import queue
 import subprocess
 import sys
 
@@ -32,7 +33,9 @@ import shutil
 import tarfile
 import threading
 import time
+import urllib.parse
 import urllib.request
+import uuid
 
 import gi
 gi.require_version("Gtk", "3.0")
@@ -449,7 +452,22 @@ DEFAULT_AI_TRY = ["--continue", "resume --last", "--resume latest"]
 # session. {id} is substituted. Per-CLI override: add "resume_id" to an entry
 # in ~/.config/tabit/ai_clis.json.
 DEFAULT_AI_RESUME_ID = "--resume {id}"
-AI_RESUME_ID_ARGS = {"codex": "resume {id}"}
+AI_RESUME_ID_ARGS = {"codex": "resume {id}", "agy": "--conversation {id}"}
+# +AI "Create new session": start with an id tabit chose, so "Resume when
+# tabit reopens" can resume this tab's own session and not just the newest
+# one in the folder. Only for CLIs that take an id for a new session, and
+# only once `--help` shows the flag: the `grok` on PATH may be a different
+# program that has none.
+AI_NEW_ID_ARGS = {"claude": "--session-id {id}", "grok": "--session-id {id}"}
+# CLIs that pick their own id. The running agent holds its session file
+# open, and the file name is the id, so tabit reads it out of /proc. The
+# file only appears with the first message.
+_UUID_RE = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+AI_SESSION_FILES = {
+    "codex": re.compile(r"/\.codex/sessions/.*-(%s)\.jsonl$" % _UUID_RE),
+    "agy": re.compile(
+        r"/antigravity-cli/conversations/(%s)\.db$" % _UUID_RE),
+}
 # +AI "Run inside tmux": per-session options that keep the AI status icons
 # working. Measured, not guessed — without the first two tabit sees an empty
 # window title (the braille spinner rules in agent-detection/*.toml go blind)
@@ -511,7 +529,12 @@ MARKDOWN_SUFFIXES = (".md", ".markdown", ".mdown", ".mkd")
 # out of the "//" inside a URL and off the tail of a longer word; `3/4` needs
 # two components to match, so it does not.
 TERM_PATH_PATTERN = (
-    r"(?<![\w:/~.-])"
+    # Not inside a word or a URL. A colon only counts as "inside" after an
+    # ASCII word character: `https:/`, `host:/`, `C:/`. After anything
+    # else -- `文件:/home/...`, as an agent writes in Chinese -- the path
+    # starts right after it. ASCII spelled out, because \w in VTE's PCRE2
+    # is not the same set as \w in Python's re, which the tests use.
+    r"(?<![\w/~.-])(?<![A-Za-z0-9_.~-]:)"
     r"~?/"
     r"(?:[A-Za-z0-9._+@~-]+/)*"
     r"[A-Za-z0-9._+@~-]+"
@@ -674,6 +697,17 @@ SCREEN_SH_PATH = os.path.join(CONFIG_DIR, "screen.sh")
 SESSIONS_FILE = os.path.join(CONFIG_DIR, "sessions.json")
 KEYS_FILE = os.path.join(CONFIG_DIR, "keys.json")
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
+# Bot token and chat id live apart from settings.json: that one is
+# rewritten on every settings save and is the file someone pastes
+# into a bug report. This one is written 0600 and never logged.
+TELEGRAM_FILE = os.path.join(CONFIG_DIR, "telegram.json")
+# Not a secret: which update we have read, and what we have already
+# said. Kept out of the 0600 file so it can be looked at.
+TELEGRAM_STATE_FILE = os.path.join(CONFIG_DIR, "telegram-state.json")
+# Where an agent writes the answer to a task that came from a phone.
+# A file, because the last lines of a terminal are the last lines of
+# a redraw, not the answer to anything.
+TELEGRAM_REPLY_DIR = os.path.join(CONFIG_DIR, "tg-replies")
 AI_LAST_FILE = os.path.join(CONFIG_DIR, "ai_last.json")
 AI_CLIS_FILE = os.path.join(CONFIG_DIR, "ai_clis.json")
 COMMANDS_FILE = os.path.join(CONFIG_DIR, "commands.json")
@@ -1431,7 +1465,12 @@ DEFAULT_SETTINGS = {
     "shell_inherit_cwd": False,  # new shell opens in the focused tab's path
     "ai_notify": True,           # desktop popup when an agent wants you
     "ai_notify_urgency": "critical",  # critical | normal | low
-    "ai_fresh_on_restore": False,  # restored AI tabs start fresh (no continue)
+    "telegram_enabled": False,   # also send the same news to a Telegram bot
+    "telegram_when": "away",     # away | always
+    "telegram_reply": False,     # answer /status from the phone
+    "telegram_quote": False,     # put the agent's own last lines in it
+    "telegram_ask_file": True,   # a task asks the agent to write its answer
+    "ai_fresh_on_restore": False,  # +AI default: tab starts fresh after restart
     "ai_use_tmux": True,           # +AI dialog: run inside tmux (can uncheck)
     "ai_claude_bypass": False,     # +AI: launch claude with --dangerously-skip-permissions
     "group_names": {},             # tab-group color -> display name
@@ -1690,7 +1729,12 @@ class Tabit(Gtk.Window):
             "sidebar_position", "left") or "left"
         self._apply_sidebar_layout()
 
-        ai_fresh = self._load_settings().get("ai_fresh_on_restore", False)
+        # One-time move from the old global switch: tabs saved before each
+        # tab kept its own choice still carry the tries, and a user with
+        # the switch on expects them to start fresh once more.
+        st = self._load_settings()
+        ai_migrate = (st.get("ai_fresh_on_restore", False)
+                      and not st.get("ai_resume_per_tab", False))
         # Keep collapsed_groups from settings; do not expand while replaying sessions.
         self._restoring_sessions = True
         last_row = None
@@ -1708,12 +1752,25 @@ class Tabit(Gtk.Window):
                         # A file reopens showing what it was showing.
                         self._note_set_preview(r, True)
                 else:
+                    # Each AI tab stored its own "resume when tabit reopens"
+                    # choice in its argv; run it as saved.
                     argv = s["argv"]
-                    if ai_fresh and _is_ai_icon(s.get("icon")):
-                        argv = self._ai_argv_plain(argv)  # no continue/resume
+                    if ai_migrate and _is_ai_icon(s.get("icon")):
+                        argv = self._ai_argv_plain(argv)
                     r = self._add_session(s["label"], argv, s["icon"],
                                           s.get("sub"), s.get("cwd"),
                                           s.get("track_cwd", False))
+                if r is not None and s.get("tg"):
+                    r.tg_id = s["tg"]
+                if r is not None and s.get("hunt"):
+                    r.ai_hunt = True
+                # A short name is an address. The dialog will not hand
+                # out a duplicate, but a hand-edited or hand-copied
+                # sessions.json can, and then a task typed on a phone
+                # goes to whichever tab was restored first.
+                if (r is not None and s.get("tgname")
+                        and self._tg_name_free(s["tgname"], keep=r)):
+                    r.tg_name = s["tgname"]
                 color = s.get("color")
                 if color and r is not None:  # restore the tab-group stripe on the new row
                     self._apply_group(r, color)
@@ -1722,6 +1779,8 @@ class Tabit(Gtk.Window):
             except (KeyError, TypeError, ValueError, IndexError, OSError):
                 continue  # skip broken entries in a hand-edited file
         self._restoring_sessions = False
+        if not st.get("ai_resume_per_tab", False):
+            self._save_settings({"ai_resume_per_tab": True})
         self._relayout()  # build group headers + cluster + apply collapse
         # Prefer a visible (non-collapsed-member) row so we do not auto-expand
         if last_row is not None:
@@ -1740,8 +1799,11 @@ class Tabit(Gtk.Window):
         self._agent_store = None
         GLib.idle_add(self._deferred_init_agent_store)
         GLib.timeout_add_seconds(self._AGENT_POLL_SEC, self._poll_ai_agent_statuses)
+        GLib.timeout_add_seconds(self._AI_HUNT_SEC, self._ai_hunt_session_ids)
         _tmux_apply_user_conf()
         GLib.idle_add(self._check_weekly_auto_update)
+        self._tg_start_listening()
+        self._tg_watch_replies()
         # Second launcher click writes tabit.raise — present this window
         GLib.timeout_add(400, self._poll_raise_request)
 
@@ -1840,6 +1902,14 @@ class Tabit(Gtk.Window):
                 entry["color"] = r.group_color
             if getattr(r, "preview_on", False):
                 entry["preview"] = True
+            # Telegram addresses a tab by an id that outlives its name,
+            # and only tabs with a short name take tasks at all.
+            if getattr(r, "tg_id", None):
+                entry["tg"] = r.tg_id
+            if getattr(r, "tg_name", None):
+                entry["tgname"] = r.tg_name
+            if getattr(r, "ai_hunt", False):
+                entry["hunt"] = True
             data.append(entry)
         os.makedirs(os.path.dirname(SESSIONS_FILE), exist_ok=True)
         with open(SESSIONS_FILE, "w") as f:
@@ -2088,7 +2158,9 @@ class Tabit(Gtk.Window):
         self._apply_editor_font()
 
     def _add_session(self, label, argv, icon_name, sub=None, cwd=None,
-                     track_cwd=False):
+                     track_cwd=False, launch_argv=None):
+        """argv is what the tab keeps and runs again after a restart;
+        launch_argv, when given, is what runs this first time instead."""
         term = Vte.Terminal()
         term.set_hexpand(True)
         term.set_vexpand(True)
@@ -2189,7 +2261,7 @@ class Tabit(Gtk.Window):
                 return False
 
             GLib.timeout_add(800, _kick)
-        term.spawn_async(Vte.PtyFlags.DEFAULT, workdir, argv,
+        term.spawn_async(Vte.PtyFlags.DEFAULT, workdir, launch_argv or argv,
                          None, GLib.SpawnFlags.SEARCH_PATH, None, None,
                          -1, None, self._on_term_spawned, row)
         return row
@@ -3881,6 +3953,14 @@ if (data !== null) {{
         for row in list(self.listbox.get_children()):
             if not self._confirm_close_row(row):
                 return True  # abort window close
+        # A first message sent since the last sweep has made a session
+        # the saved command does not know about yet.
+        try:
+            jobs = self._ai_hunt_jobs()
+            self._ai_hunt_apply(self._ai_hunt_scan(jobs),
+                                {j[0]: j[0].argv for j in jobs})
+        except Exception:
+            pass
         self._save_sessions()  # capture each shell's current cwd before exit
         self._save_sidebar_geometry()
         # Window teardown destroys VTE widgets and may fire child-exited for
@@ -4822,6 +4902,155 @@ if (data !== null) {{
         finally:
             self._agent_status_busy = False
         return True  # keep timer
+
+    # How often AI tabs are checked for the session their agent is in.
+    # Not the 3s status poll: this walks /proc, and a session id changes
+    # once per session, not once per screen.
+    _AI_HUNT_SEC = 15
+
+    @staticmethod
+    def _proc_children():
+        """ppid -> [pid] for every process that can be seen."""
+        kids = {}
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            try:
+                with open("/proc/%s/stat" % name) as f:
+                    stat = f.read()
+                # comm may hold spaces and ")"; ppid follows the last ")"
+                ppid = int(stat.rsplit(")", 1)[1].split()[1])
+            except (OSError, IndexError, ValueError):
+                continue
+            kids.setdefault(ppid, []).append(int(name))
+        return kids
+
+    @staticmethod
+    def _proc_open_files(root, kids):
+        """Every file held open by `root` and the processes under it."""
+        out, todo, seen = [], [root], set()
+        while todo:
+            pid = todo.pop()
+            if pid in seen:
+                continue
+            seen.add(pid)
+            todo.extend(kids.get(pid, ()))
+            fd_dir = "/proc/%d/fd" % pid
+            try:
+                names = os.listdir(fd_dir)
+            except OSError:
+                continue
+            for n in names:
+                try:
+                    out.append(os.readlink(os.path.join(fd_dir, n)))
+                except OSError:
+                    pass
+        return out
+
+    def _ai_hunt_jobs(self):
+        """(row, cli, tmux name, pid) for each tab worth looking at."""
+        jobs = []
+        for r in self._session_rows():
+            if (not _is_ai_icon(getattr(r, "icon_name", None))
+                    or getattr(r, "dead", False)
+                    or getattr(r, "term", None) is None):
+                continue
+            got = self._ai_cli_path_of(getattr(r, "argv", None))
+            if got is None or os.path.basename(
+                    got[0].rstrip("/")) not in AI_SESSION_FILES:
+                continue
+            inner, sess = self._ai_tmux_unwrap(r.argv)
+            if (self._ai_argv_plain(inner) == inner
+                    and not getattr(r, "ai_hunt", False)):
+                continue  # set to start fresh after a restart; leave it
+            jobs.append((r, got[0], sess, getattr(r, "pid", None)))
+        return jobs
+
+    def _ai_hunt_wanted(self, r, argv):
+        """Whether a scan result for `r`, taken while its command was
+        `argv`, may still be written. A box changed during the scan (Resume
+        turned off, tmux, the CLI) makes the result about another tab."""
+        return (getattr(r, "argv", None) == argv
+                and not getattr(r, "dead", False)
+                and any(j[0] is r for j in self._ai_hunt_jobs()))
+
+    @classmethod
+    def _ai_hunt_scan(cls, jobs):
+        """{row: session id} for the jobs whose agent holds one open.
+
+        No GTK in here: it runs off the main loop, because tmux can take
+        its time answering and the window must not wait for it.
+        """
+        panes = {}
+        if any(sess for _r, _c, sess, _p in jobs):
+            try:
+                out = subprocess.run(
+                    ["tmux", "list-panes", "-a", "-F",
+                     "#{session_name} #{pane_pid}"],
+                    capture_output=True, text=True, timeout=3).stdout
+            except (OSError, subprocess.SubprocessError):
+                out = ""
+            for line in out.splitlines():
+                name, _sp, pid = line.rpartition(" ")
+                if pid.isdigit():
+                    panes.setdefault(name, int(pid))
+        kids = cls._proc_children()
+        found = {}
+        for r, cli, sess, pid in jobs:
+            root = panes.get(sess) if sess else pid
+            if not root:
+                continue
+            sid = cls._ai_session_id_from_links(
+                cli, cls._proc_open_files(root, kids))
+            if sid:  # none yet: no message, so no session file yet
+                found[r] = sid
+        return found
+
+    def _ai_hunt_apply(self, found, seen):
+        """Write what a scan found. `seen` is each row's argv at the time
+        the scan was set up."""
+        changed = False
+        for r, sid in found.items():
+            if not self._ai_hunt_wanted(r, seen.get(r)):
+                continue
+            new = self._ai_argv_with_session(r.argv, sid)
+            if new != r.argv:
+                r.argv = new
+                changed = True
+        if changed:
+            self._save_sessions_soon()
+
+    def _ai_hunt_session_ids(self):
+        """Store the session each codex / agy tab is really in.
+
+        These CLIs pick their own id, so a tab can only resume its own
+        session after a restart if tabit reads the id off the running
+        agent. Kept up after the first hit: a new session inside the
+        agent (/new) should be the one that comes back.
+        """
+        if getattr(self, "_ai_hunting", False):
+            return True
+        jobs = self._ai_hunt_jobs()
+        if not jobs:
+            return True
+        self._ai_hunting = True
+        seen = {j[0]: j[0].argv for j in jobs}
+
+        def work():
+            try:
+                found = self._ai_hunt_scan(jobs)
+            except Exception:
+                found = {}
+
+            def done():
+                self._ai_hunting = False
+                self._ai_hunt_apply(found, seen)
+                return False
+
+            GLib.idle_add(done)
+
+        threading.Thread(target=work, daemon=True).start()
+        return True
 
     def _refresh_ai_status_widgets(self):
         """After show_all/relayout: re-apply which status widget is visible."""
@@ -5780,6 +6009,1210 @@ if (data !== null) {{
             GLib.source_remove(src)
         row._notify_src = None
 
+    # --- Telegram: the same news, on a phone ---------------------------
+
+    _TG_API = "https://api.telegram.org/bot%s/%s"
+    _TG_TIMEOUT = 10
+    _TG_HEAD = {
+        "blocked": "\u2753 Waiting for you",
+        "ready": "\u2705 Finished",
+    }
+
+    @staticmethod
+    def _tg_load_secrets():
+        """The bot token and chat id, or an empty dict."""
+        try:
+            with open(TELEGRAM_FILE) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _tg_save_secrets(token, chat_id):
+        """Write the token narrow, and narrow an existing file too.
+
+        The mode on os.open only applies when it creates the file, so a
+        file written before this rule existed would keep its old mode.
+        """
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        # Narrow it first. The mode on os.open only applies when it
+        # creates the file, so a file an older version left readable
+        # would stay readable for as long as the write takes -- with the
+        # new token already in it.
+        try:
+            os.chmod(TELEGRAM_FILE, 0o600)
+        except OSError:
+            pass
+        fd = os.open(TELEGRAM_FILE,
+                     os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"bot_token": (token or "").strip(),
+                       "chat_id": (chat_id or "").strip()}, f, indent=2)
+        os.chmod(TELEGRAM_FILE, 0o600)
+
+    @classmethod
+    def _tg_api_url(cls, token, method):
+        return cls._TG_API % (token, method)
+
+    @staticmethod
+    def _tg_error_text(exc):
+        """One error line with the bot token taken out of it.
+
+        The token is a path segment of every request URL, and urllib puts
+        the URL it was given into the text of most errors it raises. The
+        settings page shows this string, so it must not carry the key.
+        """
+        text = "%s: %s" % (type(exc).__name__, exc)
+        return re.sub(r"/bot[^/\s]+", "/bot<token>", text)
+
+    @classmethod
+    def _tg_should_send(cls, conf, app_active, status):
+        """Whether this status change is worth a buzz on the phone.
+
+        Deliberately not tied to the desktop popup switch: "no popup on
+        this screen" and "nothing on my phone" are two different wishes.
+        """
+        if not conf.get("telegram_enabled"):
+            return False
+        if status not in cls._TG_HEAD:
+            return False
+        if conf.get("telegram_when", "away") == "away" and app_active:
+            return False
+        return True
+
+    @classmethod
+    def _tg_message(cls, title, status):
+        """What the phone shows. Same words the desktop popup uses."""
+        return "%s\n%s\n%s" % (cls._TG_HEAD.get(status, status), title,
+                                cls._AGENT_NOTIFY.get(status, ""))
+
+    @staticmethod
+    def _tg_chats_from_updates(updates):
+        """Every private chat in a getUpdates answer, newest first, as
+        (id, who). `who` is the name and @username the sender shows.
+
+        Saves a trip to a third-party "what is my id" bot: the id is in
+        the first message the person sends their own bot. All of them,
+        not the newest: anyone can write to a bot, and taking the last
+        sender as the owner hands tabit to whoever wrote after you.
+        """
+        out, seen = [], set()
+        for upd in reversed(list(updates or [])):
+            msg = (upd.get("message") or upd.get("edited_message")
+                   or (upd.get("callback_query") or {}).get("message") or {})
+            chat = msg.get("chat") or {}
+            if chat.get("type") != "private" or chat.get("id") is None:
+                continue
+            cid = str(chat["id"])
+            if cid in seen:
+                continue
+            seen.add(cid)
+            name = " ".join(x for x in (chat.get("first_name"),
+                                        chat.get("last_name")) if x)
+            if chat.get("username"):
+                name = ("%s @%s" % (name, chat["username"])).strip()
+            out.append((cid, name or cid))
+        return out
+
+    @classmethod
+    def _tg_call(cls, token, method, params, timeout=None):
+        """One Bot API call. Returns (result, error line)."""
+        data = urllib.parse.urlencode(params).encode("utf-8")
+        req = urllib.request.Request(cls._tg_api_url(token, method), data=data)
+        try:
+            with urllib.request.urlopen(
+                    req, timeout=timeout or cls._TG_TIMEOUT) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:  # urllib raises a family of these
+            return None, cls._tg_error_text(exc)
+        if body.get("ok"):
+            return body.get("result"), None
+        return None, str(body.get("description") or "rejected")
+
+    @classmethod
+    def _tg_post(cls, token, chat, text):
+        """Send one message. None on success, else a line to show."""
+        _res, err = cls._tg_call(token, "sendMessage", {
+            "chat_id": chat,
+            "text": text,
+            "disable_web_page_preview": "true",
+        })
+        return err
+
+    # --- Telegram: which tab, and may it be typed into ------------------
+
+    # No l/1/0/o: these get read off a phone screen and typed back.
+    _TG_ID_ALPHABET = "abcdefghijkmnpqrstuvwxyz23456789"
+    _TG_NAME_MAX = 16
+
+    def _tg_row_id(self, row):
+        """A short id for a tab that outlives its name and a restart.
+
+        Buttons carry this, never the name: a tab renamed between the
+        message going out and the button being pressed must still be the
+        tab the message was about.
+        """
+        rid = getattr(row, "tg_id", None)
+        if rid:
+            return rid
+        taken = {getattr(r, "tg_id", None) for r in self._session_rows()}
+        while True:
+            rid = "".join(random.choice(self._TG_ID_ALPHABET)
+                          for _ in range(6))
+            if rid not in taken:
+                break
+        row.tg_id = rid
+        self._save_sessions_soon()
+        return rid
+
+    def _tg_row_by_id(self, rid):
+        if not rid:
+            return None
+        for row in self._session_rows():
+            if getattr(row, "tg_id", None) == rid:
+                return row
+        return None
+
+    def _tg_row_by_name(self, name):
+        if not name:
+            return None
+        for row in self._session_rows():
+            if getattr(row, "tg_name", None) == name:
+                return row
+        return None
+
+    @classmethod
+    def _tg_clean_name(cls, name):
+        """A usable short name, or None.
+
+        Lower case so what is typed on a phone -- which likes to
+        capitalise the first word of a line -- still matches.
+        """
+        text = (name or "").strip().lower()
+        if not text or len(text) > cls._TG_NAME_MAX:
+            return None
+        if any(c.isspace() for c in text):
+            return None
+        return text
+
+    def _tg_name_free(self, name, keep=None):
+        """Whether a short name is not already some other tab's."""
+        for row in self._session_rows():
+            if row is keep:
+                continue
+            if getattr(row, "tg_name", None) == name:
+                return False
+        return True
+
+    # An agent that has stopped being an agent. The process under an AI
+    # tab is a tmux client or a shell either way, so its command line
+    # cannot tell the two apart; the status poll is the only signal
+    # there is, and it is not a complete one -- an agent that quit to a
+    # live shell inside tmux reads as idle, not as exited. So this is a
+    # guard, not a proof, and the last line of defence stays the fact
+    # that a tab has to be turned on by hand.
+    _TG_NOT_AGENT = ("exited", "done", "unknown")
+
+    @classmethod
+    def _tg_row_trouble(cls, row):
+        """Why this tab cannot be typed into from a phone, or None."""
+        if row is None:
+            return "that tab is gone"
+        if not _is_ai_icon(getattr(row, "icon_name", None)):
+            return "that is not an AI tab"
+        if getattr(row, "dead", False) or getattr(row, "term", None) is None:
+            return "that tab has exited"
+        if getattr(row, "agent_status", None) in cls._TG_NOT_AGENT:
+            return "no agent is running in that tab"
+        if not getattr(row, "tg_name", None):
+            return "that tab does not take tasks from Telegram"
+        return None
+
+    def _tg_targets(self):
+        """Tabs a task may be sent to, as (id, short name, title)."""
+        out = []
+        for row in self._session_rows():
+            if self._tg_row_trouble(row) is not None:
+                continue
+            out.append((self._tg_row_id(row), row.tg_name,
+                        self._agent_notify_title(
+                            self._row_group_name(row),
+                            getattr(row, "title_text", None))))
+        return out
+
+    # Everything a terminal reads as an instruction rather than as text.
+    _TG_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+    @classmethod
+    def _tg_safe_text(cls, text):
+        """Text with anything the terminal would obey taken out.
+
+        An ESC in the middle of a paste ends the bracketed-paste run --
+        `ESC[201~` is the marker itself -- and everything after it
+        arrives as live keystrokes instead of as pasted text. Tabs and
+        line breaks stay; nothing else in C0 does.
+        """
+        return cls._TG_CONTROL.sub("", (text or "").replace("\r\n", "\n")
+                                   .replace("\r", "\n"))
+
+    def _tg_inject(self, row, text):
+        """Type a task into a tab, the way a paste would arrive.
+
+        paste_text is what the paste menu uses: VTE wraps it in the
+        bracketed-paste markers when the program has asked for them, so a
+        prompt with line breaks in it lands as one paste instead of being
+        submitted a line at a time. The Enter is separate, and there is
+        exactly one -- two makes some programs run it twice.
+        """
+        row.term.paste_text(self._tg_safe_text(text))
+        row.term.feed_child(b"\r")
+
+    # --- Telegram: getting the answer back ------------------------------
+
+    # Telegram's own cap is 4096; leaving room means a long answer splits
+    # on a line rather than mid-word.
+    _TG_MSG_LIMIT = 3500
+    # How much of a task is quoted back. A message that quotes the whole
+    # of a long one and adds a heading goes over Telegram's own cap and
+    # is refused outright -- taking the buttons, or the receipt, with it.
+    _TG_QUOTE_MAX = 1500
+    _TG_REPLY_PARTS = 4
+    # What to ask for is a phone screen's worth. An agent given no budget
+    # writes a report, and a report is four messages and a "cut here".
+    _TG_REPLY_LINES = 10
+    # One line, in the first person, no rule above it. Measured with a
+    # real agent: a footer that announced itself ("This task came from
+    # Telegram") under a "---" read as instructions somebody else had
+    # slipped into the paste, and the agent stopped to ask whether to
+    # obey it instead of answering. Said as part of the request, it is
+    # just the request.
+    _TG_REPLY_ASK = (
+        "\n\nWrite your reply to %s (about %d lines, result first) "
+        "\u2014 I am reading it on my phone, so keep the detail in the "
+        "terminal.")
+
+    @classmethod
+    def _tg_short(cls, text):
+        """A task, shortened enough to quote back safely."""
+        text = text or ""
+        if len(text) <= cls._TG_QUOTE_MAX:
+            return text
+        return text[:cls._TG_QUOTE_MAX].rstrip() + "\n\u2026 (shortened)"
+
+    @staticmethod
+    def _tg_reply_path(token):
+        return os.path.join(TELEGRAM_REPLY_DIR, "%s.md" % token)
+
+    @classmethod
+    def _tg_task_text(cls, text, token, ask):
+        """What actually gets typed in: the task, and where to answer."""
+        if not ask:
+            return text
+        return text + cls._TG_REPLY_ASK % (cls._tg_reply_path(token),
+                                           cls._TG_REPLY_LINES)
+
+    @classmethod
+    def _tg_chunks(cls, text):
+        """Split an answer into messages a phone will accept.
+
+        Broken on line ends where it can be, and cut off rather than sent
+        as twenty messages -- the tab itself is still the full record.
+        """
+        text = (text or "").strip()
+        if not text:
+            return []
+        parts, rest = [], text
+        while rest and len(parts) < cls._TG_REPLY_PARTS:
+            if len(rest) <= cls._TG_MSG_LIMIT:
+                parts.append(rest)
+                rest = ""
+                break
+            cut = rest.rfind("\n", 0, cls._TG_MSG_LIMIT)
+            if cut <= 0:
+                cut = cls._TG_MSG_LIMIT
+            parts.append(rest[:cut].rstrip())
+            rest = rest[cut:].lstrip("\n")
+        if rest:
+            parts[-1] += "\n\n\u2026 cut here. The rest is in the tab."
+        return parts
+
+    @staticmethod
+    def _tg_bot_key(token):
+        """Which bot, without the token: this goes in a file that is
+        not kept private."""
+        if not token:
+            return ""
+        return hashlib.sha1(token.encode("utf-8")).hexdigest()[:12]
+
+    @classmethod
+    def _tg_dest_now(cls):
+        """(chat id, bot key) as they are set right now."""
+        sec = cls._tg_load_secrets()
+        return (str(sec.get("chat_id") or ""),
+                cls._tg_bot_key(sec.get("bot_token") or ""))
+
+    @staticmethod
+    def _tg_job_dest(job):
+        """Where the answer to a task may go: the chat and bot the task
+        came from. None for a job saved before this was kept."""
+        if job.get("chat") is None:
+            return None
+        return (job["chat"], job.get("bot", ""))
+
+    def _tg_await_reply(self, token, row, msg_id):
+        """Remember that this tab owes us an answer, and to whom. Asked
+        from one chat, the answer must not go to another one set up
+        while the agent was still working."""
+        waiting = self._tg_jobs()
+        chat, bot = self._tg_dest_now()
+        waiting[token] = {"row_id": self._tg_row_id(row), "msg_id": msg_id,
+                          "name": row.tg_name, "chat": chat, "bot": bot}
+        self._tg_save_jobs()
+
+    def _tg_jobs(self):
+        """Tasks still owed an answer, read back from disk once.
+
+        An agent usually lives in tmux and outlives tabit, so a task sent
+        before a restart is still being worked on after it. Keeping this
+        in memory alone meant the answer arrived to nobody.
+        """
+        waiting = getattr(self, "_tg_waiting", None)
+        if waiting is None:
+            raw = self._tg_load_state().get("waiting")
+            waiting = self._tg_waiting = dict(raw) if isinstance(raw, dict) \
+                else {}
+            # An older build saved "sending"; nothing is in flight now.
+            for job in waiting.values():
+                if isinstance(job, dict):
+                    job.pop("sending", None)
+        return waiting
+
+    def _tg_save_jobs(self):
+        # "sending" is about this run only. Saved, a send that never
+        # finished would block the answer after a restart too.
+        waiting = getattr(self, "_tg_waiting", None) or {}
+        self._tg_save_state(waiting={
+            t: {k: v for k, v in j.items() if k != "sending"}
+            for t, j in waiting.items()})
+
+    def _tg_deliver_reply(self, token):
+        """Send what an agent wrote for a task, and tidy up.
+
+        Nothing is removed until there is something to send. An empty
+        file is an agent that has opened it and not written yet, and
+        deleting that takes the answer with it.
+
+        Sent whatever the "only when tabit is not in front" setting says:
+        this is the answer to something asked from the phone, and a
+        window that still holds focus on an empty desk is not a reason to
+        withhold it.
+        """
+        waiting = self._tg_jobs()
+        job = waiting.get(token)
+        path = self._tg_reply_path(token)
+        if job is None:
+            # Already answered, or left behind by an older run. Nobody is
+            # waiting for it, so it only has to stop taking up space.
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            return False
+        try:
+            # O_NOFOLLOW: the path is written into the agent's own prompt,
+            # and a link left there pointing at, say, telegram.json would
+            # otherwise be read and uploaded as the answer.
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd) as f:
+                body = f.read()
+        except OSError:
+            return False
+        chunks = self._tg_chunks(body)
+        if not chunks:
+            return False
+        if job.get("sending"):
+            return False  # a tick and a status change both reached it
+        job["sending"] = True
+        # Every part has to arrive before the local copy may go. The last
+        # part landing says nothing about the first.
+        left = {"n": len(chunks), "ok": True}
+
+        def part_done(ok, retry=True, t=token, p=path):
+            left["n"] -= 1
+            left["ok"] = left["ok"] and ok
+            left["retry"] = left.get("retry", True) and retry
+            if left["n"] > 0:
+                return False
+            if not left["ok"] and not left["retry"]:
+                # Meant for a bot or chat that is no longer the one. Sent
+                # again it would go to whoever that is now; drop it.
+                self._tg_jobs().pop(t, None)
+                self._tg_save_jobs()
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+                return False
+            if not left["ok"]:
+                # Keep the file and try again later. A part that did
+                # arrive goes again: twice is better than missing.
+                job.pop("sending", None)
+                # One timer per answer. The status path can fail it
+                # again meanwhile, and each failure adding its own timer
+                # sends the answer once per timer.
+                retrying = getattr(self, "_tg_retrying", None)
+                if retrying is None:
+                    retrying = self._tg_retrying = set()
+                if t not in retrying:
+                    retrying.add(t)
+
+                    def again(t=t):
+                        retrying.discard(t)
+                        self._tg_settle_watch(t)
+                        return False
+
+                    GLib.timeout_add_seconds(self._TG_RETRY_SEC, again)
+                return False
+            self._tg_jobs().pop(t, None)
+            self._tg_save_jobs()
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+            return False
+
+        head = "\u2714 %s answered" % job["name"]
+        for i, part in enumerate(chunks):
+            self._tg_send(("%s\n\n%s" % (head, part)) if i == 0 else part,
+                          row_id=job["row_id"], reply_to=job["msg_id"],
+                          after=lambda _mid: part_done(True),
+                          failed=lambda retry: part_done(False, retry),
+                          dest=self._tg_job_dest(job))
+        return True
+
+    def _tg_task_fallback(self, row, status):
+        """An agent that stopped without writing its answer still owes one.
+
+        The file is the good path. This is what happens when the agent
+        ignored the request, or was never asked: the tail of its screen,
+        which is a redraw rather than an answer, said so plainly.
+        """
+        # Only "finished". "Needs you" is the agent asking a question in
+        # the middle of the task, and clearing the job there throws away
+        # the answer it writes once you have replied.
+        if status != "ready":
+            return
+        waiting = self._tg_jobs()
+        rid = getattr(row, "tg_id", None)
+        # One task, not all of them: two tasks on one tab cannot both be
+        # answered by one screen, and the older one is the one this
+        # "finished" belongs to.
+        for token, job in list(waiting.items()):
+            if job["row_id"] != rid or job.get("sending"):
+                continue
+            if os.path.exists(self._tg_reply_path(token)):
+                # Written, or being written. Let the settling path have
+                # it rather than read half a file and delete it.
+                self._tg_settle_watch(token)
+                return
+            waiting.pop(token, None)
+            self._tg_save_jobs()
+            lines = self._tg_quote_lines(
+                self._term_tail_text(getattr(row, "term", None), 20), want=5)
+            self._tg_send(
+                "%s finished without writing a reply. Last of its screen:"
+                "\n\n%s" % (job["name"], "\n".join(lines) or "(nothing)"),
+                row_id=rid, reply_to=job["msg_id"],
+                dest=self._tg_job_dest(job))
+            return
+
+    def _tg_scan_replies(self, *_a):
+        """Deliver every answer that has landed."""
+        for token in list(self._tg_jobs()):
+            if os.path.exists(self._tg_reply_path(token)):
+                self._tg_deliver_reply(token)
+        return False
+
+    def _tg_watch_replies(self):
+        """Watch the answer folder, and clear out anything left over.
+
+        A file written while the agent keeps working would otherwise wait
+        for a status change that may be a long way off.
+        """
+        os.makedirs(TELEGRAM_REPLY_DIR, exist_ok=True)
+        owed = self._tg_jobs()
+        for name in os.listdir(TELEGRAM_REPLY_DIR):
+            # An answer written while tabit was restarting is still an
+            # answer: the agent is in tmux and never stopped. Only files
+            # nobody is waiting for go.
+            if name.endswith(".md") and name[:-3] in owed:
+                continue
+            try:
+                os.remove(os.path.join(TELEGRAM_REPLY_DIR, name))
+            except OSError:
+                pass
+        # Anything already written goes out now rather than waiting for
+        # a change event that has been and gone.
+        GLib.idle_add(self._tg_scan_replies)
+        gfile = Gio.File.new_for_path(TELEGRAM_REPLY_DIR)
+        try:
+            monitor = gfile.monitor_directory(Gio.FileMonitorFlags.NONE, None)
+        except GLib.Error:
+            return
+        # GIO dispatches this on the default main context, so it lands
+        # on the same loop as the status fallback. That is what keeps the
+        # two delivery paths from racing each other over one file.
+        monitor.connect("changed", self._on_tg_reply_dir_changed)
+        self._tg_reply_monitor = monitor  # a dropped monitor stops firing
+
+    # How long a file has to stop changing before it counts as written.
+    # Two equal readings can both land inside one pause in the writing,
+    # so it takes three -- about 1.2s of quiet.
+    _TG_SETTLE_MS = 600
+    _TG_SETTLE_TICKS = 2
+    # How long after a failed send the answer is tried again.
+    _TG_RETRY_SEC = 30
+
+    def _on_tg_reply_dir_changed(self, _mon, gfile, _other, event):
+        if event in (Gio.FileMonitorEvent.DELETED,
+                     Gio.FileMonitorEvent.PRE_UNMOUNT,
+                     Gio.FileMonitorEvent.UNMOUNTED):
+            return
+        name = os.path.basename(gfile.get_path() or "")
+        if name.endswith(".md"):
+            self._tg_settle_watch(name[:-3])
+
+    def _tg_settle_watch(self, token):
+        """Start watching a file's size until it stops changing.
+
+        Not on the first sight of it. A file that has just appeared is
+        usually empty, and an agent writing a long answer is still
+        filling it; CHANGES_DONE_HINT is a hint by its own documentation
+        and arrives when the backend feels like it. Size that has stopped
+        moving is a fact this end can check.
+        """
+        pending = getattr(self, "_tg_settling", None)
+        if pending is None:
+            pending = self._tg_settling = {}
+        if token in pending:
+            return  # a tick is already running for it
+        pending[token] = (-1, 0)
+        GLib.timeout_add(self._TG_SETTLE_MS, self._tg_settle_tick, token)
+
+    def _tg_settle_tick(self, token):
+        pending = getattr(self, "_tg_settling", None) or {}
+        if token not in self._tg_jobs():
+            # Answered by the status path, or the task is long gone.
+            pending.pop(token, None)
+            return False
+        try:
+            size = os.path.getsize(self._tg_reply_path(token))
+        except OSError:
+            pending.pop(token, None)
+            return False
+        prev, stable = pending.get(token, (-1, 0))
+        stable = stable + 1 if size > 0 and size == prev else 0
+        if stable >= self._TG_SETTLE_TICKS:
+            pending.pop(token, None)
+            self._tg_deliver_reply(token)
+            return False
+        pending[token] = (size, stable)
+        return True
+
+    def _tg_name_dialog(self, row):
+        """Turn Telegram tasks on for one tab, by giving it a short name.
+
+        The name is the switch. A tab without one is not offered on the
+        phone and is refused if something tries anyway, so there is one
+        place to look for "can this be typed into from outside".
+        """
+        dialog = Gtk.Dialog(title="Telegram tasks", transient_for=self,
+                            modal=True)
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                           "Save", Gtk.ResponseType.OK)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6,
+                      margin=12)
+        box.pack_start(Gtk.Label(
+            label="A short name for this tab on your phone.", xalign=0),
+            False, False, 0)
+        entry = Gtk.Entry(text=getattr(row, "tg_name", None) or "",
+                          width_chars=20)
+        entry.set_placeholder_text("acl")
+        box.pack_start(entry, False, False, 0)
+        warn = Gtk.Label(xalign=0)
+        warn.get_style_context().add_class("session-sub")
+        warn.set_line_wrap(True)
+        warn.set_max_width_chars(46)
+        warn.set_text(
+            "With a name, anything you send this tab from Telegram is "
+            "typed straight into it and run. Leave it empty to turn that "
+            "off again.")
+        box.pack_start(warn, False, False, 0)
+        dialog.get_content_area().add(box)
+        self._dialog_enter_is_ok(dialog)
+        dialog.show_all()
+        while True:
+            if dialog.run() != Gtk.ResponseType.OK:
+                break
+            raw = entry.get_text().strip()
+            if not raw:
+                row.tg_name = None
+                self._save_sessions_soon()
+                break
+            name = self._tg_clean_name(raw)
+            if name is None:
+                warn.set_text("One word, %d characters at most."
+                              % self._TG_NAME_MAX)
+                continue
+            if not self._tg_name_free(name, keep=row):
+                warn.set_text("Another tab is already called %s." % name)
+                continue
+            row.tg_name = name
+            self._tg_row_id(row)
+            self._save_sessions_soon()
+            break
+        dialog.destroy()
+
+    # --- Telegram: listening ------------------------------------------
+
+    _TG_POLL_TIMEOUT = 30
+    # A long poll is supposed to block at the server for the whole
+    # timeout. Anything that answers at once -- a proxy in the way, an
+    # API that ignores the timeout -- turns this loop into a spin:
+    # measured against a stub that answered immediately, 15,716 calls in
+    # six seconds. This is the floor that cannot happen under.
+    _TG_POLL_MIN = 2
+    _TG_BOARD_GLYPH = {"blocked": "?", "ready": "\u2713", "working": "\u25b6",
+                       "idle": "\u23f8", "exited": "\u2715"}
+    _TG_BOARD_ORDER = {"blocked": 0, "ready": 1, "working": 2, "idle": 3}
+
+    @classmethod
+    def _tg_poll_gap(cls, spent):
+        """How long to wait after a poll that came back in `spent`."""
+        return max(0.0, cls._TG_POLL_MIN - max(0.0, spent))
+
+    @staticmethod
+    def _tg_load_state():
+        try:
+            with open(TELEGRAM_STATE_FILE) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    # The poll thread writes the offset and the UI thread writes the
+    # jobs, both as read-change-write of one file. Without this, each
+    # can write back the other's old value: an old offset redelivers a
+    # reply and types it in twice; an old job list loses a task.
+    _TG_STATE_LOCK = threading.Lock()
+
+    @classmethod
+    def _tg_save_state(cls, **kw):
+        """Write the state, all of it or none of it.
+
+        Written in place, a crash halfway leaves JSON that will not
+        parse, which reads back as no offset at all -- and Telegram then
+        redelivers everything it has been holding.
+        """
+        with cls._TG_STATE_LOCK:
+            cur = cls._tg_load_state()
+            cur.update(kw)
+            os.makedirs(CONFIG_DIR, exist_ok=True)
+            tmp = TELEGRAM_STATE_FILE + ".new"
+            with open(tmp, "w") as f:
+                json.dump(cur, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, TELEGRAM_STATE_FILE)
+
+    _TG_MSG_MEMORY = 200
+
+    def _tg_remember_msg(self, msg_id, row_id):
+        """Tie a message to a tab, so a reply to it needs no address."""
+        if not msg_id or not row_id:
+            return
+        seen = getattr(self, "_tg_msg_row", None)
+        if seen is None:
+            seen = self._tg_msg_row = {}
+        seen[str(msg_id)] = row_id
+        # Bounded: a chat is a log, and only the recent end of it gets
+        # replied to. Oldest first, which is insertion order here.
+        while len(seen) > self._TG_MSG_MEMORY:
+            seen.pop(next(iter(seen)))
+
+    def _tg_replied_row_id(self, msg):
+        """The tab a replied-to message was about, or None."""
+        parent = (msg or {}).get("reply_to_message") or {}
+        return getattr(self, "_tg_msg_row", {}).get(
+            str(parent.get("message_id")))
+
+    @staticmethod
+    def _tg_auth_ok(msg, chat_id):
+        """Whether an update came from the one place allowed to talk.
+
+        Both halves are checked. A chat id says where, not who, and the
+        two are only the same number while this is a 1:1 chat -- which is
+        why anything else is refused outright rather than filtered.
+        """
+        chat = (msg or {}).get("chat") or {}
+        frm = (msg or {}).get("from") or {}
+        if chat.get("type") != "private":
+            return False
+        if not chat_id:
+            return False
+        return (str(chat.get("id")) == str(chat_id)
+                and str(frm.get("id")) == str(chat_id))
+
+    @staticmethod
+    def _tg_command(text):
+        """The verb of a bot command, or None.
+
+        Telegram sticks @botname on a command typed where more than one
+        bot can hear it; a message forwarded from such a chat keeps it.
+        """
+        head = (text or "").strip().split(None, 1)[:1]
+        if not head or not head[0].startswith("/"):
+            return None
+        return head[0][1:].split("@", 1)[0].lower()
+
+    # The furniture an agent CLI keeps on screen. None of it is an
+    # answer, and on a phone it is most of the message: measured on a
+    # real reply, four of the six lines sent were the status bar, the
+    # cost line, the user name and the permissions hint.
+    _TG_CHROME = re.compile(
+        r"bypass permissions"
+        r"|shift\+tab"
+        # The bar draws its separators with box characters, not pipes.
+        r"|\b(?:Opus|Sonnet|Haiku|GPT|Gemini|Grok)\b.*[|\u2502\u2503]"
+        r"|^\s*[\u2733*\u2726\u25c6]\s*\w+ for \d"
+        r"|^\s*\u2502?\s*(?:esc|ctrl|tab)\b.*(?:to|for)\b"
+        r"|reading it on my phone"
+        r"|^Write your reply to \S*tg-replies/",
+        re.IGNORECASE)
+
+    @classmethod
+    def _tg_quote_lines(cls, text, want=6):
+        """The last few lines the agent actually printed.
+
+        Most of a TUI screen is blank space, box drawing and the CLI's
+        own status bar. What is worth carrying to a phone is the last
+        handful of lines that say something -- and never the footer
+        tabit itself typed in, which comes back as an echo.
+        """
+        out = []
+        for line in reversed((text or "").splitlines()):
+            stripped = line.strip()
+            if not stripped or not any(c.isalnum() for c in stripped):
+                continue
+            if cls._TG_CHROME.search(stripped):
+                continue
+            # The CLI prints who you are under the bar. On its own line
+            # it is furniture; inside a sentence it is not.
+            if stripped == GLib.get_user_name():
+                continue
+            out.append(stripped)
+            if len(out) >= want:
+                break
+        out.reverse()
+        return out
+
+    @classmethod
+    def _tg_board_lines(cls, tabs):
+        """The overview body: worst news first, then by name.
+
+        `tabs` is (status, title) pairs, so the sorting and the wording
+        can be checked without a window.
+        """
+        if not tabs:
+            return ["No AI tabs."]
+        ranked = sorted(
+            tabs, key=lambda t: (cls._TG_BOARD_ORDER.get(t[0], 4), t[1]))
+        return ["%s %-7s %s" % (cls._TG_BOARD_GLYPH.get(st, "\u00b7"),
+                                st, title) for st, title in ranked]
+
+    def _tg_board_text_full(self):
+        """The overview, plus the short names a task can be aimed at."""
+        text = self._tg_board_text()
+        names = ["%s \u00b7 %s" % (n, t) for _i, n, t in self._tg_targets()]
+        if names:
+            text += "\n\nTakes tasks:\n" + "\n".join(names)
+        return text
+
+    def _tg_tabs(self):
+        """Every AI tab as (status, title)."""
+        out = []
+        for row in self._session_rows():
+            if not _is_ai_icon(getattr(row, "icon_name", None)):
+                continue
+            status = ("exited" if getattr(row, "dead", False)
+                      else getattr(row, "agent_status", None) or "unknown")
+            out.append((status, self._agent_notify_title(
+                self._row_group_name(row), getattr(row, "title_text", None))))
+        return out
+
+    def _tg_board_text(self):
+        return "tabit \u00b7 %s\n%s" % (
+            time.strftime("%H:%M"), "\n".join(self._tg_board_lines(
+                self._tg_tabs())))
+
+    def _tg_push_text(self, row, title, status, conf):
+        """The push. The agent's own words come only if asked for."""
+        msg = self._tg_message(title, status)
+        if not conf.get("telegram_quote"):
+            return msg
+        lines = self._tg_quote_lines(
+            self._term_tail_text(getattr(row, "term", None), 12))
+        return msg + "\n\n" + "\n".join(lines) if lines else msg
+
+    def _tg_start_listening(self):
+        """One long-poll thread for the life of the app.
+
+        It re-reads the settings every time round, so turning the reply
+        side on or off takes effect without a restart.
+        """
+        if getattr(self, "_tg_poll_thread", None) is not None:
+            return
+        self._tg_poll_thread = threading.Thread(
+            target=self._tg_poll_worker, daemon=True)
+        self._tg_poll_thread.start()
+
+    def _tg_poll_worker(self):
+        wait = 5
+        while True:
+            try:
+                wait = self._tg_poll_once(wait)
+            except Exception as exc:
+                # A disk that filled up while writing the read offset
+                # used to end this thread, and nothing restarts it: the
+                # switch still reads as on and no message is ever
+                # answered again until tabit is restarted.
+                self._tg_last_error = self._tg_error_text(exc)
+                time.sleep(5)
+
+    def _tg_poll_once(self, wait):
+        conf = self._load_settings()
+        sec = self._tg_load_secrets()
+        token = sec.get("bot_token") or ""
+        chat = str(sec.get("chat_id") or "")
+        if not (conf.get("telegram_enabled") and conf.get("telegram_reply")
+                and token and chat):
+            time.sleep(5)
+            return wait
+        started = time.monotonic()
+        res, err = self._tg_call(
+            token, "getUpdates",
+            {"timeout": self._TG_POLL_TIMEOUT,
+             "offset": self._tg_load_state().get("offset", 0),
+             "allowed_updates": json.dumps(["message",
+                                            "callback_query"])},
+            timeout=self._TG_POLL_TIMEOUT + 10)
+        if err is not None:
+            self._tg_last_error = err
+            time.sleep(wait)
+            return min(60, wait * 2)
+        wait = 5
+        if str(self._tg_load_secrets().get("chat_id") or "") != chat:
+            return wait  # answered for a bot that is no longer the one
+        for upd in res or []:
+            # Written before the message is acted on, so a message
+            # that upsets us is lost rather than replayed for ever.
+            self._tg_save_state(offset=int(upd.get("update_id", 0)) + 1)
+            cb = upd.get("callback_query")
+            if cb:
+                # A press carries its own sender and the chat the
+                # message sits in, so the same test fits both.
+                stand_in = {"chat": (cb.get("message") or {}).get("chat"),
+                            "from": cb.get("from")}
+                if self._tg_auth_ok(stand_in, chat):
+                    GLib.idle_add(self._tg_on_callback, cb.get("id"),
+                                  cb.get("data") or "")
+                continue
+            msg = upd.get("message") or {}
+            if not self._tg_auth_ok(msg, chat):
+                continue
+            GLib.idle_add(self._tg_on_message, msg)
+        time.sleep(self._tg_poll_gap(time.monotonic() - started))
+        return wait
+
+    _TG_HELP = (
+        "Write the task, send it, then tap the tab to send it to.\n"
+        "Reply to one of my messages and it goes straight to that tab.\n"
+        "Put a tab's short name on the first line to pick it up front.\n\n"
+        "/status \u2014 every AI tab and what it is doing\n"
+        "/help \u2014 this")
+
+    @staticmethod
+    def _tg_draft_token():
+        return "%08x" % random.getrandbits(32)
+
+    @staticmethod
+    def _tg_keyboard(token, targets):
+        """One row per tab, then Cancel.
+
+        callback_data holds the draft token and the tab id and nothing
+        else: it has 64 bytes to live in, and the task text belongs in
+        tabit where it cannot be replayed by a stale button.
+        """
+        keys = [[{"text": ("Send to %s \u00b7 %s" % (name, title))[:56],
+                  "callback_data": "s:%s:%s" % (token, rid)}]
+                for rid, name, title in targets]
+        keys.append([{"text": "Cancel", "callback_data": "x:%s" % token}])
+        return {"inline_keyboard": keys}
+
+    def _tg_hold(self, text, row_id=None):
+        """Park a task until a button says which of `row_id` it goes to."""
+        drafts = getattr(self, "_tg_drafts", None)
+        if drafts is None:
+            drafts = self._tg_drafts = {}
+        token = self._tg_draft_token()
+        # The tabs this draft was offered for. The button carries a tab
+        # id, and without this the id in the press decides on its own --
+        # a draft shown with one button could be sent anywhere.
+        drafts[token] = {"text": text, "rows": list(row_id or [])}
+        # A draft each: two tasks in flight must not share a target.
+        while len(drafts) > 20:
+            drafts.pop(next(iter(drafts)))
+        return token
+
+    @classmethod
+    def _tg_confirm_text(cls, text, targets):
+        head = ("Where should this go? Not sent yet."
+                if len(targets) != 1 else
+                "Send to %s \u00b7 %s?" % (targets[0][1], targets[0][2]))
+        return "%s\n\n%s\n\nOne Enter goes on the end." % (
+            head, cls._tg_short(text))
+
+    def _tg_send_task(self, row, text, is_answer=False):
+        """Type a task in and say so. Returns the trouble, or None.
+
+        `is_answer` for a reply to something tabit said. An agent that
+        asked a question wants an answer to it, not a new job: "y"
+        followed by four lines about writing a reply file answers a
+        prompt with noise, and that is the path people use from a phone.
+
+        Structural, not status-based. Status is re-read from the screen
+        every three seconds and a reply from a phone arrives whenever it
+        arrives -- measured, an agent that was blocked when the push went
+        out no longer read as blocked by the time the reply landed.
+        """
+        bad = self._tg_row_trouble(row)
+        if bad is not None:
+            return bad
+        token = self._tg_draft_token()
+        ask = (bool(self._load_settings().get("telegram_ask_file", True))
+               and not is_answer
+               and getattr(row, "agent_status", None) != "blocked")
+        # Before the task goes in, not when the receipt comes back. An
+        # agent can finish before Telegram has answered, and a file that
+        # lands with nothing waiting for it is an answer nobody collects.
+        # Registered even when no file was asked for, because the
+        # screen-tail fallback hangs off the same record.
+        self._tg_await_reply(token, row, None)
+        self._tg_inject(row, self._tg_task_text(text, token, ask))
+        self._tg_send(
+            "Sent to %s \u00b7 %s\n\n%s" % (
+                row.tg_name, self._agent_notify_title(
+                    self._row_group_name(row),
+                    getattr(row, "title_text", None)),
+                self._tg_short(text)),
+            row_id=self._tg_row_id(row),
+            # The answer hangs under this message, so one task reads as
+            # one thread instead of a push that could be about anything.
+            after=(lambda mid, t=token: self._tg_task_receipt(t, mid)))
+        return None
+
+    def _tg_task_receipt(self, token, msg_id):
+        """The receipt arrived, so answers can now hang under it."""
+        job = self._tg_jobs().get(token)
+        if job is None:
+            return False
+        job["msg_id"] = msg_id
+        self._tg_save_jobs()
+        # It may already have been written while Telegram was thinking.
+        self._tg_settle_watch(token)
+        return False
+
+    def _tg_on_message(self, msg):
+        """Answer one message. Runs on the UI thread: GTK is not shared."""
+        # Re-read: this was handed over by a poll that may have been in
+        # the air for half a minute, and the switch can have gone off in
+        # that time. Off has to mean off, not off for the next one.
+        conf = self._load_settings()
+        if not (conf.get("telegram_enabled") and conf.get("telegram_reply")):
+            return False
+        text = (msg.get("text") or "").strip()
+        if not text:
+            return False
+
+        # A reply names its tab, so it is already addressed: send it.
+        # Checked before commands are: a task can start with a slash --
+        # "/deploy", a path -- and reading that as a command answered
+        # with the help text instead of sending anything.
+        rid = self._tg_replied_row_id(msg)
+        if rid:
+            bad = self._tg_send_task(self._tg_row_by_id(rid), text,
+                                     is_answer=True)
+            if bad:
+                self._tg_send("Not sent \u2014 %s." % bad)
+            return False
+
+        cmd = self._tg_command(text)
+        if cmd in ("status", "home", "start"):
+            self._tg_send(self._tg_board_text_full())
+            return False
+        if cmd is not None:
+            self._tg_send(self._TG_HELP)
+            return False
+
+        targets = self._tg_targets()
+        if not targets:
+            self._tg_send("No tab takes tasks from Telegram yet. Turn one "
+                          "on in tabit: right-click the tab \u2192 "
+                          "Telegram tasks\u2026")
+            return False
+
+        # A short name on its own first line narrows it to one button.
+        # It never sends on its own: the tap is the submit, always.
+        lines = text.split("\n")
+        named = (self._tg_row_by_name(self._tg_clean_name(lines[0]))
+                 if len(lines) > 1 else None)
+        if named is not None and self._tg_row_trouble(named) is None:
+            body = "\n".join(lines[1:]).strip()
+            if body:
+                text, targets = body, [t for t in targets
+                                       if t[0] == self._tg_row_id(named)]
+
+        token = self._tg_hold(text, [t[0] for t in targets])
+        self._tg_send(self._tg_confirm_text(text, targets),
+                      markup=self._tg_keyboard(token, targets))
+        return False
+
+    def _tg_on_callback(self, cb_id, data):
+        conf = self._load_settings()
+        if not (conf.get("telegram_enabled") and conf.get("telegram_reply")):
+            return False
+        kind, _sep, rest = (data or "").partition(":")
+        drafts = getattr(self, "_tg_drafts", None) or {}
+        if kind == "x":
+            drafts.pop(rest, None)
+            self._tg_answer(cb_id, "Cancelled")
+            return False
+        if kind != "s":
+            self._tg_answer(cb_id)
+            return False
+        token, _sep, rid = rest.partition(":")
+        # Popped before anything is typed: Telegram redelivers an update
+        # it thinks we missed, and a task must not arrive twice.
+        draft = drafts.get(token)
+        if draft is None:
+            self._tg_answer(cb_id, "Already sent, or too old")
+            return False
+        if rid not in draft.get("rows", []):
+            self._tg_answer(cb_id, "That tab was not offered for this")
+            return False
+        row = self._tg_row_by_id(rid)
+        bad = self._tg_row_trouble(row)
+        if bad:
+            # Kept: the tab went away, the text did not. Another button
+            # on the same message can still take it.
+            self._tg_answer(cb_id, "Not sent \u2014 %s" % bad)
+            self._tg_send("Not sent \u2014 %s." % bad)
+            return False
+        drafts.pop(token, None)  # before anything is typed: press once
+        bad = self._tg_send_task(row, draft["text"])
+        self._tg_answer(cb_id, bad and ("Not sent \u2014 %s" % bad) or "Sent")
+        if bad:
+            self._tg_send("Not sent \u2014 %s." % bad)
+        return False
+
+    def _tg_enqueue(self, method, params, row_id=None, after=None,
+                    failed=None, dest=None):
+        """Queue one Bot API call. Never blocks the UI thread.
+
+        One worker for the whole queue rather than a thread per call: a
+        network that has gone quiet would otherwise pile threads up at
+        one per agent that stops.
+        """
+        q = getattr(self, "_tg_queue", None)
+        if q is None:
+            q = self._tg_queue = queue.Queue()
+            threading.Thread(target=self._tg_worker, args=(q,),
+                             daemon=True).start()
+        # The chat this was meant for, fixed now rather than looked up
+        # at send time: point tabit at another bot while something is
+        # queued and it would go to whoever that is.
+        # `dest` is an older fix of the same kind, from the task itself.
+        q.put((method, params, row_id, after, dest or self._tg_dest_now(),
+               failed))
+
+    def _tg_send(self, text, markup=None, row_id=None, reply_to=None,
+                 after=None, failed=None, dest=None):
+        """Say something. `row_id` marks the message as being about that
+        tab, so a reply to it needs no address. `reply_to` hangs it under
+        an earlier message, which is what turns a pile of pushes into one
+        thread per task. `after` runs with the message id once Telegram
+        took it; `failed` runs if it never got there, with False when
+        it must not be tried again (the bot or chat changed). `dest` is
+        the (chat, bot key) it may go to; default is the one set now."""
+        params = {"text": text, "disable_web_page_preview": "true"}
+        if markup is not None:
+            params["reply_markup"] = json.dumps(markup)
+        if reply_to:
+            params["reply_to_message_id"] = str(reply_to)
+        self._tg_enqueue("sendMessage", params, row_id, after, failed, dest)
+
+    def _tg_answer(self, cb_id, text=""):
+        """Take the spinner off a button. Telegram leaves it turning
+        until the bot says it got the press."""
+        self._tg_enqueue("answerCallbackQuery",
+                         {"callback_query_id": cb_id, "text": text})
+
+    def _tg_worker(self, q):
+        """Send queued calls until the app quits.
+
+        A failure is kept for the settings page and nothing more. The
+        sidebar and the popup are the record of what happened; this is a
+        copy of it, and a copy that did not arrive is not worth stopping
+        anything over.
+        """
+        while True:
+            method, params, row_id, after, meant_for, failed = q.get()
+            # Every way out below that did not send says so, or whoever
+            # waits on it waits for ever.
+            if not self._load_settings().get("telegram_enabled"):
+                if callable(failed):
+                    GLib.idle_add(failed, True)
+                continue
+            sec = self._tg_load_secrets()
+            token = sec.get("bot_token") or ""
+            chat = str(sec.get("chat_id") or "")
+            if not token or not chat:
+                self._tg_last_error = "No bot token or chat id set"
+                if callable(failed):
+                    GLib.idle_add(failed, True)
+                continue
+            if meant_for != (chat, self._tg_bot_key(token)):
+                if callable(failed):
+                    GLib.idle_add(failed, False)
+                continue  # the bot or chat changed under it
+            if method == "sendMessage":
+                params = dict(params, chat_id=chat)
+            res, err = self._tg_call(token, method, params)
+            self._tg_last_error = err
+            if not res:
+                if callable(failed):
+                    GLib.idle_add(failed, True)
+                continue
+            if row_id:
+                # Hop to the main loop: the map is read there, and a dict
+                # that grows from one thread while another walks it to
+                # trim it is a RuntimeError waiting for a busy day.
+                GLib.idle_add(self._tg_remember_msg,
+                              res.get("message_id"), row_id)
+            if callable(after):
+                GLib.idle_add(after, res.get("message_id"))
+
     def _agent_notify_fire(self, row, status):
         """The delay is up: notify, unless the reason has gone away."""
         row._notify_src = None
@@ -5793,6 +7226,26 @@ if (data !== null) {{
         if what is None:
             return False
         conf = self._load_settings()
+        title = self._agent_notify_title(
+            self._row_group_name(row), getattr(row, "title_text", None))
+        # Before the desktop-popup gate on purpose: the phone is a
+        # separate audience, and this is past the settle delay and the
+        # re-read above, so a detection wobble never reaches it.
+        # A task in flight answers itself, in its own thread, and says
+        # more than "Finished" does. Two messages for one event is how a
+        # phone stops being worth looking at.
+        # Only "finished". "Needs you" in the middle of a task is a
+        # question nothing else will carry to the phone.
+        owed = status == "ready" and any(
+            j["row_id"] == getattr(row, "tg_id", None)
+            for j in self._tg_jobs().values())
+        if not owed and self._tg_should_send(conf, self.is_active(), status):
+            # With the tab on it, swiping reply on the push answers the
+            # agent. Without, the reply falls through to "which tab?" --
+            # which is the whole point of the push, missed.
+            self._tg_send(self._tg_push_text(row, title, status, conf),
+                          row_id=self._tg_row_id(row))
+        self._tg_task_fallback(row, status)
         if not conf.get("ai_notify", True):
             return False
         level = self._notify_urgency_name(conf.get("ai_notify_urgency"))
@@ -5817,8 +7270,6 @@ if (data !== null) {{
         # rather than failing when the library was never initialised.
         if not Notify.is_initted() and not Notify.init("tabit"):
             return False
-        title = self._agent_notify_title(
-            self._row_group_name(row), getattr(row, "title_text", None))
         old = getattr(row, "_agent_note", None)
         if old is not None:
             try:
@@ -7793,6 +9244,14 @@ if (data !== null) {{
                         swap.connect(
                             "activate", lambda *_: self._swap_panes())
                         menu.append(swap)
+                if _is_ai_icon(getattr(row, "icon_name", None)):
+                    tg_it = Gtk.MenuItem(
+                        label="Telegram tasks…"
+                        if not getattr(row, "tg_name", None)
+                        else "Telegram tasks: %s…" % row.tg_name)
+                    tg_it.connect("activate",
+                                  lambda *_, r=row: self._tg_name_dialog(r))
+                    menu.append(tg_it)
                 group_item = Gtk.MenuItem(label="Group color")
                 submenu = Gtk.Menu()
                 used_colors = {getattr(r, "group_color", None) for r in self._session_rows()
@@ -7932,7 +9391,9 @@ if (data !== null) {{
         # tab really has them.
         has_resume = bool(
             is_ai and getattr(row, "argv", None) and len(row.argv) == 3
-            and self._ai_argv_plain(row.argv) != row.argv)
+            and (self._ai_argv_plain(row.argv) != row.argv
+                 # a new codex / agy tab whose id is not known yet
+                 or getattr(row, "ai_hunt", False)))
         cur_session = (self._ai_tmux_unwrap(row.argv)[1]
                        if is_ai and getattr(row, "argv", None) else None)
         in_tmux = cur_session is not None
@@ -7948,8 +9409,12 @@ if (data !== null) {{
 
         resume_chk = tmux_chk = None
         if is_ai:
-            resume_chk = Gtk.CheckButton(label="Continue / resume previous session")
+            resume_chk = Gtk.CheckButton(label="Resume when tabit reopens")
             resume_chk.set_active(has_resume)
+            resume_chk.set_tooltip_text(
+                "Ticked: after tabit restarts, this tab continues its "
+                "session. Unticked: it starts a new one.\n"
+                "In tmux, a still-running agent is always reattached.")
             vbox.pack_start(resume_chk, False, False, 0)
             tmux_chk = Gtk.CheckButton(label="Run inside tmux session")
             tmux_chk.set_active(in_tmux)
@@ -7983,26 +9448,20 @@ if (data !== null) {{
                     and getattr(row, "argv", None) and len(row.argv) == 3):
                 # Edit the command itself, not the tmux wrapper around it
                 inner_argv, _sess = self._ai_tmux_unwrap(row.argv)
-                plain_argv = self._ai_argv_plain(inner_argv)
-                plain_cmd = plain_argv[2]
-                split_marker = " || exit 1; exec "
-                if split_marker in plain_cmd:
-                    cd_part, cli_quoted = plain_cmd.split(split_marker, 1)
-                    path_quoted = cd_part[3:]
-                    try:
-                        path_val = shlex.split(path_quoted)[0]
-                    except Exception:
-                        path_val = path_quoted.strip("'\"")
-                    try:
-                        cli_val = shlex.split(cli_quoted)[0]
-                    except Exception:
-                        cli_val = cli_quoted.strip("'\"")
-                    
+                got = self._ai_cli_path_of(inner_argv)
+                if got is not None:
+                    cli_val, path_val = got
+
                     if resume_chk.get_active():
                         # keep whatever the tab already had (a session id from
                         # +AI survives here) when only the tmux box moved
                         if has_resume:
                             tries = self._ai_tries_of(inner_argv[2])
+                        elif os.path.basename(
+                                cli_val.rstrip("/")) in AI_SESSION_FILES:
+                            # Same as a new tab: a plain start until the
+                            # hunt knows its id, not another tab's session.
+                            tries = []
                         else:
                             tries = None
                             for e in self._load_ai_clis():
@@ -8025,6 +9484,7 @@ if (data !== null) {{
                                 cli_val, path_val,
                                 unique=not resume_chk.get_active()))
                     row.argv = new_argv
+                    row.ai_hunt = resume_chk.get_active()
                     self._set_row_icon(
                         row, ICON_AI_TMUX if want_tmux else ICON_AI)
                     shown_path = self._ai_sub(path_val)
@@ -9511,7 +10971,10 @@ if (data !== null) {{
         for e in cls._load_ai_clis():
             if e["cli"] == cli and e.get("resume_id"):
                 return e["resume_id"]
-        return AI_RESUME_ID_ARGS.get(cli, DEFAULT_AI_RESUME_ID)
+        # By name as well: a CLI set as a path is still that CLI, and
+        # `/usr/bin/codex --resume <id>` is not how codex resumes.
+        return AI_RESUME_ID_ARGS.get(cli) or AI_RESUME_ID_ARGS.get(
+            os.path.basename(cli.rstrip("/")), DEFAULT_AI_RESUME_ID)
 
     @classmethod
     def _ai_tries_with_id(cls, cli, tries, session_id):
@@ -9753,6 +11216,131 @@ if (data !== null) {{
                 f" || tmux new-session -d -s {name} {inner} ;"
                 f" {opts}"
                 f" exec tmux attach-session -t {name}"]
+
+    @classmethod
+    def _ai_launch_pair(cls, cli, cwd, tries, bypass=False, tmux=False,
+                        continue_now=True, resume_later=True, new_sid=None):
+        """(launch argv, stored argv, icon) for a new +AI tab.
+
+        The two questions are separate: continue_now picks what runs now
+        (the tries, or a fresh start); resume_later picks what the tab keeps
+        for the next time tabit opens it. Both share one tmux name, so a
+        restore still reattaches to an agent that is running.
+
+        new_sid: for a new session, the id to start it with, when the CLI
+        takes one. The stored argv then resumes that id and nothing else.
+        """
+        tries = list(tries or [])
+        launch = cls._ai_argv(cli, cwd, tries if continue_now else [],
+                              bypass=bypass)
+        stored = cls._ai_argv(cli, cwd, tries if resume_later else [],
+                              bypass=bypass)
+        base = os.path.basename(cli.rstrip("/"))
+        if base in AI_SESSION_FILES and not continue_now:
+            # Its id is not known until the first message. Until then a
+            # restart starts fresh: "the newest in this folder" may be
+            # another tab's session. The hunt fills the id in.
+            stored = cls._ai_argv(cli, cwd, [], bypass=bypass)
+        new_arg = AI_NEW_ID_ARGS.get(base)
+        if new_sid and new_arg and not continue_now:
+            # exec, not a try: "a || b" also runs b when a exits nonzero
+            # after a normal session, and b would be a second agent.
+            flag = " ".join(shlex.quote(t) for t in shlex.split(
+                new_arg.replace("{id}", new_sid)))
+            head, _sep, tail = launch[2].rpartition("; exec ")
+            launch = ["/bin/sh", "-c", "%s; exec %s" % (
+                head, tail.replace(shlex.quote(cli), "%s %s" % (
+                    shlex.quote(cli), flag), 1))]
+            if resume_later:
+                # No --continue behind it: a session that never got a
+                # message is not saved, and falling back to the newest
+                # one in the folder would pick up another tab's session.
+                stored = cls._ai_argv(
+                    cli, cwd, cls._ai_tries_with_id(cli, [], new_sid),
+                    bypass=bypass)
+        if not tmux:
+            return launch, stored, ICON_AI
+        name = cls._ai_tmux_session(cli, cwd, unique=not continue_now)
+        return (cls._ai_tmux_argv(launch, name),
+                cls._ai_tmux_argv(stored, name), ICON_AI_TMUX)
+
+    @classmethod
+    def _ai_cli_path_of(cls, argv):
+        """(cli, path) of an AI argv, tmux or not, or None."""
+        inner, _sess = cls._ai_tmux_unwrap(argv or [])
+        plain = cls._ai_argv_plain(inner)
+        if len(plain) != 3:
+            return None
+        split_marker = " || exit 1; exec "
+        if split_marker not in plain[2]:
+            return None
+        cd_part, cli_quoted = plain[2].split(split_marker, 1)
+        path_quoted = cd_part[3:]
+        try:
+            path_val = shlex.split(path_quoted)[0]
+        except Exception:
+            path_val = path_quoted.strip("'\"")
+        try:
+            cli_val = shlex.split(cli_quoted)[0]
+        except Exception:
+            cli_val = cli_quoted.strip("'\"")
+        return cli_val, path_val
+
+    @classmethod
+    def _ai_argv_with_session(cls, argv, sid):
+        """The same tab, now resuming session `sid` and nothing else.
+
+        Same rule as a new Claude tab: its own id, then a plain start --
+        never --continue, which would pick up another tab's session.
+        """
+        got = cls._ai_cli_path_of(argv)
+        if got is None:
+            return argv
+        cli, path = got
+        new = cls._ai_argv(cli, path, cls._ai_tries_with_id(cli, [], sid),
+                           bypass=cls._ai_has_bypass(argv))
+        _inner, sess = cls._ai_tmux_unwrap(argv)
+        return cls._ai_tmux_argv(new, sess) if sess else new
+
+    @staticmethod
+    def _ai_session_id_from_links(cli, links):
+        """The session id in the files an agent holds open, or None."""
+        rx = AI_SESSION_FILES.get(os.path.basename((cli or "").rstrip("/")))
+        if rx is None:
+            return None
+        for link in links:
+            m = rx.search(link or "")
+            if m:
+                return m.group(1)
+        return None
+
+    _ai_new_id_cache = {}
+
+    @classmethod
+    def _ai_takes_new_id(cls, cli):
+        """Whether this CLI takes --session-id for a new session.
+
+        Asked of the program itself: the name alone cannot tell the xAI
+        grok from another grok, or a claude too old to have the flag, and
+        either one would exit at once on `--session-id`.
+        """
+        if os.path.basename(cli.rstrip("/")) not in AI_NEW_ID_ARGS:
+            return False
+        exe = shutil.which(os.path.expanduser(cli))
+        if not exe:
+            return False
+        if exe not in cls._ai_new_id_cache:
+            try:
+                out = subprocess.run(
+                    [exe, "--help"], capture_output=True, text=True,
+                    timeout=5, stdin=subprocess.DEVNULL)
+            except (OSError, subprocess.SubprocessError):
+                return False  # not cached: a slow first start is not a no
+            if out.returncode != 0:
+                return False  # same: a failed --help says nothing
+            cls._ai_new_id_cache[exe] = (
+                "--session-id" in (out.stdout or "") + (out.stderr or ""))
+        return cls._ai_new_id_cache[exe]
 
     @staticmethod
     def _ai_tries_of(cmd):
@@ -10092,12 +11680,25 @@ if (data !== null) {{
         path_box.pack_start(path, True, True, 0)
         path_box.pack_start(browse, False, False, 0)
 
-        resume_chk = Gtk.CheckButton(
-            label="Continue / resume previous session")
-        # On by default; Settings → "Start AI tabs fresh after reopening"
-        # is the preference that turns it off.
-        resume_chk.set_active(
+        new_chk = Gtk.CheckButton(label="Create new session")
+        new_chk.set_active(True)
+        new_chk.set_tooltip_text(
+            "Ticked: start a new session.\nUnticked: pick up the last "
+            "session in this folder (or the Session ID below).")
+        # What the tab does the next time tabit opens it. Settings →
+        # "New +AI tabs: start fresh after tabit reopens" is the default.
+        later_chk = Gtk.CheckButton(
+            label="Resume when tabit reopens")
+        later_chk.set_active(
             not self._load_settings().get("ai_fresh_on_restore", False))
+        later_chk.set_tooltip_text(
+            "Ticked: after tabit restarts, this tab continues its session.\n"
+            "With “Create new session”, Claude resumes this tab's own "
+            "session; otherwise it continues the newest one in this "
+            "folder.\n"
+            "Unticked: it starts a new one each time.\n"
+            "In tmux, a still-running agent is always reattached; this only "
+            "matters once the tmux session is gone (reboot, killed).")
 
         # Optional exact session to resume; empty = whatever the CLI's own
         # continue/resume tries pick (usually the newest in that folder).
@@ -10118,20 +11719,21 @@ if (data !== null) {{
             return list(DEFAULT_AI_TRY)
 
         def update_try_hint(*_a):
-            on = resume_chk.get_active()
+            on = not new_chk.get_active()  # continue now
             sid.set_sensitive(on)
-            if not on:
-                try_hint.set_text("Will start fresh (no continue/resume)")
-                return
             tool = (cli.get_active_text() or "").strip()
             tries = self._ai_tries_with_id(
-                tool, cli_tries(tool), sid.get_text())
+                tool, cli_tries(tool), sid.get_text() if on else "")
             chain = (" → ".join(tries) + " → plain") if tries \
                 else "plain start only"
-            try_hint.set_text(f"Will try: {chain}")
+            now = f"Now: {chain}" if on else "Now: new session"
+            later = ("After restart: continue" if later_chk.get_active()
+                     else "After restart: new session")
+            try_hint.set_text(f"{now}\n{later}")
 
         cli.connect("changed", update_try_hint)
-        resume_chk.connect("toggled", update_try_hint)
+        new_chk.connect("toggled", update_try_hint)
+        later_chk.connect("toggled", update_try_hint)
         sid.connect("changed", update_try_hint)
         update_try_hint()
 
@@ -10236,15 +11838,16 @@ if (data !== null) {{
 
         refresh_live()
 
-        grid.attach(resume_chk, 1, 2, 1, 1)
+        grid.attach(new_chk, 1, 2, 1, 1)
         grid.attach(Gtk.Label(label="Session ID", xalign=0), 0, 3, 1, 1)
         grid.attach(sid, 1, 3, 1, 1)
-        grid.attach(tmux_chk, 1, 4, 1, 1)
-        grid.attach(bypass_chk, 1, 5, 1, 1)
-        grid.attach(try_hint, 0, 6, 2, 1)
+        grid.attach(later_chk, 1, 4, 1, 1)
+        grid.attach(tmux_chk, 1, 5, 1, 1)
+        grid.attach(bypass_chk, 1, 6, 1, 1)
+        grid.attach(try_hint, 0, 7, 2, 1)
         grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
-                    0, 7, 2, 1)
-        grid.attach(live_box, 0, 8, 2, 1)
+                    0, 8, 2, 1)
+        grid.attach(live_box, 0, 9, 2, 1)
         dialog.get_content_area().add(grid)
         self._dialog_enter_is_ok(dialog)
 
@@ -10254,23 +11857,26 @@ if (data !== null) {{
                 cwd = (path.get_text() or "").strip() or GLib.get_home_dir()
                 cwd = os.path.expanduser(cwd)
                 if tool:
-                    tries = []
-                    if resume_chk.get_active():
-                        tries = self._ai_tries_with_id(
-                            tool, cli_tries(tool), sid.get_text())
-                    argv = self._ai_argv(
+                    now = not new_chk.get_active()
+                    # a Session ID only belongs to "continue now"
+                    tries = self._ai_tries_with_id(
+                        tool, cli_tries(tool), sid.get_text() if now else "")
+                    launch, argv, icon = self._ai_launch_pair(
                         tool, cwd, tries,
                         bypass=bypass_chk.get_active()
-                        and self._ai_is_claude(tool))
-                    icon = ICON_AI
-                    if tmux_chk.get_active():
-                        argv = self._ai_tmux_argv(
-                            argv, self._ai_tmux_session(
-                                tool, cwd,
-                                unique=not resume_chk.get_active()))
-                        icon = ICON_AI_TMUX
-                    self._add_session(tool, argv, icon,
-                                      sub=self._ai_sub(cwd), cwd=cwd)
+                        and self._ai_is_claude(tool),
+                        tmux=tmux_chk.get_active(),
+                        continue_now=now,
+                        resume_later=later_chk.get_active(),
+                        new_sid=(str(uuid.uuid4())
+                                 if self._ai_takes_new_id(tool) else None))
+                    r = self._add_session(tool, argv, icon,
+                                          sub=self._ai_sub(cwd), cwd=cwd,
+                                          launch_argv=launch)
+                    if r is not None and later_chk.get_active():
+                        # Look for its session even while the stored
+                        # command is still a plain start.
+                        r.ai_hunt = True
                     self._save_ai_last(tool, cwd,
                                        use_tmux=tmux_chk.get_active())
             self._open_dialogs.discard(dlg)
@@ -11547,8 +13153,6 @@ if (data !== null) {{
         orig_font = s.get("term_font", "Monospace")
         orig_sz = s.get("term_font_size", 12)
 
-        app_head = Gtk.Label(xalign=0)
-        app_head.set_markup("<b>Appearance</b>")
         theme_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         theme_lbl = Gtk.Label(label="Color theme template:", xalign=0)
         theme_combo = Gtk.ComboBoxText()
@@ -11621,15 +13225,11 @@ if (data !== null) {{
         term_spacing_box.pack_start(term_spacing_lbl, False, False, 0)
         term_spacing_box.pack_start(term_spacing_spin, False, False, 0)
 
-        head = Gtk.Label(xalign=0)
-        head.set_markup("<b>Notes</b>")
         wrap = Gtk.CheckButton(label="Word wrap notes (recommended)")
         wrap.set_active(bool(s.get("note_wrap", True)))
         wrap.set_tooltip_text(
             "When off, very long lines may lag. Default is on.")
 
-        term_head = Gtk.Label(xalign=0)
-        term_head.set_markup("<b>Terminals</b>")
         inherit = Gtk.CheckButton(
             label="New terminal / AI opens in the current tab's path")
         inherit.set_active(bool(s.get("shell_inherit_cwd", False)))
@@ -11637,8 +13237,6 @@ if (data !== null) {{
             "+ Terminal (Ctrl+Shift+T) and + AI start in the focused "
             "tab's working directory instead of home. Default is off.")
 
-        layout_head = Gtk.Label(xalign=0)
-        layout_head.set_markup("<b>Layout</b>")
         side_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         side_lbl = Gtk.Label(label="Tab list position:", xalign=0)
         side_combo = Gtk.ComboBoxText()
@@ -11665,14 +13263,14 @@ if (data !== null) {{
         side_box.pack_start(side_lbl, False, False, 0)
         side_box.pack_start(side_combo, True, True, 0)
 
-        ai_head = Gtk.Label(xalign=0)
-        ai_head.set_markup("<b>AI</b>")
         ai_fresh = Gtk.CheckButton(
-            label="Start AI tabs fresh after reopening (no continue/resume)")
+            label="New +AI tabs: start fresh after tabit reopens")
         ai_fresh.set_active(bool(s.get("ai_fresh_on_restore", False)))
         ai_fresh.set_tooltip_text(
-            "When tabit reopens, restored AI tabs launch the CLI without "
-            "--continue / resume. Default is off (they continue).")
+            "Default for “Resume when tabit reopens” in the +AI dialog "
+            "(ticked here = unticked there). Each tab keeps its own "
+            "choice; change one from its rename popover. Default is off "
+            "(they continue).")
         ai_tmux = Gtk.CheckButton(
             label="+AI run in tmux (default on)")
         ai_tmux.set_active(bool(s.get("ai_use_tmux", True)))
@@ -11713,6 +13311,172 @@ if (data !== null) {{
             "• Quiet: no banner on some desktops, just the tray")
         urg_box.pack_start(urg_lbl, False, False, 0)
         urg_box.pack_start(urg_combo, True, True, 0)
+        tg_sec = self._tg_load_secrets()
+        tg_on = Gtk.CheckButton(label="Also send it to Telegram")
+        tg_on.set_active(bool(s.get("telegram_enabled", False)))
+        tg_on.set_tooltip_text(
+            "The same news, on your phone, through a Telegram bot. The "
+            "token is kept in its own file, not in settings.json.")
+        tg_grid = Gtk.Grid(row_spacing=4, column_spacing=6, margin_start=22)
+        tg_token = Gtk.Entry(text=tg_sec.get("bot_token") or "",
+                             width_chars=30)
+        tg_token.set_visibility(False)          # it is a key, not a name
+        tg_token.set_placeholder_text("123456789:AA…  (from @BotFather)")
+        tg_chat = Gtk.Entry(text=str(tg_sec.get("chat_id") or ""),
+                            width_chars=30)
+        tg_chat.set_placeholder_text("your chat id  (from @userinfobot)")
+        tg_when = Gtk.ComboBoxText()
+        for wid, lab in (("away", "Only when tabit is not in front"),
+                         ("always", "Always")):
+            tg_when.append(wid, lab)
+        tg_when.set_active_id(
+            "always" if s.get("telegram_when") == "always" else "away")
+        tg_when.set_tooltip_text(
+            "“Not in front” means this window does not have the keyboard "
+            "focus. That is not the same as you being away: leave tabit "
+            "focused and walk off, and nothing reaches your phone.\n"
+            "The answer to a task you sent from Telegram comes back "
+            "either way — you asked for it from there.")
+        tg_reply = Gtk.CheckButton(label="Answer /status from the phone")
+        tg_reply.set_active(bool(s.get("telegram_reply", False)))
+        tg_reply.set_tooltip_text(
+            "Read messages sent to the bot, and reply to /status with "
+            "every AI tab and what it is doing. Only your own 1:1 chat "
+            "is listened to. Nothing can be typed into a tab yet.")
+        tg_quote = Gtk.CheckButton(
+            label="Include the agent's last lines in the message")
+        tg_quote.set_active(bool(s.get("telegram_quote", False)))
+        tg_quote.set_tooltip_text(
+            "Without this a message says an agent wants you, but not what "
+            "it asked, so you cannot answer from the phone. With it, the "
+            "last few lines of that terminal travel through Telegram — "
+            "and a console can have secrets on it. Default is off.")
+        tg_ask = Gtk.CheckButton(
+            label="A task asks the agent to write its answer to a file")
+        tg_ask.set_active(bool(s.get("telegram_ask_file", True)))
+        tg_ask.set_tooltip_text(
+            "A task sent from Telegram gets one line added, telling the "
+            "agent where to write its reply. tabit sends that file back "
+            "under the task. Without it, all that comes back is the last "
+            "lines of the screen, which for a full-screen agent is a "
+            "redraw and not an answer.")
+        tg_find = Gtk.Button(label="Find it")
+        tg_find.set_tooltip_text(
+            "Send your bot any message first, then press this: it reads "
+            "who sent it. Turn off \u201cAnswer /status\u201d while you do, "
+            "or Telegram refuses two readers at once.")
+
+        def on_tg_find(_b):
+            tok = tg_token.get_text().strip()
+            if not tok:
+                tg_result.set_text("Fill in the bot token first.")
+                return
+            tg_find.set_sensitive(False)
+            tg_result.set_text("Looking\u2026")
+
+            def work():
+                # Telegram's most. Oldest first, so a short page can
+                # hold a stranger and miss you.
+                res, err = self._tg_call(tok, "getUpdates", {"limit": 100})
+                GLib.idle_add(done, res, err)
+
+            def done(res, err):
+                tg_find.set_sensitive(True)
+                if err:
+                    tg_result.set_text(
+                        "Turn off \u201cAnswer /status\u201d and try again"
+                        if "onflict" in err else err)
+                    return False
+                found = self._tg_chats_from_updates(res)
+                if not found:
+                    tg_result.set_text(
+                        "Nothing yet \u2014 send your bot a message first.")
+                    return False
+                if len(found) > 1:
+                    # Not ours to pick: the wrong one gets your tabs.
+                    tg_result.set_text(
+                        "More than one person wrote to this bot: %s. "
+                        "Type your own id in by hand." % ", ".join(
+                            "%s (%s)" % (who, cid) for cid, who in found))
+                    return False
+                cid, who = found[0]
+                tg_chat.set_text(cid)
+                tg_result.set_text(
+                    "Found %s. Check that this is you before you save."
+                    % who)
+                return False
+
+            threading.Thread(target=work, daemon=True).start()
+
+        tg_find.connect("clicked", on_tg_find)
+        tg_help = Gtk.Expander(label="How do I set this up?")
+        steps = Gtk.Label(xalign=0, margin_start=12, margin_top=4)
+        steps.set_line_wrap(True)
+        steps.set_max_width_chars(52)
+        steps.set_markup(
+            "<b>1.</b> In Telegram, open <b>@BotFather</b> and send "
+            "<tt>/newbot</tt>. Answer its two questions. It replies with a "
+            "token like <tt>123456789:AA\u2026</tt> \u2014 paste that "
+            "above.\n"
+            "<b>2.</b> Find your new bot by the name you gave it and send "
+            "it anything. A bot cannot write to you until you have written "
+            "to it once.\n"
+            "<b>3.</b> Press <b>Find it</b> next to Chat id.\n"
+            "<b>4.</b> Press <b>Send a test message</b>. Your phone should "
+            "buzz.\n"
+            "<b>5.</b> Press <b>Save</b>.\n\n"
+            "That is the one-way half: tabit tells you when an agent "
+            "finishes or wants you.\n\n"
+            "To send work back, tick <b>Answer /status from the phone</b>, "
+            "then right-click an AI tab in the tab list and choose "
+            "<b>Telegram tasks\u2026</b> to give it a short name. Only tabs "
+            "with a short name can be typed into from Telegram.")
+        tg_help.add(steps)
+
+        tg_test = Gtk.Button(label="Send a test message")
+        tg_result = Gtk.Label(xalign=0)
+        tg_result.get_style_context().add_class("session-sub")
+        tg_result.set_ellipsize(Pango.EllipsizeMode.END)
+
+        def on_tg_test(_b):
+            tok = tg_token.get_text().strip()
+            cid = tg_chat.get_text().strip()
+            if not tok or not cid:
+                tg_result.set_text("Fill in both fields first.")
+                return
+            tg_test.set_sensitive(False)
+            tg_result.set_text("Sending…")
+
+            def work():
+                err = self._tg_post(tok, cid, "tabit: test message")
+                GLib.idle_add(done, err)
+
+            def done(err):
+                tg_test.set_sensitive(True)
+                tg_result.set_text(err or "Sent. Check your phone.")
+                return False
+
+            threading.Thread(target=work, daemon=True).start()
+
+        tg_test.connect("clicked", on_tg_test)
+        for r, (lab, w) in enumerate((("Bot token:", tg_token),
+                                      ("Chat id:", tg_chat),
+                                      ("Send:", tg_when))):
+            tg_grid.attach(Gtk.Label(label=lab, xalign=0), 0, r, 1, 1)
+            tg_grid.attach(w, 1, r, 1, 1)
+        tg_grid.attach(tg_find, 2, 1, 1, 1)
+        tg_grid.attach(tg_reply, 1, 3, 1, 1)
+        tg_grid.attach(tg_quote, 1, 4, 1, 1)
+        tg_grid.attach(tg_ask, 1, 5, 1, 1)
+        tg_grid.attach(tg_test, 1, 6, 1, 1)
+        tg_grid.attach(tg_result, 1, 7, 1, 1)
+
+        def on_tg_toggled(*_a):
+            tg_grid.set_sensitive(tg_on.get_active())
+
+        tg_on.connect("toggled", on_tg_toggled)
+        on_tg_toggled()
+
         ai_bypass = Gtk.CheckButton(
             label="Claude +AI: --dangerously-skip-permissions (bypass)")
         ai_bypass.set_active(bool(s.get("ai_claude_bypass", False)))
@@ -11745,26 +13509,43 @@ if (data !== null) {{
             label="Stored in ~/.config/tabit/settings.json",
             xalign=0)
         hint.get_style_context().add_class("session-sub")
-        box.pack_start(ver_box, False, False, 0)
-        box.pack_start(app_head, False, False, 0)
-        box.pack_start(theme_box, False, False, 0)
-        box.pack_start(ui_font_box, False, False, 0)
-        box.pack_start(term_font_box, False, False, 0)
-        box.pack_start(term_size_box, False, False, 0)
-        box.pack_start(term_spacing_box, False, False, 0)
-        box.pack_start(demo_frame, False, False, 0)
-        box.pack_start(head, False, False, 0)
-        box.pack_start(wrap, False, False, 0)
-        box.pack_start(term_head, False, False, 0)
-        box.pack_start(inherit, False, False, 0)
-        box.pack_start(layout_head, False, False, 0)
-        box.pack_start(side_box, False, False, 0)
-        box.pack_start(ai_head, False, False, 0)
-        box.pack_start(ai_fresh, False, False, 0)
-        box.pack_start(ai_tmux, False, False, 0)
-        box.pack_start(ai_notify, False, False, 0)
-        box.pack_start(urg_box, False, False, 0)
-        box.pack_start(ai_bypass, False, False, 0)
+        # One page per group instead of one long column. The dialog had
+        # grown past a thousand pixels, which is taller than the window
+        # it settles on some screens; a notebook puts every page at the
+        # height of the tallest one. The section headings come out with
+        # it -- the tab already says what the page is.
+        notebook = Gtk.Notebook()
+        pages = (
+            ("Appearance", (theme_box, ui_font_box, term_font_box,
+                            term_size_box, term_spacing_box, demo_frame,
+                            side_box)),
+            ("Sessions", (wrap, inherit)),
+            ("AI", (ai_fresh, ai_tmux, ai_notify, urg_box, ai_bypass)),
+            # tg_help sits outside the grid on purpose: the grid greys
+            # out when Telegram is off, which is when somebody needs it.
+            ("Telegram", (tg_on, tg_grid, tg_help)),
+            ("About", (ver_box,)),
+        )
+        for name, widgets in pages:
+            page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                           margin=10)
+            for w in widgets:
+                page.pack_start(w, False, False, 0)
+            notebook.append_page(page, Gtk.Label(label=name))
+
+        # The footer used to sit under one long column where it was true
+        # of everything above it. Under a page it has to say where that
+        # page's answers go, and the bot token is the one that does not
+        # go to settings.json.
+        def on_settings_page(_nb, _page, num):
+            hint.set_text(
+                "Switches here go to ~/.config/tabit/settings.json; the "
+                "bot token to ~/.config/tabit/telegram.json (owner only)"
+                if pages[num][0] == "Telegram"
+                else "Stored in ~/.config/tabit/settings.json")
+
+        notebook.connect("switch-page", on_settings_page)
+        box.pack_start(notebook, True, True, 0)
         box.pack_start(hint, False, False, 0)
         update_preview()
 
@@ -11789,11 +13570,19 @@ if (data !== null) {{
                                          urg_combo.get_active_id()
                                          or "critical",
                                      "ai_claude_bypass": ai_bypass.get_active(),
+                                     "telegram_enabled": tg_on.get_active(),
+                                     "telegram_when":
+                                         tg_when.get_active_id() or "away",
+                                     "telegram_reply": tg_reply.get_active(),
+                                     "telegram_quote": tg_quote.get_active(),
+                                     "telegram_ask_file": tg_ask.get_active(),
                                      "ui_font_size": ui_sz,
                                      "term_font": t_font,
                                      "term_font_size": t_sz,
                                      "term_line_spacing": t_line_spacing,
                                      "sidebar_position": side_id})
+                self._tg_save_secrets(tg_token.get_text(),
+                                      tg_chat.get_text())
                 self._sidebar_position = side_id
                 self._apply_sidebar_layout()
                 self._apply_note_wrap_setting(wrap.get_active())
