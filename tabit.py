@@ -452,11 +452,22 @@ DEFAULT_AI_TRY = ["--continue", "resume --last", "--resume latest"]
 # session. {id} is substituted. Per-CLI override: add "resume_id" to an entry
 # in ~/.config/tabit/ai_clis.json.
 DEFAULT_AI_RESUME_ID = "--resume {id}"
-AI_RESUME_ID_ARGS = {"codex": "resume {id}"}
+AI_RESUME_ID_ARGS = {"codex": "resume {id}", "agy": "--conversation {id}"}
 # +AI "Create new session": start with an id tabit chose, so "Resume when
 # tabit reopens" can resume this tab's own session and not just the newest
-# one in the folder. Only for CLIs that take an id for a new session.
-AI_NEW_ID_ARGS = {"claude": "--session-id {id}"}
+# one in the folder. Only for CLIs that take an id for a new session, and
+# only once `--help` shows the flag: the `grok` on PATH may be a different
+# program that has none.
+AI_NEW_ID_ARGS = {"claude": "--session-id {id}", "grok": "--session-id {id}"}
+# CLIs that pick their own id. The running agent holds its session file
+# open, and the file name is the id, so tabit reads it out of /proc. The
+# file only appears with the first message.
+_UUID_RE = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+AI_SESSION_FILES = {
+    "codex": re.compile(r"/\.codex/sessions/.*-(%s)\.jsonl$" % _UUID_RE),
+    "agy": re.compile(
+        r"/antigravity-cli/conversations/(%s)\.db$" % _UUID_RE),
+}
 # +AI "Run inside tmux": per-session options that keep the AI status icons
 # working. Measured, not guessed — without the first two tabit sees an empty
 # window title (the braille spinner rules in agent-detection/*.toml go blind)
@@ -1751,6 +1762,8 @@ class Tabit(Gtk.Window):
                                           s.get("track_cwd", False))
                 if r is not None and s.get("tg"):
                     r.tg_id = s["tg"]
+                if r is not None and s.get("hunt"):
+                    r.ai_hunt = True
                 # A short name is an address. The dialog will not hand
                 # out a duplicate, but a hand-edited or hand-copied
                 # sessions.json can, and then a task typed on a phone
@@ -1786,6 +1799,7 @@ class Tabit(Gtk.Window):
         self._agent_store = None
         GLib.idle_add(self._deferred_init_agent_store)
         GLib.timeout_add_seconds(self._AGENT_POLL_SEC, self._poll_ai_agent_statuses)
+        GLib.timeout_add_seconds(self._AI_HUNT_SEC, self._ai_hunt_session_ids)
         _tmux_apply_user_conf()
         GLib.idle_add(self._check_weekly_auto_update)
         self._tg_start_listening()
@@ -1894,6 +1908,8 @@ class Tabit(Gtk.Window):
                 entry["tg"] = r.tg_id
             if getattr(r, "tg_name", None):
                 entry["tgname"] = r.tg_name
+            if getattr(r, "ai_hunt", False):
+                entry["hunt"] = True
             data.append(entry)
         os.makedirs(os.path.dirname(SESSIONS_FILE), exist_ok=True)
         with open(SESSIONS_FILE, "w") as f:
@@ -3937,6 +3953,14 @@ if (data !== null) {{
         for row in list(self.listbox.get_children()):
             if not self._confirm_close_row(row):
                 return True  # abort window close
+        # A first message sent since the last sweep has made a session
+        # the saved command does not know about yet.
+        try:
+            jobs = self._ai_hunt_jobs()
+            self._ai_hunt_apply(self._ai_hunt_scan(jobs),
+                                {j[0]: j[0].argv for j in jobs})
+        except Exception:
+            pass
         self._save_sessions()  # capture each shell's current cwd before exit
         self._save_sidebar_geometry()
         # Window teardown destroys VTE widgets and may fire child-exited for
@@ -4878,6 +4902,155 @@ if (data !== null) {{
         finally:
             self._agent_status_busy = False
         return True  # keep timer
+
+    # How often AI tabs are checked for the session their agent is in.
+    # Not the 3s status poll: this walks /proc, and a session id changes
+    # once per session, not once per screen.
+    _AI_HUNT_SEC = 15
+
+    @staticmethod
+    def _proc_children():
+        """ppid -> [pid] for every process that can be seen."""
+        kids = {}
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            try:
+                with open("/proc/%s/stat" % name) as f:
+                    stat = f.read()
+                # comm may hold spaces and ")"; ppid follows the last ")"
+                ppid = int(stat.rsplit(")", 1)[1].split()[1])
+            except (OSError, IndexError, ValueError):
+                continue
+            kids.setdefault(ppid, []).append(int(name))
+        return kids
+
+    @staticmethod
+    def _proc_open_files(root, kids):
+        """Every file held open by `root` and the processes under it."""
+        out, todo, seen = [], [root], set()
+        while todo:
+            pid = todo.pop()
+            if pid in seen:
+                continue
+            seen.add(pid)
+            todo.extend(kids.get(pid, ()))
+            fd_dir = "/proc/%d/fd" % pid
+            try:
+                names = os.listdir(fd_dir)
+            except OSError:
+                continue
+            for n in names:
+                try:
+                    out.append(os.readlink(os.path.join(fd_dir, n)))
+                except OSError:
+                    pass
+        return out
+
+    def _ai_hunt_jobs(self):
+        """(row, cli, tmux name, pid) for each tab worth looking at."""
+        jobs = []
+        for r in self._session_rows():
+            if (not _is_ai_icon(getattr(r, "icon_name", None))
+                    or getattr(r, "dead", False)
+                    or getattr(r, "term", None) is None):
+                continue
+            got = self._ai_cli_path_of(getattr(r, "argv", None))
+            if got is None or os.path.basename(
+                    got[0].rstrip("/")) not in AI_SESSION_FILES:
+                continue
+            inner, sess = self._ai_tmux_unwrap(r.argv)
+            if (self._ai_argv_plain(inner) == inner
+                    and not getattr(r, "ai_hunt", False)):
+                continue  # set to start fresh after a restart; leave it
+            jobs.append((r, got[0], sess, getattr(r, "pid", None)))
+        return jobs
+
+    def _ai_hunt_wanted(self, r, argv):
+        """Whether a scan result for `r`, taken while its command was
+        `argv`, may still be written. A box changed during the scan (Resume
+        turned off, tmux, the CLI) makes the result about another tab."""
+        return (getattr(r, "argv", None) == argv
+                and not getattr(r, "dead", False)
+                and any(j[0] is r for j in self._ai_hunt_jobs()))
+
+    @classmethod
+    def _ai_hunt_scan(cls, jobs):
+        """{row: session id} for the jobs whose agent holds one open.
+
+        No GTK in here: it runs off the main loop, because tmux can take
+        its time answering and the window must not wait for it.
+        """
+        panes = {}
+        if any(sess for _r, _c, sess, _p in jobs):
+            try:
+                out = subprocess.run(
+                    ["tmux", "list-panes", "-a", "-F",
+                     "#{session_name} #{pane_pid}"],
+                    capture_output=True, text=True, timeout=3).stdout
+            except (OSError, subprocess.SubprocessError):
+                out = ""
+            for line in out.splitlines():
+                name, _sp, pid = line.rpartition(" ")
+                if pid.isdigit():
+                    panes.setdefault(name, int(pid))
+        kids = cls._proc_children()
+        found = {}
+        for r, cli, sess, pid in jobs:
+            root = panes.get(sess) if sess else pid
+            if not root:
+                continue
+            sid = cls._ai_session_id_from_links(
+                cli, cls._proc_open_files(root, kids))
+            if sid:  # none yet: no message, so no session file yet
+                found[r] = sid
+        return found
+
+    def _ai_hunt_apply(self, found, seen):
+        """Write what a scan found. `seen` is each row's argv at the time
+        the scan was set up."""
+        changed = False
+        for r, sid in found.items():
+            if not self._ai_hunt_wanted(r, seen.get(r)):
+                continue
+            new = self._ai_argv_with_session(r.argv, sid)
+            if new != r.argv:
+                r.argv = new
+                changed = True
+        if changed:
+            self._save_sessions_soon()
+
+    def _ai_hunt_session_ids(self):
+        """Store the session each codex / agy tab is really in.
+
+        These CLIs pick their own id, so a tab can only resume its own
+        session after a restart if tabit reads the id off the running
+        agent. Kept up after the first hit: a new session inside the
+        agent (/new) should be the one that comes back.
+        """
+        if getattr(self, "_ai_hunting", False):
+            return True
+        jobs = self._ai_hunt_jobs()
+        if not jobs:
+            return True
+        self._ai_hunting = True
+        seen = {j[0]: j[0].argv for j in jobs}
+
+        def work():
+            try:
+                found = self._ai_hunt_scan(jobs)
+            except Exception:
+                found = {}
+
+            def done():
+                self._ai_hunting = False
+                self._ai_hunt_apply(found, seen)
+                return False
+
+            GLib.idle_add(done)
+
+        threading.Thread(target=work, daemon=True).start()
+        return True
 
     def _refresh_ai_status_widgets(self):
         """After show_all/relayout: re-apply which status widget is visible."""
@@ -9218,7 +9391,9 @@ if (data !== null) {{
         # tab really has them.
         has_resume = bool(
             is_ai and getattr(row, "argv", None) and len(row.argv) == 3
-            and self._ai_argv_plain(row.argv) != row.argv)
+            and (self._ai_argv_plain(row.argv) != row.argv
+                 # a new codex / agy tab whose id is not known yet
+                 or getattr(row, "ai_hunt", False)))
         cur_session = (self._ai_tmux_unwrap(row.argv)[1]
                        if is_ai and getattr(row, "argv", None) else None)
         in_tmux = cur_session is not None
@@ -9273,26 +9448,20 @@ if (data !== null) {{
                     and getattr(row, "argv", None) and len(row.argv) == 3):
                 # Edit the command itself, not the tmux wrapper around it
                 inner_argv, _sess = self._ai_tmux_unwrap(row.argv)
-                plain_argv = self._ai_argv_plain(inner_argv)
-                plain_cmd = plain_argv[2]
-                split_marker = " || exit 1; exec "
-                if split_marker in plain_cmd:
-                    cd_part, cli_quoted = plain_cmd.split(split_marker, 1)
-                    path_quoted = cd_part[3:]
-                    try:
-                        path_val = shlex.split(path_quoted)[0]
-                    except Exception:
-                        path_val = path_quoted.strip("'\"")
-                    try:
-                        cli_val = shlex.split(cli_quoted)[0]
-                    except Exception:
-                        cli_val = cli_quoted.strip("'\"")
-                    
+                got = self._ai_cli_path_of(inner_argv)
+                if got is not None:
+                    cli_val, path_val = got
+
                     if resume_chk.get_active():
                         # keep whatever the tab already had (a session id from
                         # +AI survives here) when only the tmux box moved
                         if has_resume:
                             tries = self._ai_tries_of(inner_argv[2])
+                        elif os.path.basename(
+                                cli_val.rstrip("/")) in AI_SESSION_FILES:
+                            # Same as a new tab: a plain start until the
+                            # hunt knows its id, not another tab's session.
+                            tries = []
                         else:
                             tries = None
                             for e in self._load_ai_clis():
@@ -9315,6 +9484,7 @@ if (data !== null) {{
                                 cli_val, path_val,
                                 unique=not resume_chk.get_active()))
                     row.argv = new_argv
+                    row.ai_hunt = resume_chk.get_active()
                     self._set_row_icon(
                         row, ICON_AI_TMUX if want_tmux else ICON_AI)
                     shown_path = self._ai_sub(path_val)
@@ -10801,7 +10971,10 @@ if (data !== null) {{
         for e in cls._load_ai_clis():
             if e["cli"] == cli and e.get("resume_id"):
                 return e["resume_id"]
-        return AI_RESUME_ID_ARGS.get(cli, DEFAULT_AI_RESUME_ID)
+        # By name as well: a CLI set as a path is still that CLI, and
+        # `/usr/bin/codex --resume <id>` is not how codex resumes.
+        return AI_RESUME_ID_ARGS.get(cli) or AI_RESUME_ID_ARGS.get(
+            os.path.basename(cli.rstrip("/")), DEFAULT_AI_RESUME_ID)
 
     @classmethod
     def _ai_tries_with_id(cls, cli, tries, session_id):
@@ -11062,7 +11235,13 @@ if (data !== null) {{
                               bypass=bypass)
         stored = cls._ai_argv(cli, cwd, tries if resume_later else [],
                               bypass=bypass)
-        new_arg = AI_NEW_ID_ARGS.get(os.path.basename(cli.rstrip("/")))
+        base = os.path.basename(cli.rstrip("/"))
+        if base in AI_SESSION_FILES and not continue_now:
+            # Its id is not known until the first message. Until then a
+            # restart starts fresh: "the newest in this folder" may be
+            # another tab's session. The hunt fills the id in.
+            stored = cls._ai_argv(cli, cwd, [], bypass=bypass)
+        new_arg = AI_NEW_ID_ARGS.get(base)
         if new_sid and new_arg and not continue_now:
             # exec, not a try: "a || b" also runs b when a exits nonzero
             # after a normal session, and b would be a second agent.
@@ -11084,6 +11263,84 @@ if (data !== null) {{
         name = cls._ai_tmux_session(cli, cwd, unique=not continue_now)
         return (cls._ai_tmux_argv(launch, name),
                 cls._ai_tmux_argv(stored, name), ICON_AI_TMUX)
+
+    @classmethod
+    def _ai_cli_path_of(cls, argv):
+        """(cli, path) of an AI argv, tmux or not, or None."""
+        inner, _sess = cls._ai_tmux_unwrap(argv or [])
+        plain = cls._ai_argv_plain(inner)
+        if len(plain) != 3:
+            return None
+        split_marker = " || exit 1; exec "
+        if split_marker not in plain[2]:
+            return None
+        cd_part, cli_quoted = plain[2].split(split_marker, 1)
+        path_quoted = cd_part[3:]
+        try:
+            path_val = shlex.split(path_quoted)[0]
+        except Exception:
+            path_val = path_quoted.strip("'\"")
+        try:
+            cli_val = shlex.split(cli_quoted)[0]
+        except Exception:
+            cli_val = cli_quoted.strip("'\"")
+        return cli_val, path_val
+
+    @classmethod
+    def _ai_argv_with_session(cls, argv, sid):
+        """The same tab, now resuming session `sid` and nothing else.
+
+        Same rule as a new Claude tab: its own id, then a plain start --
+        never --continue, which would pick up another tab's session.
+        """
+        got = cls._ai_cli_path_of(argv)
+        if got is None:
+            return argv
+        cli, path = got
+        new = cls._ai_argv(cli, path, cls._ai_tries_with_id(cli, [], sid),
+                           bypass=cls._ai_has_bypass(argv))
+        _inner, sess = cls._ai_tmux_unwrap(argv)
+        return cls._ai_tmux_argv(new, sess) if sess else new
+
+    @staticmethod
+    def _ai_session_id_from_links(cli, links):
+        """The session id in the files an agent holds open, or None."""
+        rx = AI_SESSION_FILES.get(os.path.basename((cli or "").rstrip("/")))
+        if rx is None:
+            return None
+        for link in links:
+            m = rx.search(link or "")
+            if m:
+                return m.group(1)
+        return None
+
+    _ai_new_id_cache = {}
+
+    @classmethod
+    def _ai_takes_new_id(cls, cli):
+        """Whether this CLI takes --session-id for a new session.
+
+        Asked of the program itself: the name alone cannot tell the xAI
+        grok from another grok, or a claude too old to have the flag, and
+        either one would exit at once on `--session-id`.
+        """
+        if os.path.basename(cli.rstrip("/")) not in AI_NEW_ID_ARGS:
+            return False
+        exe = shutil.which(os.path.expanduser(cli))
+        if not exe:
+            return False
+        if exe not in cls._ai_new_id_cache:
+            try:
+                out = subprocess.run(
+                    [exe, "--help"], capture_output=True, text=True,
+                    timeout=5, stdin=subprocess.DEVNULL)
+            except (OSError, subprocess.SubprocessError):
+                return False  # not cached: a slow first start is not a no
+            if out.returncode != 0:
+                return False  # same: a failed --help says nothing
+            cls._ai_new_id_cache[exe] = (
+                "--session-id" in (out.stdout or "") + (out.stderr or ""))
+        return cls._ai_new_id_cache[exe]
 
     @staticmethod
     def _ai_tries_of(cmd):
@@ -11611,10 +11868,15 @@ if (data !== null) {{
                         tmux=tmux_chk.get_active(),
                         continue_now=now,
                         resume_later=later_chk.get_active(),
-                        new_sid=str(uuid.uuid4()))
-                    self._add_session(tool, argv, icon,
-                                      sub=self._ai_sub(cwd), cwd=cwd,
-                                      launch_argv=launch)
+                        new_sid=(str(uuid.uuid4())
+                                 if self._ai_takes_new_id(tool) else None))
+                    r = self._add_session(tool, argv, icon,
+                                          sub=self._ai_sub(cwd), cwd=cwd,
+                                          launch_argv=launch)
+                    if r is not None and later_chk.get_active():
+                        # Look for its session even while the stored
+                        # command is still a plain start.
+                        r.ai_hunt = True
                     self._save_ai_last(tool, cwd,
                                        use_tmux=tmux_chk.get_active())
             self._open_dialogs.discard(dlg)
