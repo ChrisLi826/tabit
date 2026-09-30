@@ -1449,7 +1449,7 @@ DEFAULT_SETTINGS = {
     "telegram_reply": False,     # answer /status from the phone
     "telegram_quote": False,     # put the agent's own last lines in it
     "telegram_ask_file": True,   # a task asks the agent to write its answer
-    "ai_fresh_on_restore": False,  # restored AI tabs start fresh (no continue)
+    "ai_fresh_on_restore": False,  # +AI default: tab starts fresh after restart
     "ai_use_tmux": True,           # +AI dialog: run inside tmux (can uncheck)
     "ai_claude_bypass": False,     # +AI: launch claude with --dangerously-skip-permissions
     "group_names": {},             # tab-group color -> display name
@@ -1708,7 +1708,12 @@ class Tabit(Gtk.Window):
             "sidebar_position", "left") or "left"
         self._apply_sidebar_layout()
 
-        ai_fresh = self._load_settings().get("ai_fresh_on_restore", False)
+        # One-time move from the old global switch: tabs saved before each
+        # tab kept its own choice still carry the tries, and a user with
+        # the switch on expects them to start fresh once more.
+        st = self._load_settings()
+        ai_migrate = (st.get("ai_fresh_on_restore", False)
+                      and not st.get("ai_resume_per_tab", False))
         # Keep collapsed_groups from settings; do not expand while replaying sessions.
         self._restoring_sessions = True
         last_row = None
@@ -1726,9 +1731,11 @@ class Tabit(Gtk.Window):
                         # A file reopens showing what it was showing.
                         self._note_set_preview(r, True)
                 else:
+                    # Each AI tab stored its own "resume when tabit reopens"
+                    # choice in its argv; run it as saved.
                     argv = s["argv"]
-                    if ai_fresh and _is_ai_icon(s.get("icon")):
-                        argv = self._ai_argv_plain(argv)  # no continue/resume
+                    if ai_migrate and _is_ai_icon(s.get("icon")):
+                        argv = self._ai_argv_plain(argv)
                     r = self._add_session(s["label"], argv, s["icon"],
                                           s.get("sub"), s.get("cwd"),
                                           s.get("track_cwd", False))
@@ -1749,6 +1756,8 @@ class Tabit(Gtk.Window):
             except (KeyError, TypeError, ValueError, IndexError, OSError):
                 continue  # skip broken entries in a hand-edited file
         self._restoring_sessions = False
+        if not st.get("ai_resume_per_tab", False):
+            self._save_settings({"ai_resume_per_tab": True})
         self._relayout()  # build group headers + cluster + apply collapse
         # Prefer a visible (non-collapsed-member) row so we do not auto-expand
         if last_row is not None:
@@ -2123,7 +2132,9 @@ class Tabit(Gtk.Window):
         self._apply_editor_font()
 
     def _add_session(self, label, argv, icon_name, sub=None, cwd=None,
-                     track_cwd=False):
+                     track_cwd=False, launch_argv=None):
+        """argv is what the tab keeps and runs again after a restart;
+        launch_argv, when given, is what runs this first time instead."""
         term = Vte.Terminal()
         term.set_hexpand(True)
         term.set_vexpand(True)
@@ -2224,7 +2235,7 @@ class Tabit(Gtk.Window):
                 return False
 
             GLib.timeout_add(800, _kick)
-        term.spawn_async(Vte.PtyFlags.DEFAULT, workdir, argv,
+        term.spawn_async(Vte.PtyFlags.DEFAULT, workdir, launch_argv or argv,
                          None, GLib.SpawnFlags.SEARCH_PATH, None, None,
                          -1, None, self._on_term_spawned, row)
         return row
@@ -9099,8 +9110,12 @@ if (data !== null) {{
 
         resume_chk = tmux_chk = None
         if is_ai:
-            resume_chk = Gtk.CheckButton(label="Continue / resume previous session")
+            resume_chk = Gtk.CheckButton(label="Resume when tabit reopens")
             resume_chk.set_active(has_resume)
+            resume_chk.set_tooltip_text(
+                "Ticked: after tabit restarts, this tab continues its "
+                "session. Unticked: it starts a new one.\n"
+                "In tmux, a still-running agent is always reattached.")
             vbox.pack_start(resume_chk, False, False, 0)
             tmux_chk = Gtk.CheckButton(label="Run inside tmux session")
             tmux_chk.set_active(in_tmux)
@@ -10905,6 +10920,27 @@ if (data !== null) {{
                 f" {opts}"
                 f" exec tmux attach-session -t {name}"]
 
+    @classmethod
+    def _ai_launch_pair(cls, cli, cwd, tries, bypass=False, tmux=False,
+                        continue_now=True, resume_later=True):
+        """(launch argv, stored argv, icon) for a new +AI tab.
+
+        The two questions are separate: continue_now picks what runs now
+        (the tries, or a fresh start); resume_later picks what the tab keeps
+        for the next time tabit opens it. Both share one tmux name, so a
+        restore still reattaches to an agent that is running.
+        """
+        tries = list(tries or [])
+        launch = cls._ai_argv(cli, cwd, tries if continue_now else [],
+                              bypass=bypass)
+        stored = cls._ai_argv(cli, cwd, tries if resume_later else [],
+                              bypass=bypass)
+        if not tmux:
+            return launch, stored, ICON_AI
+        name = cls._ai_tmux_session(cli, cwd, unique=not continue_now)
+        return (cls._ai_tmux_argv(launch, name),
+                cls._ai_tmux_argv(stored, name), ICON_AI_TMUX)
+
     @staticmethod
     def _ai_tries_of(cmd):
         """Read the try strings back out of a built AI command.
@@ -11243,12 +11279,22 @@ if (data !== null) {{
         path_box.pack_start(path, True, True, 0)
         path_box.pack_start(browse, False, False, 0)
 
-        resume_chk = Gtk.CheckButton(
-            label="Continue / resume previous session")
-        # On by default; Settings → "Start AI tabs fresh after reopening"
-        # is the preference that turns it off.
-        resume_chk.set_active(
+        new_chk = Gtk.CheckButton(label="Create new session")
+        new_chk.set_active(True)
+        new_chk.set_tooltip_text(
+            "Ticked: start a new session.\nUnticked: pick up the last "
+            "session in this folder (or the Session ID below).")
+        # What the tab does the next time tabit opens it. Settings →
+        # "Start AI tabs fresh after reopening" is the default here.
+        later_chk = Gtk.CheckButton(
+            label="Resume when tabit reopens")
+        later_chk.set_active(
             not self._load_settings().get("ai_fresh_on_restore", False))
+        later_chk.set_tooltip_text(
+            "Ticked: after tabit restarts, this tab continues its session.\n"
+            "Unticked: it starts a new one each time.\n"
+            "In tmux, a still-running agent is always reattached; this only "
+            "matters once the tmux session is gone (reboot, killed).")
 
         # Optional exact session to resume; empty = whatever the CLI's own
         # continue/resume tries pick (usually the newest in that folder).
@@ -11269,20 +11315,21 @@ if (data !== null) {{
             return list(DEFAULT_AI_TRY)
 
         def update_try_hint(*_a):
-            on = resume_chk.get_active()
+            on = not new_chk.get_active()  # continue now
             sid.set_sensitive(on)
-            if not on:
-                try_hint.set_text("Will start fresh (no continue/resume)")
-                return
             tool = (cli.get_active_text() or "").strip()
             tries = self._ai_tries_with_id(
-                tool, cli_tries(tool), sid.get_text())
+                tool, cli_tries(tool), sid.get_text() if on else "")
             chain = (" → ".join(tries) + " → plain") if tries \
                 else "plain start only"
-            try_hint.set_text(f"Will try: {chain}")
+            now = f"Now: {chain}" if on else "Now: new session"
+            later = ("After restart: continue" if later_chk.get_active()
+                     else "After restart: new session")
+            try_hint.set_text(f"{now}\n{later}")
 
         cli.connect("changed", update_try_hint)
-        resume_chk.connect("toggled", update_try_hint)
+        new_chk.connect("toggled", update_try_hint)
+        later_chk.connect("toggled", update_try_hint)
         sid.connect("changed", update_try_hint)
         update_try_hint()
 
@@ -11387,15 +11434,16 @@ if (data !== null) {{
 
         refresh_live()
 
-        grid.attach(resume_chk, 1, 2, 1, 1)
+        grid.attach(new_chk, 1, 2, 1, 1)
         grid.attach(Gtk.Label(label="Session ID", xalign=0), 0, 3, 1, 1)
         grid.attach(sid, 1, 3, 1, 1)
-        grid.attach(tmux_chk, 1, 4, 1, 1)
-        grid.attach(bypass_chk, 1, 5, 1, 1)
-        grid.attach(try_hint, 0, 6, 2, 1)
+        grid.attach(later_chk, 1, 4, 1, 1)
+        grid.attach(tmux_chk, 1, 5, 1, 1)
+        grid.attach(bypass_chk, 1, 6, 1, 1)
+        grid.attach(try_hint, 0, 7, 2, 1)
         grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
-                    0, 7, 2, 1)
-        grid.attach(live_box, 0, 8, 2, 1)
+                    0, 8, 2, 1)
+        grid.attach(live_box, 0, 9, 2, 1)
         dialog.get_content_area().add(grid)
         self._dialog_enter_is_ok(dialog)
 
@@ -11405,23 +11453,20 @@ if (data !== null) {{
                 cwd = (path.get_text() or "").strip() or GLib.get_home_dir()
                 cwd = os.path.expanduser(cwd)
                 if tool:
-                    tries = []
-                    if resume_chk.get_active():
-                        tries = self._ai_tries_with_id(
-                            tool, cli_tries(tool), sid.get_text())
-                    argv = self._ai_argv(
+                    now = not new_chk.get_active()
+                    # a Session ID only belongs to "continue now"
+                    tries = self._ai_tries_with_id(
+                        tool, cli_tries(tool), sid.get_text() if now else "")
+                    launch, argv, icon = self._ai_launch_pair(
                         tool, cwd, tries,
                         bypass=bypass_chk.get_active()
-                        and self._ai_is_claude(tool))
-                    icon = ICON_AI
-                    if tmux_chk.get_active():
-                        argv = self._ai_tmux_argv(
-                            argv, self._ai_tmux_session(
-                                tool, cwd,
-                                unique=not resume_chk.get_active()))
-                        icon = ICON_AI_TMUX
+                        and self._ai_is_claude(tool),
+                        tmux=tmux_chk.get_active(),
+                        continue_now=now,
+                        resume_later=later_chk.get_active())
                     self._add_session(tool, argv, icon,
-                                      sub=self._ai_sub(cwd), cwd=cwd)
+                                      sub=self._ai_sub(cwd), cwd=cwd,
+                                      launch_argv=launch)
                     self._save_ai_last(tool, cwd,
                                        use_tmux=tmux_chk.get_active())
             self._open_dialogs.discard(dlg)
@@ -12809,11 +12854,13 @@ if (data !== null) {{
         side_box.pack_start(side_combo, True, True, 0)
 
         ai_fresh = Gtk.CheckButton(
-            label="Start AI tabs fresh after reopening (no continue/resume)")
+            label="New +AI tabs: start fresh after tabit reopens")
         ai_fresh.set_active(bool(s.get("ai_fresh_on_restore", False)))
         ai_fresh.set_tooltip_text(
-            "When tabit reopens, restored AI tabs launch the CLI without "
-            "--continue / resume. Default is off (they continue).")
+            "Default for “Resume when tabit reopens” in the +AI dialog "
+            "(ticked here = unticked there). Each tab keeps its own "
+            "choice; change one from its rename popover. Default is off "
+            "(they continue).")
         ai_tmux = Gtk.CheckButton(
             label="+AI run in tmux (default on)")
         ai_tmux.set_active(bool(s.get("ai_use_tmux", True)))
