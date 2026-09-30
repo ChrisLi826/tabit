@@ -71,6 +71,19 @@ class TestPathPattern(unittest.TestCase):
         self.assertIsNone(self.first("see https://herdr.dev/docs for info"))
         self.assertIsNone(self.first("visit http://a.io/x/y/z now"))
 
+    def test_after_a_colon_in_chinese(self):
+        # Seen: an agent wrote the path right after "文件:" and it did not
+        # open. The colon there is ASCII, not the full-width one.
+        p = ("/home/chris/cloudcamsdk/SENAO/package/repo/libcloudsnipcam/"
+             "docs/live-viewer-admission.html")
+        self.assertEqual(self.first("文件:" + p), p)
+        self.assertEqual(self.first("文件：" + p), p)
+        self.assertEqual(self.first("(see: " + p + ")"), p)
+
+    def test_not_after_a_word_and_a_colon(self):
+        self.assertIsNone(self.first("scp host:/etc/passwd ."))
+        self.assertIsNone(self.first("file:/etc/hosts"))
+
     def test_not_a_fraction(self):
         self.assertIsNone(self.first("ratio 3/4 done"))
 

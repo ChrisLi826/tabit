@@ -518,7 +518,12 @@ MARKDOWN_SUFFIXES = (".md", ".markdown", ".mdown", ".mkd")
 # out of the "//" inside a URL and off the tail of a longer word; `3/4` needs
 # two components to match, so it does not.
 TERM_PATH_PATTERN = (
-    r"(?<![\w:/~.-])"
+    # Not inside a word or a URL. A colon only counts as "inside" after an
+    # ASCII word character: `https:/`, `host:/`, `C:/`. After anything
+    # else -- `文件:/home/...`, as an agent writes in Chinese -- the path
+    # starts right after it. ASCII spelled out, because \w in VTE's PCRE2
+    # is not the same set as \w in Python's re, which the tests use.
+    r"(?<![\w/~.-])(?<![A-Za-z0-9_.~-]:)"
     r"~?/"
     r"(?:[A-Za-z0-9._+@~-]+/)*"
     r"[A-Za-z0-9._+@~-]+"
