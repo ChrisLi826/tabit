@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import tempfile
+from unittest import mock
 import unittest
 
 import gi
@@ -1232,11 +1233,19 @@ class _ReplySink:
     _TG_MSG_LIMIT = Tabit._TG_MSG_LIMIT
     _TG_REPLY_PARTS = Tabit._TG_REPLY_PARTS
 
+    _TG_RETRY_SEC = Tabit._TG_RETRY_SEC
+    _tg_job_dest = staticmethod(Tabit._tg_job_dest)
+
     def __init__(self, waiting, sends=True):
         self._tg_waiting = waiting
         self.sent = []
         self.sends = sends          # False stands in for a failed send
         self.saved = 0
+        self.retried = []
+        self.retry = True           # False: the bot changed under it
+
+    def _tg_settle_watch(self, token):
+        self.retried.append(token)
 
     def _tg_jobs(self):
         return self._tg_waiting
@@ -1245,11 +1254,16 @@ class _ReplySink:
         self.saved += 1
 
     def _tg_send(self, text, markup=None, row_id=None, reply_to=None,
-                 after=None):
+                 after=None, failed=None, dest=None):
         self.sent.append((text, reply_to))
-        # The real worker only calls `after` when Telegram accepted it.
-        if self.sends and callable(after):
+        self.dest = dest
+        # `sends` is True, False, or a list saying it per part.
+        ok = (self.sends if not isinstance(self.sends, list)
+              else self.sends[len(self.sent) - 1])
+        if ok and callable(after):
             after(999)
+        elif ok is False and callable(failed):
+            failed(self.retry)
 
 
 class TestTelegramDeliverReply(unittest.TestCase):
@@ -1329,6 +1343,90 @@ class TestTelegramDeliverReply(unittest.TestCase):
         self.assertTrue(still_there)
         self.assertIn("tok", sink._tg_waiting)
 
+    def test_a_failed_send_can_be_sent_again(self):
+        # Wi-Fi drops as the agent finishes. The answer must not be
+        # stuck as "sending" for ever.
+        old = tabit.TELEGRAM_REPLY_DIR
+        d = tempfile.mkdtemp()
+        tabit.TELEGRAM_REPLY_DIR = d
+        try:
+            with open(Tabit._tg_reply_path("tok"), "w") as f:
+                f.write("all done")
+            sink = _ReplySink({"tok": dict(self.JOB)}, sends=False)
+            with mock.patch.object(tabit.GLib, "timeout_add_seconds",
+                                   lambda _s, fn: fn()):
+                self.assertTrue(sink._tg_deliver_reply("tok"))
+            self.assertEqual(sink.retried, ["tok"])
+            self.assertNotIn("sending", sink._tg_waiting["tok"])
+            sink.sends = True
+            self.assertTrue(sink._tg_deliver_reply("tok"))
+            self.assertNotIn("tok", sink._tg_waiting)
+        finally:
+            tabit.TELEGRAM_REPLY_DIR = old
+
+    def test_an_answer_for_an_old_bot_is_dropped_not_resent(self):
+        # Sent again, it would go to whoever the new chat is.
+        old = tabit.TELEGRAM_REPLY_DIR
+        d = tempfile.mkdtemp()
+        tabit.TELEGRAM_REPLY_DIR = d
+        try:
+            with open(Tabit._tg_reply_path("tok"), "w") as f:
+                f.write("all done")
+            sink = _ReplySink({"tok": dict(self.JOB)}, sends=False)
+            sink.retry = False
+            sink._tg_deliver_reply("tok")
+            self.assertEqual(sink.retried, [])
+            self.assertNotIn("tok", sink._tg_waiting)
+            self.assertFalse(os.path.exists(Tabit._tg_reply_path("tok")))
+        finally:
+            tabit.TELEGRAM_REPLY_DIR = old
+
+    def test_the_answer_goes_where_the_task_came_from(self):
+        job = dict(self.JOB, chat="424242", bot="b0t")
+        _got, sink, _s = self._run("all done", waiting={"tok": job})
+        self.assertEqual(sink.dest, ("424242", "b0t"))
+
+    def test_one_retry_timer_per_answer(self):
+        # Two failures before the first timer fires must not become two
+        # timers, or the answer goes out twice every time.
+        old = tabit.TELEGRAM_REPLY_DIR
+        d = tempfile.mkdtemp()
+        tabit.TELEGRAM_REPLY_DIR = d
+        timers = []
+        try:
+            with open(Tabit._tg_reply_path("tok"), "w") as f:
+                f.write("all done")
+            sink = _ReplySink({"tok": dict(self.JOB)}, sends=False)
+            with mock.patch.object(tabit.GLib, "timeout_add_seconds",
+                                   lambda _s, fn: timers.append(fn)):
+                sink._tg_deliver_reply("tok")
+                sink._tg_deliver_reply("tok")
+            self.assertEqual(len(timers), 1)
+            timers[0]()
+            self.assertEqual(sink.retried, ["tok"])
+        finally:
+            tabit.TELEGRAM_REPLY_DIR = old
+
+    def test_a_lost_first_part_keeps_the_answer(self):
+        # Part one fails, the last part lands: the file must stay.
+        old = tabit.TELEGRAM_REPLY_DIR
+        d = tempfile.mkdtemp()
+        tabit.TELEGRAM_REPLY_DIR = d
+        try:
+            body = "\n".join("x" * 80 for _ in range(100))
+            with open(Tabit._tg_reply_path("tok"), "w") as f:
+                f.write(body)
+            self.assertEqual(len(Tabit._tg_chunks(body)), 3)
+            sink = _ReplySink({"tok": dict(self.JOB)},
+                              sends=[False, True, True])
+            with mock.patch.object(tabit.GLib, "timeout_add_seconds",
+                                   lambda _s, fn: fn()):
+                sink._tg_deliver_reply("tok")
+            self.assertIn("tok", sink._tg_waiting)
+            self.assertTrue(os.path.exists(Tabit._tg_reply_path("tok")))
+        finally:
+            tabit.TELEGRAM_REPLY_DIR = old
+
     def test_it_does_not_send_the_same_answer_twice(self):
         # A settle tick and a status change can both reach one file.
         old = tabit.TELEGRAM_REPLY_DIR
@@ -1337,12 +1435,115 @@ class TestTelegramDeliverReply(unittest.TestCase):
         try:
             with open(Tabit._tg_reply_path("tok"), "w") as f:
                 f.write("all done")
-            sink = _ReplySink({"tok": dict(self.JOB)}, sends=False)
+            # None: still in the queue, neither sent nor failed yet
+            sink = _ReplySink({"tok": dict(self.JOB)}, sends=None)
             self.assertTrue(sink._tg_deliver_reply("tok"))
             self.assertFalse(sink._tg_deliver_reply("tok"))
             self.assertEqual(len(sink.sent), 1)
         finally:
             tabit.TELEGRAM_REPLY_DIR = old
+
+
+class TestTelegramWorkerDest(unittest.TestCase):
+    """A queued message goes only to the chat and bot it was meant for."""
+
+    def _run_one(self, meant_for):
+        import queue as _q
+        import threading
+        calls, idles = [], []
+        done = threading.Event()
+
+        class W:
+            _tg_bot_key = staticmethod(Tabit._tg_bot_key)
+            _tg_last_error = None
+
+            def _load_settings(self):
+                return {"telegram_enabled": True}
+
+            def _tg_load_secrets(self):
+                return {"bot_token": "123:new", "chat_id": "424242"}
+
+            def _tg_call(self, token, method, params):
+                calls.append(params)
+                return {"message_id": 1}, None
+
+        def idle(fn, *a):
+            idles.append((fn, a))
+            done.set()
+
+        q = _q.Queue()
+        q.put(("sendMessage", {"text": "x"}, None, lambda _m: None,
+               meant_for, lambda retry: None))
+        with mock.patch.object(tabit.GLib, "idle_add", idle):
+            threading.Thread(target=Tabit._tg_worker, args=(W(), q),
+                             daemon=True).start()
+            done.wait(2)
+        return calls, idles
+
+    def test_same_chat_and_bot_is_sent(self):
+        calls, _i = self._run_one(("424242", Tabit._tg_bot_key("123:new")))
+        self.assertEqual(len(calls), 1)
+
+    def test_another_chat_is_dropped_for_good(self):
+        calls, idles = self._run_one(("111", Tabit._tg_bot_key("123:new")))
+        self.assertEqual(calls, [])
+        self.assertEqual(idles[0][1], (False,))
+
+    def test_another_bot_is_dropped_for_good(self):
+        calls, idles = self._run_one(("424242", Tabit._tg_bot_key("9:old")))
+        self.assertEqual(calls, [])
+        self.assertEqual(idles[0][1], (False,))
+
+    def test_an_old_sending_mark_is_cleared_on_load(self):
+        old = tabit.TELEGRAM_STATE_FILE
+        d = tempfile.mkdtemp()
+        tabit.TELEGRAM_STATE_FILE = os.path.join(d, "state.json")
+        try:
+            Tabit._tg_save_state(waiting={"tok": {"row_id": "r",
+                                                  "sending": True}})
+
+            class J:
+                _tg_load_state = staticmethod(Tabit._tg_load_state)
+            got = Tabit._tg_jobs(J())
+            self.assertEqual(got, {"tok": {"row_id": "r"}})
+        finally:
+            tabit.TELEGRAM_STATE_FILE = old
+
+    def test_no_token_in_the_state_file(self):
+        self.assertNotIn("123:new", Tabit._tg_bot_key("123:new"))
+
+
+class TestTelegramStateLock(unittest.TestCase):
+    """The poll thread and the UI thread share one state file."""
+
+    def test_two_writers_do_not_undo_each_other(self):
+        import threading
+        old = tabit.TELEGRAM_STATE_FILE
+        d = tempfile.mkdtemp()
+        tabit.TELEGRAM_STATE_FILE = os.path.join(d, "state.json")
+        try:
+            went_back = []
+
+            def offsets():
+                for i in range(1, 201):
+                    Tabit._tg_save_state(offset=i)
+                    # An offset that goes back redelivers a message.
+                    if Tabit._tg_load_state().get("offset", 0) < i:
+                        went_back.append(i)
+
+            def jobs():
+                for i in range(1, 201):
+                    Tabit._tg_save_state(waiting={"t%d" % i: {}})
+
+            a = threading.Thread(target=offsets)
+            b = threading.Thread(target=jobs)
+            a.start(); b.start(); a.join(); b.join()
+            self.assertEqual(went_back, [])
+            got = Tabit._tg_load_state()
+            self.assertEqual(got.get("offset"), 200)
+            self.assertEqual(got.get("waiting"), {"t200": {}})
+        finally:
+            tabit.TELEGRAM_STATE_FILE = old
 
 
 class TestTelegramChunks(unittest.TestCase):
@@ -1382,30 +1583,40 @@ class TestTelegramChunks(unittest.TestCase):
 class TestTelegramChatFromUpdates(unittest.TestCase):
     """Finding your own chat id, so nobody has to go and ask a third bot."""
 
-    def _msg(self, cid, kind="private"):
-        return {"message": {"chat": {"id": cid, "type": kind}}}
+    def _msg(self, cid, kind="private", **who):
+        return {"message": {"chat": dict({"id": cid, "type": kind}, **who)}}
+
+    def ids(self, updates):
+        return [c for c, _w in Tabit._tg_chats_from_updates(updates)]
 
     def test_it_reads_the_id_off_a_message(self):
-        self.assertEqual(Tabit._tg_chat_from_updates([self._msg(424242)]),
-                         "424242")
+        self.assertEqual(self.ids([self._msg(424242)]), ["424242"])
 
-    def test_the_newest_message_wins(self):
-        self.assertEqual(
-            Tabit._tg_chat_from_updates([self._msg(111), self._msg(222)]),
-            "222")
+    def test_a_stranger_writing_after_you_is_not_picked(self):
+        # Anyone can write to a bot. Both come back, so nobody is chosen
+        # for you.
+        self.assertEqual(self.ids([self._msg(111), self._msg(222)]),
+                         ["222", "111"])
+
+    def test_one_person_twice_is_one_chat(self):
+        self.assertEqual(self.ids([self._msg(111), self._msg(111)]),
+                         ["111"])
+
+    def test_it_says_who_wrote(self):
+        got = Tabit._tg_chats_from_updates([self._msg(
+            5, first_name="Ann", last_name="Lee", username="ann")])
+        self.assertEqual(got, [("5", "Ann Lee @ann")])
 
     def test_a_group_is_not_your_chat(self):
-        self.assertIsNone(
-            Tabit._tg_chat_from_updates([self._msg(424242, "supergroup")]))
+        self.assertEqual(self.ids([self._msg(424242, "supergroup")]), [])
 
     def test_an_edited_message_counts(self):
         upd = {"edited_message": {"chat": {"id": 7, "type": "private"}}}
-        self.assertEqual(Tabit._tg_chat_from_updates([upd]), "7")
+        self.assertEqual(self.ids([upd]), ["7"])
 
     def test_nothing_sent_yet(self):
         for updates in ([], None, [{}], [{"message": {}}]):
-            self.assertIsNone(Tabit._tg_chat_from_updates(updates),
-                              repr(updates))
+            self.assertEqual(self.ids(updates), [], repr(updates))
 
 
 class TestTelegramAuth(unittest.TestCase):

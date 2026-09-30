@@ -5910,19 +5910,32 @@ if (data !== null) {{
                                 cls._AGENT_NOTIFY.get(status, ""))
 
     @staticmethod
-    def _tg_chat_from_updates(updates):
-        """The private chat id out of a getUpdates answer, or None.
+    def _tg_chats_from_updates(updates):
+        """Every private chat in a getUpdates answer, newest first, as
+        (id, who). `who` is the name and @username the sender shows.
 
         Saves a trip to a third-party "what is my id" bot: the id is in
-        the first message the person sends their own bot.
+        the first message the person sends their own bot. All of them,
+        not the newest: anyone can write to a bot, and taking the last
+        sender as the owner hands tabit to whoever wrote after you.
         """
+        out, seen = [], set()
         for upd in reversed(list(updates or [])):
             msg = (upd.get("message") or upd.get("edited_message")
                    or (upd.get("callback_query") or {}).get("message") or {})
             chat = msg.get("chat") or {}
-            if chat.get("type") == "private" and chat.get("id") is not None:
-                return str(chat["id"])
-        return None
+            if chat.get("type") != "private" or chat.get("id") is None:
+                continue
+            cid = str(chat["id"])
+            if cid in seen:
+                continue
+            seen.add(cid)
+            name = " ".join(x for x in (chat.get("first_name"),
+                                        chat.get("last_name")) if x)
+            if chat.get("username"):
+                name = ("%s @%s" % (name, chat["username"])).strip()
+            out.append((cid, name or cid))
+        return out
 
     @classmethod
     def _tg_call(cls, token, method, params, timeout=None):
@@ -6146,11 +6159,37 @@ if (data !== null) {{
             parts[-1] += "\n\n\u2026 cut here. The rest is in the tab."
         return parts
 
+    @staticmethod
+    def _tg_bot_key(token):
+        """Which bot, without the token: this goes in a file that is
+        not kept private."""
+        if not token:
+            return ""
+        return hashlib.sha1(token.encode("utf-8")).hexdigest()[:12]
+
+    @classmethod
+    def _tg_dest_now(cls):
+        """(chat id, bot key) as they are set right now."""
+        sec = cls._tg_load_secrets()
+        return (str(sec.get("chat_id") or ""),
+                cls._tg_bot_key(sec.get("bot_token") or ""))
+
+    @staticmethod
+    def _tg_job_dest(job):
+        """Where the answer to a task may go: the chat and bot the task
+        came from. None for a job saved before this was kept."""
+        if job.get("chat") is None:
+            return None
+        return (job["chat"], job.get("bot", ""))
+
     def _tg_await_reply(self, token, row, msg_id):
-        """Remember that this tab owes us an answer."""
+        """Remember that this tab owes us an answer, and to whom. Asked
+        from one chat, the answer must not go to another one set up
+        while the agent was still working."""
         waiting = self._tg_jobs()
+        chat, bot = self._tg_dest_now()
         waiting[token] = {"row_id": self._tg_row_id(row), "msg_id": msg_id,
-                          "name": row.tg_name}
+                          "name": row.tg_name, "chat": chat, "bot": bot}
         self._tg_save_jobs()
 
     def _tg_jobs(self):
@@ -6165,10 +6204,19 @@ if (data !== null) {{
             raw = self._tg_load_state().get("waiting")
             waiting = self._tg_waiting = dict(raw) if isinstance(raw, dict) \
                 else {}
+            # An older build saved "sending"; nothing is in flight now.
+            for job in waiting.values():
+                if isinstance(job, dict):
+                    job.pop("sending", None)
         return waiting
 
     def _tg_save_jobs(self):
-        self._tg_save_state(waiting=getattr(self, "_tg_waiting", None) or {})
+        # "sending" is about this run only. Saved, a send that never
+        # finished would block the answer after a restart too.
+        waiting = getattr(self, "_tg_waiting", None) or {}
+        self._tg_save_state(waiting={
+            t: {k: v for k, v in j.items() if k != "sending"}
+            for t, j in waiting.items()})
 
     def _tg_deliver_reply(self, token):
         """Send what an agent wrote for a task, and tidy up.
@@ -6208,9 +6256,46 @@ if (data !== null) {{
         if job.get("sending"):
             return False  # a tick and a status change both reached it
         job["sending"] = True
+        # Every part has to arrive before the local copy may go. The last
+        # part landing says nothing about the first.
+        left = {"n": len(chunks), "ok": True}
 
-        def delivered(_msg_id, t=token, p=path):
-            """Only now is it safe to lose the local copy."""
+        def part_done(ok, retry=True, t=token, p=path):
+            left["n"] -= 1
+            left["ok"] = left["ok"] and ok
+            left["retry"] = left.get("retry", True) and retry
+            if left["n"] > 0:
+                return False
+            if not left["ok"] and not left["retry"]:
+                # Meant for a bot or chat that is no longer the one. Sent
+                # again it would go to whoever that is now; drop it.
+                self._tg_jobs().pop(t, None)
+                self._tg_save_jobs()
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+                return False
+            if not left["ok"]:
+                # Keep the file and try again later. A part that did
+                # arrive goes again: twice is better than missing.
+                job.pop("sending", None)
+                # One timer per answer. The status path can fail it
+                # again meanwhile, and each failure adding its own timer
+                # sends the answer once per timer.
+                retrying = getattr(self, "_tg_retrying", None)
+                if retrying is None:
+                    retrying = self._tg_retrying = set()
+                if t not in retrying:
+                    retrying.add(t)
+
+                    def again(t=t):
+                        retrying.discard(t)
+                        self._tg_settle_watch(t)
+                        return False
+
+                    GLib.timeout_add_seconds(self._TG_RETRY_SEC, again)
+                return False
             self._tg_jobs().pop(t, None)
             self._tg_save_jobs()
             try:
@@ -6220,11 +6305,12 @@ if (data !== null) {{
             return False
 
         head = "\u2714 %s answered" % job["name"]
-        last = len(chunks) - 1
         for i, part in enumerate(chunks):
             self._tg_send(("%s\n\n%s" % (head, part)) if i == 0 else part,
                           row_id=job["row_id"], reply_to=job["msg_id"],
-                          after=delivered if i == last else None)
+                          after=lambda _mid: part_done(True),
+                          failed=lambda retry: part_done(False, retry),
+                          dest=self._tg_job_dest(job))
         return True
 
     def _tg_task_fallback(self, row, status):
@@ -6259,7 +6345,8 @@ if (data !== null) {{
             self._tg_send(
                 "%s finished without writing a reply. Last of its screen:"
                 "\n\n%s" % (job["name"], "\n".join(lines) or "(nothing)"),
-                row_id=rid, reply_to=job["msg_id"])
+                row_id=rid, reply_to=job["msg_id"],
+                dest=self._tg_job_dest(job))
             return
 
     def _tg_scan_replies(self, *_a):
@@ -6306,6 +6393,8 @@ if (data !== null) {{
     # so it takes three -- about 1.2s of quiet.
     _TG_SETTLE_MS = 600
     _TG_SETTLE_TICKS = 2
+    # How long after a failed send the answer is tried again.
+    _TG_RETRY_SEC = 30
 
     def _on_tg_reply_dir_changed(self, _mon, gfile, _other, event):
         if event in (Gio.FileMonitorEvent.DELETED,
@@ -6434,6 +6523,12 @@ if (data !== null) {{
             return {}
         return data if isinstance(data, dict) else {}
 
+    # The poll thread writes the offset and the UI thread writes the
+    # jobs, both as read-change-write of one file. Without this, each
+    # can write back the other's old value: an old offset redelivers a
+    # reply and types it in twice; an old job list loses a task.
+    _TG_STATE_LOCK = threading.Lock()
+
     @classmethod
     def _tg_save_state(cls, **kw):
         """Write the state, all of it or none of it.
@@ -6442,15 +6537,16 @@ if (data !== null) {{
         parse, which reads back as no offset at all -- and Telegram then
         redelivers everything it has been holding.
         """
-        cur = cls._tg_load_state()
-        cur.update(kw)
-        os.makedirs(CONFIG_DIR, exist_ok=True)
-        tmp = TELEGRAM_STATE_FILE + ".new"
-        with open(tmp, "w") as f:
-            json.dump(cur, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, TELEGRAM_STATE_FILE)
+        with cls._TG_STATE_LOCK:
+            cur = cls._tg_load_state()
+            cur.update(kw)
+            os.makedirs(CONFIG_DIR, exist_ok=True)
+            tmp = TELEGRAM_STATE_FILE + ".new"
+            with open(tmp, "w") as f:
+                json.dump(cur, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, TELEGRAM_STATE_FILE)
 
     _TG_MSG_MEMORY = 200
 
@@ -6852,7 +6948,8 @@ if (data !== null) {{
             self._tg_send("Not sent \u2014 %s." % bad)
         return False
 
-    def _tg_enqueue(self, method, params, row_id=None, after=None):
+    def _tg_enqueue(self, method, params, row_id=None, after=None,
+                    failed=None, dest=None):
         """Queue one Bot API call. Never blocks the UI thread.
 
         One worker for the whole queue rather than a thread per call: a
@@ -6867,21 +6964,25 @@ if (data !== null) {{
         # The chat this was meant for, fixed now rather than looked up
         # at send time: point tabit at another bot while something is
         # queued and it would go to whoever that is.
-        chat = str((self._tg_load_secrets().get("chat_id") or ""))
-        q.put((method, params, row_id, after, chat))
+        # `dest` is an older fix of the same kind, from the task itself.
+        q.put((method, params, row_id, after, dest or self._tg_dest_now(),
+               failed))
 
     def _tg_send(self, text, markup=None, row_id=None, reply_to=None,
-                 after=None):
+                 after=None, failed=None, dest=None):
         """Say something. `row_id` marks the message as being about that
         tab, so a reply to it needs no address. `reply_to` hangs it under
         an earlier message, which is what turns a pile of pushes into one
-        thread per task."""
+        thread per task. `after` runs with the message id once Telegram
+        took it; `failed` runs if it never got there, with False when
+        it must not be tried again (the bot or chat changed). `dest` is
+        the (chat, bot key) it may go to; default is the one set now."""
         params = {"text": text, "disable_web_page_preview": "true"}
         if markup is not None:
             params["reply_markup"] = json.dumps(markup)
         if reply_to:
             params["reply_to_message_id"] = str(reply_to)
-        self._tg_enqueue("sendMessage", params, row_id, after)
+        self._tg_enqueue("sendMessage", params, row_id, after, failed, dest)
 
     def _tg_answer(self, cb_id, text=""):
         """Take the spinner off a button. Telegram leaves it turning
@@ -6898,22 +6999,32 @@ if (data !== null) {{
         anything over.
         """
         while True:
-            method, params, row_id, after, meant_for = q.get()
+            method, params, row_id, after, meant_for, failed = q.get()
+            # Every way out below that did not send says so, or whoever
+            # waits on it waits for ever.
             if not self._load_settings().get("telegram_enabled"):
+                if callable(failed):
+                    GLib.idle_add(failed, True)
                 continue
             sec = self._tg_load_secrets()
             token = sec.get("bot_token") or ""
             chat = str(sec.get("chat_id") or "")
             if not token or not chat:
                 self._tg_last_error = "No bot token or chat id set"
+                if callable(failed):
+                    GLib.idle_add(failed, True)
                 continue
-            if meant_for and meant_for != chat:
-                continue  # the bot changed under it
+            if meant_for != (chat, self._tg_bot_key(token)):
+                if callable(failed):
+                    GLib.idle_add(failed, False)
+                continue  # the bot or chat changed under it
             if method == "sendMessage":
                 params = dict(params, chat_id=chat)
             res, err = self._tg_call(token, method, params)
             self._tg_last_error = err
             if not res:
+                if callable(failed):
+                    GLib.idle_add(failed, True)
                 continue
             if row_id:
                 # Hop to the main loop: the map is read there, and a dict
@@ -6945,8 +7056,11 @@ if (data !== null) {{
         # A task in flight answers itself, in its own thread, and says
         # more than "Finished" does. Two messages for one event is how a
         # phone stops being worth looking at.
-        owed = any(j["row_id"] == getattr(row, "tg_id", None)
-                   for j in self._tg_jobs().values())
+        # Only "finished". "Needs you" in the middle of a task is a
+        # question nothing else will carry to the phone.
+        owed = status == "ready" and any(
+            j["row_id"] == getattr(row, "tg_id", None)
+            for j in self._tg_jobs().values())
         if not owed and self._tg_should_send(conf, self.is_active(), status):
             # With the tab on it, swiping reply on the push answers the
             # agent. Without, the reply falls through to "which tab?" --
@@ -12994,7 +13108,9 @@ if (data !== null) {{
             tg_result.set_text("Looking\u2026")
 
             def work():
-                res, err = self._tg_call(tok, "getUpdates", {"limit": 10})
+                # Telegram's most. Oldest first, so a short page can
+                # hold a stranger and miss you.
+                res, err = self._tg_call(tok, "getUpdates", {"limit": 100})
                 GLib.idle_add(done, res, err)
 
             def done(res, err):
@@ -13004,13 +13120,23 @@ if (data !== null) {{
                         "Turn off \u201cAnswer /status\u201d and try again"
                         if "onflict" in err else err)
                     return False
-                found = self._tg_chat_from_updates(res)
-                if found is None:
+                found = self._tg_chats_from_updates(res)
+                if not found:
                     tg_result.set_text(
                         "Nothing yet \u2014 send your bot a message first.")
                     return False
-                tg_chat.set_text(found)
-                tg_result.set_text("Found it.")
+                if len(found) > 1:
+                    # Not ours to pick: the wrong one gets your tabs.
+                    tg_result.set_text(
+                        "More than one person wrote to this bot: %s. "
+                        "Type your own id in by hand." % ", ".join(
+                            "%s (%s)" % (who, cid) for cid, who in found))
+                    return False
+                cid, who = found[0]
+                tg_chat.set_text(cid)
+                tg_result.set_text(
+                    "Found %s. Check that this is you before you save."
+                    % who)
                 return False
 
             threading.Thread(target=work, daemon=True).start()
