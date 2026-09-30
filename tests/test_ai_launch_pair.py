@@ -60,6 +60,45 @@ class TestAiLaunchPair(unittest.TestCase):
             "claude", "/tmp", tries, continue_now=True, resume_later=True)
         self.assertIn("abc-123", stored[2])
 
+    def test_new_claude_session_resumes_its_own_id(self):
+        launch, stored, _ = Tabit._ai_launch_pair(
+            "claude", "/tmp", TRIES, continue_now=False, resume_later=True,
+            new_sid="11111111-2222-3333-4444-555555555555")
+        self.assertIn("--session-id 11111111-2222-3333-4444-555555555555",
+                      launch[2])
+        self.assertNotIn("--continue", launch[2])
+        # one command, no fallback that would start a second agent
+        self.assertNotIn("||", launch[2].split("exit 1;", 1)[1])
+        # its own id, then a plain start; never another tab's session
+        self.assertIn("--resume 11111111-2222-3333-4444-555555555555 ||",
+                      stored[2])
+        self.assertNotIn("--continue", stored[2])
+
+    def test_new_id_only_where_it_applies(self):
+        sid = "11111111-2222-3333-4444-555555555555"
+        # fresh after restart: no id kept
+        _, stored, _ = Tabit._ai_launch_pair(
+            "claude", "/tmp", TRIES, continue_now=False, resume_later=False,
+            new_sid=sid)
+        self.assertNotIn(sid, stored[2])
+        # continuing now: the new id is not used
+        launch, _, _ = Tabit._ai_launch_pair(
+            "claude", "/tmp", TRIES, continue_now=True, new_sid=sid)
+        self.assertNotIn(sid, launch[2])
+        # a CLI with no "new with id" flag keeps the generic behaviour
+        launch, stored, _ = Tabit._ai_launch_pair(
+            "codex", "/tmp", ["resume --last"], continue_now=False,
+            new_sid=sid)
+        self.assertNotIn(sid, launch[2] + stored[2])
+
+    def test_new_id_survives_tmux(self):
+        sid = "11111111-2222-3333-4444-555555555555"
+        launch, stored, _ = Tabit._ai_launch_pair(
+            "claude", "/tmp", TRIES, tmux=True, continue_now=False,
+            new_sid=sid)
+        self.assertIn(sid, Tabit._ai_tmux_unwrap(launch)[0][2])
+        self.assertIn(sid, Tabit._ai_tmux_unwrap(stored)[0][2])
+
 
 if __name__ == "__main__":
     unittest.main()

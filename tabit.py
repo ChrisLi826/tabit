@@ -35,6 +35,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import uuid
 
 import gi
 gi.require_version("Gtk", "3.0")
@@ -452,6 +453,10 @@ DEFAULT_AI_TRY = ["--continue", "resume --last", "--resume latest"]
 # in ~/.config/tabit/ai_clis.json.
 DEFAULT_AI_RESUME_ID = "--resume {id}"
 AI_RESUME_ID_ARGS = {"codex": "resume {id}"}
+# +AI "Create new session": start with an id tabit chose, so "Resume when
+# tabit reopens" can resume this tab's own session and not just the newest
+# one in the folder. Only for CLIs that take an id for a new session.
+AI_NEW_ID_ARGS = {"claude": "--session-id {id}"}
 # +AI "Run inside tmux": per-session options that keep the AI status icons
 # working. Measured, not guessed — without the first two tabit sees an empty
 # window title (the braille spinner rules in agent-detection/*.toml go blind)
@@ -10922,19 +10927,39 @@ if (data !== null) {{
 
     @classmethod
     def _ai_launch_pair(cls, cli, cwd, tries, bypass=False, tmux=False,
-                        continue_now=True, resume_later=True):
+                        continue_now=True, resume_later=True, new_sid=None):
         """(launch argv, stored argv, icon) for a new +AI tab.
 
         The two questions are separate: continue_now picks what runs now
         (the tries, or a fresh start); resume_later picks what the tab keeps
         for the next time tabit opens it. Both share one tmux name, so a
         restore still reattaches to an agent that is running.
+
+        new_sid: for a new session, the id to start it with, when the CLI
+        takes one. The stored argv then resumes that id and nothing else.
         """
         tries = list(tries or [])
         launch = cls._ai_argv(cli, cwd, tries if continue_now else [],
                               bypass=bypass)
         stored = cls._ai_argv(cli, cwd, tries if resume_later else [],
                               bypass=bypass)
+        new_arg = AI_NEW_ID_ARGS.get(os.path.basename(cli.rstrip("/")))
+        if new_sid and new_arg and not continue_now:
+            # exec, not a try: "a || b" also runs b when a exits nonzero
+            # after a normal session, and b would be a second agent.
+            flag = " ".join(shlex.quote(t) for t in shlex.split(
+                new_arg.replace("{id}", new_sid)))
+            head, _sep, tail = launch[2].rpartition("; exec ")
+            launch = ["/bin/sh", "-c", "%s; exec %s" % (
+                head, tail.replace(shlex.quote(cli), "%s %s" % (
+                    shlex.quote(cli), flag), 1))]
+            if resume_later:
+                # No --continue behind it: a session that never got a
+                # message is not saved, and falling back to the newest
+                # one in the folder would pick up another tab's session.
+                stored = cls._ai_argv(
+                    cli, cwd, cls._ai_tries_with_id(cli, [], new_sid),
+                    bypass=bypass)
         if not tmux:
             return launch, stored, ICON_AI
         name = cls._ai_tmux_session(cli, cwd, unique=not continue_now)
@@ -11285,13 +11310,16 @@ if (data !== null) {{
             "Ticked: start a new session.\nUnticked: pick up the last "
             "session in this folder (or the Session ID below).")
         # What the tab does the next time tabit opens it. Settings →
-        # "Start AI tabs fresh after reopening" is the default here.
+        # "New +AI tabs: start fresh after tabit reopens" is the default.
         later_chk = Gtk.CheckButton(
             label="Resume when tabit reopens")
         later_chk.set_active(
             not self._load_settings().get("ai_fresh_on_restore", False))
         later_chk.set_tooltip_text(
             "Ticked: after tabit restarts, this tab continues its session.\n"
+            "With “Create new session”, Claude resumes this tab's own "
+            "session; otherwise it continues the newest one in this "
+            "folder.\n"
             "Unticked: it starts a new one each time.\n"
             "In tmux, a still-running agent is always reattached; this only "
             "matters once the tmux session is gone (reboot, killed).")
@@ -11463,7 +11491,8 @@ if (data !== null) {{
                         and self._ai_is_claude(tool),
                         tmux=tmux_chk.get_active(),
                         continue_now=now,
-                        resume_later=later_chk.get_active())
+                        resume_later=later_chk.get_active(),
+                        new_sid=str(uuid.uuid4()))
                     self._add_session(tool, argv, icon,
                                       sub=self._ai_sub(cwd), cwd=cwd,
                                       launch_argv=launch)
