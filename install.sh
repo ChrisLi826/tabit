@@ -42,6 +42,8 @@ install -m 644 tabit.svg "$HOME/.local/share/icons/hicolor/scalable/apps/tabit.s
 install -m 644 agent_detect.py "$HOME/.local/share/tabit/agent_detect.py"
 install -m 644 agent_status.py "$HOME/.local/share/tabit/agent_status.py"
 install -m 644 tabit_chrome.toml "$HOME/.local/share/tabit/tabit_chrome.toml"
+# Settings > Remote: the status page tabit serves over Tailscale
+install -m 644 remote.html "$HOME/.local/share/tabit/remote.html"
 install -m 755 sudo_askpass.py "$HOME/.local/share/tabit/sudo_askpass.py"
 rm -rf "$HOME/.local/share/tabit/agent-detection" "$HOME/.local/share/tabit/vendor"
 cp -a agent-detection "$HOME/.local/share/tabit/agent-detection"
