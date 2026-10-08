@@ -25,6 +25,8 @@
   /* a tab, a file or a sheet is open: the list behind it must not scroll */
   :root:has(#detail.on, #viewer.on, #sheet.on),
   :root:has(#detail.on, #viewer.on, #sheet.on) body { overflow: hidden; }
+  /* with the keyboard up, fill only what is left above it (set by JS) */
+  #detail, #viewer { top: var(--vvt, 0px); height: var(--vvh, 100%); bottom: auto; }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--fg);
          font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -123,6 +125,8 @@
   .s-exited { background: transparent; color: var(--dim); border: 1px solid var(--line); }
   .exited { opacity: .45; }
   .attn .tab:first-child { border-top: 0; }
+  /* iOS zooms the page into any text field under 16px when it gets focus */
+  .send textarea, #kbd, #sheet input, #sheet select { font-size: 16px; }
 </style>
 </head>
 <body>
@@ -811,6 +815,25 @@ document.addEventListener("visibilitychange", () => {
 });
 startEvents();
 refresh();
+
+// iOS keeps the page its full height under the keyboard and slides it up,
+// so a swipe slides the whole page. Fit the open view to the part above
+// the keyboard, and let a swipe move only what can scroll.
+const vv = window.visualViewport;
+function fitView() {
+  const s = document.documentElement.style;
+  if (!vv || Math.abs(vv.scale - 1) > 0.01) {          // pinch zoom: leave it be
+    s.removeProperty("--vvh"); s.removeProperty("--vvt"); return;
+  }
+  s.setProperty("--vvh", `${vv.height}px`);
+  s.setProperty("--vvt", `${vv.offsetTop}px`);
+}
+if (vv) { vv.addEventListener("resize", fitView); vv.addEventListener("scroll", fitView); }
+document.addEventListener("touchmove", (ev) => {
+  if (!document.querySelector("#detail.on, #viewer.on, #sheet.on") || ev.touches.length > 1) return;
+  const box = ev.target.closest && ev.target.closest("#screen, #sheet .card, textarea");
+  if (!box || (box.scrollHeight <= box.clientHeight && box.scrollWidth <= box.clientWidth)) ev.preventDefault();
+}, { passive: false });
 </script>
 </body>
 </html>
