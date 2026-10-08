@@ -125,6 +125,10 @@
   .attn .tab:first-child { border-top: 0; }
   /* iOS zooms the page into any text field under 16px when it gets focus */
   .send textarea, #kbd, #sheet input, #sheet select { font-size: 16px; }
+  /* typing: the keyboard covers the home bar, so drop the space kept for
+     it, and an empty status line, to keep the text box right on the keyboard */
+  #detail:has(#text:focus, #kbd:focus) { padding-bottom: 2px; }
+  #detail:has(#text:focus, #kbd:focus) #dmsg:empty { display: none; }
 </style>
 </head>
 <body>
