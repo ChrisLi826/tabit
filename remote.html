@@ -820,6 +820,24 @@ refresh();
 
 // With the keyboard up, iOS slides the page and a swipe slides it more:
 // while a view is open, a swipe moves only what can scroll.
+// And pin the list page itself while a view covers it: with the keyboard
+// up iOS treats the covering view as part of the page, so a page with
+// anything to scroll lets it slide off and shows the list. A pinned page
+// has nothing to scroll; on the way back it returns to where it was.
+let pinnedAt = null;
+function pinList() {
+  const open = !!document.querySelector("#detail.on, #viewer.on, #sheet.on");
+  if (open && pinnedAt === null) {
+    pinnedAt = window.scrollY;
+    Object.assign(document.body.style, { position: "fixed", top: `-${pinnedAt}px`, left: "0", right: "0" });
+  } else if (!open && pinnedAt !== null) {
+    Object.assign(document.body.style, { position: "", top: "", left: "", right: "" });
+    window.scrollTo(0, pinnedAt);
+    pinnedAt = null;
+  }
+}
+const pinWatch = new MutationObserver(pinList);
+for (const id of ["detail", "viewer", "sheet"]) pinWatch.observe($(id), { attributes: true, attributeFilter: ["class"] });
 document.addEventListener("touchmove", (ev) => {
   if (!document.querySelector("#detail.on, #viewer.on, #sheet.on") || ev.touches.length > 1) return;
   const box = ev.target.closest && ev.target.closest("#screen, #sheet .card, textarea");
