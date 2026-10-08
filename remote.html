@@ -280,8 +280,8 @@ function render(snap) {
 function show(snap, how) {
   if (!snap || !Array.isArray(snap.tabs)) { failed((snap && snap.error) || "bad answer from tabit"); return; }
   if (how === "polled" && live) return;     // a late poll must not undo a newer push
+  lastSnap = snap;                // render (and the open tab's view) read it
   render(snap);
-  lastSnap = snap;
   checked(how);
 }
 
@@ -410,12 +410,16 @@ function sizeScreen(cols) {
   pre.style.fontSize = fit && cols ? `${Math.max(5, Math.min(14, (pre.clientWidth - 18) / (cols * 0.6)))}px` : "";
 }
 
-async function loadScreen(ack) {
+let screenGen = 0;
+async function loadScreen() {
   if (!current) return;
+  // only the newest request for the open tab may paint: a slow answer for
+  // the tab you just left must not show under this one's title
+  const id = current, gen = ++screenGen;
   try {
-    // ack: this is the tab being opened -- tabit counts its "ready" as read
-    const res = await fetch(`api/tabs/${encodeURIComponent(current)}/screen?color=1&back=${back}${ack ? "&ack=1" : ""}`, { cache: "no-store" });
+    const res = await fetch(`api/tabs/${encodeURIComponent(id)}/screen?color=1&back=${back}`, { cache: "no-store" });
     const body = await res.json();
+    if (id !== current || gen !== screenGen) return;
     if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
     const pre = $("screen"), atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
     const fromBottom = pre.scrollHeight - pre.scrollTop;     // to stay put on a refresh
@@ -457,7 +461,10 @@ function openTab(id) {
   dmsg("");
   updateDetail();
   $("detail").classList.add("on");
-  loadScreen(true).then(() => { $("screen").scrollTop = $("screen").scrollHeight; });
+  // opening the tab: tabit counts its "ready" as read
+  if (lastSnap && lastSnap.send) inOrder(() => fetch(`api/tabs/${encodeURIComponent(id)}/ack`, {
+    method: "POST", headers: { "Content-Type": "application/json", "X-Tabit": "1" }, body: "{}" }).catch(() => {}));
+  loadScreen().then(() => { $("screen").scrollTop = $("screen").scrollHeight; });
   restartScreenTimer();
 }
 
@@ -468,10 +475,20 @@ function closeTab() {
   $("detail").classList.remove("on");
 }
 
-async function act(kind, payload) {
+// Everything typed into a tab goes out one request at a time, in order:
+// an Enter must never overtake the letters typed before it.
+let queue = Promise.resolve();
+const inOrder = (fn) => (queue = queue.then(fn, fn));
+
+function act(kind, payload) {
+  flushTyped();
+  const id = current;
+  return inOrder(() => actNow(id, kind, payload));
+}
+async function actNow(id, kind, payload) {
   try {
     // the custom header makes a cross-site page's request fail its CORS check
-    const res = await fetch(`api/tabs/${encodeURIComponent(current)}/${kind}`, {
+    const res = await fetch(`api/tabs/${encodeURIComponent(id)}/${kind}`, {
       method: "POST", headers: { "Content-Type": "application/json", "X-Tabit": "1" },
       body: JSON.stringify(payload),
     });
@@ -592,9 +609,13 @@ function setKbd(on) {
   else { $("kbd").blur(); flushTyped(); }
 }
 function refreshSoon() { clearTimeout(screenSoon); screenSoon = setTimeout(loadScreen, 350); }
-async function post(kind, payload) {
+function post(kind, payload) {
+  const id = current;
+  return inOrder(() => postNow(id, kind, payload));
+}
+async function postNow(id, kind, payload) {
   try {
-    const res = await fetch(`api/tabs/${encodeURIComponent(current)}/${kind}`, {
+    const res = await fetch(`api/tabs/${encodeURIComponent(id)}/${kind}`, {
       method: "POST", headers: { "Content-Type": "application/json", "X-Tabit": "1" },
       body: JSON.stringify(payload),
     });
@@ -627,6 +648,9 @@ $("kbd").addEventListener("input", (ev) => {
   if (ev.isComposing) return;                     // wait for the chosen word
   if (ev.inputType === "deleteContentBackward") keyNow("backspace");
   else if (ev.inputType === "insertLineBreak") keyNow("enter");
+  // a chosen word comes from compositionend; some browsers (Firefox,
+  // Safari) also send it here once composing is over: not twice
+  else if (ev.inputType === "insertCompositionText" || ev.inputType === "insertFromComposition") { /* sent */ }
   else if (ev.data) queueTyped(ev.data);
   $("kbd").value = "";
 });

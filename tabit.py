@@ -21,6 +21,7 @@ import glob
 import html as html_module
 import json
 import os
+import stat
 import random
 import re
 import shlex
@@ -740,10 +741,13 @@ REMOTE_FILE_IMAGE = {".png": "image/png", ".jpg": "image/jpeg",
 REMOTE_FILE_DENY_DIRS = {".ssh", ".gnupg", ".password-store", ".aws",
                          ".kube", ".docker", ".mozilla", ".thunderbird",
                          "keyrings", ".pki"}
+# app folders under ~/.config that hold tokens (gh, rclone, gcloud ...)
+REMOTE_FILE_DENY_CONFIG = {"gh", "rclone", "gcloud", "hub", "op", "doctl",
+                           "github-copilot", "Bitwarden CLI"}
 REMOTE_FILE_DENY_NAMES = re.compile(
     r"(^\.env(\..*)?$|^id_(rsa|dsa|ecdsa|ed25519)|\.(key|pem|p12|pfx|kdbx|"
     r"keystore|jks)$|^\.netrc$|^\.git-credentials$|^\.pgpass$|^telegram\.json$|"
-    r"^credentials|secret|passw)", re.IGNORECASE)
+    r"credentials|secret|passw|tokens?\b)", re.IGNORECASE)
 SSH_TOOL_DIR = os.path.expanduser("~/senao-tools/ssh_tool")
 SSH_TOOL_CONNECT_SH = os.path.join(SSH_TOOL_DIR, "connect.sh")
 SSH_TOOL_CONNECT_PY = os.path.join(SSH_TOOL_DIR, "connect.py")
@@ -1552,6 +1556,9 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        # no other page may show this one in a frame and trick a tap
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
         self.end_headers()
         self.wfile.write(body)
 
@@ -1596,6 +1603,11 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             manage = ("groupop", parts[2])
         elif len(parts) == 4 and parts[:2] == ["api", "tabs"] and parts[3] in ("close", "group", "move"):
             manage = (parts[3], parts[2])
+        elif len(parts) == 4 and parts[:2] == ["api", "tabs"] and parts[3] == "ack":
+            # a state change, so behind the same checks as typing
+            self._json(*self._result(self.app._remote_call(
+                lambda: self.app._remote_ack_id(parts[2]))))
+            return
         elif len(parts) != 4 or parts[:2] != ["api", "tabs"] or parts[3] not in ("send", "key", "type"):
             self._json(404, {"error": "not found"})
             return
@@ -1632,12 +1644,11 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:2] == ["api", "tabs"] and parts[3] == "screen":
             q = urllib.parse.parse_qs(self.path.partition("?")[2])
             color = (q.get("color") or [""])[0] == "1"
-            ack = (q.get("ack") or [""])[0] == "1"
             try:
                 back = min(max(int((q.get("back") or ["0"])[0]), 0), 3000)
             except ValueError:
                 back = 0
-            res = self.app._remote_call(lambda: self.app._remote_screen(parts[2], color, ack))
+            res = self.app._remote_call(lambda: self.app._remote_screen(parts[2], color))
             if isinstance(res, tuple):
                 code, out, name = res
                 pane = name and self.app._tmux_pane_ansi(name, back)    # this thread
@@ -1733,7 +1744,9 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         if not any(os.path.commonpath([real, r]) == r for r in roots):
             return "only files under your home or /tmp"
         parts = real.split(os.sep)
-        if any(p in REMOTE_FILE_DENY_DIRS for p in parts):
+        if any(p in REMOTE_FILE_DENY_DIRS for p in parts) or any(
+                a == ".config" and b in REMOTE_FILE_DENY_CONFIG
+                for a, b in zip(parts, parts[1:])):
             return "that folder holds keys or passwords"
         if REMOTE_FILE_DENY_NAMES.search(os.path.basename(real)):
             return "that file looks like a key or a password"
@@ -1761,9 +1774,14 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         if why:
             return self._file_err(403, why)
         try:
-            if os.path.getsize(real) > REMOTE_FILE_MAX:
-                return self._file_err(413, "bigger than 2 MB")
-            with open(real, "rb") as f:
+            # O_NONBLOCK: a FIFO or device would wait forever for a writer
+            fd = os.open(real, os.O_RDONLY | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as f:
+                st = os.fstat(f.fileno())
+                if not stat.S_ISREG(st.st_mode):
+                    return self._file_err(403, "only plain files")
+                if st.st_size > REMOTE_FILE_MAX:
+                    return self._file_err(413, "bigger than 2 MB")
                 data = f.read(REMOTE_FILE_MAX + 1)
         except OSError as e:
             return self._file_err(404, e.strerror or "cannot read it")
@@ -2478,7 +2496,10 @@ class Tabit(Gtk.Window):
         row.page = page
         row._pane = None  # attached on select / pin
         restoring = getattr(self, "_restoring_sessions", False)
-        if not restoring:
+        # opened from the phone: the page picks the group, and the desk
+        # keeps the tab it shows
+        remote = getattr(self, "_remote_placing", False)
+        if not restoring and not remote:
             cur_group = self._get_active_group_color()
             if cur_group:
                 row.group_color = cur_group
@@ -2498,7 +2519,8 @@ class Tabit(Gtk.Window):
         self.listbox.add(row)
         self._relayout()  # keep group members clustered under their header
         if not restoring:
-            self.listbox.select_row(row)
+            if not remote:
+                self.listbox.select_row(row)
             self._save_sessions()
 
     def _apply_term_colors(self, term, theme_info=None):
@@ -10722,9 +10744,15 @@ if (data !== null) {{
         # the desk keeps showing what it showed: opening a tab from the
         # phone selects it here (tabit's own habit), which nobody asked for
         prev = self.listbox.get_selected_row()
+        prev_header = (prev.group_color
+                       if getattr(prev, "kind", None) == "group_header" else None)
+        self._remote_placing = True         # see _place_tab_row
         try:
             return self._remote_manage_op(op, target, body)
         finally:
+            self._remote_placing = False
+            if prev_header:                 # _relayout made a new header row
+                prev = self._group_header_row(prev_header)
             if (prev is not None and prev.get_parent() is not None
                     and prev.get_visible()
                     and self.listbox.get_selected_row() is not prev):
@@ -10748,13 +10776,20 @@ if (data !== null) {{
             color = body.get("color")
             if color is not None and color not in GROUP_COLORS:
                 return 400, {"error": "unknown group colour"}
-            self._set_group(row, color)
+            self._remote_set_group(row, color)
             return 200, {"ok": True}
         if op == "move":
             delta = body.get("delta")
             if delta not in (-1, 1):
                 return 400, {"error": "delta must be -1 or 1"}
+            # same rules as Ctrl+Shift+PageUp/Down, but a collapsed group
+            # the desk folded stays folded
+            g = getattr(row, "group_color", None)
+            folded = g in self._collapsed_groups
             self._move_session(delta, row=row)
+            if folded and g not in self._collapsed_groups and any(
+                    getattr(r, "group_color", None) == g for r in self._session_rows()):
+                self._set_group_collapsed(g, True)
             self._save_sessions_soon()
             return 200, {"ok": True}
         return 404, {"error": "unknown action"}
@@ -10798,10 +10833,16 @@ if (data !== null) {{
             return 500, {"error": "tabit could not open it"}
         color = body.get("group")
         if color in GROUP_COLORS:
-            self._set_group(row, color)
+            self._remote_set_group(row, color)
         self._save_sessions_soon()
         print(f"[remote] new {kind} tab in {cwd}", file=sys.stderr)
         return 200, {"id": self._tg_row_id(row)}
+
+    def _remote_set_group(self, row, color):
+        """_set_group without unfolding: a group the desk folded stays so."""
+        self._apply_group(row, color)
+        self._relayout()
+        self._save_sessions()
 
     def _remote_group_op(self, color, body):
         if color not in GROUP_COLORS or not any(
@@ -10847,7 +10888,17 @@ if (data !== null) {{
             row._agent_display = _dc_replace(disp, ui="idle", had_busy_turn=False)
         self._set_agent_status(row, "idle")
 
-    def _remote_screen(self, rid, color=False, ack=False):
+    def _remote_ack_id(self, rid):
+        """GTK thread: POST /api/tabs/<id>/ack, the page opened this tab."""
+        if not self._remote_send_on:
+            return 403, {"error": "AI tab screens are off (Settings > Remote)"}
+        row = self._tg_row_by_id(rid)
+        if row is None:
+            return 404, {"error": "that tab is gone"}
+        self._remote_ack(row)
+        return 200, {"ok": True}
+
+    def _remote_screen(self, rid, color=False):
         """The last screenful of an AI tab, for a phone to read (GTK thread).
 
         Returns (code, body, tmux session or None). With color and a tmux
@@ -10860,8 +10911,6 @@ if (data !== null) {{
         row = self._tg_row_by_id(rid)
         if row is None or getattr(row, "kind", None) != "term":
             return 404, {"error": "no such terminal tab"}, None
-        if ack:                             # the page's first load of this tab
-            self._remote_ack(row)
         text = self._term_tail_text(getattr(row, "term", None), 60)
         out = {"id": rid, "title": getattr(row, "title_text", "") or "",
                "ai_status": getattr(row, "agent_status", None) or "unknown",
@@ -10983,7 +11032,7 @@ if (data !== null) {{
         self._remote_files_on = bool(conf.get("remote_files"))
         want = bool(conf.get("remote_enabled"))
         if not want:
-            self._remote_declined = False   # a fresh "on" may ask again
+            self._remote_fresh()
         self._remote_want = want
         if want and self._remote_srv is None:
             self._remote_start()
@@ -10992,6 +11041,23 @@ if (data !== null) {{
             self._remote_tried = False
             self._remote_stop(unpublish=True)
             self._remote_label.hide()
+
+    def _remote_fresh(self):
+        """A fresh "on" (Remote off, or Save): setup may ask, run each step
+        and open the Serve page once more. Until then it does each at most
+        once, so a retry every minute never nags."""
+        self._remote_declined = False
+        self._remote_agreed = False
+        self._remote_link_opened = False
+        self._remote_steps_done = set()
+
+    def _remote_decline(self):
+        """GTK thread: the setup was declined, so Remote goes off for good
+        (the setting says so too) instead of asking at every start."""
+        self._remote_want = False
+        self._remote_tried = False          # nothing published: nothing to undo
+        self._save_settings({"remote_enabled": False})
+        return False
 
     def _remote_ts(self, job):
         """Run a `tailscale` job off the GTK thread, one at a time, in order.
@@ -11014,8 +11080,10 @@ if (data !== null) {{
             os.unlink(REMOTE_SOCK)
         except OSError:
             pass
+        # its own stream list: an old server's streams must not count here
         handler = type("Handler", (_RemoteHandler,),
-                       {"app": self, "stop": threading.Event(), "owner": None})
+                       {"app": self, "stop": threading.Event(), "owner": None,
+                        "_streams": [], "_streams_lock": threading.Lock()})
         try:
             srv = _RemoteServer(REMOTE_SOCK, handler)
             os.chmod(REMOTE_SOCK, 0o600)
@@ -11034,6 +11102,8 @@ if (data !== null) {{
             if problem:
                 retry = problem.startswith("retry:")
                 GLib.idle_add(self._remote_fail, srv, problem.removeprefix("retry:"), retry)
+                return
+            if self._remote_srv is not srv:     # turned off during the setup
                 return
             try:
                 # who may look: this login only, not everyone on the tailnet
@@ -11054,6 +11124,14 @@ if (data !== null) {{
                 url = next((w for w in out.split()
                             if w.startswith("https://")), "")
                 ok = r.returncode == 0 and url
+                if not ok and re.search(r"denied|must be root|operator", out, re.I):
+                    # tailscaled serves a unix socket only for root, or an
+                    # operator who may also `sudo tailscale`: a minute
+                    # changes nothing, so say it once
+                    GLib.idle_add(self._remote_fail, srv,
+                                  out.splitlines()[-1] if out else "tailscale serve was refused",
+                                  False)
+                    return
             except subprocess.TimeoutExpired as e:
                 # Serve not enabled for the tailnet: it prints a link and waits
                 out = "".join(x.decode() if isinstance(x, bytes) else (x or "")
@@ -11061,8 +11139,10 @@ if (data !== null) {{
                 link = next((w for w in out.split()
                              if "login.tailscale.com" in w), "")
                 ok, url = False, ""
-                if link:
+                if link and not getattr(self, "_remote_link_opened", False):
                     # one click in the browser; the 60 s retry picks it up
+                    # (once: the next retries must not pile up pages)
+                    self._remote_link_opened = True
                     GLib.idle_add(lambda: (self._open_uri(link), False)[1])
                 out = ("Enable Serve in the browser page that opened ("
                        + link + "), tabit retries in a minute") if link \
@@ -11113,28 +11193,44 @@ if (data !== null) {{
         else why not ("retry:" in front when a minute may fix it).
 
         installed? -> official install script (sudo). daemon up? ->
-        systemctl (sudo). logged in? -> `tailscale up --operator=$USER`
-        (sudo) with its login page opened in the browser. may this user
-        run `tailscale serve`? -> `tailscale set --operator=$USER` (sudo).
+        systemctl (sudo). may this user run tailscale? -> `tailscale set
+        --operator=$USER` (sudo). logged in? -> `tailscale up` as this user
+        (no sudo), its login page opened in the browser. Each sudo step runs
+        at most once per "on", and nothing runs once Remote is off again.
         """
         user = os.environ.get("USER") or GLib.get_user_name()
         progress = lambda text: GLib.idle_add(self._remote_show, "connecting", text)
         asked = []
+        done = self.__dict__.setdefault("_remote_steps_done", set())
 
         def consent(steps):
             if asked:
                 return asked[0]
             if getattr(self, "_remote_declined", False):
                 return False
+            if getattr(self, "_remote_agreed", False):
+                return True                 # a Yes holds until a fresh "on"
             ok = self._remote_ask(
                 "Set up Tailscale for tabit Remote?",
                 "Remote needs Tailscale ready on this computer. tabit will:\n\n"
                 + "\n".join("  • " + x for x in steps)
-                + "\n\nThese steps need your password (sudo).")
+                + "\n\nSteps that change the system ask for your password (sudo).")
             asked.append(ok)
+            self._remote_agreed = ok
             if not ok:
                 self._remote_declined = True
+                GLib.idle_add(self._remote_decline)
             return ok
+
+        def step(name, text, argv, timeout):
+            if self._remote_srv is not srv:
+                raise RuntimeError("Remote was turned off")
+            if name in done:
+                # it ran and did not fix it: once more will not either
+                raise RuntimeError(text.rstrip("…") + " did not help")
+            done.add(name)
+            progress(text)
+            self._sudo(argv, timeout)
 
         def status():
             r = subprocess.run(["tailscale", "status", "--json"],
@@ -11145,43 +11241,74 @@ if (data !== null) {{
             except ValueError:
                 return None, r.stderr or r.stdout
 
+        def operator():
+            """OperatorUser, or None when it cannot be read."""
+            r = subprocess.run(["tailscale", "debug", "prefs"], stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, timeout=10)
+            try:
+                return json.loads(r.stdout).get("OperatorUser")
+            except (ValueError, AttributeError):
+                return None
+
+        manage = f"let {user} run Tailscale and its Serve without sudo"
+        login = "open a Tailscale login page in your browser if needed"
         try:
             if not shutil.which("tailscale"):
                 if not consent([
                         "install Tailscale (official script from "
                         "tailscale.com: adds its apt repository)",
-                        "start the Tailscale service",
-                        "open a Tailscale login page in your browser",
-                        f"let {user} manage Tailscale Serve"]):
+                        "start the Tailscale service", manage, login]):
                     return "Tailscale is not installed (setup declined)"
-                progress("installing Tailscale…")
-                self._sudo(["sh", "-c", "curl -fsSL https://tailscale.com/install.sh | sh"], 900)
+                step("install", "installing Tailscale…",
+                     ["sh", "-c", "curl -fsSL https://tailscale.com/install.sh | sh"], 900)
                 if not shutil.which("tailscale"):
                     return "Tailscale did not install"
             st, err = status()
             if st is None:
-                if not consent(["start the Tailscale service",
-                                "open a Tailscale login page if needed",
-                                f"let {user} manage Tailscale Serve"]):
-                    return "the Tailscale service is not running (setup declined)"
-                progress("starting Tailscale…")
-                self._sudo(["systemctl", "enable", "--now", "tailscaled"], 60)
-                time.sleep(2)
-                st, err = status()
+                active = subprocess.run(
+                    ["systemctl", "is-active", "tailscaled"], stdin=subprocess.DEVNULL,
+                    capture_output=True, text=True, timeout=10).stdout.strip()
+                if active == "activating":      # e.g. just after a boot
+                    return "retry:Tailscale is starting"
+                if active != "active":
+                    if not consent(["start the Tailscale service", manage, login]):
+                        return "the Tailscale service is not running (setup declined)"
+                    step("start", "starting Tailscale…",
+                         ["systemctl", "enable", "--now", "tailscaled"], 60)
+                    for _ in range(10):
+                        time.sleep(1)
+                        st, err = status()
+                        if st is not None:
+                            break
                 if st is None:
-                    return "retry:Tailscale is not running: " + (err.strip().splitlines() or ["?"])[-1]
-            if st.get("BackendState") != "Running":
-                if not consent(["open a Tailscale login page in your browser",
-                                f"let {user} manage Tailscale Serve"]):
+                    # running but not answering: say why, do not loop
+                    return "Tailscale does not answer: " + (
+                        (err or "").strip().splitlines() or ["?"])[-1]
+            if operator() != user:              # unknown counts as no
+                if not consent([manage, login]):
+                    return f"{user} may not run Tailscale (setup declined)"
+                step("operator", "letting you run Tailscale…",
+                     ["tailscale", "set", f"--operator={user}"], 30)
+            state = st.get("BackendState")
+            if state == "Starting":
+                return "retry:Tailscale is starting"
+            if state == "NeedsMachineAuth":
+                return ("retry:this computer waits for approval in the "
+                        "Tailscale admin console")
+            if state != "Running":              # NeedsLogin, Stopped, NoState
+                if not consent([login]):
                     return "Tailscale is not logged in (setup declined)"
+                if self._remote_srv is not srv:
+                    return "Remote was turned off"
+                if "login" in done:
+                    return "Tailscale login did not finish"
+                done.add("login")
                 progress("log in to Tailscale in your browser…")
-                env = os.environ.copy()
-                askpass = self._sudo_askpass_path()
-                if askpass:
-                    env["SUDO_ASKPASS"] = askpass
-                p = subprocess.Popen(["sudo", "-A", "tailscale", "up", f"--operator={user}"],
+                # as the operator, no sudo; no flags, so it keeps the
+                # settings this computer already has
+                p = subprocess.Popen(["tailscale", "up"],
                                      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT, text=True, env=env)
+                                     stderr=subprocess.STDOUT, text=True)
                 # `tailscale up` waits for the login with no output: a
                 # watchdog ends it after 10 minutes, or when Remote goes off
                 ended = threading.Event()
@@ -11190,12 +11317,16 @@ if (data !== null) {{
                     deadline = time.time() + 600
                     while not ended.wait(1):
                         if time.time() > deadline or self._remote_srv is not srv:
-                            p.kill()
+                            p.terminate()
+                            if not ended.wait(3):
+                                p.kill()
                             return
                 threading.Thread(target=watchdog, daemon=True).start()
-                opened = False
+                opened, said = False, []
                 try:
                     for line in p.stdout:
+                        if line.strip():
+                            said.append(line.strip())
                         url = next((w for w in line.split()
                                     if w.startswith("https://login.tailscale.com/")), "")
                         if url and not opened:
@@ -11205,23 +11336,14 @@ if (data !== null) {{
                     code = p.wait()
                 finally:
                     ended.set()
+                    p.stdout.close()
                 if code != 0:
-                    return "Tailscale login did not finish"
+                    # its own words: e.g. it wants this computer's other
+                    # non-default settings spelled out
+                    return "Tailscale login: " + (said[-1] if said else "did not finish")
                 st, err = status()
                 if not st or st.get("BackendState") != "Running":
                     return "Tailscale is still not logged in"
-            # may this user run `tailscale serve` (no sudo each time)?
-            r = subprocess.run(["tailscale", "debug", "prefs"], stdin=subprocess.DEVNULL,
-                               capture_output=True, text=True, timeout=10)
-            try:
-                operator = json.loads(r.stdout).get("OperatorUser")
-            except ValueError:
-                operator = user                 # cannot tell: let serve say
-            if operator != user:
-                if not consent([f"let {user} manage Tailscale Serve"]):
-                    return f"{user} may not run tailscale serve (setup declined)"
-                progress("letting you manage Tailscale Serve…")
-                self._sudo(["tailscale", "set", f"--operator={user}"], 30)
         except (OSError, RuntimeError, subprocess.SubprocessError) as e:
             return f"Tailscale setup: {e}"
         return None
@@ -11242,8 +11364,11 @@ if (data !== null) {{
         still be starting after a reboot). retry=False for a setup the user
         declined or that needs them: asking again every minute would nag."""
         if srv is not None:
+            if srv is not self._remote_srv:
+                return False                # an old job's news: not this server
             self._remote_stop(unpublish=False)
-        self._remote_show("failed", detail)
+        # declined: the setting is off now, so this is not a failure
+        self._remote_show("failed" if getattr(self, "_remote_want", False) else "off", detail)
         if not retry:
             return False
 
@@ -11276,9 +11401,9 @@ if (data !== null) {{
             self._remote_ts(off)
 
     def _remote_show(self, state, detail):
-        color = {"online": "#9ece6a", "connecting": "#e0af68"}.get(
-            state, "#f7768e")
-        text = {"online": "Remote on",
+        color = {"online": "#9ece6a", "connecting": "#e0af68",
+                 "off": "#565f89"}.get(state, "#f7768e")
+        text = {"online": "Remote on", "off": "Remote off",
                 "connecting": "Remote: " + detail if detail and len(detail) < 60
                 else "Remote starting",
                 }.get(state, "Remote failed")
@@ -14688,7 +14813,7 @@ if (data !== null) {{
                                      "sidebar_position": side_id})
                 self._tg_save_secrets(tg_token.get_text(),
                                       tg_chat.get_text())
-                self._remote_declined = False   # Save is a fresh go: may ask again
+                self._remote_fresh()            # Save is a fresh go: may ask again
                 self._remote_sync()
                 self._sidebar_position = side_id
                 self._apply_sidebar_layout()
