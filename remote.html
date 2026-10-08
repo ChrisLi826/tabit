@@ -25,8 +25,6 @@
   /* a tab, a file or a sheet is open: the list behind it must not scroll */
   :root:has(#detail.on, #viewer.on, #sheet.on),
   :root:has(#detail.on, #viewer.on, #sheet.on) body { overflow: hidden; }
-  /* with the keyboard up, fill only what is left above it (set by JS) */
-  #detail, #viewer { top: var(--vvt, 0px); height: var(--vvh, 100%); bottom: auto; }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--fg);
          font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -816,19 +814,8 @@ document.addEventListener("visibilitychange", () => {
 startEvents();
 refresh();
 
-// iOS keeps the page its full height under the keyboard and slides it up,
-// so a swipe slides the whole page. Fit the open view to the part above
-// the keyboard, and let a swipe move only what can scroll.
-const vv = window.visualViewport;
-function fitView() {
-  const s = document.documentElement.style;
-  if (!vv || Math.abs(vv.scale - 1) > 0.01) {          // pinch zoom: leave it be
-    s.removeProperty("--vvh"); s.removeProperty("--vvt"); return;
-  }
-  s.setProperty("--vvh", `${vv.height}px`);
-  s.setProperty("--vvt", `${vv.offsetTop}px`);
-}
-if (vv) { vv.addEventListener("resize", fitView); vv.addEventListener("scroll", fitView); }
+// With the keyboard up, iOS slides the page and a swipe slides it more:
+// while a view is open, a swipe moves only what can scroll.
 document.addEventListener("touchmove", (ev) => {
   if (!document.querySelector("#detail.on, #viewer.on, #sheet.on") || ev.touches.length > 1) return;
   const box = ev.target.closest && ev.target.closest("#screen, #sheet .card, textarea");
