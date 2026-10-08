@@ -176,6 +176,21 @@ class TestRemoteServer(_ServerCase):
                 self.assertEqual(http_post(path, self.sock, json.dumps(body), h)[0], 403, (path, change))
         self.assertEqual(self.app.acts, [])
 
+    def test_icons(self):
+        # the real lookup and rendering, from this repo's SVGs
+        self.app._remote_icon = lambda path: tabit.Tabit._remote_icon(
+            type("A", (), {"_agent_detect_roots": staticmethod(lambda: [ROOT])})(), path)
+        head, body = http_get("/icon.svg", self.sock)
+        self.assertIn("image/svg+xml", head)
+        self.assertIn(b"<svg", body)
+        for path, size in (("/favicon.png", 32), ("/apple-touch-icon.png", 180)):
+            head, body = http_get(path, self.sock)
+            self.assertIn("image/png", head, path)
+            self.assertEqual(body[:8], b"\x89PNG\r\n\x1a\n", path)
+            self.assertEqual(int.from_bytes(body[16:20], "big"), size, path)   # IHDR width
+        head, _ = http_get("/icon.svg", self.sock, login="x@example.com")
+        self.assertIn("403", head.splitlines()[0])
+
     def test_never_in_a_frame(self):
         head, _ = http_get("/", self.sock)
         self.assertIn("X-Frame-Options: DENY", head)

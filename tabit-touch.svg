@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- iPhone home screen: an opaque square (iOS rounds the corners itself) -->
+<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180" viewBox="0 0 128 128">
+  <rect width="128" height="128" fill="#1a1b26"/>
+  <g transform="translate(19 19) scale(0.703)">
+    <rect x="8" y="8" width="42" height="34" rx="10" fill="#EA4335"/>
+    <rect x="8" y="47" width="42" height="34" rx="10" fill="#34A853"/>
+    <rect x="8" y="86" width="42" height="34" rx="10" fill="#FBBC04"/>
+    <rect x="56" y="8" width="64" height="112" rx="10" fill="#4285F4"/>
+  </g>
+</svg>

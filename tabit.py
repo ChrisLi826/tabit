@@ -719,6 +719,9 @@ CONNECT_LAST_FILE = os.path.join(CONFIG_DIR, "connect_last.json")
 # Serve publishes it to this user's own devices only (tailnet, HTTPS).
 REMOTE_SOCK = os.path.join(GLib.get_user_runtime_dir(), "tabit-remote.sock")
 REMOTE_PAGE = "remote.html"
+# the page's icons: tab favicon (SVG, and a PNG for Safari), iPhone home screen
+REMOTE_ICONS = {"/icon.svg": ("tabit.svg", None), "/favicon.png": ("tabit.svg", 32),
+                "/apple-touch-icon.png": ("tabit-touch.svg", 180)}
 REMOTE_PUSH_EVERY = 10       # /api/events checks for a change this often (s)
 # A phone that drops off the network (airplane mode, out of range) leaves
 # its stream open on our side until TCP gives up, which can take many
@@ -1669,6 +1672,12 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             ok = isinstance(snap, dict) and "tabs" in snap
             self._send(200 if ok else (500 if snap else 503), "application/json",
                        json.dumps(snap or {"error": "tabit busy"}).encode())
+        elif path in REMOTE_ICONS:
+            icon = self.app._remote_icon(path)
+            if icon is None:
+                self._send(404, "text/plain", b"icon not installed")
+            else:
+                self._send(200, *icon)
         elif path == "/api/events":
             self._events()
         elif path == "/api/file":
@@ -11023,6 +11032,22 @@ if (data !== null) {{
                 with open(path, "rb") as f:
                     return f.read()
         return None
+
+    def _remote_icon(self, path):
+        """(content type, bytes) for one of REMOTE_ICONS, or None."""
+        name, size = REMOTE_ICONS[path]
+        src = next((os.path.join(d, name) for d in self._agent_detect_roots()
+                    if os.path.isfile(os.path.join(d, name))), None)
+        if src is None:
+            return None
+        try:
+            if size is None:
+                with open(src, "rb") as f:
+                    return "image/svg+xml", f.read()
+            pb = GdkPixbuf.Pixbuf.new_from_file_at_size(src, size, size)
+            return "image/png", bytes(pb.save_to_bufferv("png", [], [])[1])
+        except (OSError, GLib.Error):
+            return None
 
     def _remote_sync(self):
         """Start or stop serving to match the setting."""
