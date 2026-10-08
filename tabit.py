@@ -1807,7 +1807,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         return self._file_send("text/plain; charset=utf-8", data)
 
     _DOC_CSS = (
-        "body{background:#1a1b26;color:#c0caf5;font:15px/1.55 -apple-system,"
+        ":root{color-scheme:dark}body{background:#1a1b26;color:#c0caf5;font:15px/1.55 -apple-system,"
         "BlinkMacSystemFont,sans-serif;margin:0;padding:14px 16px 40px;"
         "word-wrap:break-word}a{color:#7aa2f7}h1,h2,h3{line-height:1.25}"
         "h1{font-size:22px}h2{font-size:19px}h3{font-size:16px}"

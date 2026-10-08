@@ -19,7 +19,9 @@
     --red: #f7768e; --orange: #ff9e64; --yellow: #e0af68; --green: #9ece6a;
     --teal: #73daca; --cyan: #7dcfff; --blue: #7aa2f7; --indigo: #8c8cff;
     --purple: #bb9af7; --pink: #ff79c6; --gray: #a9b1d6; --white: #e6e6e6; --brown: #c49a6c;
+    color-scheme: dark;           /* dark scrollbars and form controls */
   }
+  html { background: var(--bg); }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--fg);
          font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -55,19 +57,25 @@
   #detail .bar .name { flex: 1; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #screen { flex: 1; margin: 0; overflow: auto; background: #11121a; border: 1px solid var(--line);
             border-radius: 8px; padding: 8px; font: 11px/1.35 ui-monospace, Menlo, monospace;
-            white-space: pre-wrap; word-break: break-all; color: var(--fg); }
+            white-space: pre-wrap; word-break: break-all; color: var(--fg);
+            display: flex; flex-direction: column; }
+  /* a short screen sits at the bottom, by the keys, like a terminal */
+  #screen .term { margin-top: auto; white-space: inherit; }
   #screen.ansi { white-space: pre; word-break: normal; background: #16161e; }
   #screen.ansi.fit { overflow-x: hidden; }
   .hist { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; font-size: 12px; color: var(--dim); }
   .hist button { padding: 4px 10px; font-size: 13px; }
-  .keys { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
-  .keys button { min-width: 44px; padding: 8px 10px; }
+  .keys { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 5px; margin: 8px 0; }
+  .keys button { min-width: 0; padding: 9px 0; font-size: 13px; }
+  @media (min-width: 800px) {
+    .keys { grid-template-columns: repeat(8, 56px); }
+  }
   .send { display: flex; gap: 6px; }
   .send textarea { flex: 1; min-height: 44px; max-height: 30vh; background: var(--panel); color: var(--fg);
                    border: 1px solid var(--line); border-radius: 8px; padding: 8px; font: inherit; resize: vertical; }
   .send button { background: var(--blue); color: #111; border: 0; font-weight: 600; }
-  #attach { padding: 0 10px; font-size: 18px; }
-  .keys + .keys { margin-top: -2px; }
+  #attach { padding: 0 10px; font-size: 18px; background: var(--panel); color: var(--fg);
+            border: 1px solid var(--line); font-weight: 400; }
   #kbdbtn.on { background: var(--blue); color: #111; }
   #kbd { position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; }
   #detail.dropping #screen { outline: 2px dashed var(--blue); outline-offset: -4px; }
@@ -87,7 +95,8 @@
   #sheet .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
   #sheet .row button { flex: 1; padding: 10px; }
   #sheet .seg button.sel { background: var(--blue); color: #111; }
-  #sheet .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  #sheet .chips { display: grid; grid-template-columns: repeat(7, 34px); gap: 10px;
+                  justify-content: space-between; max-width: 330px; }
   #sheet .chip { width: 34px; height: 34px; border-radius: 50%; border: 2px solid transparent; padding: 0; }
   #sheet .chip.sel { border-color: var(--fg); }
   #sheet .danger { background: var(--red); color: #111; border: 0; font-weight: 600; }
@@ -139,8 +148,6 @@
       <button data-key="1">1</button><button data-key="2">2</button><button data-key="3">3</button>
       <button data-key="enter">Enter</button><button data-key="esc">Esc</button>
       <button data-key="up">↑</button><button data-key="down">↓</button>
-    </div>
-    <div class="keys">
       <button id="kbdbtn" type="button" title="keyboard: every key goes straight in">⌨</button>
       <button data-key="tab">Tab</button><button data-key="left">←</button><button data-key="right">→</button>
       <button data-key="backspace">⌫</button><button data-key="ctrl-c">^C</button>
@@ -152,7 +159,7 @@
     <div class="send">
       <button id="attach" type="button" title="add a photo or a file">📎</button>
       <input id="filein" type="file" multiple hidden>
-      <textarea id="text" placeholder="Type, Enter to send (Shift+Enter: new line; drop or paste a file to attach)" rows="2"></textarea>
+      <textarea id="text" placeholder="Message" rows="1"></textarea>
       <button id="sendbtn" type="button">Send</button>
     </div>
   </div>
@@ -431,12 +438,12 @@ async function loadScreen() {
       ? body.ansi.replace(/\x1b\[[0-9;:]*[A-Za-z]/g, "").split("\n") : body.lines);
     if (body.ansi !== undefined) {
       pre.classList.add("ansi");
-      pre.innerHTML = ansiToHtml(body.ansi.replace(/\n+$/, ""));   // escaped run by run
+      pre.innerHTML = `<div class="term">${ansiToHtml(body.ansi.replace(/\n+$/, ""))}</div>`;   // escaped run by run
       sizeScreen(body.cols);
     } else {
       pre.classList.remove("ansi", "fit");
       pre.style.fontSize = "";
-      pre.innerHTML = linkify(esc(body.lines.join("\n")));
+      pre.innerHTML = `<div class="term">${linkify(esc(body.lines.join("\n")))}</div>`;
     }
     // follow the output at the bottom; reading history, stay where you were
     if (atEnd && !back) pre.scrollTop = pre.scrollHeight;
@@ -771,9 +778,9 @@ for (const b of document.querySelectorAll(".keys button[data-key]")) b.onclick =
 // no Shift+Enter on its keyboard): Enter is a new line, the Send button
 // sends. Never while an input method is still choosing a word.
 const TOUCH = matchMedia("(pointer: coarse)").matches;
-$("text").placeholder = TOUCH
-  ? "Type, then Send (Enter: new line; 📎 to attach)"
-  : "Type, Enter to send (Shift+Enter: new line; drop or paste a file to attach)";
+$("text").title = TOUCH
+  ? "Send sends; Enter is a new line; 📎 attaches a file"
+  : "Enter sends, Shift+Enter is a new line; drop or paste a file to attach";
 $("text").addEventListener("keydown", (ev) => {
   if (TOUCH || ev.key !== "Enter" || ev.shiftKey || ev.isComposing || ev.keyCode === 229) return;
   ev.preventDefault();
