@@ -10467,6 +10467,15 @@ if (data !== null) {{
         magic_words_entry.set_placeholder_text("e.g. word1,word2 (comma-separated)")
         magic_words_entry.set_hexpand(True)
 
+        # 9b. EHR mesh agent (optional): SN is the controller, hop into this agent
+        # Not remembered (like reconnect): a stale value would silently hop
+        # into an agent the next time you only want the controller.
+        agent_entry = Gtk.Entry(width_chars=24)
+        agent_entry.set_placeholder_text("EHR agent SN/MAC/IP or auto (optional)")
+        agent_entry.set_tooltip_text("EHR mesh only: Serial Number is the controller; "
+                                     "after connecting, hop into this agent (--agent)")
+        agent_entry.set_hexpand(True)
+
         # 10. Bypass Cache (--no-cache)
         nocache_chk = Gtk.CheckButton(label="Bypass device cache (--no-cache)")
         nocache_chk.set_active(bool(last.get("no_cache", False)))
@@ -10511,9 +10520,12 @@ if (data !== null) {{
         grid.attach(Gtk.Label(label="Magic Words", xalign=0), 0, 9, 1, 1)
         grid.attach(magic_words_entry, 1, 9, 1, 1)
 
-        grid.attach(nocache_chk, 1, 10, 1, 1)
-        grid.attach(use_tmux_chk, 1, 11, 1, 1)
-        grid.attach(reconnect_chk, 1, 12, 1, 1)
+        grid.attach(Gtk.Label(label="EHR Agent", xalign=0), 0, 10, 1, 1)
+        grid.attach(agent_entry, 1, 10, 1, 1)
+
+        grid.attach(nocache_chk, 1, 11, 1, 1)
+        grid.attach(use_tmux_chk, 1, 12, 1, 1)
+        grid.attach(reconnect_chk, 1, 13, 1, 1)
 
         # Buttons
         btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -10526,7 +10538,7 @@ if (data !== null) {{
         connect_b.connect("clicked", lambda *_: dialog.response(Gtk.ResponseType.OK))
         btns.pack_start(cancel_b, False, False, 0)
         btns.pack_start(connect_b, False, False, 0)
-        grid.attach(btns, 0, 13, 2, 1)
+        grid.attach(btns, 0, 14, 2, 1)
 
         dialog.get_content_area().add(grid)
         dialog.show_all()
@@ -10568,6 +10580,7 @@ if (data !== null) {{
                 reconnect_val = reconnect_chk.get_active()
                 gw_pass_val = gw_pass_entry.get_text().strip()
                 magic_words_val = magic_words_entry.get_text().strip()
+                agent_val = agent_entry.get_text().strip()
 
                 # Save last used credentials/parameters
                 self._save_connect_last({
@@ -10605,10 +10618,16 @@ if (data !== null) {{
                     raw_cmd.extend(["--gateway-pass", gw_pass_val])
                 if magic_words_val:
                     raw_cmd.extend(["--magic-words", magic_words_val])
+                if agent_val:
+                    raw_cmd.extend(["--agent", agent_val])
 
                 if use_tmux_val:
                     _tmux_apply_user_conf()
                     session_name = f"conn-{sn.lower()}"
+                    if agent_val:
+                        # Own session per agent, so it does not attach to
+                        # (or reconnect-kill) the controller's session.
+                        session_name += f"-{agent_val.lower().replace(':', '').replace('.', '-')}"
                     cmd_str = " ".join(shlex.quote(arg) for arg in raw_cmd)
                     if reconnect_val:
                         # One-off action: drop the stale session now. The kill
@@ -10627,6 +10646,8 @@ if (data !== null) {{
                     sub = f"cloud ({env_val})"
 
                 label = f"{sn} (connect)"
+                if agent_val:
+                    label = f"{sn} → {agent_val} (connect)"
                 self._add_session(label=label, argv=cmd, icon_name=icon_name,
                                   sub=sub, cwd=SSH_TOOL_DIR)
 
@@ -10960,8 +10981,9 @@ if (data !== null) {{
         # read once here (start, Save), not on every request
         self._remote_send_on = bool(conf.get("remote_send"))
         self._remote_files_on = bool(conf.get("remote_files"))
-        want = (bool(conf.get("remote_enabled"))
-                and shutil.which("tailscale") is not None)
+        want = bool(conf.get("remote_enabled"))
+        if not want:
+            self._remote_declined = False   # a fresh "on" may ask again
         self._remote_want = want
         if want and self._remote_srv is None:
             self._remote_start()
@@ -11008,6 +11030,11 @@ if (data !== null) {{
         def publish():
             if self._remote_srv is not srv:     # turned off while queued
                 return
+            problem = self._tailscale_prepare(srv)
+            if problem:
+                retry = problem.startswith("retry:")
+                GLib.idle_add(self._remote_fail, srv, problem.removeprefix("retry:"), retry)
+                return
             try:
                 # who may look: this login only, not everyone on the tailnet
                 st = json.loads(subprocess.run(
@@ -11034,7 +11061,11 @@ if (data !== null) {{
                 link = next((w for w in out.split()
                              if "login.tailscale.com" in w), "")
                 ok, url = False, ""
-                out = ("Enable Serve for your tailnet: " + link) if link \
+                if link:
+                    # one click in the browser; the 60 s retry picks it up
+                    GLib.idle_add(lambda: (self._open_uri(link), False)[1])
+                out = ("Enable Serve in the browser page that opened ("
+                       + link + "), tabit retries in a minute") if link \
                     else "tailscale serve did not answer"
             except (OSError, ValueError, RuntimeError,
                     subprocess.SubprocessError) as e:
@@ -11042,6 +11073,158 @@ if (data !== null) {{
             GLib.idle_add(self._remote_published, srv, ok, url, out)
 
         self._remote_ts(publish)
+
+    def _remote_ask(self, title, body):
+        """Worker thread: ask Yes/No on the GTK thread and wait for it."""
+        box, done = [], threading.Event()
+
+        def ask():
+            d = Gtk.MessageDialog(transient_for=self, modal=True,
+                                  message_type=Gtk.MessageType.QUESTION,
+                                  buttons=Gtk.ButtonsType.YES_NO, text=title)
+            d.format_secondary_text(body)
+
+            def on_resp(dlg, resp):
+                box.append(resp == Gtk.ResponseType.YES)
+                dlg.destroy()
+                done.set()
+            d.connect("response", on_resp)
+            d.show_all()
+            return False
+        GLib.idle_add(ask)
+        done.wait()
+        return box[0]
+
+    def _sudo(self, argv, timeout):
+        """sudo -A with tabit's password window; output text, or raise."""
+        env = os.environ.copy()
+        askpass = self._sudo_askpass_path()
+        if askpass:
+            env["SUDO_ASKPASS"] = askpass
+        r = subprocess.run(["sudo", "-A", *argv], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=timeout, env=env)
+        if r.returncode != 0:
+            raise RuntimeError(((r.stderr or r.stdout).strip().splitlines() or
+                                ["failed"])[-1])
+        return r.stdout
+
+    def _tailscale_prepare(self, srv):
+        """Worker thread: get Tailscale ready, asking first. None when it is;
+        else why not ("retry:" in front when a minute may fix it).
+
+        installed? -> official install script (sudo). daemon up? ->
+        systemctl (sudo). logged in? -> `tailscale up --operator=$USER`
+        (sudo) with its login page opened in the browser. may this user
+        run `tailscale serve`? -> `tailscale set --operator=$USER` (sudo).
+        """
+        user = os.environ.get("USER") or GLib.get_user_name()
+        progress = lambda text: GLib.idle_add(self._remote_show, "connecting", text)
+        asked = []
+
+        def consent(steps):
+            if asked:
+                return asked[0]
+            if getattr(self, "_remote_declined", False):
+                return False
+            ok = self._remote_ask(
+                "Set up Tailscale for tabit Remote?",
+                "Remote needs Tailscale ready on this computer. tabit will:\n\n"
+                + "\n".join("  • " + x for x in steps)
+                + "\n\nThese steps need your password (sudo).")
+            asked.append(ok)
+            if not ok:
+                self._remote_declined = True
+            return ok
+
+        def status():
+            r = subprocess.run(["tailscale", "status", "--json"],
+                               stdin=subprocess.DEVNULL, capture_output=True,
+                               text=True, timeout=10)
+            try:
+                return json.loads(r.stdout), r.stderr
+            except ValueError:
+                return None, r.stderr or r.stdout
+
+        try:
+            if not shutil.which("tailscale"):
+                if not consent([
+                        "install Tailscale (official script from "
+                        "tailscale.com: adds its apt repository)",
+                        "start the Tailscale service",
+                        "open a Tailscale login page in your browser",
+                        f"let {user} manage Tailscale Serve"]):
+                    return "Tailscale is not installed (setup declined)"
+                progress("installing Tailscale…")
+                self._sudo(["sh", "-c", "curl -fsSL https://tailscale.com/install.sh | sh"], 900)
+                if not shutil.which("tailscale"):
+                    return "Tailscale did not install"
+            st, err = status()
+            if st is None:
+                if not consent(["start the Tailscale service",
+                                "open a Tailscale login page if needed",
+                                f"let {user} manage Tailscale Serve"]):
+                    return "the Tailscale service is not running (setup declined)"
+                progress("starting Tailscale…")
+                self._sudo(["systemctl", "enable", "--now", "tailscaled"], 60)
+                time.sleep(2)
+                st, err = status()
+                if st is None:
+                    return "retry:Tailscale is not running: " + (err.strip().splitlines() or ["?"])[-1]
+            if st.get("BackendState") != "Running":
+                if not consent(["open a Tailscale login page in your browser",
+                                f"let {user} manage Tailscale Serve"]):
+                    return "Tailscale is not logged in (setup declined)"
+                progress("log in to Tailscale in your browser…")
+                env = os.environ.copy()
+                askpass = self._sudo_askpass_path()
+                if askpass:
+                    env["SUDO_ASKPASS"] = askpass
+                p = subprocess.Popen(["sudo", "-A", "tailscale", "up", f"--operator={user}"],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, text=True, env=env)
+                # `tailscale up` waits for the login with no output: a
+                # watchdog ends it after 10 minutes, or when Remote goes off
+                ended = threading.Event()
+
+                def watchdog():
+                    deadline = time.time() + 600
+                    while not ended.wait(1):
+                        if time.time() > deadline or self._remote_srv is not srv:
+                            p.kill()
+                            return
+                threading.Thread(target=watchdog, daemon=True).start()
+                opened = False
+                try:
+                    for line in p.stdout:
+                        url = next((w for w in line.split()
+                                    if w.startswith("https://login.tailscale.com/")), "")
+                        if url and not opened:
+                            opened = True
+                            GLib.idle_add(lambda u=url: (self._open_uri(u), False)[1])
+                            progress("log in to Tailscale in the browser page that opened")
+                    code = p.wait()
+                finally:
+                    ended.set()
+                if code != 0:
+                    return "Tailscale login did not finish"
+                st, err = status()
+                if not st or st.get("BackendState") != "Running":
+                    return "Tailscale is still not logged in"
+            # may this user run `tailscale serve` (no sudo each time)?
+            r = subprocess.run(["tailscale", "debug", "prefs"], stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, timeout=10)
+            try:
+                operator = json.loads(r.stdout).get("OperatorUser")
+            except ValueError:
+                operator = user                 # cannot tell: let serve say
+            if operator != user:
+                if not consent([f"let {user} manage Tailscale Serve"]):
+                    return f"{user} may not run tailscale serve (setup declined)"
+                progress("letting you manage Tailscale Serve…")
+                self._sudo(["tailscale", "set", f"--operator={user}"], 30)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+            return f"Tailscale setup: {e}"
+        return None
 
     def _remote_published(self, srv, ok, url, out):
         if srv is not self._remote_srv:     # stopped in the meantime
@@ -11054,12 +11237,15 @@ if (data !== null) {{
                               else "tailscale serve failed")
         return False
 
-    def _remote_fail(self, srv, detail):
+    def _remote_fail(self, srv, detail, retry=True):
         """Show why, stop serving, and try again in a minute (tailscaled may
-        still be starting after a reboot)."""
+        still be starting after a reboot). retry=False for a setup the user
+        declined or that needs them: asking again every minute would nag."""
         if srv is not None:
             self._remote_stop(unpublish=False)
         self._remote_show("failed", detail)
+        if not retry:
+            return False
 
         def retry():
             if getattr(self, "_remote_want", False) and self._remote_srv is None:
@@ -11092,7 +11278,9 @@ if (data !== null) {{
     def _remote_show(self, state, detail):
         color = {"online": "#9ece6a", "connecting": "#e0af68"}.get(
             state, "#f7768e")
-        text = {"online": "Remote on", "connecting": "Remote starting",
+        text = {"online": "Remote on",
+                "connecting": "Remote: " + detail if detail and len(detail) < 60
+                else "Remote starting",
                 }.get(state, "Remote failed")
         self._remote_detail = detail
         host = self._remote_url.split("//")[-1].split(".")[0]
@@ -14389,8 +14577,12 @@ if (data !== null) {{
         remote_note.set_text(
             ("Open it at " + self._remote_url) if self._remote_url else
             (getattr(self, "_remote_detail", "") or
-             "Needs Tailscale logged in here and on the phone, with Serve "
-             "enabled for your tailnet.") + "\nOnly your own login can open "
+             ("Turning this on sets Tailscale up here (it asks first: "
+              "install, start, log in) if it is not ready. The phone needs "
+              "the Tailscale app on the same account."
+              if not shutil.which("tailscale") else
+              "Needs Tailscale on the phone too, logged in to the same "
+              "account.")) + "\nOnly your own login can open "
             "it. tabit takes over Tailscale Serve on port 443 of this host.")
 
         ver_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -14433,8 +14625,7 @@ if (data !== null) {{
             # tg_help sits outside the grid on purpose: the grid greys
             # out when Telegram is off, which is when somebody needs it.
             ("Telegram", (tg_on, tg_grid, tg_help)),
-        ) + ((("Remote", (remote_on, remote_send, remote_files, remote_note)),) if shutil.which("tailscale")
-             else ()) + (
+        ) + (("Remote", (remote_on, remote_send, remote_files, remote_note)),) + (
             ("About", (ver_box,)),
         )
         for name, widgets in pages:
@@ -14497,6 +14688,7 @@ if (data !== null) {{
                                      "sidebar_position": side_id})
                 self._tg_save_secrets(tg_token.get_text(),
                                       tg_chat.get_text())
+                self._remote_declined = False   # Save is a fresh go: may ask again
                 self._remote_sync()
                 self._sidebar_position = side_id
                 self._apply_sidebar_layout()
