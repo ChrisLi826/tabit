@@ -726,7 +726,7 @@ REMOTE_PUSH_EVERY = 10       # /api/events checks for a change this often (s)
 # A phone that drops off the network (airplane mode, out of range) leaves
 # its stream open on our side until TCP gives up, which can take many
 # minutes. Keep the newest few and close the oldest instead of piling up.
-REMOTE_MAX_STREAMS = 4
+REMOTE_MAX_STREAMS = 8
 # Files the page may open (Settings > Remote > Allow opening files): under
 # home or /tmp, a known document/image type, small, and never a secret.
 REMOTE_FILE_MAX = 2 * 1024 * 1024
@@ -741,7 +741,7 @@ REMOTE_FILE_TEXT = {
 REMOTE_FILE_IMAGE = {".png": "image/png", ".jpg": "image/jpeg",
                      ".jpeg": "image/jpeg", ".gif": "image/gif",
                      ".webp": "image/webp"}
-REMOTE_FILE_DENY_DIRS = {".ssh", ".gnupg", ".password-store", ".aws",
+REMOTE_FILE_DENY_DIRS = {".ssh", ".gnupg", ".password-store", ".aws", ".codex",
                          ".kube", ".docker", ".mozilla", ".thunderbird",
                          "keyrings", ".pki"}
 # app folders under ~/.config that hold tokens (gh, rclone, gcloud ...)
@@ -750,7 +750,7 @@ REMOTE_FILE_DENY_CONFIG = {"gh", "rclone", "gcloud", "hub", "op", "doctl",
 REMOTE_FILE_DENY_NAMES = re.compile(
     r"(^\.env(\..*)?$|^id_(rsa|dsa|ecdsa|ed25519)|\.(key|pem|p12|pfx|kdbx|"
     r"keystore|jks)$|^\.netrc$|^\.git-credentials$|^\.pgpass$|^telegram\.json$|"
-    r"credentials|secret|passw|tokens?\b)", re.IGNORECASE)
+    r"credentials|secret|passw|tokens?\b|\bauth\b)", re.IGNORECASE)
 SSH_TOOL_DIR = os.path.expanduser("~/senao-tools/ssh_tool")
 SSH_TOOL_CONNECT_SH = os.path.join(SSH_TOOL_DIR, "connect.sh")
 SSH_TOOL_CONNECT_PY = os.path.join(SSH_TOOL_DIR, "connect.py")
@@ -1841,8 +1841,10 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         # no scripts, no forms, its own opaque origin; images inline only
+        # frame-ancestors: shown in tabit's own viewer only, no other site's frame
         self.send_header("Content-Security-Policy",
-                         "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'")
+                         "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; "
+                         "frame-ancestors 'self'")
         self.end_headers()
         self.wfile.write(data)
 
@@ -1898,8 +1900,16 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                     # (BrokenPipe) when the page has gone away
                     self.wfile.write(b"event: alive\ndata: {}\n\n")
                 self.wfile.flush()
-                if self.stop.wait(REMOTE_PUSH_EVERY) or mine.is_set():
-                    return
+                end = time.monotonic() + REMOTE_PUSH_EVERY
+                while time.monotonic() < end:   # a kicked stream ends within 1 s
+                    if self.stop.wait(min(1, max(0.01, end - time.monotonic()))):
+                        return
+                    if mine.is_set():
+                        # pushed out by a newer page: come back later, not
+                        # at once to push out another one in turn
+                        self.wfile.write(b"retry: 30000\n\n")
+                        self.wfile.flush()
+                        return
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
 
@@ -10769,6 +10779,8 @@ if (data !== null) {{
             self._remote_placing = False
             if prev_header:                 # _relayout made a new header row
                 prev = self._group_header_row(prev_header)
+                if prev is None and op == "groupop" and target == prev_header:
+                    prev = self._group_header_row(body.get("color"))   # recoloured
             if (prev is not None and prev.get_parent() is not None
                     and prev.get_visible()
                     and self.listbox.get_selected_row() is not prev):
@@ -10875,14 +10887,17 @@ if (data !== null) {{
     def _remote_group_op(self, color, body):
         rows = self._session_rows()
         used = {getattr(r, "group_color", None) for r in rows}
+        if color not in GROUP_COLORS:
+            return 404, {"error": "no such group"}
+        # every check before the first change: no half-done answer
         name = body.get("name")
         if "name" in body and (not isinstance(name, str) or len(name.strip()) > 40):
             return 400, {"error": "name up to 40 characters"}
         new = body.get("color", color)
         if new not in GROUP_COLORS:
             return 400, {"error": "unknown group colour"}
-        if color not in GROUP_COLORS:
-            return 404, {"error": "no such group"}
+        if new != color and new in used:
+            return 409, {"error": "that colour has a group"}
         if body.get("loose"):
             # the tabs without a group become one, in this free colour
             loose = [r for r in rows if not getattr(r, "group_color", None)]
@@ -10897,8 +10912,6 @@ if (data !== null) {{
         elif color not in used:
             return 404, {"error": "no such group"}
         if new != color:
-            if new in used:
-                return 409, {"error": "that colour has a group"}
             self._recolor_group(color, new)
             color = new
             self._save_group_names()

@@ -346,18 +346,23 @@ const NOTE_OK = "Notification" in window && matchMedia("(pointer: fine)").matche
 let noteOn = false, lastStatus = null;
 try { noteOn = NOTE_OK && Notification.permission === "granted" && localStorage.getItem("tabit-notify") === "1"; } catch (e) {}
 function notifyChanges(snap) {
-  if (noteOn && lastStatus) for (const t of snap.tabs) {
-    if (lastStatus[t.id] === "working" && (t.ai_status === "ready" || t.ai_status === "blocked")) {
-      const n = new Notification(`${t.title || "AI tab"}: ${t.ai_status}`, { body: t.sub || "", tag: `tabit-${t.id}` });
-      n.onclick = () => { window.focus(); openTab(t.id); n.close(); };
+  const was = lastStatus;
+  lastStatus = Object.fromEntries(snap.tabs.map((t) => [t.id, t.ai_status]));
+  if (noteOn && was) for (const t of snap.tabs) {
+    if (was[t.id] === "working" && (t.ai_status === "ready" || t.ai_status === "blocked")) {
+      try {           // permission taken back: no notice, but the list still updates
+        const n = new Notification(`${t.title || "AI tab"}: ${t.ai_status}`, { body: t.sub || "", tag: `tabit-${t.id}` });
+        n.onclick = () => { window.focus(); openTab(t.id); n.close(); };
+      } catch (e) {}
     }
   }
-  lastStatus = Object.fromEntries(snap.tabs.map((t) => [t.id, t.ai_status]));
 }
 $("notify").hidden = !NOTE_OK;
 $("notify").classList.toggle("on", noteOn);
 $("notify").onclick = async () => {
-  if (!noteOn && Notification.permission !== "granted" && await Notification.requestPermission() !== "granted") {
+  let ok = noteOn || Notification.permission === "granted";
+  if (!ok) try { ok = await Notification.requestPermission() === "granted"; } catch (e) {}
+  if (!ok) {
     alert("The browser blocks notifications for this page.");
     return;
   }
@@ -572,6 +577,7 @@ const markCur = () => {
 };
 
 function openTab(id) {
+  flushTyped();                   // letters typed into the last tab go there, not here
   if ($("viewer").classList.contains("on")) $("vback").click();   // a laptop: the list opened another tab
   current = id;
   lastScreen = null;
@@ -968,9 +974,12 @@ $("text").addEventListener("keydown", (ev) => {
   $("sendbtn").click();
 });
 $("sendbtn").onclick = async () => {
-  const text = $("text").value;
+  const box = $("text"), text = box.value;
   if (!text.trim()) return;
-  if (await act("send", { text })) $("text").value = "";
+  // empty at once: a second Send has nothing to send twice, and a new
+  // draft typed while this one is on its way is never wiped
+  box.value = "";
+  if (!(await act("send", { text }))) box.value = text + (box.value ? "\n" + box.value : "");
 };
 
 $("refresh").onclick = refresh;
@@ -996,8 +1005,10 @@ refresh();
 // anything to scroll lets it slide off and shows the list. A pinned page
 // has nothing to scroll; on the way back it returns to where it was.
 let pinnedAt = null;
+// the laptop layout scrolls each side on its own: nothing to pin there
+const WIDE_MQ = matchMedia("(min-width: 900px) and (pointer: fine)");
 function pinList() {
-  const open = !!document.querySelector("#detail.on, #viewer.on, #sheet.on");
+  const open = !WIDE_MQ.matches && !!document.querySelector("#detail.on, #viewer.on, #sheet.on");
   if (open && pinnedAt === null) {
     pinnedAt = window.scrollY;
     Object.assign(document.body.style, { position: "fixed", top: `-${pinnedAt}px`, left: "0", right: "0" });
@@ -1009,8 +1020,9 @@ function pinList() {
 }
 const pinWatch = new MutationObserver(pinList);
 for (const id of ["detail", "viewer", "sheet"]) pinWatch.observe($(id), { attributes: true, attributeFilter: ["class"] });
+WIDE_MQ.addEventListener("change", pinList);
 document.addEventListener("touchmove", (ev) => {
-  if (!document.querySelector("#detail.on, #viewer.on, #sheet.on") || ev.touches.length > 1) return;
+  if (WIDE_MQ.matches || !document.querySelector("#detail.on, #viewer.on, #sheet.on") || ev.touches.length > 1) return;
   const box = ev.target.closest && ev.target.closest("#screen, #sheet .card, textarea");
   if (!box || (box.scrollHeight <= box.clientHeight && box.scrollWidth <= box.clientWidth)) ev.preventDefault();
 }, { passive: false });

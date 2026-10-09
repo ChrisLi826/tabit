@@ -230,17 +230,23 @@ class TestRemoteServer(_ServerCase):
             socks.append(c)
             __import__("time").sleep(0.3)
 
+        seen = b""
+
         def closed(c, within=1.5):
+            nonlocal seen
             end = __import__("time").monotonic() + within
             c.settimeout(0.3)
             while __import__("time").monotonic() < end:
                 try:
-                    if not c.recv(65536):
+                    data = c.recv(65536)
+                    if not data:
                         return True             # the server hung up
+                    seen += data
                 except socket.timeout:
                     pass
             return False
         self.assertTrue(closed(socks[0]))
+        self.assertIn(b"retry: 30000", seen)    # and it waits before coming back
         self.assertFalse(closed(socks[2]))
         for c in socks:
             c.close()
@@ -514,6 +520,17 @@ class TestRemoteRename(unittest.TestCase):
 
 
 
+class TestRemoteFileDeny(unittest.TestCase):
+    """Agent logins are keys too: never opened from the page."""
+
+    def test_agent_logins(self):
+        home = os.path.realpath(os.path.expanduser("~"))
+        why = tabit._RemoteHandler._file_problem
+        self.assertTrue(why(os.path.join(home, ".codex", "auth.json")))
+        self.assertTrue(why(os.path.join(home, ".grok", "auth.json")))
+        self.assertIsNone(why(os.path.join(home, "notes", "oauth-plan.md")))
+
+
 class TestRemoteGroupColour(unittest.TestCase):
     """Recolour a group, and make one of the tabs without a group."""
 
@@ -561,6 +578,35 @@ class TestRemoteGroupColour(unittest.TestCase):
         self.assertEqual(self.colours(), ["red", "red", "teal"])
         self.assertEqual(self.app._group_names["teal"], "Misc")
         self.assertEqual(self.op("pink", {"loose": True}), 404)   # none left
+
+    def test_every_check_comes_before_a_change(self):
+        self.assertEqual(self.op("nope", {}), 404)
+        self.assertEqual(self.op("teal", {"loose": True, "color": "red"}), 409)
+        self.assertEqual(self.colours(), ["red", "red", None])
+
+    def test_desk_keeps_the_recoloured_header_selected(self):
+        test, headers = self, {"red": object()}
+        picked = []
+
+        class Box:
+            get_selected_row = lambda _s: test.hdr if not picked and not test.done else None
+            select_row = lambda _s, r: picked.append(r)
+
+        class Hdr:
+            kind, group_color = "group_header", "red"
+            get_parent = get_visible = lambda _s: True
+
+        self.hdr = Hdr()
+        app = self.app
+        app.listbox = Box()
+        app._group_header_row = lambda c: headers.get(c)
+        app._remote_send_on = True
+        app._remote_manage_op = lambda op, t, b: (headers.pop("red"), headers.update(blue=test.hdr), (200, {}))[2]
+        self.done = False
+        op = app._remote_manage_op
+        app._remote_manage_op = lambda *a: (setattr(test, "done", True), op(*a))[1]   # the relayout drops it
+        tabit.Tabit._remote_manage(app, "groupop", "red", {"color": "blue"})
+        self.assertEqual(picked, [self.hdr])
 
 class TestTailscaleSetup(unittest.TestCase):
     """_tailscale_prepare against a fake tailscale: what it asks, runs and
