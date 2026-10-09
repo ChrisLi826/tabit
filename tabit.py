@@ -681,11 +681,21 @@ def _strip_url_tail(url):
     return url.rstrip(TERM_URL_TRAILING) or url
 
 
+def _tmux_exact(name):
+    """A -t target that names exactly this session.
+
+    A bare -t NAME falls back to a prefix match: with "work" gone,
+    "-t work" hits "work2". "=NAME:" matches the whole name only, and
+    the ":" makes it a valid pane target too.
+    """
+    return f"={name}:"
+
+
 def _tmux_kill_session(name):
     """Drop one tmux session now; missing session is not an error."""
     try:
         subprocess.run(
-            ["tmux", "kill-session", "-t", name],
+            ["tmux", "kill-session", "-t", _tmux_exact(name)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=2,
@@ -2306,6 +2316,9 @@ class Tabit(Gtk.Window):
         # keep the child pid so we can read its cwd on save
         row.pid = pid if pid and pid > 0 else None
         row._spawned_at = time.monotonic()
+        # the session this run really holds: the rename dialog may change
+        # argv for the next start, which must not change what a close kills
+        row._live_tmux = self._row_tmux_session(row)
         self._refresh_term_cwd(row)
 
     def _refresh_term_cwd(self, row):
@@ -11114,10 +11127,10 @@ if (data !== null) {{
         """
         try:
             size = subprocess.run(
-                ["tmux", "display-message", "-p", "-t", name,
+                ["tmux", "display-message", "-p", "-t", _tmux_exact(name),
                  "#{pane_width} #{pane_height} #{cursor_x} #{cursor_y} #{cursor_flag}"],
                 capture_output=True, text=True, timeout=2).stdout.split()
-            cmd = ["tmux", "capture-pane", "-p", "-e", "-t", name]
+            cmd = ["tmux", "capture-pane", "-p", "-e", "-t", _tmux_exact(name)]
             if back > 0:
                 cmd += ["-S", str(-back)]
             ansi = subprocess.run(cmd, capture_output=True, timeout=3).stdout
@@ -11783,21 +11796,27 @@ if (data !== null) {{
                 except ValueError:
                     continue
                 if i + 1 < len(argv) and argv[i + 1]:
-                    return argv[i + 1]
+                    return re.sub(r"^=(.*?):?$", r"\1", argv[i + 1])
             return None
         if (len(argv) >= 3 and argv[0] in ("/bin/sh", "sh")
                 and argv[1] == "-c" and isinstance(argv[2], str)):
             cmd = argv[2]
             for pat in (
-                r"attach-session\s+-t\s+['\"]?([^\s'\";]+)",
-                r"has-session\s+-t\s+['\"]?([^\s'\";]+)",
+                r"attach-session\s+-t\s+['\"]?=?([^\s'\";:]+)",
+                r"has-session\s+-t\s+['\"]?=?([^\s'\";:]+)",
                 r"new-session(?:\s+[^;]*?)?\s+-s\s+['\"]?([^\s'\";]+)",
-                r"kill-session\s+-t\s+['\"]?([^\s'\";]+)",
+                r"kill-session\s+-t\s+['\"]?=?([^\s'\";:]+)",
             ):
                 m = re.search(pat, cmd)
                 if m:
                     return m.group(1)
         return None
+
+    def _row_live_tmux(self, row):
+        """The session this tab holds now (argv until it has started)."""
+        if hasattr(row, "_live_tmux"):
+            return row._live_tmux
+        return self._row_tmux_session(row)
 
     def _row_tmux_session(self, row):
         """Named tmux session for a sidebar row, or None if not tmux-backed."""
@@ -11899,6 +11918,8 @@ if (data !== null) {{
         if not old or not new or old == new:
             return
         for row in self._session_rows():
+            if getattr(row, "_live_tmux", None) == old:
+                row._live_tmux = new
             if self._row_tmux_session(row) != old:
                 continue
             argv = list(getattr(row, "argv", None) or [])
@@ -11914,9 +11935,11 @@ if (data !== null) {{
                 # _tmux_session_from_argv reads the name from
                 def swap(m):
                     q = m.group(2)
-                    return m.group(1) + q + (new if q else shlex.quote(new))
+                    return (m.group(1) + q + m.group(3)
+                            + (new if q else shlex.quote(new)))
                 row.argv = argv[:2] + [re.sub(
-                    r"(-[st]\s+)(['\"]?)" + re.escape(old) + r"(?=['\"\s;]|$)",
+                    r"(-[st]\s+)(['\"]?)(=?)" + re.escape(old)
+                    + r"(?=[:'\"\s;]|$)",
                     swap, argv[2])] + argv[3:]
         self._save_sessions_soon()
 
@@ -11996,16 +12019,16 @@ if (data !== null) {{
             return
         if getattr(row, "_tmux_session_killed", False):
             return
-        name = self._row_tmux_session(row)
+        name = self._row_live_tmux(row)
         if not name:
             return
-        if any(r is not row and self._row_tmux_session(r) == name
+        if any(r is not row and self._row_live_tmux(r) == name
                for r in self._session_rows()):
             return                          # another tab still holds it
         row._tmux_session_killed = True
         try:
             subprocess.run(
-                ["tmux", "kill-session", "-t", name],
+                ["tmux", "kill-session", "-t", _tmux_exact(name)],
                 capture_output=True, timeout=5)
         except (OSError, subprocess.TimeoutExpired):
             pass
@@ -12178,17 +12201,25 @@ if (data !== null) {{
             dialog.response(Gtk.ResponseType.OK)
 
         def create_new(*_a):
-            name = entry.get_text().strip()
+            name = re.sub(r"[.:]", "_", entry.get_text().strip())
+            label = name or "tmux"
+            # unnamed: still give it a name, or closing the tab can never
+            # kill it and each restart leaves one more behind
+            name = name or f"tabit-{os.urandom(3).hex()}"
             # -A: attach if it already exists, otherwise create it
-            argv = (["tmux", "new-session", "-A", "-s", name] if name
-                    else ["tmux"])
-            open_session(name or "tmux", argv)
+            open_session(label, ["tmux", "new-session", "-A", "-s", name])
 
         def do_rename(name):
             new = self._tmux_prompt_rename(dialog, name)
+            # tmux turns "." and ":" into "_" and still says it worked
+            new = re.sub(r"[.:]", "_", new or "")
             if new and new != name:
-                r = subprocess.run(["tmux", "rename-session", "-t", name, new],
-                                   capture_output=True, text=True)
+                try:
+                    r = subprocess.run(
+                        ["tmux", "rename-session", "-t", _tmux_exact(name), new],
+                        capture_output=True, text=True, timeout=5)
+                except (OSError, subprocess.SubprocessError) as e:
+                    r = subprocess.CompletedProcess([], 1, "", str(e))
                 if r.returncode != 0:
                     # tabs keep the old name: it is still the session's name
                     self._note_msg(Gtk.MessageType.ERROR, "Could not rename",
@@ -12199,8 +12230,11 @@ if (data !== null) {{
 
         def do_kill(name):
             if self._tmux_confirm_kill(dialog, name):
-                subprocess.run(["tmux", "kill-session", "-t", name],
-                               capture_output=True)
+                try:
+                    subprocess.run(["tmux", "kill-session", "-t", _tmux_exact(name)],
+                                   capture_output=True, timeout=5)
+                except (OSError, subprocess.SubprocessError):
+                    pass
                 refresh()
 
         cat_titles = {"ai": "AI", "connect": "Connect", "other": "Other"}
@@ -12609,8 +12643,9 @@ if (data !== null) {{
             return argv
         inner = shlex.quote(argv[2])
         name = shlex.quote(session)
+        tgt = shlex.quote(_tmux_exact(session))
         opts = " ".join(
-            f"tmux set-option -t {name} {shlex.quote(k)} {shlex.quote(v)}"
+            f"tmux set-option -t {tgt} {shlex.quote(k)} {shlex.quote(v)}"
             f" >/dev/null 2>&1;"
             for k, v in AI_TMUX_OPTS)
         src = ""
@@ -12620,10 +12655,10 @@ if (data !== null) {{
         # keep ";" a separate word — glued to the quoted command it becomes
         # part of that token and the unwrap parses "claude;" as the CLI name
         return ["/bin/sh", "-c",
-                f"{src}tmux has-session -t {name} 2>/dev/null"
+                f"{src}tmux has-session -t {tgt} 2>/dev/null"
                 f" || tmux new-session -d -s {name} {inner} ;"
                 f" {opts}"
-                f" exec tmux attach-session -t {name}"]
+                f" exec tmux attach-session -t {tgt}"]
 
     @classmethod
     def _ai_launch_pair(cls, cli, cwd, tries, bypass=False, tmux=False,
@@ -13196,8 +13231,11 @@ if (data !== null) {{
         def kill_session(name):
             if not self._confirm_kill(dialog, f"Kill AI session “{name}”?"):
                 return
-            subprocess.run(["tmux", "kill-session", "-t", name],
-                           capture_output=True)
+            try:
+                subprocess.run(["tmux", "kill-session", "-t", _tmux_exact(name)],
+                               capture_output=True, timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                pass
             refresh_live()
 
         def refresh_live():

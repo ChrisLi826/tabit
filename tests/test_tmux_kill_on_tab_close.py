@@ -51,8 +51,22 @@ class TestKillRowTmuxSession(unittest.TestCase):
             Tabit._kill_row_tmux_session(self.win, row)
             run.assert_called_once()
             args = run.call_args[0][0]
-            self.assertEqual(args, ["tmux", "kill-session", "-t", "dev"])
+            # "=dev:" is the exact name: a bare "dev" would hit "dev2"
+            self.assertEqual(args, ["tmux", "kill-session", "-t", "=dev:"])
         self.assertTrue(row._tmux_session_killed)
+
+    def test_kills_the_session_the_tab_started_in(self):
+        # the rename dialog changed argv for the next start only
+        row = _FakeRow(["/bin/bash"])
+        row._live_tmux = "S"
+        with mock.patch("tabit.subprocess.run") as run:
+            Tabit._kill_row_tmux_session(self.win, row)
+            self.assertEqual(run.call_args[0][0], ["tmux", "kill-session", "-t", "=S:"])
+        row = _FakeRow(["tmux", "new-session", "-A", "-s", "S"])
+        row._live_tmux = None               # started as a plain shell
+        with mock.patch("tabit.subprocess.run") as run:
+            Tabit._kill_row_tmux_session(self.win, row)
+            run.assert_not_called()
 
     def test_keeps_a_session_another_tab_holds(self):
         row = _FakeRow(["tmux", "attach-session", "-t", "dev"])
@@ -142,6 +156,29 @@ class TestRetargetTmuxRows(unittest.TestCase):
                          ["/bin/sh", "-c", "tmux attach-session -t 'a b'"])
         self.assertEqual(self.retarget(["/bin/sh", "-c", "tmux attach-session -t old2"], "old", "new"),
                          ["/bin/sh", "-c", "tmux attach-session -t old2"])
+        self.assertEqual(self.retarget(["/bin/sh", "-c", "tmux attach-session -t =old:"], "old", "new"),
+                         ["/bin/sh", "-c", "tmux attach-session -t =new:"])
+
+    def test_ai_wrapper_uses_exact_targets(self):
+        argv = Tabit._ai_tmux_argv(["/bin/sh", "-c", "cd /tmp; exec claude"], "ai-a")
+        self.assertIn("has-session -t =ai-a:", argv[2])
+        self.assertIn("attach-session -t =ai-a:", argv[2])
+        self.assertIn("new-session -d -s ai-a ", argv[2])
+        self.assertEqual(Tabit._tmux_session_from_argv(argv), "ai-a")
+        self.assertEqual(Tabit._tmux_session_from_argv(
+            ["tmux", "attach-session", "-t", "=dev:"]), "dev")
+        moved = self.retarget(argv, "ai-a", "ai-b")
+        self.assertIn("attach-session -t =ai-b:", moved[2])
+        self.assertNotIn("ai-a", moved[2])
+
+    def test_live_session_follows_a_rename(self):
+        win = Tabit.__new__(Tabit)
+        row = _FakeRow(["/bin/bash"])
+        row._live_tmux = "old"
+        win._session_rows = lambda: [row]
+        win._save_sessions_soon = lambda: None
+        Tabit._retarget_tmux_rows(win, "old", "new")
+        self.assertEqual(row._live_tmux, "new")
 
 
 if __name__ == "__main__":
