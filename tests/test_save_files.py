@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -83,6 +84,93 @@ class TestSaveFiles(unittest.TestCase):
         tabit.Tabit._save_sessions(app)
         self.assertEqual(tabit.Tabit._load_sessions()[0]["cwd"], "/tmp")
         self.assertIsNone(r._cwd_wanted)
+
+class TestRestoreSafety(TestSaveFiles):
+    """Second review: what a restore or a bad file must not do."""
+
+    def app(self, rows, **kw):
+        return type("App", (), dict({"_session_rows": lambda _s: rows,
+                                     "_term_cwd": staticmethod(lambda _r: None)}, **kw))()
+
+    def test_only_a_restored_tab_that_failed_is_kept(self):
+        def exited(restored, status):
+            row = type("Row", (), {"_spawned_at": tabit.time.monotonic(),
+                                   "get_style_context": lambda _s: unittest.mock.Mock(),
+                                   "dot": unittest.mock.Mock(), "subtitle": unittest.mock.Mock()})()
+            if restored:
+                row._restored = True
+            app = unittest.mock.Mock()
+            tabit.Tabit._on_child_exited(app, None, status, row)
+            return row._died_young
+        self.assertTrue(exited(True, 256))
+        self.assertFalse(exited(True, 0))        # "exit" typed at once
+        self.assertFalse(exited(False, 256))     # a new quick command tab
+
+    def test_an_unreadable_sessions_file_is_not_written_over(self):
+        if os.geteuid() == 0:
+            self.skipTest("root reads anything")
+        with open(tabit.SESSIONS_FILE, "w") as f:
+            f.write("[]")
+        os.chmod(tabit.SESSIONS_FILE, 0)
+        self.addCleanup(lambda: tabit.Tabit.__dict__.get("_sessions_unreadable")
+                        and delattr(tabit.Tabit, "_sessions_unreadable"))
+        self.assertEqual(tabit.Tabit._load_sessions(), [])
+        row = type("Row", (), {"title_text": "s", "sub_text": "", "argv": ["bash"],
+                               "icon_name": "x", "dead": False})()
+        app = self.app([row])
+        app._sessions_unreadable = tabit.Tabit._sessions_unreadable
+        tabit.Tabit._save_sessions(app)
+        os.chmod(tabit.SESSIONS_FILE, 0o600)
+        with open(tabit.SESSIONS_FILE) as f:
+            self.assertEqual(f.read(), "[]")
+
+    def test_an_unrestored_entry_stays_in_the_file(self):
+        app = self.app([], _unrestored=[{"label": "from a newer tabit"}])
+        tabit.Tabit._save_sessions(app)
+        self.assertEqual(tabit.Tabit._load_sessions(), [{"label": "from a newer tabit"}])
+
+    def test_a_linked_file_stays_a_link(self):
+        real = os.path.join(self.dir, "dotfiles.json")
+        with open(real, "w") as f:
+            f.write("[]")
+        os.symlink(real, tabit.SESSIONS_FILE)
+        tabit.Tabit._save_sessions(self.app([], _unrestored=[{"label": "x"}]))
+        self.assertTrue(os.path.islink(tabit.SESSIONS_FILE))
+        with open(real) as f:
+            self.assertEqual(json.load(f), [{"label": "x"}])
+
+    def test_a_setting_of_the_wrong_type_reads_as_the_default(self):
+        with open(tabit.SETTINGS_FILE, "w") as f:
+            json.dump({"ui_font_size": "11", "theme": ["x"], "term_line_spacing": 1,
+                       "cloud_register_mac": 123, "extra": "kept"}, f)
+        st = tabit.Tabit._load_settings()
+        self.assertEqual(st["ui_font_size"], tabit.DEFAULT_SETTINGS["ui_font_size"])
+        self.assertEqual(st["theme"], tabit.DEFAULT_SETTINGS["theme"])
+        self.assertEqual(st["cloud_register_mac"], "")
+        self.assertEqual(st["term_line_spacing"], 1)     # an int is a fine number
+        self.assertEqual(st["extra"], "kept")
+
+    def test_a_bad_cloud_status_file_does_not_crash(self):
+        app = unittest.mock.Mock()
+        app._cloud_args = ("aa:bb", "staging")
+        app._cloud_proc = None
+        app._cloud_error = None
+        app._cloud_started = tabit.time.time()
+        app._cloud_state_dir = lambda *_a: self.dir
+        for body in ("[]", "null", '{"time": "x", "state": "online"}', '{"sn": 5, "time": null}'):
+            with open(os.path.join(self.dir, "status.json"), "w") as f:
+                f.write(body)
+            self.assertTrue(tabit.Tabit._cloud_tick(app), body)
+
+    def test_the_last_tab_is_not_closed_from_the_phone(self):
+        row = object()
+        app = unittest.mock.Mock()
+        app._tg_row_by_id = lambda _t: row
+        app._session_rows = lambda: [row]
+        code, _ = tabit.Tabit._remote_manage_op(app, "close", "t", {})
+        self.assertEqual(code, 409)
+        app._close_session.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

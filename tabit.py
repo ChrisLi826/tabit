@@ -1549,6 +1549,7 @@ DEFAULT_SETTINGS = {
 def _write_json(path, obj):
     """Write JSON so a crash halfway never leaves a half file: a new file
     next to it, then one rename over the old one."""
+    path = os.path.realpath(path)   # a link to a dotfiles copy stays a link
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".new"
     with open(tmp, "w") as f:
@@ -1561,6 +1562,7 @@ def _write_json(path, obj):
 def _set_aside(path):
     """A file that does not parse is kept as <path>.broken, so the next
     save cannot write over the only copy (it may be a hand edit)."""
+    path = os.path.realpath(path)
     try:
         os.replace(path, path + ".broken")
         print(f"[tabit] {path} does not parse; kept as {path}.broken",
@@ -2201,7 +2203,9 @@ class Tabit(Gtk.Window):
         # Keep collapsed_groups from settings; do not expand while replaying sessions.
         self._restoring_sessions = True
         last_row = None
+        self._unrestored = []
         for s in self._load_sessions():
+            r = None
             try:
                 argv = s.get("argv") or []
                 if argv and argv[0] == NOTE_SENTINEL:
@@ -2240,8 +2244,14 @@ class Tabit(Gtk.Window):
                     self._apply_group(r, color)
                 if r is not None:
                     last_row = r
-            except (KeyError, TypeError, ValueError, IndexError, OSError):
-                continue  # skip broken entries in a hand-edited file
+                    r._restored = True
+            except Exception as e:
+                # a hand edit, or a field from a newer tabit: skip it here,
+                # but keep it in the file rather than drop it on next save
+                print(f"[tabit] tab not restored ({e!r}): {s!r}"[:300],
+                      file=sys.stderr)
+                if r is None:
+                    self._unrestored.append(s)
         self._restoring_sessions = False
         if not st.get("ai_resume_per_tab", False):
             self._save_settings({"ai_resume_per_tab": True})
@@ -2309,7 +2319,14 @@ class Tabit(Gtk.Window):
         except ValueError:
             _set_aside(SESSIONS_FILE)
             return []
-        except OSError:
+        except FileNotFoundError:
+            return []
+        except OSError as e:
+            # there but not readable (owned by root after a sudo run...):
+            # a save now would replace every tab with what is open now
+            Tabit._sessions_unreadable = True
+            print(f"[tabit] cannot read {SESSIONS_FILE} ({e}); "
+                  "tabs will not be saved this run", file=sys.stderr)
             return []
 
     def _on_term_spawned(self, _term, pid, _error, row):
@@ -2359,6 +2376,8 @@ class Tabit(Gtk.Window):
             return None
 
     def _save_sessions(self):
+        if getattr(self, "_sessions_unreadable", False):
+            return
         data = []
         for r in self._session_rows():  # skip group-header rows
             if getattr(r, "dead", False) and not getattr(r, "_died_young", False):
@@ -2390,6 +2409,8 @@ class Tabit(Gtk.Window):
             if getattr(r, "ai_hunt", False):
                 entry["hunt"] = True
             data.append(entry)
+        # entries the restore could not open stay as they were
+        data += getattr(self, "_unrestored", [])
         _write_json(SESSIONS_FILE, data)
 
     def _save_sessions_soon(self):
@@ -5348,7 +5369,7 @@ if (data !== null) {{
         self._relayout()
         self._save_sessions()
 
-    def _on_child_exited(self, _term, _status, row):
+    def _on_child_exited(self, _term, status, row):
         # VTE child gone (detach / session ended). Do NOT kill the named
         # tmux session here — leave it so the user sees "exited" and can
         # decide; intentional single-tab close (_close_session) kills it.
@@ -5357,7 +5378,10 @@ if (data !== null) {{
         # Gone at once (its folder or program missing after a restore, a
         # serial device unplugged): it never ran, so keep it in sessions.json
         # to try again next start. Only the x drops it.
-        row._died_young = time.monotonic() - getattr(row, "_spawned_at", 0) < 5
+        # A new tab that ends at once (a quick command, an "exit") is not
+        # this: it would run again at every start.
+        row._died_young = (getattr(row, "_restored", False) and status != 0
+                           and time.monotonic() - getattr(row, "_spawned_at", 0) < 5)
         row.get_style_context().add_class("dead")
         row.dot.hide()
         row.subtitle.set_text("exited")
@@ -10930,6 +10954,9 @@ if (data !== null) {{
             if getattr(row, "kind", None) == "note" and row.buffer.get_modified():
                 # the save question is a modal dialog here: answer it at the desk
                 return 409, {"error": "that note has unsaved changes; close it in tabit"}
+            if len(self._session_rows()) == 1:
+                # the last tab closes tabit, and the phone cannot start it again
+                return 409, {"error": "that is the last tab; closing it quits tabit, do it in tabit"}
             self._close_session(row)
             return 200, {"ok": True}
         if op == "group":
@@ -14025,18 +14052,33 @@ if (data !== null) {{
             with open(SETTINGS_FILE) as f:
                 raw = json.load(f)
             if isinstance(raw, dict):
-                data.update(raw)
+                # a hand edit of the wrong type ("11" for a size) would
+                # crash every start: such a value reads as the default
+                num = (int, float)
+                data.update({k: v for k, v in raw.items()
+                             if k not in DEFAULT_SETTINGS
+                             or isinstance(v, type(DEFAULT_SETTINGS[k]))
+                             or (isinstance(DEFAULT_SETTINGS[k], num)
+                                 and not isinstance(DEFAULT_SETTINGS[k], bool)
+                                 and isinstance(v, num)
+                                 and not isinstance(v, bool))})
             else:
                 _set_aside(SETTINGS_FILE)   # JSON, but not settings
         except ValueError:
             _set_aside(SETTINGS_FILE)
-        except OSError:
+        except FileNotFoundError:
             pass
+        except OSError as e:
+            Tabit._settings_unreadable = True
+            print(f"[tabit] cannot read {SETTINGS_FILE} ({e}); "
+                  "settings will not be saved this run", file=sys.stderr)
         return data
 
     @staticmethod
     def _save_settings(data):
         cur = Tabit._load_settings()
+        if getattr(Tabit, "_settings_unreadable", False):
+            return                          # would write defaults over it
         cur.update(data)
         _write_json(SETTINGS_FILE, cur)
 
@@ -14515,7 +14557,17 @@ if (data !== null) {{
                 # ask about unsaved notes, save sessions, stop Remote/Cloud
                 if self._on_delete_event():
                     return                  # a note's save question said Cancel
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+                try:
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                except OSError as e:
+                    # still running: undo the half quit, or a closed tab
+                    # keeps its tmux session and Remote stays off
+                    self._shutting_down = False
+                    self._remote_sync()
+                    if HAS_CLOUD_DEVICE:
+                        self._cloud_sync()
+                    self._note_msg(Gtk.MessageType.ERROR,
+                                   "Could not restart tabit", str(e))
 
         dialog.connect("response", _on_update_progress_resp)
         dialog.show_all()
