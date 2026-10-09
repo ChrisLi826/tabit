@@ -42,6 +42,8 @@ class TestKillRowTmuxSession(unittest.TestCase):
         # Minimal stand-in: only the kill helper + shutdown flag.
         self.win = Tabit.__new__(Tabit)
         self.win._shutting_down = False
+        self.rows = []                      # the other tabs open in tabit
+        self.win._session_rows = lambda: self.rows
 
     def test_kills_named_session(self):
         row = _FakeRow(["tmux", "attach-session", "-t", "dev"])
@@ -51,6 +53,17 @@ class TestKillRowTmuxSession(unittest.TestCase):
             args = run.call_args[0][0]
             self.assertEqual(args, ["tmux", "kill-session", "-t", "dev"])
         self.assertTrue(row._tmux_session_killed)
+
+    def test_keeps_a_session_another_tab_holds(self):
+        row = _FakeRow(["tmux", "attach-session", "-t", "dev"])
+        self.rows = [row, _FakeRow(["tmux", "new-session", "-A", "-s", "dev"])]
+        with mock.patch("tabit.subprocess.run") as run:
+            Tabit._kill_row_tmux_session(self.win, row)
+            run.assert_not_called()
+        self.rows = [row]                   # the last one: now it goes
+        with mock.patch("tabit.subprocess.run") as run:
+            Tabit._kill_row_tmux_session(self.win, row)
+            run.assert_called_once()
 
     def test_idempotent_second_call(self):
         row = _FakeRow(["tmux", "attach-session", "-t", "dev"])
@@ -105,6 +118,30 @@ class TestCloseVsExitedVsShutdownContract(unittest.TestCase):
         self.assertNotIn("_kill_row_tmux_session(", block)
         self.assertNotIn('["tmux", "kill-session"', block)
         self.assertIn("_shutting_down = True", block)
+
+
+class TestRetargetTmuxRows(unittest.TestCase):
+    """A renamed session: tabs follow it, and nothing but the name changes."""
+
+    def retarget(self, argv, old, new):
+        win = Tabit.__new__(Tabit)
+        row = _FakeRow(list(argv))
+        win._session_rows = lambda: [row]
+        win._save_sessions_soon = lambda: None
+        Tabit._retarget_tmux_rows(win, old, new)
+        return row.argv
+
+    def test_plain_argv_changes_only_the_name(self):
+        self.assertEqual(self.retarget(["tmux", "new-session", "-A", "-s", "tmux"], "tmux", "work"),
+                         ["tmux", "new-session", "-A", "-s", "work"])
+
+    def test_sh_c_string(self):
+        self.assertEqual(self.retarget(["/bin/sh", "-c", "tmux attach-session -t old || true"], "old", "new"),
+                         ["/bin/sh", "-c", "tmux attach-session -t new || true"])
+        self.assertEqual(self.retarget(["/bin/sh", "-c", "tmux attach-session -t 'old'"], "old", "a b"),
+                         ["/bin/sh", "-c", "tmux attach-session -t 'a b'"])
+        self.assertEqual(self.retarget(["/bin/sh", "-c", "tmux attach-session -t old2"], "old", "new"),
+                         ["/bin/sh", "-c", "tmux attach-session -t old2"])
 
 
 if __name__ == "__main__":

@@ -55,5 +55,34 @@ class TestSaveFiles(unittest.TestCase):
         self.assertEqual(tabit.Tabit._load_settings()["theme"], "x")
 
 
+    def test_wrong_shape_is_kept(self):
+        with open(tabit.SESSIONS_FILE, "w") as f:
+            f.write('{"not": "a list"}')
+        self.assertEqual(tabit.Tabit._load_sessions(), [])
+        self.assertTrue(os.path.exists(tabit.SESSIONS_FILE + ".broken"))
+
+    def test_a_tab_that_died_at_once_stays_saved(self):
+        def row(young):
+            return type("Row", (), {"title_text": "ai", "sub_text": "", "argv": ["x"], "icon_name": "x",
+                                    "dead": True, "_died_young": young})()
+        app = type("App", (), {"_session_rows": lambda _s: [row(True), row(False)],
+                               "_term_cwd": staticmethod(lambda _r: None)})()
+        tabit.Tabit._save_sessions(app)
+        self.assertEqual(len(tabit.Tabit._load_sessions()), 1)
+
+    def test_a_missing_folder_is_saved_until_it_moves(self):
+        r = type("Row", (), {"title_text": "sh", "sub_text": "", "argv": ["bash"], "icon_name": "x",
+                             "dead": False, "_cwd_wanted": "/mnt/work"})()
+        home = tabit.GLib.get_home_dir()
+        cwd = [home]
+        app = type("App", (), {"_session_rows": lambda _s: [r],
+                               "_term_cwd": staticmethod(lambda _r: cwd[0])})()
+        tabit.Tabit._save_sessions(app)
+        self.assertEqual(tabit.Tabit._load_sessions()[0]["cwd"], "/mnt/work")
+        cwd[0] = "/tmp"
+        tabit.Tabit._save_sessions(app)
+        self.assertEqual(tabit.Tabit._load_sessions()[0]["cwd"], "/tmp")
+        self.assertIsNone(r._cwd_wanted)
+
 if __name__ == "__main__":
     unittest.main()

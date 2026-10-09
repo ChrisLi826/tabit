@@ -2201,7 +2201,8 @@ class Tabit(Gtk.Window):
                         lab = lab[:-2]
                     r = self._add_note_session(path=path, label=lab,
                                                sub=s.get("sub"))
-                    if r is not None and s.get("preview"):
+                    if (r is not None and s.get("preview")
+                            and not getattr(r, "note_unloaded", None)):
                         # A file reopens showing what it was showing.
                         self._note_set_preview(r, True)
                 else:
@@ -2291,7 +2292,10 @@ class Tabit(Gtk.Window):
         try:
             with open(SESSIONS_FILE) as f:
                 data = json.load(f)
-            return data if isinstance(data, list) else []
+            if isinstance(data, list):
+                return data
+            _set_aside(SESSIONS_FILE)       # JSON, but not a tab list
+            return []
         except ValueError:
             _set_aside(SESSIONS_FILE)
             return []
@@ -2301,6 +2305,7 @@ class Tabit(Gtk.Window):
     def _on_term_spawned(self, _term, pid, _error, row):
         # keep the child pid so we can read its cwd on save
         row.pid = pid if pid and pid > 0 else None
+        row._spawned_at = time.monotonic()
         self._refresh_term_cwd(row)
 
     def _refresh_term_cwd(self, row):
@@ -2343,7 +2348,7 @@ class Tabit(Gtk.Window):
     def _save_sessions(self):
         data = []
         for r in self._session_rows():  # skip group-header rows
-            if getattr(r, "dead", False):
+            if getattr(r, "dead", False) and not getattr(r, "_died_young", False):
                 # Exited tabs must not resurrect as live processes on restart
                 continue
             entry = {"label": r.title_text, "sub": r.sub_text,
@@ -2352,6 +2357,11 @@ class Tabit(Gtk.Window):
                 entry["track_cwd"] = True
                 entry["sub"] = ""  # sub is the live cwd; recompute on reload
             cwd = self._term_cwd(r)
+            wanted = getattr(r, "_cwd_wanted", None)
+            if wanted and cwd in (None, GLib.get_home_dir()):
+                cwd = wanted
+            elif cwd:
+                r._cwd_wanted = None        # it moved on: that is its folder now
             if cwd:
                 entry["cwd"] = cwd
             if getattr(r, "group_color", None):
@@ -2695,6 +2705,9 @@ class Tabit(Gtk.Window):
             if parsed and os.path.isdir(parsed):
                 cwd = parsed
         workdir = cwd if cwd and os.path.isdir(cwd) else GLib.get_home_dir()
+        # started in home for now (its folder is on a disk not mounted):
+        # save the folder it wants until it really moves somewhere else
+        row._cwd_wanted = cwd if cwd and workdir != cwd else None
         term.connect("child-exited", self._on_child_exited, row)
         term.connect("contents-changed", self._on_activity, row)
         if _is_ai_icon(icon_name):
@@ -2919,7 +2932,22 @@ class Tabit(Gtk.Window):
             buf.set_style_scheme(scheme)
 
         wanted_lang = None
-        if path and os.path.isfile(path):
+        # A saved note whose file is gone (a disk not mounted) or too big
+        # for the editor (it would freeze tabit at start): keep the path,
+        # show nothing, never write over it. It loads on the next start.
+        unloaded = None
+        if path and not os.path.isfile(path):
+            unloaded = "missing"
+        elif (path and not Tabit._is_binary_render(path)
+              and self._note_file_too_big(path)):
+            unloaded = "too big to open here"
+        if unloaded:
+            view.set_editable(False)
+            buf.set_modified(False)
+            label = label or os.path.basename(path)
+            sub = sub if sub is not None else os.path.dirname(path)
+            tooltip = path
+        elif path and os.path.isfile(path):
             if Tabit._is_binary_render(path):
                 # An image or a PDF has no text to edit. The buffer stays
                 # empty and the preview shows the file itself, but the tab
@@ -2982,6 +3010,10 @@ class Tabit(Gtk.Window):
         row.view = view
         row.buffer = buf
         row.file_path = path
+        row.note_unloaded = unloaded
+        if unloaded:                  # shown only: sessions.json keeps the plain sub
+            row.subtitle.set_text(f"{unloaded} · {sub}")
+            row.subtitle.set_no_show_all(False)
         row.webview = webview
         row.content_paned = content if HAS_WEBKIT else None
         row.preview_on = False
@@ -4317,6 +4349,9 @@ if (data !== null) {{
         if getattr(row, "kind", None) != "note":
             return False
         path = row.file_path
+        if getattr(row, "note_unloaded", None):
+            # its file was never read in: writing would empty it
+            return True
         if path and self._is_binary_render(path):
             # The buffer was never filled from this file, so writing it back
             # would replace an image with an empty text file. Save As is no
@@ -5306,6 +5341,10 @@ if (data !== null) {{
         # decide; intentional single-tab close (_close_session) kills it.
         # keep the tab and its scrollback; only the x really closes it
         row.dead = True
+        # Gone at once (its folder or program missing after a restore, a
+        # serial device unplugged): it never ran, so keep it in sessions.json
+        # to try again next start. Only the x drops it.
+        row._died_young = time.monotonic() - getattr(row, "_spawned_at", 0) < 5
         row.get_style_context().add_class("dead")
         row.dot.hide()
         row.subtitle.set_text("exited")
@@ -11833,8 +11872,19 @@ if (data !== null) {{
             inner, sess = self._ai_tmux_unwrap(argv)
             if sess is not None:
                 row.argv = self._ai_tmux_argv(inner, new)
-            else:
-                row.argv = [new if a == old else a for a in argv]
+            elif argv[:1] == ["tmux"]:
+                # only the name after -s / -t: never the program or a flag
+                row.argv = [new if a == old and i and argv[i - 1] in ("-s", "-t") else a
+                            for i, a in enumerate(argv)]
+            elif len(argv) >= 3 and argv[1] == "-c" and isinstance(argv[2], str):
+                # sh -c "... attach-session -t NAME ...": the forms
+                # _tmux_session_from_argv reads the name from
+                def swap(m):
+                    q = m.group(2)
+                    return m.group(1) + q + (new if q else shlex.quote(new))
+                row.argv = argv[:2] + [re.sub(
+                    r"(-[st]\s+)(['\"]?)" + re.escape(old) + r"(?=['\"\s;]|$)",
+                    swap, argv[2])] + argv[3:]
         self._save_sessions_soon()
 
     def _device_tab_name(self, dev):
@@ -11916,6 +11966,9 @@ if (data !== null) {{
         name = self._row_tmux_session(row)
         if not name:
             return
+        if any(r is not row and self._row_tmux_session(r) == name
+               for r in self._session_rows()):
+            return                          # another tab still holds it
         row._tmux_session_killed = True
         try:
             subprocess.run(
@@ -12101,8 +12154,13 @@ if (data !== null) {{
         def do_rename(name):
             new = self._tmux_prompt_rename(dialog, name)
             if new and new != name:
-                subprocess.run(["tmux", "rename-session", "-t", name, new],
-                               capture_output=True)
+                r = subprocess.run(["tmux", "rename-session", "-t", name, new],
+                                   capture_output=True, text=True)
+                if r.returncode != 0:
+                    # tabs keep the old name: it is still the session's name
+                    self._note_msg(Gtk.MessageType.ERROR, "Could not rename",
+                                   (r.stderr or "").strip() or None, parent=dialog)
+                    return
                 self._retarget_tmux_rows(name, new)
                 refresh()
 
@@ -13194,6 +13252,7 @@ if (data !== null) {{
                         # Look for its session even while the stored
                         # command is still a plain start.
                         r.ai_hunt = True
+                        self._save_sessions_soon()  # _add_session saved before the flag
                     self._save_ai_last(tool, cwd,
                                        use_tmux=tmux_chk.get_active())
             self._open_dialogs.discard(dlg)
@@ -13872,6 +13931,8 @@ if (data !== null) {{
                 raw = json.load(f)
             if isinstance(raw, dict):
                 data.update(raw)
+            else:
+                _set_aside(SETTINGS_FILE)   # JSON, but not settings
         except ValueError:
             _set_aside(SETTINGS_FILE)
         except OSError:
@@ -14355,7 +14416,10 @@ if (data !== null) {{
             self._open_dialogs.discard(dlg)
             dlg.destroy()
             if resp == Gtk.ResponseType.OK:
-                # Restart tabit process
+                # Restart tabit process, after what closing the window does:
+                # ask about unsaved notes, save sessions, stop Remote/Cloud
+                if self._on_delete_event():
+                    return                  # a note's save question said Cancel
                 os.execv(sys.executable, [sys.executable] + sys.argv)
 
         dialog.connect("response", _on_update_progress_resp)
