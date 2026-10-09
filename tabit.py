@@ -5204,20 +5204,9 @@ if (data !== null) {{
                 return
 
             if new_color != color:
-                for r in self._session_rows():
-                    if getattr(r, "group_color", None) == color:
-                        r.group_color = new_color
-                        self._apply_group(r, new_color)
+                self._recolor_group(color, new_color)
                 if name:
                     self._group_names[new_color] = name
-                elif color in self._group_names:
-                    self._group_names[new_color] = self._group_names[color]
-                self._group_names.pop(color, None)
-                if color in self._collapsed_groups:
-                    self._collapsed_groups.discard(color)
-                    self._collapsed_groups.add(new_color)
-                    self._save_collapsed_groups()
-                self._save_sessions()
             else:
                 if name:
                     self._group_names[color] = name
@@ -5250,6 +5239,20 @@ if (data !== null) {{
         ok.connect("key-press-event", on_key)
         pop.popup()
         entry.grab_focus()
+
+    def _recolor_group(self, color, new_color):
+        """Give every tab of a group a new colour; its name and fold go along."""
+        for r in self._session_rows():
+            if getattr(r, "group_color", None) == color:
+                r.group_color = new_color
+                self._apply_group(r, new_color)
+        if color in self._group_names:
+            self._group_names[new_color] = self._group_names.pop(color)
+        if color in self._collapsed_groups:
+            self._collapsed_groups.discard(color)
+            self._collapsed_groups.add(new_color)
+            self._save_collapsed_groups()
+        self._save_sessions()
 
     def _ungroup(self, color):
         for r in self._session_rows():
@@ -10870,13 +10873,37 @@ if (data !== null) {{
         self._save_sessions()
 
     def _remote_group_op(self, color, body):
-        if color not in GROUP_COLORS or not any(
-                getattr(r, "group_color", None) == color for r in self._session_rows()):
+        rows = self._session_rows()
+        used = {getattr(r, "group_color", None) for r in rows}
+        name = body.get("name")
+        if "name" in body and (not isinstance(name, str) or len(name.strip()) > 40):
+            return 400, {"error": "name up to 40 characters"}
+        new = body.get("color", color)
+        if new not in GROUP_COLORS:
+            return 400, {"error": "unknown group colour"}
+        if color not in GROUP_COLORS:
             return 404, {"error": "no such group"}
+        if body.get("loose"):
+            # the tabs without a group become one, in this free colour
+            loose = [r for r in rows if not getattr(r, "group_color", None)]
+            if color in used:
+                return 409, {"error": "that colour has a group"}
+            if not loose:
+                return 404, {"error": "no tabs without a group"}
+            for r in loose:
+                self._apply_group(r, color)
+            self._relayout()
+            self._save_sessions()
+        elif color not in used:
+            return 404, {"error": "no such group"}
+        if new != color:
+            if new in used:
+                return 409, {"error": "that colour has a group"}
+            self._recolor_group(color, new)
+            color = new
+            self._save_group_names()
+            self._relayout()
         if "name" in body:
-            name = body.get("name")
-            if not isinstance(name, str) or len(name.strip()) > 40:
-                return 400, {"error": "name up to 40 characters"}
             if name.strip():
                 self._group_names[color] = name.strip()
             else:

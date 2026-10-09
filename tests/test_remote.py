@@ -513,6 +513,55 @@ class TestRemoteRename(unittest.TestCase):
         self.assertEqual(self.rename("note", "todo *"), (200, "todo"))
 
 
+
+class TestRemoteGroupColour(unittest.TestCase):
+    """Recolour a group, and make one of the tabs without a group."""
+
+    def setUp(self):
+        Row = type("Row", (), {})
+        self.rows = [Row(), Row(), Row()]
+        for r, c in zip(self.rows, ("red", "red", None)):
+            r.group_color = c
+        test = self
+
+        class App:
+            _group_names = {"red": "Work"}
+            _collapsed_groups = {"red"}
+            _session_rows = lambda _s: test.rows
+            _relayout = _save_sessions = _save_group_names = _save_collapsed_groups = lambda _s: None
+
+            def _apply_group(self, r, c):
+                r.group_color = c
+
+        App._recolor_group = tabit.Tabit._recolor_group
+        self.app = App()
+
+    def op(self, color, body):
+        return tabit.Tabit._remote_group_op(self.app, color, body)[0]
+
+    def colours(self):
+        return [r.group_color for r in self.rows]
+
+    def test_recolour_keeps_name_and_fold(self):
+        self.assertEqual(self.op("red", {"color": "blue"}), 200)
+        self.assertEqual(self.colours(), ["blue", "blue", None])
+        self.assertEqual(self.app._group_names, {"blue": "Work"})
+        self.assertEqual(self.app._collapsed_groups, {"blue"})
+
+    def test_recolour_refuses_a_used_or_unknown_colour(self):
+        self.rows[2].group_color = "green"
+        self.assertEqual(self.op("red", {"color": "green"}), 409)
+        self.assertEqual(self.op("red", {"color": "nope"}), 400)
+        self.assertEqual(self.op("red", {"color": "blue", "name": "x" * 41}), 400)
+        self.assertEqual(self.colours(), ["red", "red", "green"])
+
+    def test_loose_tabs_become_a_group(self):
+        self.assertEqual(self.op("red", {"loose": True}), 409)
+        self.assertEqual(self.op("teal", {"loose": True, "name": " Misc "}), 200)
+        self.assertEqual(self.colours(), ["red", "red", "teal"])
+        self.assertEqual(self.app._group_names["teal"], "Misc")
+        self.assertEqual(self.op("pink", {"loose": True}), 404)   # none left
+
 class TestTailscaleSetup(unittest.TestCase):
     """_tailscale_prepare against a fake tailscale: what it asks, runs and
     opens. Counts matter here: a retry every minute must never nag."""
