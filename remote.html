@@ -86,7 +86,8 @@
   #attach { padding: 0 10px; font-size: 18px; background: var(--panel); color: var(--fg);
             border: 1px solid var(--line); font-weight: 400; }
   #kbdbtn.on { background: var(--blue); color: #111; }
-  #kbd { position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; }
+  /* at the top, so iOS has no reason to scroll the view to show it */
+  #kbd { position: absolute; left: 0; top: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; }
   #detail.dropping #screen { outline: 2px dashed var(--blue); outline-offset: -4px; }
   #dmsg { font-size: 13px; color: var(--dim); min-height: 18px; margin-top: 6px; }
   #dmsg.err { color: var(--red); }
@@ -630,7 +631,22 @@ function setKbd(on) {
   $("kbdbtn").classList.toggle("on", on);
   if (on) { $("kbd").value = ""; $("kbd").focus(); dmsg("keyboard: typing goes straight in"); }
   else { $("kbd").blur(); flushTyped(); }
+  fitKbd();
 }
+// Keyboard mode on iOS: the keyboard covers the bottom of the page and iOS
+// may slide the page up. Pad the open view so its content fills just the
+// part the keyboard leaves. The view itself stays full size, so the list
+// behind it never shows (fitting its height to the keyboard did show it).
+const vv = window.visualViewport;
+function fitKbd() {
+  const s = $("detail").style;
+  const kb = vv && kbdOn && Math.abs(vv.scale - 1) < 0.01
+    ? window.innerHeight - vv.height - vv.offsetTop : 0;
+  if (kb < 50) { s.paddingTop = s.paddingBottom = ""; return; }   // no keyboard up
+  s.paddingTop = `calc(${vv.offsetTop}px + env(safe-area-inset-top))`;
+  s.paddingBottom = `${kb + 2}px`;
+}
+if (vv) { vv.addEventListener("resize", fitKbd); vv.addEventListener("scroll", fitKbd); }
 function refreshSoon() { clearTimeout(screenSoon); screenSoon = setTimeout(loadScreen, 350); }
 function post(kind, payload) {
   const id = current;
