@@ -7277,14 +7277,20 @@ if (data !== null) {{
 
     _TG_MSG_MEMORY = 200
 
-    def _tg_remember_msg(self, msg_id, row_id):
+    @staticmethod
+    def _tg_msg_key(dest, msg_id):
+        # message ids are per chat and per bot: the same number in another
+        # chat is another message, and must not reach this tab
+        return "%s|%s|%s" % (dest[0], dest[1], msg_id)
+
+    def _tg_remember_msg(self, msg_id, row_id, dest):
         """Tie a message to a tab, so a reply to it needs no address."""
         if not msg_id or not row_id:
             return
         seen = getattr(self, "_tg_msg_row", None)
         if seen is None:
             seen = self._tg_msg_row = {}
-        seen[str(msg_id)] = row_id
+        seen[self._tg_msg_key(dest, msg_id)] = row_id
         # Bounded: a chat is a log, and only the recent end of it gets
         # replied to. Oldest first, which is insertion order here.
         while len(seen) > self._TG_MSG_MEMORY:
@@ -7293,8 +7299,8 @@ if (data !== null) {{
     def _tg_replied_row_id(self, msg):
         """The tab a replied-to message was about, or None."""
         parent = (msg or {}).get("reply_to_message") or {}
-        return getattr(self, "_tg_msg_row", {}).get(
-            str(parent.get("message_id")))
+        return getattr(self, "_tg_msg_row", {}).get(self._tg_msg_key(
+            self._tg_dest_now(), parent.get("message_id")))
 
     @staticmethod
     def _tg_auth_ok(msg, chat_id):
@@ -7448,11 +7454,17 @@ if (data !== null) {{
                 and token and chat):
             time.sleep(5)
             return wait
+        dest = (chat, self._tg_bot_key(token))
+        # update ids count per bot: another bot's offset would tell this
+        # one to drop every update below it
+        state = self._tg_load_state()
+        offset = (state.get("offset", 0)
+                  if state.get("offset_bot", dest[1]) == dest[1] else 0)
         started = time.monotonic()
         res, err = self._tg_call(
             token, "getUpdates",
             {"timeout": self._TG_POLL_TIMEOUT,
-             "offset": self._tg_load_state().get("offset", 0),
+             "offset": offset,
              "allowed_updates": json.dumps(["message",
                                             "callback_query"])},
             timeout=self._TG_POLL_TIMEOUT + 10)
@@ -7461,12 +7473,13 @@ if (data !== null) {{
             time.sleep(wait)
             return min(60, wait * 2)
         wait = 5
-        if str(self._tg_load_secrets().get("chat_id") or "") != chat:
-            return wait  # answered for a bot that is no longer the one
+        if self._tg_dest_now() != dest:
+            return wait  # answered for a bot or chat that is no longer the one
         for upd in res or []:
             # Written before the message is acted on, so a message
             # that upsets us is lost rather than replayed for ever.
-            self._tg_save_state(offset=int(upd.get("update_id", 0)) + 1)
+            self._tg_save_state(offset=int(upd.get("update_id", 0)) + 1,
+                                offset_bot=dest[1])
             cb = upd.get("callback_query")
             if cb:
                 # A press carries its own sender and the chat the
@@ -7475,12 +7488,12 @@ if (data !== null) {{
                             "from": cb.get("from")}
                 if self._tg_auth_ok(stand_in, chat):
                     GLib.idle_add(self._tg_on_callback, cb.get("id"),
-                                  cb.get("data") or "")
+                                  cb.get("data") or "", dest)
                 continue
             msg = upd.get("message") or {}
             if not self._tg_auth_ok(msg, chat):
                 continue
-            GLib.idle_add(self._tg_on_message, msg)
+            GLib.idle_add(self._tg_on_message, msg, dest)
         time.sleep(self._tg_poll_gap(time.monotonic() - started))
         return wait
 
@@ -7586,7 +7599,12 @@ if (data !== null) {{
         self._tg_settle_watch(token)
         return False
 
-    def _tg_on_message(self, msg):
+    # A reply older than this is not typed in straight away: it answered
+    # a screen that has long moved on (sent while replies were off, or
+    # while the network was down). It gets the buttons like a new task.
+    _TG_REPLY_FRESH = 600
+
+    def _tg_on_message(self, msg, dest):
         """Answer one message. Runs on the UI thread: GTK is not shared."""
         # Re-read: this was handed over by a poll that may have been in
         # the air for half a minute, and the switch can have gone off in
@@ -7594,6 +7612,8 @@ if (data !== null) {{
         conf = self._load_settings()
         if not (conf.get("telegram_enabled") and conf.get("telegram_reply")):
             return False
+        if dest != self._tg_dest_now():
+            return False  # the chat or bot changed since it was read
         text = (msg.get("text") or "").strip()
         if not text:
             return False
@@ -7603,6 +7623,8 @@ if (data !== null) {{
         # "/deploy", a path -- and reading that as a command answered
         # with the help text instead of sending anything.
         rid = self._tg_replied_row_id(msg)
+        if rid and time.time() - msg.get("date", time.time()) > self._TG_REPLY_FRESH:
+            rid = None
         if rid:
             bad = self._tg_send_task(self._tg_row_by_id(rid), text,
                                      is_answer=True)
@@ -7641,10 +7663,12 @@ if (data !== null) {{
                       markup=self._tg_keyboard(token, targets))
         return False
 
-    def _tg_on_callback(self, cb_id, data):
+    def _tg_on_callback(self, cb_id, data, dest):
         conf = self._load_settings()
         if not (conf.get("telegram_enabled") and conf.get("telegram_reply")):
             return False
+        if dest != self._tg_dest_now():
+            return False  # the chat or bot changed since it was read
         kind, _sep, rest = (data or "").partition(":")
         drafts = getattr(self, "_tg_drafts", None) or {}
         if kind == "x":
@@ -7762,7 +7786,7 @@ if (data !== null) {{
                 # that grows from one thread while another walks it to
                 # trim it is a RuntimeError waiting for a busy day.
                 GLib.idle_add(self._tg_remember_msg,
-                              res.get("message_id"), row_id)
+                              res.get("message_id"), row_id, meant_for)
             if callable(after):
                 GLib.idle_add(after, res.get("message_id"))
 
