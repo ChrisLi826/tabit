@@ -166,6 +166,7 @@ class TestRemoteServer(_ServerCase):
                 ("/api/tabs/a1/close", {}, ("close", "a1", {})),
                 ("/api/tabs/a1/group", {"color": "red"}, ("group", "a1", {"color": "red"})),
                 ("/api/tabs/a1/move", {"delta": 1}, ("move", "a1", {"delta": 1})),
+                ("/api/tabs/a1/rename", {"name": "x"}, ("rename", "a1", {"name": "x"})),
                 ("/api/groups/red", {"collapsed": True}, ("groupop", "red", {"collapsed": True}))):
             self.assertEqual(http_post(path, self.sock, json.dumps(body), ok)[0], 200, path)
             self.assertEqual(self.app.acts.pop(), want, path)
@@ -492,6 +493,24 @@ class TestRemoteCursor(unittest.TestCase):
         lines = ["$ ls"]
         self.assertEqual(tabit.Tabit._remote_cursor(FakeTerm(None), lines), {})
         self.assertEqual(lines, ["$ ls"])
+
+
+class TestRemoteRename(unittest.TestCase):
+
+    def rename(self, kind, name):
+        row = type("Row", (), {"kind": kind})()
+        app = type("App", (), {"_tg_row_by_id": lambda _s, _id: row, "_save_sessions": lambda _s: None,
+                               "_set_tab_name": lambda _s, _r, n: setattr(row, "name", n)})()
+        code, _out = tabit.Tabit._remote_manage_op(app, "rename", "x", {"name": name})
+        return code, getattr(row, "name", None)
+
+    def test_rename(self):
+        self.assertEqual(self.rename("term", "  build  "), (200, "build"))
+        self.assertEqual(self.rename("term", "   "), (400, None))
+        self.assertEqual(self.rename("term", "x" * 81), (400, None))
+
+    def test_unsaved_note_mark_is_not_kept(self):
+        self.assertEqual(self.rename("note", "todo *"), (200, "todo"))
 
 
 class TestTailscaleSetup(unittest.TestCase):

@@ -621,6 +621,8 @@ function tabMenu() {
   const t = tabById(current);
   if (!t) return;
   sheet(`<h3>${esc(t.title || "(untitled)")}</h3>
+    <label for="tname">Name</label><input id="tname" value="${esc(t.title || "")}" maxlength="80">
+    <div class="row"><button id="tsave" class="go">Rename</button></div>
     <label>Group</label><div class="chips" id="tgrp">${colorChips(t.group)}</div>
     <div class="row"><button id="tup">↑ Move up</button><button id="tdown">↓ Move down</button></div>
     <div class="row"><button id="tclose" class="danger">Close tab</button></div>
@@ -628,6 +630,12 @@ function tabMenu() {
   for (const b of $("sheetcard").querySelectorAll("#tgrp .chip")) b.onclick = async () => {
     await manage(`api/tabs/${encodeURIComponent(t.id)}/group`, { color: b.dataset.c || null });
     tabMenu();
+  };
+  $("tsave").onclick = async () => {
+    if (await manage(`api/tabs/${encodeURIComponent(t.id)}/rename`, { name: $("tname").value })) {
+      $("dname").textContent = $("tname").value.trim();
+      unsheet();
+    }
   };
   $("tup").onclick = () => manage(`api/tabs/${encodeURIComponent(t.id)}/move`, { delta: -1 });
   $("tdown").onclick = () => manage(`api/tabs/${encodeURIComponent(t.id)}/move`, { delta: 1 });

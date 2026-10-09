@@ -1604,7 +1604,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             manage = ("new", None)
         elif len(parts) == 3 and parts[:2] == ["api", "groups"]:
             manage = ("groupop", parts[2])
-        elif len(parts) == 4 and parts[:2] == ["api", "tabs"] and parts[3] in ("close", "group", "move"):
+        elif len(parts) == 4 and parts[:2] == ["api", "tabs"] and parts[3] in ("close", "group", "move", "rename"):
             manage = (parts[3], parts[2])
         elif len(parts) == 4 and parts[:2] == ["api", "tabs"] and parts[3] == "ack":
             # a state change, so behind the same checks as typing
@@ -9799,6 +9799,21 @@ if (data !== null) {{
             self.listbox.select_row(row)
             self._focus_row_content(row)
 
+    def _set_tab_name(self, row, name):
+        """Show `name` as the tab's title (a note keeps its unsaved mark)."""
+        if getattr(row, "kind", None) == "note":
+            dirty = row.buffer.get_modified()
+            row.title_text = name + (" *" if dirty else "")
+            row.title_label.set_text(row.title_text)
+        else:
+            row.title_text = name
+            row.title_label.set_text(name)
+        shown = row.title_label.get_text()
+        row.session_label = (f"{shown} {row.sub_text}"
+                             if row.sub_text else shown)
+        if self.listbox.get_selected_row() is row:
+            self.set_title(f"{row.session_label} — tabit")
+
     def _rename_session(self, row=None):
         """Rename in a popover bubble anchored to the right of the tab."""
         row = row or self.listbox.get_selected_row()
@@ -9927,18 +9942,7 @@ if (data !== null) {{
                         row.subtitle.show()
 
             if name:
-                if getattr(row, "kind", None) == "note":
-                    dirty = row.buffer.get_modified()
-                    row.title_text = name + (" *" if dirty else "")
-                    row.title_label.set_text(row.title_text)
-                else:
-                    row.title_text = name
-                    row.title_label.set_text(name)
-                shown = row.title_label.get_text()
-                row.session_label = (f"{shown} {row.sub_text}"
-                                     if row.sub_text else shown)
-                if self.listbox.get_selected_row() is row:
-                    self.set_title(f"{row.session_label} — tabit")
+                self._set_tab_name(row, name)
             self._save_sessions()
             pop.popdown()
 
@@ -10786,6 +10790,18 @@ if (data !== null) {{
             if color is not None and color not in GROUP_COLORS:
                 return 400, {"error": "unknown group colour"}
             self._remote_set_group(row, color)
+            return 200, {"ok": True}
+        if op == "rename":
+            name = body.get("name")
+            if not isinstance(name, str) or not 0 < len(name.strip()) <= 80:
+                return 400, {"error": "name of 1 to 80 characters"}
+            name = name.strip()
+            if getattr(row, "kind", None) == "note" and name.endswith(" *"):
+                name = name[:-2].rstrip()   # the unsaved mark, as the desk drops it
+            if not name:
+                return 400, {"error": "name of 1 to 80 characters"}
+            self._set_tab_name(row, name)
+            self._save_sessions()
             return 200, {"ok": True}
         if op == "move":
             delta = body.get("delta")
