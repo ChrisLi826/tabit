@@ -86,6 +86,9 @@
   #attach { padding: 0 10px; font-size: 18px; background: var(--panel); color: var(--fg);
             border: 1px solid var(--line); font-weight: 400; }
   #kbdbtn.on { background: var(--blue); color: #111; }
+  /* the terminal cursor, shown in keyboard mode */
+  #detail:has(#kbdbtn.on) #screen .cur { background: var(--fg); color: var(--bg); animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { background: transparent; color: inherit; } }
   /* at the top, so iOS has no reason to scroll the view to show it */
   #kbd { position: absolute; left: 0; top: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; }
   #detail.dropping #screen { outline: 2px dashed var(--blue); outline-offset: -4px; }
@@ -386,6 +389,35 @@ function color256(n) {
   return `rgb(${lv[Math.floor(n / 36)]},${lv[Math.floor(n / 6) % 6]},${lv[n % 6]})`;
 }
 
+// cells a character takes in a terminal: 2 for CJK and emoji, else 1
+const WIDE = /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6\u{1F300}-\u{1FAFF}\u{20000}-\u{3FFFD}]/u;
+// Mark the cursor cell with \uE000 ... \uE001 (ansiToHtml turns them into
+// a span). cx, cy: cell and row among the last `rows` lines: for tmux the
+// visible pane, for a plain tab the cursor's line and those under it (cy 0).
+// Trailing empty lines go, but never the cursor's own line.
+function withCursor(ansi, rows, cur) {
+  // the marks are ours alone: the same characters in real output are blanked
+  const lines = ansi.replace(/[\uE000\uE001]/g, " ").replace(/\n$/, "").split("\n");
+  let last = lines.length - 1;
+  while (last >= 0 && !lines[last]) last--;
+  if (!cur) return lines.slice(0, last + 1).join("\n");
+  const [cx, cy] = cur, at = lines.length - rows + cy;
+  if (at < 0 || at >= lines.length) return lines.slice(0, last + 1).join("\n");
+  let out = "", cell = 0, done = false;
+  for (const part of lines[at].split(/(\x1b\[[0-9;:]*[A-Za-z])/)) {
+    if (done || part.startsWith("\x1b[")) { out += part; continue; }
+    for (const ch of part) {
+      const w = /\p{M}/u.test(ch) ? 0 : WIDE.test(ch) ? 2 : 1;
+      if (!done && w && cx < cell + w) { out += `\uE000${ch}\uE001`; done = true; }
+      else out += ch;
+      cell += w;
+    }
+  }
+  if (!done) out += " ".repeat(Math.max(0, cx - cell)) + "\uE000 \uE001";
+  lines[at] = out;
+  return lines.slice(0, Math.max(last, at) + 1).join("\n");
+}
+
 function ansiToHtml(text) {
   let st = {}, html = "";
   const style = () => {
@@ -418,7 +450,10 @@ function ansiToHtml(text) {
       }
     } else if (part) {
       const css = style();
-      html += css ? `<span style="${css}">${linkify(esc(part))}</span>` : linkify(esc(part));
+      // the cursor cell (marked by withCursor) is its own span, outside any link
+      const run = part.split(/\uE000([^]*?)\uE001/)
+        .map((x, i) => (i % 2 ? `<span class="cur">${esc(x)}</span>` : linkify(esc(x)))).join("");
+      html += css ? `<span style="${css}">${run}</span>` : run;
     }
   }
   return html;
@@ -448,19 +483,20 @@ async function loadScreen() {
     const pre = $("screen"), atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
     const fromBottom = pre.scrollHeight - pre.scrollTop;     // to stay put on a refresh
     // unchanged: leave the DOM alone (battery, and a selection survives)
-    const sig = (body.ansi !== undefined ? "a" + body.cols + body.ansi : "l" + body.lines.join("\n")) + fit;
+    const sig = (body.ansi !== undefined ? "a" + body.cols + body.cursor + body.rows + body.ansi
+                                         : "l" + body.cursor + body.rows + body.lines.join("\n")) + fit;
     if (sig === lastScreen) return;
     lastScreen = sig;
     findWraps(body.ansi !== undefined
       ? body.ansi.replace(/\x1b\[[0-9;:]*[A-Za-z]/g, "").split("\n") : body.lines);
     if (body.ansi !== undefined) {
       pre.classList.add("ansi");
-      pre.innerHTML = `<div class="term">${ansiToHtml(body.ansi.replace(/\n+$/, ""))}</div>`;   // escaped run by run
+      pre.innerHTML = `<div class="term">${ansiToHtml(withCursor(body.ansi, body.rows, body.cursor))}</div>`;   // escaped run by run
       sizeScreen(body.cols);
     } else {
       pre.classList.remove("ansi", "fit");
       pre.style.fontSize = "";
-      pre.innerHTML = `<div class="term">${linkify(esc(body.lines.join("\n")))}</div>`;
+      pre.innerHTML = `<div class="term">${ansiToHtml(withCursor(body.lines.join("\n") + "\n", body.rows, body.cursor))}</div>`;
     }
     // follow the output at the bottom; reading history, stay where you were
     if (atEnd && !back) pre.scrollTop = pre.scrollHeight;

@@ -10920,15 +10920,43 @@ if (data !== null) {{
         row = self._tg_row_by_id(rid)
         if row is None or getattr(row, "kind", None) != "term":
             return 404, {"error": "no such terminal tab"}, None
-        text = self._term_tail_text(getattr(row, "term", None), 60)
+        term = getattr(row, "term", None)
+        text = self._term_tail_text(term, 60)
         out = {"id": rid, "title": getattr(row, "title_text", "") or "",
                "ai_status": getattr(row, "agent_status", None) or "unknown",
                "lines": text.rstrip().splitlines()[-60:]}
+        out.update(self._remote_cursor(term, out["lines"]))
         return 200, out, (self._row_tmux_session(row) if color else None)
 
     @staticmethod
+    def _remote_cursor(term, lines):
+        """The cursor for a plain tab's text, as the phone page reads it:
+        cursor [col, 0] on the line `rows` from the end. When the cursor
+        row is blank and the last one, an empty line is added for it."""
+        try:
+            col, crow = (int(v) for v in term.get_cursor_position())
+            end_col = max(0, int(term.get_column_count()) - 1)
+            end_row = crow + max(16, int(term.get_row_count()))
+            try:
+                text, _attrs = term.get_text_range(crow, 0, end_row, end_col, None)
+            except TypeError:               # older VTE, as in _term_tail_text
+                text, _attrs = term.get_text_range(
+                    crow, 0, end_row, end_col, lambda *_a: False)
+        except Exception:
+            return {}
+        if text is None:                    # could not read: no cursor, not a wrong one
+            return {}
+        rows = text.splitlines()
+        while rows and not rows[-1].strip():
+            rows.pop()
+        if not rows:                        # on a blank last line
+            lines.append("")
+        return {"cursor": [col, 0], "rows": max(1, len(rows))}
+
+    @staticmethod
     def _tmux_pane_ansi(name, back=0):
-        """`capture-pane -e` (text + SGR codes only) and the pane size, or None.
+        """`capture-pane -e` (text + SGR codes only), the pane size and the
+        cursor, or None.
 
         back: also this many lines of scrollback above the visible pane
         (agents draw inline, so their old output is in tmux's history).
@@ -10936,7 +10964,7 @@ if (data !== null) {{
         try:
             size = subprocess.run(
                 ["tmux", "display-message", "-p", "-t", name,
-                 "#{pane_width} #{pane_height}"],
+                 "#{pane_width} #{pane_height} #{cursor_x} #{cursor_y} #{cursor_flag}"],
                 capture_output=True, text=True, timeout=2).stdout.split()
             cmd = ["tmux", "capture-pane", "-p", "-e", "-t", name]
             if back > 0:
@@ -10944,7 +10972,11 @@ if (data !== null) {{
             ansi = subprocess.run(cmd, capture_output=True, timeout=3).stdout
             # keep the newest part if it is huge
             return {"ansi": ansi[-600000:].decode("utf-8", "replace"),
-                    "cols": int(size[0]), "rows": int(size[1]), "back": back}
+                    "cols": int(size[0]), "rows": int(size[1]), "back": back,
+                    # where the cursor is in the visible pane; None when the
+                    # program hides it (agents draw their own)
+                    "cursor": ([int(size[2]), int(size[3])]
+                               if size[4:5] == ["1"] else None)}
         except (OSError, ValueError, IndexError, subprocess.SubprocessError):
             return None
 

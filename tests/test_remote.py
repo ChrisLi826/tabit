@@ -457,6 +457,43 @@ if sys.argv[1:2] == ["is-active"]:
 """
 
 
+class FakeTerm:
+    """A VTE terminal: cursor at (col, row) and what the rows from it read."""
+    def __init__(self, text, col=4, row=10):
+        self.text, self.pos = text, (col, row)
+
+    def get_cursor_position(self):
+        return self.pos
+
+    def get_column_count(self):
+        return 80
+
+    def get_row_count(self):
+        return 24
+
+    def get_text_range(self, *_a):
+        return self.text, None
+
+
+class TestRemoteCursor(unittest.TestCase):
+
+    def test_cursor_counts_lines_from_its_row(self):
+        lines = ["old", "$ ", "status bar"]
+        out = tabit.Tabit._remote_cursor(FakeTerm("$ \n\nstatus bar\n\n"), lines)
+        self.assertEqual(out, {"cursor": [4, 0], "rows": 3})
+        self.assertEqual(lines, ["old", "$ ", "status bar"])
+
+    def test_blank_last_row_gets_a_line(self):
+        lines = ["$ ls", "a b"]
+        out = tabit.Tabit._remote_cursor(FakeTerm("\n\n"), lines)
+        self.assertEqual((out["rows"], lines), (1, ["$ ls", "a b", ""]))
+
+    def test_failed_read_gives_no_cursor(self):
+        lines = ["$ ls"]
+        self.assertEqual(tabit.Tabit._remote_cursor(FakeTerm(None), lines), {})
+        self.assertEqual(lines, ["$ ls"])
+
+
 class TestTailscaleSetup(unittest.TestCase):
     """_tailscale_prepare against a fake tailscale: what it asks, runs and
     opens. Counts matter here: a retry every minute must never nag."""
