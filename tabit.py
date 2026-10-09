@@ -6546,12 +6546,17 @@ if (data !== null) {{
             os.chmod(TELEGRAM_FILE, 0o600)
         except OSError:
             pass
-        fd = os.open(TELEGRAM_FILE,
-                     os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # a new file, then one rename: a crash halfway must not leave an
+        # empty file that the next Save turns into "no token" for good
+        tmp = TELEGRAM_FILE + ".new"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
             json.dump({"bot_token": (token or "").strip(),
                        "chat_id": (chat_id or "").strip()}, f, indent=2)
-        os.chmod(TELEGRAM_FILE, 0o600)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, TELEGRAM_FILE)
 
     @classmethod
     def _tg_api_url(cls, token, method):
@@ -6931,9 +6936,16 @@ if (data !== null) {{
             # O_NOFOLLOW: the path is written into the agent's own prompt,
             # and a link left there pointing at, say, telegram.json would
             # otherwise be read and uploaded as the answer.
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-            with os.fdopen(fd) as f:
-                body = f.read()
+            # O_NONBLOCK, a plain file, one link, a capped read: a FIFO left
+            # there would freeze tabit, a hard link to telegram.json would
+            # upload it, and a huge log would fill memory (chunks cut it
+            # to a few messages anyway).
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as f:
+                st = os.fstat(f.fileno())
+                if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                    return False
+                body = f.read(256 * 1024).decode("utf-8", "replace")
         except OSError:
             return False
         chunks = self._tg_chunks(body)
@@ -7026,6 +7038,15 @@ if (data !== null) {{
                 return
             waiting.pop(token, None)
             self._tg_save_jobs()
+            if not self._load_settings().get("telegram_quote"):
+                # the screen is only sent when quoting is on: it can hold
+                # anything, keys included
+                self._tg_send(
+                    "%s finished without writing a reply. Its screen is in "
+                    "the tab." % job["name"],
+                    row_id=rid, reply_to=job["msg_id"],
+                    dest=self._tg_job_dest(job))
+                return
             lines = self._tg_quote_lines(
                 self._term_tail_text(getattr(row, "term", None), 20), want=5)
             self._tg_send(
@@ -7048,9 +7069,16 @@ if (data !== null) {{
         A file written while the agent keeps working would otherwise wait
         for a status change that may be a long way off.
         """
-        os.makedirs(TELEGRAM_REPLY_DIR, exist_ok=True)
+        try:
+            os.makedirs(TELEGRAM_REPLY_DIR, exist_ok=True)
+            names = os.listdir(TELEGRAM_REPLY_DIR)
+        except OSError as e:
+            # e.g. a file where the folder should be: no answers by file,
+            # but tabit still starts
+            print(f"[telegram] reply folder: {e}", file=sys.stderr)
+            return
         owed = self._tg_jobs()
-        for name in os.listdir(TELEGRAM_REPLY_DIR):
+        for name in names:
             # An answer written while tabit was restarting is still an
             # answer: the agent is in tmux and never stopped. Only files
             # nobody is waiting for go.
@@ -7507,6 +7535,10 @@ if (data !== null) {{
         bad = self._tg_row_trouble(row)
         if bad is not None:
             return bad
+        if not self._tg_safe_text(text).strip():
+            # only control characters: typing nothing and then an Enter
+            # would answer whatever prompt the agent is showing
+            return "nothing to type in that message"
         token = self._tg_draft_token()
         ask = (bool(self._load_settings().get("telegram_ask_file", True))
                and not is_answer
@@ -11120,7 +11152,8 @@ if (data !== null) {{
             return 409, {"error": why}
         if action == "send":
             text = body.get("text")
-            if not isinstance(text, str) or not text.strip() or len(text) > 8000:
+            if (not isinstance(text, str) or not self._tg_safe_text(text).strip()
+                    or len(text) > 8000):
                 return 400, {"error": "text must be 1..8000 characters"}
             self._tg_inject(row, text)
         elif action == "type":
@@ -15012,8 +15045,13 @@ if (data !== null) {{
                                      "term_font_size": t_sz,
                                      "term_line_spacing": t_line_spacing,
                                      "sidebar_position": side_id})
+                old_tg = self._tg_load_secrets()
                 self._tg_save_secrets(tg_token.get_text(),
                                       tg_chat.get_text())
+                if old_tg != self._tg_load_secrets():
+                    # message ids are per chat: an old id must not send a
+                    # reply in the new chat to the tab it meant before
+                    self._tg_msg_row = {}
                 self._remote_fresh()            # Save is a fresh go: may ask again
                 self._remote_sync()
                 self._sidebar_position = side_id
