@@ -1536,6 +1536,29 @@ DEFAULT_SETTINGS = {
 }
 
 
+def _write_json(path, obj):
+    """Write JSON so a crash halfway never leaves a half file: a new file
+    next to it, then one rename over the old one."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".new"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _set_aside(path):
+    """A file that does not parse is kept as <path>.broken, so the next
+    save cannot write over the only copy (it may be a hand edit)."""
+    try:
+        os.replace(path, path + ".broken")
+        print(f"[tabit] {path} does not parse; kept as {path}.broken",
+              file=sys.stderr)
+    except OSError:
+        pass
+
+
 class _RemoteServer(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
 
@@ -2269,7 +2292,10 @@ class Tabit(Gtk.Window):
             with open(SESSIONS_FILE) as f:
                 data = json.load(f)
             return data if isinstance(data, list) else []
-        except (OSError, ValueError):
+        except ValueError:
+            _set_aside(SESSIONS_FILE)
+            return []
+        except OSError:
             return []
 
     def _on_term_spawned(self, _term, pid, _error, row):
@@ -2341,9 +2367,7 @@ class Tabit(Gtk.Window):
             if getattr(r, "ai_hunt", False):
                 entry["hunt"] = True
             data.append(entry)
-        os.makedirs(os.path.dirname(SESSIONS_FILE), exist_ok=True)
-        with open(SESSIONS_FILE, "w") as f:
-            json.dump(data, f, indent=2)
+        _write_json(SESSIONS_FILE, data)
 
     def _save_sessions_soon(self):
         # key-repeat can fire many moves; coalesce disk writes
@@ -13848,17 +13872,17 @@ if (data !== null) {{
                 raw = json.load(f)
             if isinstance(raw, dict):
                 data.update(raw)
-        except (OSError, ValueError):
+        except ValueError:
+            _set_aside(SETTINGS_FILE)
+        except OSError:
             pass
         return data
 
     @staticmethod
     def _save_settings(data):
-        os.makedirs(CONFIG_DIR, exist_ok=True)
         cur = Tabit._load_settings()
         cur.update(data)
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(cur, f, indent=2)
+        _write_json(SETTINGS_FILE, cur)
 
     def _apply_note_wrap_setting(self, wrap_on):
         mode = Gtk.WrapMode.WORD_CHAR if wrap_on else Gtk.WrapMode.NONE
