@@ -20,7 +20,6 @@ import hashlib
 import glob
 import html as html_module
 import json
-import math
 import os
 import stat
 import random
@@ -917,7 +916,7 @@ def get_theme_colors(theme_key):
 def get_theme_css(theme_key):
     s = get_theme_colors(theme_key)
     settings = Tabit._load_settings()
-    ui_sz = settings.get("ui_font_size", 10)
+    ui_sz = min(24, max(6, int(settings.get("ui_font_size", 10))))
     sz_sub = max(6, ui_sz - 2)
     sz_btn = max(7, ui_sz - 1)
     css_text = f"""
@@ -14133,8 +14132,9 @@ if (data !== null) {{
                 def fits(d, v):
                     if isinstance(d, bool) or not isinstance(d, num):
                         return isinstance(v, type(d))
+                    # NaN fails both sides; a huge int never becomes float
                     return (isinstance(v, num) and not isinstance(v, bool)
-                            and math.isfinite(v))
+                            and -1e9 < v < 1e9)
                 data.update({k: v for k, v in raw.items()
                              if k not in DEFAULT_SETTINGS
                              or fits(DEFAULT_SETTINGS[k], v)})

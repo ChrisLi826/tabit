@@ -86,14 +86,14 @@ class TestPasswordFileMode(_Base):
 
 
 class TestSettingsWrongType(_Base):
-    def test_true_or_nan_for_a_number_reads_as_default(self):
+    def test_true_nan_or_huge_for_a_number_reads_as_default(self):
+        huge = "1" + "0" * 400          # json reads it; float() cannot
         with open(tabit.SETTINGS_FILE, "w") as f:
             f.write('{"ui_font_size": true, "split_pos": NaN, '
-                    '"term_line_spacing": Infinity, "ui_font_size_x": 1}')
+                    '"term_line_spacing": Infinity, "term_font_size": %s}' % huge)
         s = tabit.Tabit._load_settings()
-        for k in ("ui_font_size", "term_line_spacing"):
+        for k in ("ui_font_size", "split_pos", "term_line_spacing", "term_font_size"):
             self.assertEqual(s[k], tabit.DEFAULT_SETTINGS[k])
-        self.assertEqual(s["split_pos"], 0)
 
     def test_a_good_number_is_kept(self):
         with open(tabit.SETTINGS_FILE, "w") as f:
