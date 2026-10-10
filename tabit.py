@@ -750,7 +750,9 @@ REMOTE_FILE_TEXT = {
     ".rs", ".java", ".lua", ".mk", ".cmake", ".html", ".htm"}
 REMOTE_FILE_IMAGE = {".png": "image/png", ".jpg": "image/jpeg",
                      ".jpeg": "image/jpeg", ".gif": "image/gif",
-                     ".webp": "image/webp"}
+                     ".webp": "image/webp",
+                     # may hold a script: safe only under _file_send's sandbox CSP
+                     ".svg": "image/svg+xml"}
 REMOTE_FILE_DENY_DIRS = {".ssh", ".gnupg", ".password-store", ".aws", ".codex",
                          ".kube", ".docker", ".mozilla", ".thunderbird",
                          "keyrings", ".pki"}
@@ -1839,8 +1841,8 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         except OSError as e:
             return self._file_err(404, e.strerror or "cannot read it")
         ext = os.path.splitext(real)[1].lower()
-        if ext in REMOTE_FILE_IMAGE:
-            return self._file_send(REMOTE_FILE_IMAGE[ext], data)
+        if ext in REMOTE_FILE_IMAGE and (render or ext != ".svg"):
+            return self._file_send(REMOTE_FILE_IMAGE[ext], data)    # txt: an svg's source
         text = data.decode("utf-8", "replace")
         if render and ext in (".md", ".markdown") and HAS_MARKDOWN:
             # YAML front matter reads better as the block it is

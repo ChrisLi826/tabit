@@ -2,6 +2,7 @@
 """Remote page server: routes and the SSE stream, on a real unix socket."""
 import json
 import os
+import re
 import socket
 import sys
 import tempfile
@@ -335,6 +336,22 @@ class TestRemoteFiles(_ServerCase):
             self.assertEqual(got, code, path)
             self.assertNotIn(b"root:", body)
             self.assertIn("Content-Security-Policy: sandbox", head)
+
+    def test_svg_shows_but_its_script_cannot_run(self):
+        svg = os.path.join(self.dir.name, "logo.svg")
+        with open(svg, "w") as f:
+            f.write('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script>'
+                    '<rect width="9" height="9"/></svg>')
+        code, head, body = self.get(svg, render=True)
+        self.assertEqual(code, 200)
+        self.assertIn("Content-Type: image/svg+xml", head)
+        csp = re.search(r"Content-Security-Policy: (.*)", head).group(1)
+        self.assertTrue(csp.startswith("sandbox;"))            # no allow-scripts
+        self.assertIn("default-src 'none'", csp)                # and nothing loads
+        self.assertNotIn("script-src", csp)
+        code, head, body = self.get(svg)                        # txt: the source
+        self.assertIn("text/plain", head)
+        self.assertTrue(body.startswith(b"<svg"))
 
     def test_a_name_with_token_inside_opens(self):
         self.assertEqual(self.get(os.path.join(self.dir.name, "tokenizer.py"))[0], 200)
