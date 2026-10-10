@@ -1787,6 +1787,11 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         roots = [home, os.path.realpath("/tmp")]
         if not any(os.path.commonpath([real, r]) == r for r in roots):
             return "only files under your home or /tmp"
+        conf = os.path.realpath(CONFIG_DIR)
+        if os.path.commonpath([real, conf]) == conf:
+            # tabit's own state: connect_last.json and the argv in
+            # sessions.json can hold passwords
+            return "that folder holds keys or passwords"
         parts = real.split(os.sep)
         if any(p in REMOTE_FILE_DENY_DIRS for p in parts) or any(
                 a == ".config" and b in REMOTE_FILE_DENY_CONFIG

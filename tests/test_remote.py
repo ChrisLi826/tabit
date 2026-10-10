@@ -530,6 +530,13 @@ class TestRemoteFileDeny(unittest.TestCase):
         self.assertTrue(why(os.path.join(home, ".grok", "auth.json")))
         self.assertIsNone(why(os.path.join(home, "notes", "oauth-plan.md")))
 
+    def test_tabit_own_state(self):
+        # connect_last.json and the argv in sessions.json can hold passwords
+        why = tabit._RemoteHandler._file_problem
+        conf = os.path.realpath(tabit.CONFIG_DIR)
+        self.assertTrue(why(os.path.join(conf, "connect_last.json")))
+        self.assertTrue(why(os.path.join(conf, "sessions.json")))
+
 
 class TestRemoteGroupColour(unittest.TestCase):
     """Recolour a group, and make one of the tabs without a group."""

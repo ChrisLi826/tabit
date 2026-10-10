@@ -528,12 +528,13 @@ function sizeScreen(cols) {
   pre.style.fontSize = fit && cols ? `${Math.max(5, Math.min(14, (pre.clientWidth - 18) / (cols * 0.6)))}px` : "";
 }
 
-let screenGen = 0;
+let screenGen = 0, screenBusy = 0;
 async function loadScreen() {
   if (!current) return;
   // only the newest request for the open tab may paint: a slow answer for
   // the tab you just left must not show under this one's title
   const id = current, gen = ++screenGen;
+  screenBusy = Date.now();
   try {
     const res = await fetch(`api/tabs/${encodeURIComponent(id)}/screen?color=1&back=${back}`, { cache: "no-store" });
     const body = await res.json();
@@ -564,12 +565,17 @@ async function loadScreen() {
     $("latest").disabled = !back;
     $("earlier").disabled = body.ansi === undefined || back >= BACK_MAX;
   } catch (e) { dmsg(`screen: ${e.message || e}`, true); }
+  finally { if (gen === screenGen) screenBusy = 0; }
 }
 
 function screenEvery() { return back ? 10000 : 3000; }   // history is bigger: refresh less
 function restartScreenTimer() {
   clearInterval(screenTimer);
-  screenTimer = setInterval(() => { if (document.visibilityState === "visible") loadScreen(); }, screenEvery());
+  // one poll at a time: on a slow link a new tick would void the answer
+  // still on its way, and none would ever paint (20 s: a lost one gives up)
+  screenTimer = setInterval(() => {
+    if (document.visibilityState === "visible" && Date.now() - screenBusy > 20000) loadScreen();
+  }, screenEvery());
 }
 
 const markCur = () => {
