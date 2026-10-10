@@ -1561,14 +1561,18 @@ def _write_json(path, obj):
 
 def _set_aside(path):
     """A file that does not parse is kept as <path>.broken, so the next
-    save cannot write over the only copy (it may be a hand edit)."""
+    save cannot write over the only copy (it may be a hand edit).
+    False when it could not be moved: the caller must not save over it."""
     path = os.path.realpath(path)
     try:
         os.replace(path, path + ".broken")
         print(f"[tabit] {path} does not parse; kept as {path}.broken",
               file=sys.stderr)
-    except OSError:
-        pass
+        return True
+    except OSError as e:
+        print(f"[tabit] {path} does not parse and cannot be moved ({e}); "
+              "it will not be saved this run", file=sys.stderr)
+        return False
 
 
 class _RemoteServer(socketserver.ThreadingUnixStreamServer):
@@ -2323,10 +2327,12 @@ class Tabit(Gtk.Window):
                 data = json.load(f)
             if isinstance(data, list):
                 return data
-            _set_aside(SESSIONS_FILE)       # JSON, but not a tab list
+            if not _set_aside(SESSIONS_FILE):   # JSON, but not a tab list
+                Tabit._sessions_unreadable = True
             return []
         except ValueError:
-            _set_aside(SESSIONS_FILE)
+            if not _set_aside(SESSIONS_FILE):
+                Tabit._sessions_unreadable = True
             return []
         except FileNotFoundError:
             return []
@@ -2398,6 +2404,8 @@ class Tabit(Gtk.Window):
                 entry["track_cwd"] = True
                 entry["sub"] = ""  # sub is the live cwd; recompute on reload
             cwd = self._term_cwd(r)
+            if cwd is None and getattr(r, "dead", False):
+                cwd = getattr(r, "_cwd_saved", None)    # no /proc for it now
             wanted = getattr(r, "_cwd_wanted", None)
             if wanted and cwd in (None, GLib.get_home_dir()):
                 cwd = wanted
@@ -2751,6 +2759,7 @@ class Tabit(Gtk.Window):
         # started in home for now (its folder is on a disk not mounted):
         # save the folder it wants until it really moves somewhere else
         row._cwd_wanted = cwd if cwd and workdir != cwd else None
+        row._cwd_saved = cwd
         term.connect("child-exited", self._on_child_exited, row)
         term.connect("contents-changed", self._on_activity, row)
         if _is_ai_icon(icon_name):
@@ -3524,7 +3533,7 @@ function renderTree(obj, path = "", keyName = "") {{
     let html = `<span class="collapsible" onclick="toggle(this)">[</span><span class="item-count" onclick="toggle(this)">${{obj.length}} items</span><div class="content tree-node">`;
     obj.forEach((item, idx) => {{
       const currentPath = path ? `${{path}}[${{idx}}]` : `[${{idx}}]`;
-      html += `<div class="tree-line"><span class="key" title="Click to copy path: ${{currentPath}}" onclick="copyPath('${{currentPath}}')">[${{idx}}]</span><span style="margin: 0 4px; color: #565f89;">:</span> ${{renderTree(item, currentPath, '')}}</div>`;
+      html += `<div class="tree-line"><span class="key" title="Click to copy path: ${{escapeHtml(currentPath)}}" data-path="${{escapeHtml(currentPath)}}" onclick="copyPath(this.dataset.path)">[${{idx}}]</span><span style="margin: 0 4px; color: #565f89;">:</span> ${{renderTree(item, currentPath, '')}}</div>`;
     }});
     html += `</div><span class="bracket">]</span>`;
     return html;
@@ -3537,7 +3546,7 @@ function renderTree(obj, path = "", keyName = "") {{
     keys.forEach(k => {{
       const currentPath = path ? `${{path}}.${{k}}` : k;
       const kLineAttr = (lineMap[k]) ? `data-line="${{lineMap[k]}}"` : '';
-      html += `<div class="tree-line" ${{kLineAttr}}><span class="key" title="Click to copy path: ${{currentPath}}" onclick="copyPath('${{currentPath}}')">${{escapeHtml(k)}}</span><span style="margin: 0 4px; color: #565f89;">:</span> ${{renderTree(obj[k], currentPath, k)}}</div>`;
+      html += `<div class="tree-line" ${{kLineAttr}}><span class="key" title="Click to copy path: ${{escapeHtml(currentPath)}}" data-path="${{escapeHtml(currentPath)}}" onclick="copyPath(this.dataset.path)">${{escapeHtml(k)}}</span><span style="margin: 0 4px; color: #565f89;">:</span> ${{renderTree(obj[k], currentPath, k)}}</div>`;
     }});
     html += `</div><span class="bracket">}}</span>`;
     return html;
@@ -3548,7 +3557,7 @@ function renderTree(obj, path = "", keyName = "") {{
 
 function escapeHtml(str) {{
   if (typeof str !== "string") str = String(str);
-  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }}
 function toggle(el) {{
   if (!el) return;
@@ -5130,8 +5139,13 @@ if (data !== null) {{
         # peeks/header aggregates (also scheduled from _refresh_ai_status_widgets)
         self._schedule_ai_summary_refresh()
         # forget names / collapse flags of colors no longer in use
-        if not getattr(self, "_restoring_sessions", False):
-            # forget names / collapse flags of colors no longer in use
+        # (not when the tab list could not be read: its groups are not here)
+        if not (getattr(self, "_restoring_sessions", False)
+                or getattr(self, "_sessions_unreadable", False)):
+            # tabs not restored keep their group: their colors stay in use
+            emitted = set(emitted) | {
+                s.get("color") for s in getattr(self, "_unrestored", [])
+                if isinstance(s, dict)}
             pruned = False
             for c in list(self._group_names):
                 if c not in emitted:
@@ -14081,10 +14095,11 @@ if (data !== null) {{
                                  and not isinstance(DEFAULT_SETTINGS[k], bool)
                                  and isinstance(v, num)
                                  and not isinstance(v, bool))})
-            else:
-                _set_aside(SETTINGS_FILE)   # JSON, but not settings
+            elif not _set_aside(SETTINGS_FILE):   # JSON, but not settings
+                Tabit._settings_unreadable = True
         except ValueError:
-            _set_aside(SETTINGS_FILE)
+            if not _set_aside(SETTINGS_FILE):
+                Tabit._settings_unreadable = True
         except FileNotFoundError:
             pass
         except OSError as e:
