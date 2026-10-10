@@ -80,13 +80,13 @@ class TestNoteClosePrompt(unittest.TestCase):
 class TestPreviewLinks(unittest.TestCase):
     """A link clicked in a note preview opens in the browser, not in the pane."""
 
-    def _click(self, uri, here="file:///home/u/notes/"):
+    def _click(self, uri, here="file:///home/u/notes/", kind="LINK_CLICKED"):
         if not tabit.HAS_WEBKIT:
             self.skipTest("no WebKit2")
         W = tabit.WebKit2
         decision = unittest.mock.Mock()
         action = decision.get_navigation_action.return_value
-        action.get_navigation_type.return_value = W.NavigationType.LINK_CLICKED
+        action.get_navigation_type.return_value = getattr(W.NavigationType, kind)
         action.get_request.return_value.get_uri.return_value = uri
         wv = unittest.mock.Mock()
         wv.get_uri.return_value = here
@@ -106,6 +106,17 @@ class TestPreviewLinks(unittest.TestCase):
         self.assertFalse(took)
         decision.ignore.assert_not_called()
         win._open_uri.assert_not_called()
+
+    def test_a_refresh_tag_or_iframe_loads_no_site(self):
+        took, decision, win = self._click("https://example.com/x", kind="OTHER")
+        self.assertTrue(took)
+        decision.ignore.assert_called_once()
+        win._open_uri.assert_not_called()
+
+    def test_the_note_itself_still_loads(self):
+        took, decision, _ = self._click("file:///home/u/notes/a.md", kind="OTHER")
+        self.assertFalse(took)
+        decision.ignore.assert_not_called()
 
 
 if __name__ == "__main__":

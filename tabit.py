@@ -20,6 +20,7 @@ import hashlib
 import glob
 import html as html_module
 import json
+import math
 import os
 import stat
 import random
@@ -2015,9 +2016,12 @@ class Tabit(Gtk.Window):
         self._marked = set()  # rows Ctrl+clicked for a group action
         settings = self._load_settings()
         gn = settings.get("group_names", {})
-        self._group_names = dict(gn) if isinstance(gn, dict) else {}
+        self._group_names = ({k: v for k, v in gn.items()
+                              if isinstance(v, str)}
+                             if isinstance(gn, dict) else {})
         cg = settings.get("collapsed_groups", [])
-        self._collapsed_groups = set(cg) if isinstance(cg, list) else set()
+        self._collapsed_groups = ({c for c in cg if isinstance(c, str)}
+                                  if isinstance(cg, list) else set())
 
         self.sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         self.sidebar.get_style_context().add_class("sidebar")
@@ -2435,7 +2439,8 @@ class Tabit(Gtk.Window):
             data.append(entry)
         # entries the restore could not open stay as they were
         data += getattr(self, "_unrestored", [])
-        _write_json(SESSIONS_FILE, data)
+        # private: a + Connect tab's command line holds its password
+        _write_json(SESSIONS_FILE, data, mode=0o600)
 
     def _save_sessions_soon(self):
         # key-repeat can fire many moves; coalesce disk writes
@@ -13877,9 +13882,13 @@ if (data !== null) {{
         if dtype != WebKit2.PolicyDecisionType.NAVIGATION_ACTION:
             return False
         action = decision.get_navigation_action()
-        if action.get_navigation_type() != WebKit2.NavigationType.LINK_CLICKED:
-            return False
         uri = action.get_request().get_uri() or ""
+        if action.get_navigation_type() != WebKit2.NavigationType.LINK_CLICKED:
+            # a refresh tag or an iframe in the note must not load a site
+            if uri.split(":", 1)[0].lower() in ("http", "https"):
+                decision.ignore()
+                return True
+            return False
         here = (webview.get_uri() or "").partition("#")[0]
         if here and uri.partition("#")[0] == here:
             return False                    # an anchor in this note: scroll
@@ -14118,14 +14127,17 @@ if (data !== null) {{
             if isinstance(raw, dict):
                 # a hand edit of the wrong type ("11" for a size) would
                 # crash every start: such a value reads as the default
+                # (true is an int to Python, NaN is a float: neither a size)
                 num = (int, float)
+
+                def fits(d, v):
+                    if isinstance(d, bool) or not isinstance(d, num):
+                        return isinstance(v, type(d))
+                    return (isinstance(v, num) and not isinstance(v, bool)
+                            and math.isfinite(v))
                 data.update({k: v for k, v in raw.items()
                              if k not in DEFAULT_SETTINGS
-                             or isinstance(v, type(DEFAULT_SETTINGS[k]))
-                             or (isinstance(DEFAULT_SETTINGS[k], num)
-                                 and not isinstance(DEFAULT_SETTINGS[k], bool)
-                                 and isinstance(v, num)
-                                 and not isinstance(v, bool))})
+                             or fits(DEFAULT_SETTINGS[k], v)})
             elif not _set_aside(SETTINGS_FILE):   # JSON, but not settings
                 Tabit._settings_unreadable = True
         except ValueError:
@@ -14213,7 +14225,7 @@ if (data !== null) {{
                 def on_done():
                     if status_label:
                         if is_newer:
-                            status_label.set_markup(f"<span color='#ff9e64'>New version <b>{latest_label}</b> available!</span>")
+                            status_label.set_markup(f"<span color='#ff9e64'>New version <b>{GLib.markup_escape_text(latest_label)}</b> available!</span>")
                         elif latest_tag:
                             status_label.set_markup("<span color='#9ece6a'>✓ You are using the latest version.</span>")
                         else:
@@ -14265,7 +14277,7 @@ if (data !== null) {{
             getattr(box, f"set_margin_{side}")(14)
 
         head = Gtk.Label(xalign=0)
-        head.set_markup(f"<big><b>Release Notes for {title}</b></big>")
+        head.set_markup(f"<big><b>Release Notes for {GLib.markup_escape_text(title)}</b></big>")
         box.pack_start(head, False, False, 0)
 
         frame = Gtk.Frame()
@@ -14306,7 +14318,7 @@ if (data !== null) {{
             getattr(box, f"set_margin_{side}")(14)
 
         head = Gtk.Label(xalign=0)
-        head.set_markup(f"<big><b>A new version of tabit is available!</b></big>\nNew version: <b>{new_disp}</b> (Current: {cur_disp})")
+        head.set_markup(f"<big><b>A new version of tabit is available!</b></big>\nNew version: <b>{GLib.markup_escape_text(new_disp)}</b> (Current: {GLib.markup_escape_text(cur_disp)})")
         box.pack_start(head, False, False, 0)
 
         if notes_body:

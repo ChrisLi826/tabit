@@ -85,6 +85,34 @@ class TestPasswordFileMode(_Base):
             self.assertEqual(json.load(f), {"password": "y"})
 
 
+class TestSettingsWrongType(_Base):
+    def test_true_or_nan_for_a_number_reads_as_default(self):
+        with open(tabit.SETTINGS_FILE, "w") as f:
+            f.write('{"ui_font_size": true, "split_pos": NaN, '
+                    '"term_line_spacing": Infinity, "ui_font_size_x": 1}')
+        s = tabit.Tabit._load_settings()
+        for k in ("ui_font_size", "term_line_spacing"):
+            self.assertEqual(s[k], tabit.DEFAULT_SETTINGS[k])
+        self.assertEqual(s["split_pos"], 0)
+
+    def test_a_good_number_is_kept(self):
+        with open(tabit.SETTINGS_FILE, "w") as f:
+            f.write('{"ui_font_size": 12, "term_line_spacing": 1}')
+        s = tabit.Tabit._load_settings()
+        self.assertEqual((s["ui_font_size"], s["term_line_spacing"]), (12, 1))
+
+
+class TestSessionsFileMode(_Base):
+    def test_sessions_file_is_private(self):
+        # a + Connect tab's saved command holds its password
+        mask = os.umask(0o002)
+        self.addCleanup(os.umask, mask)
+        app = unittest.mock.Mock(_sessions_unreadable=False, _unrestored=[])
+        app._session_rows.return_value = []
+        tabit.Tabit._save_sessions(app)
+        self.assertEqual(os.stat(tabit.SESSIONS_FILE).st_mode & 0o777, 0o600)
+
+
 class TestStatusPollSurvives(unittest.TestCase):
     def test_one_bad_tab_does_not_end_the_timer(self):
         win = tabit.Tabit.__new__(tabit.Tabit)
