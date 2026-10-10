@@ -46,9 +46,11 @@ Then every tab works the same way:
 ## Remote: your tabs on your phone
 
 <p align="center">
-  <img src="assets/remote-phone.png" alt="Remote on a phone: Needs you, groups, tabs and AI status" width="280">
-  &nbsp;&nbsp;
-  <img src="assets/remote-laptop.png" alt="Remote in a laptop browser: the tab list on the left, a blocked AI agent on the right" width="560">
+  <img src="assets/remote-phone.png" alt="Remote on a phone: Needs you, groups, tabs and AI status" width="300">
+</p>
+
+<p align="center">
+  <img src="assets/remote-laptop.png" alt="Remote in a laptop browser: the tab list on the left, a blocked AI agent on the right" width="900">
 </p>
 
 Turn it on in **Settings… → Remote**. tabit sets up Tailscale for you, then
