@@ -18,7 +18,7 @@ window. Tabs sit in colour groups, and every AI tab shows its status.
 **Remote** puts the same list on your phone or laptop, live, over Tailscale.
 You can also type into a tab from there.
 
-Native GTK + VTE. No Electron. One install script.
+Native GTK + VTE. No Electron, no pip. One install script.
 
 <p align="center">
   <img src="assets/hero.png" alt="tabit: colour groups of serial, SSH, AI, tmux, shell and note tabs; a serial console and an AI agent side by side" width="900">
@@ -37,7 +37,7 @@ Native GTK + VTE. No Electron. One install script.
 Then every tab works the same way:
 
 - **Colour groups**: one colour per project; collapse what you are not using.
-- **Status at a glance**: an AI tab shows ▶ working, ❚❚ idle, ? needs you, ✓ done.
+- **Status at a glance**: an AI tab shows ▶ working, ❚❚ idle, ? needs you, ✔ ready.
   A popup says when an agent finishes or wants you.
 - **Two side by side**: pin any tab to a right pane.
 - **Remembered**: the next start brings back the same tabs. tmux-backed agents
@@ -83,11 +83,12 @@ sudo password for apt.
 - Linux with GTK3 + VTE + GtkSourceView 4 (X11 or Wayland)
 - WebKit2 + `python3-markdown` for note Markdown preview
 - libnotify (`gir1.2-notify-0.7`) for AI status notifications
-- `picocom` for serial sessions
+- `screen` and `picocom` for serial sessions
 - Tailscale for Remote (tabit can install it for you)
 - Tested on Ubuntu / Xubuntu
 
-`install.sh` installs these from apt (Tailscale only when you turn Remote on).
+`install.sh` installs these from apt. Tailscale is not part of it: tabit offers
+to install it when you turn Remote on.
 
 ## More
 

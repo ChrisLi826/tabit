@@ -64,7 +64,8 @@ console, that is a remote shell from your phone.
 - The desktop keeps showing the tab it was showing.
 
 **Allow opening files** — tap a path or a note tab to read the file. Only
-files under your home and `/tmp`; key and password files are never shown.
+files under your home and `/tmp`: text, and png, jpg, gif and webp images,
+up to 2 MB. Key and password files are never shown.
 
 ## On a laptop or desktop browser
 

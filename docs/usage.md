@@ -18,7 +18,7 @@ Back to the [README](../README.md).
 | Double-click a tab / right-click → Rename… / `F2` | Rename (popover bubble to the right of the tab) |
 | `x` on a tab (shown on hover) | Close that session |
 | `Ctrl+Shift+S` / `Ctrl+Shift+T` / `Ctrl+Shift+A` / `Ctrl+Shift+N` | New serial / terminal / AI / open |
-| `Ctrl+Shift+E` / `Ctrl+Shift+D` / `Ctrl+Shift+M` | New connect / command / tmux |
+| `Ctrl+Shift+D` / `Ctrl+Shift+M` | New command / tmux |
 | `Ctrl+S` | Save note (when a note tab is selected) |
 | `Ctrl+Alt+B` / `Ctrl+Alt+Shift+B` | Note Base64 encode / decode |
 | `Ctrl+Alt+J` | Note JSON format (also validates) |
@@ -45,8 +45,7 @@ looking elsewhere. When a session's process ends (device unplugged,
 you keep the scrollback — press its `x` to really close it.
 
 Serial tool defaults to `screen` — a bundled `screen.sh` wrapper
-(multi-attach + logfile), written to `~/.config/tabit/screen.sh`. `kermit`
-uses `~/senaoenv/kermrc` when present (`-c -E`). `picocom` quit is
+(multi-attach + logfile), written to `~/.config/tabit/screen.sh`. `picocom` quit is
 `Ctrl-A Ctrl-X`. Closing the last tab quits tabit.
 
 Tabs are remembered: the next start restores the same set of sessions
