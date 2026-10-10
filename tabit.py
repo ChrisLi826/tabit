@@ -3239,9 +3239,11 @@ class Tabit(Gtk.Window):
         page = self._is_browser_page(path)
         wset = row.webview.get_settings()
         # A file from terminal output is not necessarily yours. Scripts stay
-        # on, because a real report needs them, but they may not read the
-        # rest of the disk and post it somewhere.
-        wset.set_allow_file_access_from_file_urls(not page)
+        # on for a page, because a real report needs them, but they may not
+        # read the rest of the disk and post it somewhere. Markdown needs no
+        # script: raw HTML in it must not run any.
+        wset.set_enable_javascript(page)
+        wset.set_allow_file_access_from_file_urls(False)
         row.webview.set_settings(wset)
         if page and not self._has_source(path):
             # An image or a PDF has nothing in the buffer to render from.
@@ -3291,11 +3293,13 @@ class Tabit(Gtk.Window):
                 if kp and not kp.startswith("-"):
                     if kp not in line_map:
                         line_map[kp] = ln
-        line_map_json = json.dumps(line_map)
+        # "<" escaped: a value holding "</script>" must not end the block
+        line_map_json = json.dumps(line_map).replace("<", "\\u003c")
 
         try:
             parsed = yaml.safe_load(text)
-            json_str = json.dumps(parsed if parsed is not None else {}, default=str)
+            json_str = json.dumps(parsed if parsed is not None else {},
+                                  default=str).replace("<", "\\u003c")
             err_msg = None
         except Exception as e:
             json_str = "{}"
@@ -3577,6 +3581,9 @@ if (data !== null) {{
 </script>
 </body></html>"""
 
+        wset = row.webview.get_settings()
+        wset.set_allow_file_access_from_file_urls(False)  # the tree reads no file
+        row.webview.set_settings(wset)
         row.webview.load_html(doc, "file:///")
 
     def _note_schedule_preview(self, row):
@@ -4453,11 +4460,10 @@ if (data !== null) {{
         dialog.set_default_response(Gtk.ResponseType.ACCEPT)
         resp = dialog.run()
         dialog.destroy()
-        if resp == Gtk.ResponseType.CANCEL:
-            return False
         if resp == Gtk.ResponseType.ACCEPT:
             return self._save_note(row)
-        return True  # discard
+        # only Discard throws it away: Esc and the window X keep the note
+        return resp == Gtk.ResponseType.REJECT
 
     def _set_app_icon(self):
         # running from the repo: load the svg next to this script; once
