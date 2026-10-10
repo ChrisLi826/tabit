@@ -142,25 +142,12 @@ class TestRestoreSafety(TestSaveFiles):
     def test_a_setting_of_the_wrong_type_reads_as_the_default(self):
         with open(tabit.SETTINGS_FILE, "w") as f:
             json.dump({"ui_font_size": "11", "theme": ["x"], "term_line_spacing": 1,
-                       "cloud_register_mac": 123, "extra": "kept"}, f)
+                       "extra": "kept"}, f)
         st = tabit.Tabit._load_settings()
         self.assertEqual(st["ui_font_size"], tabit.DEFAULT_SETTINGS["ui_font_size"])
         self.assertEqual(st["theme"], tabit.DEFAULT_SETTINGS["theme"])
-        self.assertEqual(st["cloud_register_mac"], "")
         self.assertEqual(st["term_line_spacing"], 1)     # an int is a fine number
         self.assertEqual(st["extra"], "kept")
-
-    def test_a_bad_cloud_status_file_does_not_crash(self):
-        app = unittest.mock.Mock()
-        app._cloud_args = ("aa:bb", "staging")
-        app._cloud_proc = None
-        app._cloud_error = None
-        app._cloud_started = tabit.time.time()
-        app._cloud_state_dir = lambda *_a: self.dir
-        for body in ("[]", "null", '{"time": "x", "state": "online"}', '{"sn": 5, "time": null}'):
-            with open(os.path.join(self.dir, "status.json"), "w") as f:
-                f.write(body)
-            self.assertTrue(tabit.Tabit._cloud_tick(app), body)
 
     def test_the_last_tab_is_not_closed_from_the_phone(self):
         row = object()

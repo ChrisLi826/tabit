@@ -14641,8 +14641,6 @@ if (data !== null) {{
                     # keeps its tmux session and Remote stays off
                     self._shutting_down = False
                     self._remote_sync()
-                    if HAS_CLOUD_DEVICE:
-                        self._cloud_sync()
                     self._note_msg(Gtk.MessageType.ERROR,
                                    "Could not restart tabit", str(e))
 
