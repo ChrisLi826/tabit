@@ -3050,6 +3050,7 @@ class Tabit(Gtk.Window):
             wset = webview.get_settings()
             wset.set_enable_javascript(True)
             wset.set_allow_file_access_from_file_urls(True)
+            webview.connect("decide-policy", self._on_preview_policy)
             content = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
             content.pack1(scroll, resize=True, shrink=False)
             content.pack2(webview, resize=True, shrink=False)
@@ -13862,6 +13863,22 @@ if (data !== null) {{
 
         return _rejoin_wrapped_n(
             Tabit._term_screen_text(term), raw, better)
+
+    def _on_preview_policy(self, webview, decision, dtype):
+        """A clicked link leaves the preview for the browser: the pane has no
+        address bar or Back, so a page loaded in it could pass as tabit."""
+        if dtype != WebKit2.PolicyDecisionType.NAVIGATION_ACTION:
+            return False
+        action = decision.get_navigation_action()
+        if action.get_navigation_type() != WebKit2.NavigationType.LINK_CLICKED:
+            return False
+        uri = action.get_request().get_uri() or ""
+        here = (webview.get_uri() or "").partition("#")[0]
+        if here and uri.partition("#")[0] == here:
+            return False                    # an anchor in this note: scroll
+        decision.ignore()
+        self._open_uri(uri)
+        return True
 
     @staticmethod
     def _open_uri(uri):
