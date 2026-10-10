@@ -57,7 +57,7 @@ rm -f "$HOME/.config/autostart/tabit.desktop"
 cat > "$HOME/.local/share/applications/tabit.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=TabIt
+Name=tabit
 Comment=Terminal sessions as vertical tabs
 Exec=$HOME/.local/bin/tabit
 Icon=tabit
