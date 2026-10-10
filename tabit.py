@@ -1548,13 +1548,18 @@ DEFAULT_SETTINGS = {
 }
 
 
-def _write_json(path, obj):
+def _write_json(path, obj, mode=None):
     """Write JSON so a crash halfway never leaves a half file: a new file
-    next to it, then one rename over the old one."""
+    next to it, then one rename over the old one. mode=0o600 for a file
+    that holds a password (the new file would get the umask's mode)."""
     path = os.path.realpath(path)   # a link to a dotfiles copy stays a link
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".new"
-    with open(tmp, "w") as f:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                 0o666 if mode is None else mode)
+    if mode is not None:
+        os.fchmod(fd, mode)             # also when an old .new was left
+    with os.fdopen(fd, "w") as f:
         json.dump(obj, f, indent=2)
         f.flush()
         os.fsync(f.fileno())
@@ -5469,7 +5474,11 @@ if (data !== null) {{
                 if (_is_ai_icon(getattr(r, "icon_name", None))
                         and not getattr(r, "dead", False)
                         and getattr(r, "term", None) is not None):
-                    self._update_agent_status(r)
+                    try:
+                        self._update_agent_status(r)
+                    except Exception as e:
+                        # one bad tab must not end this timer for every tab
+                        print(f"[tabit] AI status: {e!r}", file=sys.stderr)
         finally:
             self._agent_status_busy = False
         return True  # keep timer
@@ -10619,10 +10628,8 @@ if (data !== null) {{
 
     @staticmethod
     def _save_connect_last(data):
-        os.makedirs(CONFIG_DIR, exist_ok=True)
         try:
-            with open(CONNECT_LAST_FILE, "w") as f:
-                json.dump(data, f, indent=2)
+            _write_json(CONNECT_LAST_FILE, data, mode=0o600)   # holds passwords
         except OSError:
             pass
 

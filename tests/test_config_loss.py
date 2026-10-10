@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -65,6 +66,41 @@ class TestDeadTabKeepsCwd(_Base):
         tabit.Tabit._save_sessions(win)
         with open(tabit.SESSIONS_FILE) as f:
             self.assertEqual(json.load(f)[0]["cwd"], proj)
+
+
+class TestPasswordFileMode(_Base):
+    def test_connect_last_is_private_new_or_old(self):
+        path = os.path.join(self.dir, "connect_last.json")
+        old = tabit.CONNECT_LAST_FILE
+        tabit.CONNECT_LAST_FILE = path
+        self.addCleanup(setattr, tabit, "CONNECT_LAST_FILE", old)
+        mask = os.umask(0o002)
+        self.addCleanup(os.umask, mask)
+        tabit.Tabit._save_connect_last({"password": "x"})      # a new file
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        os.chmod(path, 0o664)                                    # an old one
+        tabit.Tabit._save_connect_last({"password": "y"})
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        with open(path) as f:
+            self.assertEqual(json.load(f), {"password": "y"})
+
+
+class TestStatusPollSurvives(unittest.TestCase):
+    def test_one_bad_tab_does_not_end_the_timer(self):
+        win = tabit.Tabit.__new__(tabit.Tabit)
+        rows = [type("R", (), {"icon_name": "x", "dead": False, "term": 1})()
+                for _ in range(2)]
+        win._session_rows = lambda: rows
+        seen = []
+
+        def upd(r):
+            seen.append(r)
+            if r is rows[0]:
+                raise ValueError("odd screen")
+        win._update_agent_status = upd
+        with unittest.mock.patch.object(tabit, "_is_ai_icon", lambda _i: True):
+            self.assertTrue(tabit.Tabit._poll_ai_agent_statuses(win))
+        self.assertEqual(seen, rows)                # the second tab still ran
 
 
 class TestYamlTreePaths(unittest.TestCase):
