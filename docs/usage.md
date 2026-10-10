@@ -61,6 +61,10 @@ or killed. tabit sets `status off`, window-title passthrough and prefix
 `C-a` on those sessions, so the AI status icons keep working and `Ctrl+B`
 still reaches the agent.
 
+Closing a tab ends the tmux session only when tabit made it for that tab
+(an AI tab's `ai-…` session). A session of your own, opened with **+ tmux**,
+is only detached: it keeps running, and you can attach to it again.
+
 ## Two panes
 
 Two sessions can share the window: `Ctrl+Alt+R` opens a **right content

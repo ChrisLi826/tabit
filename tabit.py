@@ -12073,7 +12073,9 @@ if (data !== null) {{
         return tag
 
     def _kill_row_tmux_session(self, row):
-        """Kill this tab's tmux session on intentional single-tab close.
+        """Kill this tab's ai-/conn- tmux session on intentional single-tab close.
+
+        Any other session is the user's own: closing the tab only detaches.
 
         Called from `_close_session` only — not from child-exited (exited
         tabs keep their session until the user closes them).
@@ -12088,6 +12090,8 @@ if (data !== null) {{
         name = self._row_live_tmux(row)
         if not name:
             return
+        if self._tmux_session_category(name) == "other":
+            return                          # the user's own session: detach only
         if any(r is not row and self._row_live_tmux(r) == name
                for r in self._session_rows()):
             return                          # another tab still holds it
