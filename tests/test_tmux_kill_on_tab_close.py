@@ -86,6 +86,16 @@ class TestKillRowTmuxSession(unittest.TestCase):
             Tabit._kill_row_tmux_session(self.win, row)
             self.assertEqual(run.call_count, 1)
 
+    def test_a_command_with_remote_tmux_kills_nothing_here(self):
+        # the tmux these talk to is on another host (or is just text)
+        for cmd in ("ssh -t server tmux attach-session -t conn-prod",
+                    "ssh -t server tmux new-session -A -s ai-work bash",
+                    "echo kill-session -t conn-abc"):
+            row = _FakeRow(["/bin/sh", "-c", cmd])
+            with mock.patch("tabit.subprocess.run") as run:
+                Tabit._kill_row_tmux_session(self.win, row)
+                run.assert_not_called()
+
     def test_detaches_the_users_own_session(self):
         # a session tabit did not make for the tab is only detached
         for argv in (["tmux", "attach-session", "-t", "dev"],

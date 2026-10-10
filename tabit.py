@@ -11881,6 +11881,10 @@ if (data !== null) {{
         if (len(argv) >= 3 and argv[0] in ("/bin/sh", "sh")
                 and argv[1] == "-c" and isinstance(argv[2], str)):
             cmd = argv[2]
+            # a tmux tab tabit made starts with tmux; any other command
+            # (ssh to a remote tmux, echo ...) holds no local session
+            if not re.match(r"\s*(?:exec\s+)?tmux\s", cmd):
+                return None
             for pat in (
                 r"attach-session\s+-t\s+['\"]?=?([^\s'\";:]+)",
                 r"has-session\s+-t\s+['\"]?=?([^\s'\";:]+)",
@@ -12901,7 +12905,8 @@ if (data !== null) {{
         string search finds the inner markers and parses the wrong thing.
         """
         if (len(argv) != 3 or argv[0] != "/bin/sh"
-                or "tmux new-session" not in argv[2]):
+                or "tmux new-session" not in argv[2]
+                or not re.match(r"\s*(?:exec\s+)?tmux\s", argv[2])):
             return argv, None
         try:
             toks = shlex.split(argv[2])
