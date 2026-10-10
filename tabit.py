@@ -2225,6 +2225,10 @@ class Tabit(Gtk.Window):
                     argv = s["argv"]
                     if ai_migrate and _is_ai_icon(s.get("icon")):
                         argv = self._ai_argv_plain(argv)
+                    inner, sess = self._ai_tmux_unwrap(argv)
+                    if sess is not None:
+                        # a wrapper saved by an older tabit: exact targets
+                        argv = self._ai_tmux_argv(inner, sess)
                     r = self._add_session(s["label"], argv, s["icon"],
                                           s.get("sub"), s.get("cwd"),
                                           s.get("track_cwd", False))
