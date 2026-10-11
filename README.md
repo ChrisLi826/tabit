@@ -1,23 +1,69 @@
-# tabit
-
-[![Release](https://img.shields.io/github/v/release/ChrisLi826/tabit?display_name=tag&sort=semver)](https://github.com/ChrisLi826/tabit/releases/latest)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-
-**tabit** is a Linux GTK terminal where every session — a shell, a serial
-console, an AI CLI, or a note — is a **color-coded tab down the left edge**
-of one window.
-
 <p align="center">
-  <img src="assets/hero.png" alt="tabit — left session sidebar with color groups, AI status icons, serial and shell tabs" width="900">
+  <img src="tabit.svg" alt="tabit logo" width="96">
 </p>
 
-- **Serial consoles** — USB-serial, `screen` multi-attach, kermit, picocom;
-  group devices by project color and collapse what you are not using
-- **Multi-AI status** — Claude / Codex / Grok (and more): ▶ working ·
-  || idle · ? needs input · ✔ done; off-viewport peeks and
-  collapsed-group summaries
-- **Native GTK + VTE** — no Electron, no pip; install from the Ubuntu archive
-  with one script
+<h1 align="center">tabit</h1>
+
+<p align="center"><b>Every piece of work becomes a tab you manage.</b></p>
+
+<p align="center">
+  <a href="https://github.com/ChrisLi826/tabit/releases/latest"><img src="https://img.shields.io/github/v/release/ChrisLi826/tabit?display_name=tag&sort=semver" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+</p>
+
+tabit is a Linux GTK terminal. Shells, serial consoles, SSH, AI agents, tmux
+sessions, notes and files all live in one tab list down the left of one
+window. Tabs sit in colour groups, and every AI tab shows its status.
+
+**Remote** puts the same list on your phone or laptop, live, over Tailscale.
+You can also type into a tab from there.
+
+Native GTK + VTE. No Electron, no pip. One install script.
+
+<p align="center">
+  <img src="assets/hero.png" alt="tabit: colour groups of serial, SSH, AI, tmux, shell and note tabs; a serial console and an AI agent side by side" width="900">
+</p>
+
+## Every kind of work is a tab
+
+| Your work | Its tab |
+|---|---|
+| A board on a USB serial port | **+ Serial**: `screen`, `kermit` or `picocom`; or `ssh` / `telnet` to a console server |
+| A shell, here or over SSH | **+ Terminal**, or **+ Command** for any command line (`ssh root@192.168.1.1`) |
+| An AI agent: Claude, Codex, Grok and more | **+ AI**: in a folder you pick; it can run inside tmux, so it keeps working while tabit is closed |
+| A long-running tmux session | **+ tmux**: attach to one or make one |
+| A note, a Markdown file, an image or a PDF | **+ Open**: an editor with a Markdown preview; images and PDFs open rendered |
+
+Then every tab works the same way:
+
+- **Colour groups**: one colour per project; collapse what you are not using.
+- **Status at a glance**: an AI tab shows ▶ working, ❚❚ idle, ? needs you, ✔ ready.
+  A popup says when an agent finishes or wants you.
+- **Two side by side**: pin any tab to a right pane.
+- **Remembered**: the next start brings back the same tabs. tmux-backed agents
+  are reattached in the middle of what they were doing.
+
+## Remote: your tabs on your phone
+
+<p align="center">
+  <img src="assets/remote-phone.png" alt="Remote on a phone: Needs you, groups, tabs and AI status" width="300">
+</p>
+
+<p align="center">
+  <img src="assets/remote-laptop.png" alt="Remote in a laptop browser: the tab list on the left, a blocked AI agent on the right" width="900">
+</p>
+
+Turn it on in **Settings… → Remote**. tabit sets up Tailscale for you, then
+serves a page to your own devices only. On a phone, add it to the home screen.
+
+- **See**: every group and tab, and which agents need you, updated live.
+- **Type** (a switch, off by default): read a tab's screen and type into it:
+  answer an agent, run a command on a shell, or use a serial console.
+  Attach a file or a screenshot.
+- **Manage**: open, rename, move and close tabs and groups from the page.
+- **Read files** (a second switch): tap a path to read the file.
+
+On a laptop browser the page looks like tabit itself. More: [docs/remote.md](docs/remote.md).
 
 ## Install
 
@@ -39,167 +85,20 @@ sudo password for apt.
 - Linux with GTK3 + VTE + GtkSourceView 4 (X11 or Wayland)
 - WebKit2 + `python3-markdown` for note Markdown preview
 - libnotify (`gir1.2-notify-0.7`) for AI status notifications
-- `picocom` for serial sessions
+- `screen` and `picocom` for serial sessions
+- Tailscale for Remote (tabit can install it for you)
 - Tested on Ubuntu / Xubuntu
 
-## Usage
+`install.sh` installs these from apt. Tailscale is not part of it: tabit offers
+to install it when you turn Remote on.
 
-| Action | Result |
-|---|---|
-| `+ Serial` | Pick device, baud (default 115200), and tool (a device a tab already has open says which tab): `screen` (bundled `screen.sh`) / `kermit` / `picocom`; or `ssh` / `telnet` to a host + port (for network console servers) |
-| `+ Terminal` | New tab running your login shell |
-| `+ AI` | Pick AI CLI and working directory. Two separate choices: **Create new session** (on by default; untick to continue the last one), and **Resume when tabit reopens** (what the tab does after a restart; the rename popover changes it later). A tab comes back to its own session, not just the newest one in the folder: claude and the xAI grok start with an id tabit picks (`--session-id`, used only when the CLI's `--help` lists it); codex and agy pick their own, and tabit reads it from the session file the running agent holds open, once the first message has been sent. An optional **Session ID** resumes that exact session (tried first, normal continue/resume stays as fallback). **Run inside tmux** keeps the agent alive across restarts and lists the ones still running, each marked with the tab holding it where there is one. **Edit list…** manages CLI names and per-CLI continue/resume tries (`~/.config/tabit/ai_clis.json`) |
-| `+ Open` | Blank buffer to type in, or open a file to read. GtkSourceView editor + **Markdown Preview** (WebKit); an image, PDF or HTML page opens rendered, full width; bottom tools: Base64 / JSON Format; wrap in **Settings…**; huge-line guards. The preview toggle is remembered across restarts |
-| `Settings…` | Theme, fonts, terminal line spacing, note wrap, and other prefs (`settings.json`) |
-| `+ Command` | Run anything (e.g. `ssh root@192.168.1.1`) in a new tab |
-| `+ tmux` | Attach to a running tmux session or create one; rename / kill sessions from the list. A session a tab already holds is marked with that tab's group and name |
-| Click a tab | Switch to that session |
-| Double-click a tab / right-click → Rename… / `F2` | Rename (popover bubble to the right of the tab) |
-| `x` on a tab (shown on hover) | Close that session |
-| `Ctrl+Shift+S` / `Ctrl+Shift+T` / `Ctrl+Shift+A` / `Ctrl+Shift+N` | New serial / terminal / AI / open |
-| `Ctrl+Shift+E` / `Ctrl+Shift+D` / `Ctrl+Shift+M` | New connect / command / tmux |
-| `Ctrl+S` | Save note (when a note tab is selected) |
-| `Ctrl+Alt+B` / `Ctrl+Alt+Shift+B` | Note Base64 encode / decode |
-| `Ctrl+Alt+J` | Note JSON format (also validates) |
-| `Ctrl+Alt+M` | Note Markdown preview toggle |
-| `Ctrl+Shift+W` | Close current session |
-| `Ctrl+PageUp` / `Ctrl+PageDown` | Previous / next session |
-| `Ctrl+Shift+PageUp` / `Ctrl+Shift+PageDown` | Move current tab up / down |
-| `Ctrl+Alt+R` | Toggle the right content pane (two sessions side by side) |
-| `Ctrl+Alt+P` | Pin the selected session to the right pane |
-| `Ctrl+Tab` | Move focus between the left and right pane; with no right pane open, jump back to the last tab you stayed on (press again to come back). Tabs you only passed through do not count: a tab is "stayed on" once it has been selected for 0.8s **and** the modifier is released, so holding Ctrl through a run of `Ctrl+PageUp`/`PageDown` is one move however long it pauses |
-| `Ctrl+Alt+W` | Swap what the left and right panes show |
-| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |
-| `Ctrl`+click a URL in a terminal | Open it in the browser. Hover underlines the match; right-click a link adds **Open Link** / **Copy Link**. Works on plain `http(s)://` / `ftp://` text and on OSC 8 hyperlinks (tmux hides OSC 8 unless `allow-passthrough` is on; plain URLs still match) |
-| `Ctrl`+click a file path in a terminal | Open it. A text file (decided by reading it, not by its suffix — `Makefile` counts) opens as a note tab; a `path:line` lands on that line; an `.html` page, an image (`.png` `.jpg` `.gif` `.webp` `.bmp` `.ico` `.svg`) or a `.pdf` opens rendered and full width, and so does a `.md`, which is written to be read even though it is also text. `Ctrl+Alt+M` swaps to the source where there is any, and right-click → **Open in Browser** hands a page over. A path an app wrapped onto a second line is put back together, as long as the result is a real file. A text file too big or too long-lined for the editor asks what to do — `$EDITOR` in a tab, or Base64 decode — rather than going to the desktop, which freezes on it just the same. Anything else goes to the desktop's handler. Absolute or `~/` paths only — a relative one would resolve against tabit's directory, not the terminal's. Paths with spaces or non-ASCII characters match up to the first such character, deliberately: a wider pattern underlines half of every JSON dump and serial log. Right-click adds **Open Path** / **Copy Path**, which is what a `.bin` usually wants |
-| `Shortcuts…` (sidebar) | Edit any of the shortcuts above. Each sidebar button marks its own key the way a menu does — `+ (S)erial`, `+ t(M)ux`, and the letter on the end where the word has none — and follows an edit here. The modifiers are the same on all of them, so only the letter is shown |
+## More
 
-When an AI tab stops working — it finished, or it wants input — a popup
-inside tabit says so, **at the foot of the tab list**, shaped like the tab
-row it is about: the group's colour bar, the same status glyph, the group
-and tab names, and the time. Click anywhere on it to switch to that tab.
-When tabit is **not** the window in front, the same news also goes to the
-desktop as a system notification, so it reaches you either way — the popup
-is what is still waiting when you come back. Nothing pops for the tab you
-are already looking at, and nothing pops for a status that changes back
-within a few seconds, which is a detection wobble rather than news.
-
-Opening a tab any other way takes its popup down too, and one tab never
-has two: a second one replaces the first. **Nothing is ever thrown away
-to make room.** Three of them show at a time, newest at the bottom; the
-rest wait behind `3 more · 1 need input ▴`, which opens the whole list
-oldest-first and folds it back again. **Clear all** takes down the
-waiting ones as well. The AI counts in the row just below are never
-covered, whatever the stack is doing.
-
-One that goes away on its own only counts down while it is on screen and
-tabit is in front, and never under the pointer — a popup that expired
-where nobody could read it was never shown. The wheel over a popup
-reaches the terminal underneath, since the stack hangs past a narrow tab
-list.
-
-It stays until you dismiss it, because urgency is the only say an app has
-over the desktop half: GNOME gives every other notification four seconds
-and ignores the timeout an app asks for. **Settings… → AI** turns it off
-or drops it to one that goes away on its own. The desktop half needs
-`gir1.2-notify-0.7`, which the installer pulls in; the in-app half works
-without it.
-
-The same news can also reach your **phone**. **Settings… → Telegram →
-Also send it to Telegram** takes a bot token (from `@BotFather`) and
-sends one message per agent that finishes or wants you. **How do I set
-this up?** on that page has the five steps, and **Find it** next to Chat
-id reads your own id off the first message you send the bot, so there is
-no second bot to go and ask. By default it only sends while tabit is not the window in
-front; **Always** sends either way. It is deliberately not tied to the
-desktop popup switch, because "no popup on this screen" and "nothing on
-my phone" are two different wishes. **Send a test message** proves the
-pair before you rely on it. The token is kept in
-`~/.config/tabit/telegram.json`, mode `0600` — not in `settings.json`,
-which is the file you would paste into a bug report.
-
-Two more switches sit under it. **Answer /status from the phone** makes
-tabit read what you send the bot and reply to `/status` with every AI tab
-and what it is doing; only your own 1:1 chat is listened to, and nothing
-can be typed into a tab yet. **Include the agent's last lines in the
-message** puts the agent's own words in the push, because otherwise a
-message says an agent wants you but not what it asked — and you cannot
-answer from a phone without that. It is off by default: those lines
-travel through Telegram, and a console can have secrets on it.
-
-**Sending a task back.** Right-click an AI tab → **Telegram tasks…** and
-give it a short name. That name is the switch: a tab without one is not
-offered on the phone and is refused if anything tries. With one, write
-the task in Telegram, send it, and tap the tab to send it to — the tap
-is the submit, and a plain message never goes anywhere on its own.
-**Replying** to one of tabit's messages skips the tap, because the reply
-already says which tab. Putting a tab's short name on the first line
-narrows the buttons to that one tab. The task arrives the way a paste
-does, so a prompt with line breaks in it is not submitted a line at a
-time, and exactly one Enter goes on the end. A button works once:
-pressing it again says so rather than running the task twice.
-
-**Getting the answer back.** A task sent from Telegram carries a short
-footer telling the agent where to write its reply and to keep it to
-about ten lines with the result first — it is going to a phone, and an
-agent given no budget writes a report. tabit sends that file back as a
-reply to the task — so one task reads as one thread. The
-file is the good path: the last lines of a terminal are the last lines
-of a redraw, not an answer to anything. If the agent stops without
-writing one, tabit says so and falls back to the tail of the screen.
-Either way it comes back whatever **Send** is set to: "not in front"
-means this window lost the keyboard focus, which is not the same as you
-being away, and an answer you asked for from your phone should not
-depend on it. Turn the extra line off with **A task asks the agent to
-write its answer to a file** if you would rather tabit never touched
-your prompt.
-
-A blue dot on a tab means that session printed output while you were
-looking elsewhere. When a session's process ends (device unplugged,
-`exit`, picocom quit) the tab stays, greyed and marked `exited`, so
-you keep the scrollback — press its `x` to really close it.
-
-The foot of the sidebar counts **every** AI tab by status — `?` blocked,
-`✓` done, play working, pause idle — next to a clock. The off-viewport
-peeks only cover tabs scrolled out of sight, so with a long list an agent
-waiting on you could still be missed; this row cannot miss one. Click a
-count to jump to that agent, and click again to cycle through the rest.
-
-Serial tool defaults to `screen` — a bundled `screen.sh` wrapper
-(multi-attach + logfile), written to `~/.config/tabit/screen.sh`. `kermit`
-uses `~/senaoenv/kermrc` when present (`-c -E`). `picocom` quit is
-`Ctrl-A Ctrl-X`. Closing the last tab quits tabit.
-
-Tabs are remembered: the next start restores the same set of sessions
-as fresh processes (serial consoles reconnect, shells start clean —
-scrollback is not kept). Stored in `~/.config/tabit/sessions.json`.
-
-An AI tab can instead **run inside tmux** (tick it in **+ AI**): the agent
-keeps running when tabit closes, and reopening the tab reattaches to the
-turn it was in the middle of, rather than replaying the conversation with
-`--continue`. **+ AI** lists the AI sessions still running — CLI, folder,
-and whether a tab is attached — so a detached agent can be picked back up
-or killed. tabit sets `status off`, window-title passthrough and prefix
-`C-a` on those sessions, so the AI status icons keep working and `Ctrl+B`
-still reaches the agent.
-
-Two sessions can share the window: `Ctrl+Alt+R` opens a **right content
-pane**, `Ctrl+Alt+P` pins the selected tab there. Drag the divider to
-resize; the split and the pinned session come back on the next start. Each
-pane has a small header with an `L` / `R` badge and an `x` that closes only
-that pane — closing the right pane keeps the left one full width, closing
-the left one promotes the right session. The tab list can sit **left,
-right, or between the two panes** (**Settings… → Tab list position**).
-
-With three columns on screen, the middle one can be nudged sideways: drag
-its header — the tab list's **SESSIONS** bar when the list is centered, or
-the `L` / `R` bar when the list is parked on an edge. The middle column
-keeps its width and the two outer ones trade. Every drag stops where a
-neighbour hits its minimum, so the left and right window edges stay put.
-
-Keyboard shortcuts are editable via **Shortcuts…** in the sidebar
-(or hand-edit `~/.config/tabit/keys.json`). Defaults match the table
-above; **Reset defaults** in the dialog restores them.
+- [Using tabit](docs/usage.md): every button, key and shortcut; restore, tmux, two panes
+- [AI agent status](docs/ai-status.md): the popup and the count row
+- [Remote](docs/remote.md): setup, the three switches, what the page can do
+- [Telegram](docs/telegram.md): pushes to your phone, and tasks sent back to an agent
+- [Releasing](docs/releasing.md): versions and codenames (for maintainers)
 
 ## Where tabit fits
 
@@ -208,67 +107,12 @@ inside a host and for many-way tiling. tabit is a **session dock**: many
 independent VTE terminals (and notes) as one tab list, with any two of them
 side by side when you need it — especially when you juggle **serial
 boards**, **SSH consoles**, and **several AI CLIs** and want at-a-glance
-status without tiling windows by hand.
+status without tiling windows by hand. With Remote, that same tab list goes
+with you.
 
 ## Roadmap
 
-- File browser pane + text editing tabs
 - Saved session profiles (named serial/ssh setups)
-
-## Releasing (cuisine codenames)
-
-Each release gets a fresh **Taiwan-origin cuisine** English codename. There is
-**no public menu of upcoming names** in the repo (that would spoil the
-surprise). RD picks the name when cutting the release.
-
-Public label:
-
-```text
-v1.7.12 · Oyster Omelette
-```
-
-That same string appears in:
-
-- GitHub Release **title** (and preferably the notes heading)
-- In-app **Update** dialog (`New version: …`)
-- **Settings** version line (About)
-
-### Naming rules
-
-| Rule | Detail |
-|---|---|
-| Origin | Must be **Taiwan-origin cuisine** (not limited to street snacks) |
-| Major / minor | 1st and 2nd version digits → more **internationally known** names |
-| Patch | 3rd digit → more **obscure** names |
-| Language | **English** display name in the public label; optional Chinese only in private notes if needed — never a browsable public catalog |
-| Reuse | Do not reuse a name already in shipped history — except a **hotfix**, which is the same release with bugs taken out and keeps its name (`v1.8.3` → `v1.8.3.1`) |
-
-### Files
-
-| File | Role |
-|---|---|
-| `APP_VERSION` / `APP_CODENAME` in `tabit.py` | What the running build shows |
-| `release-codenames.json` | **Shipped history only** (no future candidates) |
-| `scripts/release-codename.py` | `list` / `title` / `record` / `check` helpers |
-
-### Checklist when cutting a release
-
-1. Pick a fresh English codename per the rules above (`python3 scripts/release-codename.py list` shows names already used).
-2. Bump `APP_VERSION` and set `APP_CODENAME` in `tabit.py` to that English name.
-3. Record history (no candidate pool):  
-   `python3 scripts/release-codename.py record vX.Y.Z --name "English Name"`
-4. Commit, tag `vX.Y.Z`, and create the GitHub release **with the codename in the title**:
-
-```sh
-TITLE=$(python3 scripts/release-codename.py title)
-gh release create vX.Y.Z -t "$TITLE" -F .release/vX.Y.Z-notes.md
-```
-
-5. Confirm four places spell the **same** `vX.Y.Z · Name` string:
-   - `APP_CODENAME` in `tabit.py`
-   - shipped entry in `release-codenames.json`
-   - Settings → Version (About)
-   - Check for Updates / Update dialog (and GitHub release title)
 
 ## License
 

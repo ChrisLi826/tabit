@@ -21,6 +21,7 @@ import glob
 import html as html_module
 import json
 import os
+import stat
 import random
 import re
 import shlex
@@ -30,6 +31,8 @@ import subprocess
 import sys
 
 import shutil
+import socketserver
+import http.server
 import tarfile
 import threading
 import time
@@ -341,10 +344,10 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v1.10.0"
+APP_VERSION = "v2.0.0"
 # Fresh Taiwan-origin cuisine English name picked at release time (no public
 # future pool). Display: v1.8.0 · Braised Pork Rice
-APP_CODENAME = "Beef Noodle Soup"
+APP_CODENAME = "Pineapple Cake"
 _VERSION_CODENAME_SEP = " · "
 
 
@@ -678,11 +681,21 @@ def _strip_url_tail(url):
     return url.rstrip(TERM_URL_TRAILING) or url
 
 
+def _tmux_exact(name):
+    """A -t target that names exactly this session.
+
+    A bare -t NAME falls back to a prefix match: with "work" gone,
+    "-t work" hits "work2". "=NAME:" matches the whole name only, and
+    the ":" makes it a valid pane target too.
+    """
+    return f"={name}:"
+
+
 def _tmux_kill_session(name):
     """Drop one tmux session now; missing session is not an error."""
     try:
         subprocess.run(
-            ["tmux", "kill-session", "-t", name],
+            ["tmux", "kill-session", "-t", _tmux_exact(name)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=2,
@@ -712,6 +725,44 @@ AI_LAST_FILE = os.path.join(CONFIG_DIR, "ai_last.json")
 AI_CLIS_FILE = os.path.join(CONFIG_DIR, "ai_clis.json")
 COMMANDS_FILE = os.path.join(CONFIG_DIR, "commands.json")
 CONNECT_LAST_FILE = os.path.join(CONFIG_DIR, "connect_last.json")
+# Remote: tabit serves a status page + API on a unix socket, and Tailscale
+# Serve publishes it to this user's own devices only (tailnet, HTTPS).
+REMOTE_SOCK = os.path.join(GLib.get_user_runtime_dir(), "tabit-remote.sock")
+REMOTE_PAGE = "remote.html"
+# the page's icons: tab favicon (SVG, and a PNG for Safari), iPhone home screen
+REMOTE_ICONS = {"/icon.svg": ("tabit.svg", None), "/favicon.png": ("tabit.svg", 32),
+                "/apple-touch-icon.png": ("tabit-touch.svg", 180)}
+REMOTE_PUSH_EVERY = 10       # /api/events checks for a change this often (s)
+# A phone that drops off the network (airplane mode, out of range) leaves
+# its stream open on our side until TCP gives up, which can take many
+# minutes. Keep the newest few and close the oldest instead of piling up.
+REMOTE_MAX_STREAMS = 8
+# Files the page may open (Settings > Remote > Allow opening files): under
+# home or /tmp, a known document/image type, small, and never a secret.
+REMOTE_FILE_MAX = 2 * 1024 * 1024
+# Uploads from the page (for an agent to read by path): one folder, per day.
+REMOTE_UPLOAD_DIR = os.path.expanduser("~/.local/share/tabit/uploads")
+REMOTE_UPLOAD_MAX = 25 * 1024 * 1024
+REMOTE_FILE_TEXT = {
+    ".md", ".markdown", ".txt", ".log", ".json", ".yaml", ".yml", ".toml",
+    ".ini", ".cfg", ".conf", ".csv", ".xml", ".diff", ".patch", ".sql",
+    ".py", ".sh", ".c", ".h", ".cc", ".cpp", ".hpp", ".js", ".ts", ".go",
+    ".rs", ".java", ".lua", ".mk", ".cmake", ".html", ".htm"}
+REMOTE_FILE_IMAGE = {".png": "image/png", ".jpg": "image/jpeg",
+                     ".jpeg": "image/jpeg", ".gif": "image/gif",
+                     ".webp": "image/webp",
+                     # may hold a script: safe only under _file_send's sandbox CSP
+                     ".svg": "image/svg+xml"}
+REMOTE_FILE_DENY_DIRS = {".ssh", ".gnupg", ".password-store", ".aws", ".codex",
+                         ".kube", ".docker", ".mozilla", ".thunderbird",
+                         "keyrings", ".pki"}
+# app folders under ~/.config that hold tokens (gh, rclone, gcloud ...)
+REMOTE_FILE_DENY_CONFIG = {"gh", "rclone", "gcloud", "hub", "op", "doctl",
+                           "github-copilot", "Bitwarden CLI"}
+REMOTE_FILE_DENY_NAMES = re.compile(
+    r"(^\.env(\..*)?$|^id_(rsa|dsa|ecdsa|ed25519)|\.(key|pem|p12|pfx|kdbx|"
+    r"keystore|jks)$|^\.netrc$|^\.git-credentials$|^\.pgpass$|^telegram\.json$|"
+    r"credentials|secret|passw|tokens?\b|\bauth\b)", re.IGNORECASE)
 SSH_TOOL_DIR = os.path.expanduser("~/senao-tools/ssh_tool")
 SSH_TOOL_CONNECT_SH = os.path.join(SSH_TOOL_DIR, "connect.sh")
 SSH_TOOL_CONNECT_PY = os.path.join(SSH_TOOL_DIR, "connect.py")
@@ -865,7 +916,7 @@ def get_theme_colors(theme_key):
 def get_theme_css(theme_key):
     s = get_theme_colors(theme_key)
     settings = Tabit._load_settings()
-    ui_sz = settings.get("ui_font_size", 10)
+    ui_sz = min(24, max(6, int(settings.get("ui_font_size", 10))))
     sz_sub = max(6, ui_sz - 2)
     sz_btn = max(7, ui_sz - 1)
     css_text = f"""
@@ -1470,6 +1521,9 @@ DEFAULT_SETTINGS = {
     "telegram_reply": False,     # answer /status from the phone
     "telegram_quote": False,     # put the agent's own last lines in it
     "telegram_ask_file": True,   # a task asks the agent to write its answer
+    "remote_enabled": False,     # serve the status page to my Tailscale devices
+    "remote_send": False,        # ...and let that page type into AI tabs
+    "remote_files": False,       # ...and open files under home and /tmp
     "ai_fresh_on_restore": False,  # +AI default: tab starts fresh after restart
     "ai_use_tmux": True,           # +AI dialog: run inside tmux (can uncheck)
     "ai_claude_bypass": False,     # +AI: launch claude with --dangerously-skip-permissions
@@ -1492,6 +1546,423 @@ DEFAULT_SETTINGS = {
     # room while keeping glyphs, cursor, selection, and terminal rows aligned.
     "term_line_spacing": 1.20,
 }
+
+
+def _write_json(path, obj, mode=None):
+    """Write JSON so a crash halfway never leaves a half file: a new file
+    next to it, then one rename over the old one. mode=0o600 for a file
+    that holds a password (the new file would get the umask's mode)."""
+    path = os.path.realpath(path)   # a link to a dotfiles copy stays a link
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".new"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                 0o666 if mode is None else mode)
+    if mode is not None:
+        os.fchmod(fd, mode)             # also when an old .new was left
+    with os.fdopen(fd, "w") as f:
+        json.dump(obj, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _set_aside(path):
+    """A file that does not parse is kept as <path>.broken, so the next
+    save cannot write over the only copy (it may be a hand edit).
+    False when it could not be moved: the caller must not save over it."""
+    path = os.path.realpath(path)
+    try:
+        os.replace(path, path + ".broken")
+        print(f"[tabit] {path} does not parse; kept as {path}.broken",
+              file=sys.stderr)
+        return True
+    except OSError as e:
+        print(f"[tabit] {path} does not parse and cannot be moved ({e}); "
+              "it will not be saved this run", file=sys.stderr)
+        return False
+
+
+class _RemoteServer(socketserver.ThreadingUnixStreamServer):
+    daemon_threads = True
+
+
+class _RemoteHandler(http.server.BaseHTTPRequestHandler):
+    """GET / (page), /api/status (snapshot), /api/events (SSE on change).
+
+    Reached only through Tailscale Serve: the unix socket is the user's own
+    and lives in the runtime dir.
+    """
+    app = None                      # the Tabit window
+    stop = None                     # threading.Event, set when serving ends
+    owner = None                    # Tailscale login allowed in; None = nobody
+    timeout = 30                    # an idle peer cannot hold a thread forever
+
+    def log_message(self, *_a):     # a unix peer has no address to print
+        pass
+
+    def _send(self, code, ctype, body):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        # no other page may show this one in a frame and trick a tap
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _allowed(self):
+        # Serve puts the viewer's login here; only tailscaled reaches the
+        # socket, so it can be trusted. Tagged devices send none: refused.
+        if not self.owner or self.headers.get("Tailscale-User-Login") != self.owner:
+            self._send(403, "text/plain", b"not your tabit")
+            return False
+        return True
+
+    def _json(self, code, obj):
+        self._send(code, "application/json", json.dumps(obj).encode())
+
+    def do_POST(self):
+        """POST /api/tabs/<id>/send {"text"} or /key {"key"}.
+
+        Tailscale vouches for the network, not for the page: any web page
+        open on the phone could send a request here. A custom header and a
+        JSON body make the browser ask first (CORS preflight), which this
+        server never grants, so only this page's own requests get through.
+        """
+        if not self._allowed():
+            return
+        origin = self.headers.get("Origin")
+        ours = self.app._remote_url.rstrip("/")     # https://<host>.ts.net
+        upload = self.path.split("?", 1)[0] == "/api/upload"
+        ctype = self.headers.get("Content-Type") or ""
+        if (self.headers.get("X-Tabit") != "1"
+                or ("application/octet-stream" if upload else "application/json") not in ctype
+                or (origin is not None and (not ours or origin != ours))):
+            self._json(403, {"error": "not from the tabit page"})
+            return
+        if upload:
+            self._upload()
+            return
+        parts = self.path.split("?", 1)[0].strip("/").split("/")
+        manage = None                       # (op, target) for tabs and groups
+        if parts == ["api", "new"]:
+            manage = ("new", None)
+        elif len(parts) == 3 and parts[:2] == ["api", "groups"]:
+            manage = ("groupop", parts[2])
+        elif len(parts) == 4 and parts[:2] == ["api", "tabs"] and parts[3] in ("close", "group", "move", "rename"):
+            manage = (parts[3], parts[2])
+        elif len(parts) == 4 and parts[:2] == ["api", "tabs"] and parts[3] == "ack":
+            # a state change, so behind the same checks as typing
+            self._json(*self._result(self.app._remote_call(
+                lambda: self.app._remote_ack_id(parts[2]))))
+            return
+        elif len(parts) != 4 or parts[:2] != ["api", "tabs"] or parts[3] not in ("send", "key", "type"):
+            self._json(404, {"error": "not found"})
+            return
+        try:
+            size = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(size) if 0 < size <= 65536 else b"x")
+            if not isinstance(body, dict):
+                raise ValueError
+        except ValueError:
+            self._json(400, {"error": "body must be a JSON object"})
+            return
+        if manage:
+            op, target = manage
+            self._json(*self._result(self.app._remote_call(
+                lambda: self.app._remote_manage(op, target, body))))
+            return
+        self._json(*self._result(self.app._remote_call(
+            lambda: self.app._remote_act(parts[2], parts[3], body))))
+
+    @staticmethod
+    def _result(res):
+        """(code, body) from a GTK-thread call: busy, crashed, or its own."""
+        if res is None:
+            return 503, {"error": "tabit busy"}
+        if isinstance(res, tuple):
+            return res
+        return 500, res                     # the exception text
+
+    def do_GET(self):
+        if not self._allowed():
+            return
+        path = self.path.split("?", 1)[0]
+        parts = path.strip("/").split("/")
+        if len(parts) == 4 and parts[:2] == ["api", "tabs"] and parts[3] == "screen":
+            q = urllib.parse.parse_qs(self.path.partition("?")[2])
+            color = (q.get("color") or [""])[0] == "1"
+            try:
+                back = min(max(int((q.get("back") or ["0"])[0]), 0), 3000)
+            except ValueError:
+                back = 0
+            res = self.app._remote_call(lambda: self.app._remote_screen(parts[2], color))
+            if isinstance(res, tuple):
+                code, out, name = res
+                pane = name and self.app._tmux_pane_ansi(name, back)    # this thread
+                if pane:
+                    out.pop("lines", None)
+                    out.update(pane)
+                res = (code, out)
+            self._json(*self._result(res))
+            return
+        if path in ("/", "/index.html"):
+            page = self.app._remote_page()
+            if page is None:
+                self._send(404, "text/plain", b"remote.html not installed")
+            else:
+                self._send(200, "text/html; charset=utf-8", page)
+        elif path == "/api/status":
+            snap = self.app._remote_call(self.app._remote_snapshot)
+            ok = isinstance(snap, dict) and "tabs" in snap
+            self._send(200 if ok else (500 if snap else 503), "application/json",
+                       json.dumps(snap or {"error": "tabit busy"}).encode())
+        elif path in REMOTE_ICONS:
+            icon = self.app._remote_icon(path)
+            if icon is None:
+                self._send(404, "text/plain", b"icon not installed")
+            else:
+                self._send(200, *icon)
+        elif path == "/api/events":
+            self._events()
+        elif path == "/api/file":
+            self._file()
+        else:
+            self._send(404, "text/plain", b"not found")
+
+    @staticmethod
+    def _upload_name(raw):
+        """A safe file name: no folders, no leading dot, letters (any script),
+        digits and . _ - only, at most 100 characters. No spaces either: the
+        path goes into a prompt, where a space would split it in two."""
+        name = os.path.basename((raw or "").replace("\\", "/")).strip()
+        name = re.sub(r"[^\w.\-]", "_", name).lstrip("._")[:100]
+        return name or "upload"
+
+    def _upload(self):
+        """POST /api/upload?name=<file name>, raw bytes: save under
+        ~/.local/share/tabit/uploads/<date>/ and answer its path. Never
+        overwrites: a taken name gets -1, -2 ... added."""
+        if not getattr(self.app, "_remote_send_on", False):
+            self._json(403, {"error": "uploads come with typing (Settings > Remote)"})
+            return
+        try:
+            size = int(self.headers.get("Content-Length") or -1)
+        except ValueError:
+            size = -1
+        if size <= 0:
+            self._json(400, {"error": "empty upload"})
+            return
+        if size > REMOTE_UPLOAD_MAX:
+            self._json(413, {"error": "bigger than 25 MB"})
+            return
+        q = urllib.parse.parse_qs(self.path.partition("?")[2])
+        name = self._upload_name((q.get("name") or [""])[0])
+        folder = os.path.join(REMOTE_UPLOAD_DIR, time.strftime("%Y-%m-%d"))
+        os.makedirs(folder, mode=0o700, exist_ok=True)
+        stem, ext = os.path.splitext(name)
+        for n in range(1000):
+            path = os.path.join(folder, f"{stem}-{n}{ext}" if n else name)
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                break
+            except FileExistsError:
+                continue
+        else:
+            self._json(409, {"error": "too many files with that name"})
+            return
+        left = size
+        try:
+            with os.fdopen(fd, "wb") as f:
+                while left > 0:
+                    chunk = self.rfile.read(min(left, 1 << 16))
+                    if not chunk:
+                        raise OSError("upload cut short")
+                    f.write(chunk)
+                    left -= len(chunk)
+        except OSError as e:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            self._json(400, {"error": str(e)})
+            return
+        print(f"[remote] upload -> {path} ({size} bytes)", file=sys.stderr)
+        self._json(200, {"path": path, "size": size})
+
+    @staticmethod
+    def _file_problem(real):
+        """Why the page may not open this (resolved) path, or None."""
+        home = os.path.realpath(os.path.expanduser("~"))
+        roots = [home, os.path.realpath("/tmp")]
+        if not any(os.path.commonpath([real, r]) == r for r in roots):
+            return "only files under your home or /tmp"
+        conf = os.path.realpath(CONFIG_DIR)
+        if os.path.commonpath([real, conf]) == conf:
+            # tabit's own state: connect_last.json and the argv in
+            # sessions.json can hold passwords
+            return "that folder holds keys or passwords"
+        parts = real.split(os.sep)
+        if any(p in REMOTE_FILE_DENY_DIRS for p in parts) or any(
+                a == ".config" and b in REMOTE_FILE_DENY_CONFIG
+                for a, b in zip(parts, parts[1:])):
+            return "that folder holds keys or passwords"
+        if REMOTE_FILE_DENY_NAMES.search(os.path.basename(real)):
+            return "that file looks like a key or a password"
+        ext = os.path.splitext(real)[1].lower()
+        if ext not in REMOTE_FILE_TEXT and ext not in REMOTE_FILE_IMAGE:
+            return f"{ext or 'that'} files are not opened from the phone"
+        return None
+
+    def _file(self):
+        """GET /api/file?path=<abs or ~/...>[&render=1]: one file, read-only.
+
+        Everything goes out with a sandbox CSP: an HTML file or a Markdown
+        page with raw HTML in it can show, but cannot run a script in this
+        origin (where /api/tabs/*/send lives).
+        """
+        q = urllib.parse.parse_qs(self.path.partition("?")[2])
+        raw = (q.get("path") or [""])[0]
+        render = (q.get("render") or [""])[0] == "1"
+        if not getattr(self.app, "_remote_files_on", False):
+            return self._file_err(403, "opening files from the phone is off (Settings > Remote)")
+        if not raw.startswith(("/", "~/")):
+            return self._file_err(400, "give a full path")
+        real = os.path.realpath(os.path.expanduser(raw))     # symlinks resolved first
+        why = self._file_problem(real)
+        if why:
+            return self._file_err(403, why)
+        try:
+            # O_NONBLOCK: a FIFO or device would wait forever for a writer
+            fd = os.open(real, os.O_RDONLY | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as f:
+                st = os.fstat(f.fileno())
+                if not stat.S_ISREG(st.st_mode):
+                    return self._file_err(403, "only plain files")
+                if st.st_size > REMOTE_FILE_MAX:
+                    return self._file_err(413, "bigger than 2 MB")
+                data = f.read(REMOTE_FILE_MAX + 1)
+        except OSError as e:
+            return self._file_err(404, e.strerror or "cannot read it")
+        ext = os.path.splitext(real)[1].lower()
+        if ext in REMOTE_FILE_IMAGE and (render or ext != ".svg"):
+            return self._file_send(REMOTE_FILE_IMAGE[ext], data)    # txt: an svg's source
+        text = data.decode("utf-8", "replace")
+        if render and ext in (".md", ".markdown") and HAS_MARKDOWN:
+            # YAML front matter reads better as the block it is
+            front = ""
+            m = re.match(r"---\n(.*?)\n---\n", text, re.S)
+            if m:
+                front = "<pre>" + html_module.escape(m.group(1)) + "</pre>"
+                text = text[m.end():]
+            body = front + markdown_lib.markdown(
+                text, extensions=["fenced_code", "tables", "nl2br", "sane_lists"])
+            return self._file_send("text/html; charset=utf-8", self._doc_page(body))
+        if render and ext in (".html", ".htm"):
+            return self._file_send("text/html; charset=utf-8", data)
+        if render:
+            return self._file_send("text/html; charset=utf-8", self._doc_page(
+                "<pre>" + html_module.escape(text) + "</pre>"))
+        return self._file_send("text/plain; charset=utf-8", data)
+
+    _DOC_CSS = (
+        ":root{color-scheme:dark}body{background:#1a1b26;color:#c0caf5;font:15px/1.55 -apple-system,"
+        "BlinkMacSystemFont,sans-serif;margin:0;padding:14px 16px 40px;"
+        "word-wrap:break-word}a{color:#7aa2f7}h1,h2,h3{line-height:1.25}"
+        "h1{font-size:22px}h2{font-size:19px}h3{font-size:16px}"
+        "code,pre{font:12.5px/1.45 ui-monospace,Menlo,monospace;"
+        "background:#24283b;border-radius:6px}code{padding:1px 4px}"
+        "pre{padding:10px;overflow:auto;white-space:pre}"
+        "pre code{padding:0;background:none}table{border-collapse:collapse;"
+        "display:block;overflow:auto}td,th{border:1px solid #2f3549;"
+        "padding:4px 8px}blockquote{border-left:3px solid #414868;margin:0;"
+        "padding-left:12px;color:#a9b1d6}img{max-width:100%}")
+
+    @classmethod
+    def _doc_page(cls, body_html):
+        return ("<!doctype html><meta charset=utf-8><meta name=viewport "
+                "content='width=device-width,initial-scale=1'><style>"
+                + cls._DOC_CSS + "</style>" + body_html).encode()
+
+    def _file_send(self, ctype, data):
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        # no scripts, no forms, its own opaque origin; images inline only
+        # frame-ancestors: shown in tabit's own viewer only, no other site's frame
+        self.send_header("Content-Security-Policy",
+                         "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; "
+                         "frame-ancestors 'self'")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _file_err(self, code, msg):
+        self._file_send_code(code, self._doc_page(
+            "<p style='color:#f7768e'>" + html_module.escape(msg) + "</p>"))
+
+    def _file_send_code(self, code, data):
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Security-Policy", "sandbox; default-src 'none'; style-src 'unsafe-inline'")
+        self.end_headers()
+        self.wfile.write(data)
+
+    _streams = []                   # stop events of open /api/events, oldest first
+    _streams_lock = threading.Lock()
+
+    def _events(self):
+        mine = threading.Event()
+        with self._streams_lock:
+            self._streams.append(mine)
+            while len(self._streams) > REMOTE_MAX_STREAMS:
+                self._streams.pop(0).set()      # the oldest gives way
+        try:
+            self._stream(mine)
+        finally:
+            with self._streams_lock:
+                if mine in self._streams:
+                    self._streams.remove(mine)
+
+    def _stream(self, mine):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        last = None
+        try:
+            while True:
+                snap = self.app._remote_call(self.app._remote_snapshot)
+                key = snap and json.dumps(
+                    {k: v for k, v in snap.items() if k != "time"},
+                    sort_keys=True)
+                if not (isinstance(snap, dict) and "tabs" in snap):
+                    key = last                  # busy or an error: not a status
+                if key != last:
+                    last = key
+                    self.wfile.write(b"event: status\ndata: "
+                                     + json.dumps(snap).encode() + b"\n\n")
+                else:
+                    # a named event, so the page sees the link is alive and
+                    # can say when it last checked; also shows us
+                    # (BrokenPipe) when the page has gone away
+                    self.wfile.write(b"event: alive\ndata: {}\n\n")
+                self.wfile.flush()
+                end = time.monotonic() + REMOTE_PUSH_EVERY
+                while time.monotonic() < end:   # a kicked stream ends within 1 s
+                    if self.stop.wait(min(1, max(0.01, end - time.monotonic()))):
+                        return
+                    if mine.is_set():
+                        # pushed out by a newer page: come back later, not
+                        # at once to push out another one in turn
+                        self.wfile.write(b"retry: 30000\n\n")
+                        self.wfile.flush()
+                        return
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
 
 
 class Tabit(Gtk.Window):
@@ -1544,9 +2015,12 @@ class Tabit(Gtk.Window):
         self._marked = set()  # rows Ctrl+clicked for a group action
         settings = self._load_settings()
         gn = settings.get("group_names", {})
-        self._group_names = dict(gn) if isinstance(gn, dict) else {}
+        self._group_names = ({k: v for k, v in gn.items()
+                              if isinstance(v, str)}
+                             if isinstance(gn, dict) else {})
         cg = settings.get("collapsed_groups", [])
-        self._collapsed_groups = set(cg) if isinstance(cg, list) else set()
+        self._collapsed_groups = ({c for c in cg if isinstance(c, str)}
+                                  if isinstance(cg, list) else set())
 
         self.sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         self.sidebar.get_style_context().add_class("sidebar")
@@ -1630,6 +2104,16 @@ class Tabit(Gtk.Window):
             system_box.pack_start(btn, True, True, 0)
 
         adders.pack_start(system_box, False, False, 0)
+        self._remote_srv = None
+        self._remote_url = ""
+        self._remote_send_on = False
+        self._remote_files_on = False
+        self._remote_label = Gtk.Label(xalign=0)
+        self._remote_label.set_margin_top(4)
+        self._remote_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self._remote_label.set_no_show_all(True)
+        adders.pack_start(self._remote_label, False, False, 0)
+        GLib.idle_add(lambda: (self._remote_sync(), False)[1])
         self.sidebar.pack_start(adders, False, False, 0)
         self.ai_status_bar = self._make_ai_status_bar()
         self.sidebar.pack_start(self.ai_status_bar, False, False, 0)
@@ -1738,7 +2222,9 @@ class Tabit(Gtk.Window):
         # Keep collapsed_groups from settings; do not expand while replaying sessions.
         self._restoring_sessions = True
         last_row = None
+        self._unrestored = []
         for s in self._load_sessions():
+            r = None
             try:
                 argv = s.get("argv") or []
                 if argv and argv[0] == NOTE_SENTINEL:
@@ -1748,7 +2234,8 @@ class Tabit(Gtk.Window):
                         lab = lab[:-2]
                     r = self._add_note_session(path=path, label=lab,
                                                sub=s.get("sub"))
-                    if r is not None and s.get("preview"):
+                    if (r is not None and s.get("preview")
+                            and not getattr(r, "note_unloaded", None)):
                         # A file reopens showing what it was showing.
                         self._note_set_preview(r, True)
                 else:
@@ -1757,6 +2244,10 @@ class Tabit(Gtk.Window):
                     argv = s["argv"]
                     if ai_migrate and _is_ai_icon(s.get("icon")):
                         argv = self._ai_argv_plain(argv)
+                    inner, sess = self._ai_tmux_unwrap(argv)
+                    if sess is not None:
+                        # a wrapper saved by an older tabit: exact targets
+                        argv = self._ai_tmux_argv(inner, sess)
                     r = self._add_session(s["label"], argv, s["icon"],
                                           s.get("sub"), s.get("cwd"),
                                           s.get("track_cwd", False))
@@ -1776,8 +2267,14 @@ class Tabit(Gtk.Window):
                     self._apply_group(r, color)
                 if r is not None:
                     last_row = r
-            except (KeyError, TypeError, ValueError, IndexError, OSError):
-                continue  # skip broken entries in a hand-edited file
+                    r._restored = True
+            except Exception as e:
+                # a hand edit, or a field from a newer tabit: skip it here,
+                # but keep it in the file rather than drop it on next save
+                print(f"[tabit] tab not restored ({e!r}): {s!r}"[:300],
+                      file=sys.stderr)
+                if r is None:
+                    self._unrestored.append(s)
         self._restoring_sessions = False
         if not st.get("ai_resume_per_tab", False):
             self._save_settings({"ai_resume_per_tab": True})
@@ -1838,13 +2335,32 @@ class Tabit(Gtk.Window):
         try:
             with open(SESSIONS_FILE) as f:
                 data = json.load(f)
-            return data if isinstance(data, list) else []
-        except (OSError, ValueError):
+            if isinstance(data, list):
+                return data
+            if not _set_aside(SESSIONS_FILE):   # JSON, but not a tab list
+                Tabit._sessions_unreadable = True
+            return []
+        except ValueError:
+            if not _set_aside(SESSIONS_FILE):
+                Tabit._sessions_unreadable = True
+            return []
+        except FileNotFoundError:
+            return []
+        except OSError as e:
+            # there but not readable (owned by root after a sudo run...):
+            # a save now would replace every tab with what is open now
+            Tabit._sessions_unreadable = True
+            print(f"[tabit] cannot read {SESSIONS_FILE} ({e}); "
+                  "tabs will not be saved this run", file=sys.stderr)
             return []
 
     def _on_term_spawned(self, _term, pid, _error, row):
         # keep the child pid so we can read its cwd on save
         row.pid = pid if pid and pid > 0 else None
+        row._spawned_at = time.monotonic()
+        # the session this run really holds: the rename dialog may change
+        # argv for the next start, which must not change what a close kills
+        row._live_tmux = self._row_tmux_session(row)
         self._refresh_term_cwd(row)
 
     def _refresh_term_cwd(self, row):
@@ -1885,9 +2401,11 @@ class Tabit(Gtk.Window):
             return None
 
     def _save_sessions(self):
+        if getattr(self, "_sessions_unreadable", False):
+            return
         data = []
         for r in self._session_rows():  # skip group-header rows
-            if getattr(r, "dead", False):
+            if getattr(r, "dead", False) and not getattr(r, "_died_young", False):
                 # Exited tabs must not resurrect as live processes on restart
                 continue
             entry = {"label": r.title_text, "sub": r.sub_text,
@@ -1896,6 +2414,13 @@ class Tabit(Gtk.Window):
                 entry["track_cwd"] = True
                 entry["sub"] = ""  # sub is the live cwd; recompute on reload
             cwd = self._term_cwd(r)
+            if cwd is None and getattr(r, "dead", False):
+                cwd = getattr(r, "_cwd_saved", None)    # no /proc for it now
+            wanted = getattr(r, "_cwd_wanted", None)
+            if wanted and cwd in (None, GLib.get_home_dir()):
+                cwd = wanted
+            elif cwd:
+                r._cwd_wanted = None        # it moved on: that is its folder now
             if cwd:
                 entry["cwd"] = cwd
             if getattr(r, "group_color", None):
@@ -1911,9 +2436,10 @@ class Tabit(Gtk.Window):
             if getattr(r, "ai_hunt", False):
                 entry["hunt"] = True
             data.append(entry)
-        os.makedirs(os.path.dirname(SESSIONS_FILE), exist_ok=True)
-        with open(SESSIONS_FILE, "w") as f:
-            json.dump(data, f, indent=2)
+        # entries the restore could not open stay as they were
+        data += getattr(self, "_unrestored", [])
+        # private: a + Connect tab's command line holds its password
+        _write_json(SESSIONS_FILE, data, mode=0o600)
 
     def _save_sessions_soon(self):
         # key-repeat can fire many moves; coalesce disk writes
@@ -2085,7 +2611,10 @@ class Tabit(Gtk.Window):
         row.page = page
         row._pane = None  # attached on select / pin
         restoring = getattr(self, "_restoring_sessions", False)
-        if not restoring:
+        # opened from the phone: the page picks the group, and the desk
+        # keeps the tab it shows
+        remote = getattr(self, "_remote_placing", False)
+        if not restoring and not remote:
             cur_group = self._get_active_group_color()
             if cur_group:
                 row.group_color = cur_group
@@ -2105,7 +2634,8 @@ class Tabit(Gtk.Window):
         self.listbox.add(row)
         self._relayout()  # keep group members clustered under their header
         if not restoring:
-            self.listbox.select_row(row)
+            if not remote:
+                self.listbox.select_row(row)
             self._save_sessions()
 
     def _apply_term_colors(self, term, theme_info=None):
@@ -2237,6 +2767,10 @@ class Tabit(Gtk.Window):
             if parsed and os.path.isdir(parsed):
                 cwd = parsed
         workdir = cwd if cwd and os.path.isdir(cwd) else GLib.get_home_dir()
+        # started in home for now (its folder is on a disk not mounted):
+        # save the folder it wants until it really moves somewhere else
+        row._cwd_wanted = cwd if cwd and workdir != cwd else None
+        row._cwd_saved = cwd
         term.connect("child-exited", self._on_child_exited, row)
         term.connect("contents-changed", self._on_activity, row)
         if _is_ai_icon(icon_name):
@@ -2461,7 +2995,22 @@ class Tabit(Gtk.Window):
             buf.set_style_scheme(scheme)
 
         wanted_lang = None
-        if path and os.path.isfile(path):
+        # A saved note whose file is gone (a disk not mounted) or too big
+        # for the editor (it would freeze tabit at start): keep the path,
+        # show nothing, never write over it. It loads on the next start.
+        unloaded = None
+        if path and not os.path.isfile(path):
+            unloaded = "missing"
+        elif (path and not Tabit._is_binary_render(path)
+              and self._note_file_too_big(path)):
+            unloaded = "too big to open here"
+        if unloaded:
+            view.set_editable(False)
+            buf.set_modified(False)
+            label = label or os.path.basename(path)
+            sub = sub if sub is not None else os.path.dirname(path)
+            tooltip = path
+        elif path and os.path.isfile(path):
             if Tabit._is_binary_render(path):
                 # An image or a PDF has no text to edit. The buffer stays
                 # empty and the preview shows the file itself, but the tab
@@ -2510,6 +3059,7 @@ class Tabit(Gtk.Window):
             wset = webview.get_settings()
             wset.set_enable_javascript(True)
             wset.set_allow_file_access_from_file_urls(True)
+            webview.connect("decide-policy", self._on_preview_policy)
             content = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
             content.pack1(scroll, resize=True, shrink=False)
             content.pack2(webview, resize=True, shrink=False)
@@ -2524,6 +3074,10 @@ class Tabit(Gtk.Window):
         row.view = view
         row.buffer = buf
         row.file_path = path
+        row.note_unloaded = unloaded
+        if unloaded:                  # shown only: sessions.json keeps the plain sub
+            row.subtitle.set_text(f"{unloaded} · {sub}")
+            row.subtitle.set_no_show_all(False)
         row.webview = webview
         row.content_paned = content if HAS_WEBKIT else None
         row.preview_on = False
@@ -2711,9 +3265,11 @@ class Tabit(Gtk.Window):
         page = self._is_browser_page(path)
         wset = row.webview.get_settings()
         # A file from terminal output is not necessarily yours. Scripts stay
-        # on, because a real report needs them, but they may not read the
-        # rest of the disk and post it somewhere.
-        wset.set_allow_file_access_from_file_urls(not page)
+        # on for a page, because a real report needs them, but they may not
+        # read the rest of the disk and post it somewhere. Markdown needs no
+        # script: raw HTML in it must not run any.
+        wset.set_enable_javascript(page)
+        wset.set_allow_file_access_from_file_urls(False)
         row.webview.set_settings(wset)
         if page and not self._has_source(path):
             # An image or a PDF has nothing in the buffer to render from.
@@ -2763,11 +3319,13 @@ class Tabit(Gtk.Window):
                 if kp and not kp.startswith("-"):
                     if kp not in line_map:
                         line_map[kp] = ln
-        line_map_json = json.dumps(line_map)
+        # "<" escaped: a value holding "</script>" must not end the block
+        line_map_json = json.dumps(line_map).replace("<", "\\u003c")
 
         try:
             parsed = yaml.safe_load(text)
-            json_str = json.dumps(parsed if parsed is not None else {}, default=str)
+            json_str = json.dumps(parsed if parsed is not None else {},
+                                  default=str).replace("<", "\\u003c")
             err_msg = None
         except Exception as e:
             json_str = "{}"
@@ -2987,7 +3545,7 @@ function renderTree(obj, path = "", keyName = "") {{
     let html = `<span class="collapsible" onclick="toggle(this)">[</span><span class="item-count" onclick="toggle(this)">${{obj.length}} items</span><div class="content tree-node">`;
     obj.forEach((item, idx) => {{
       const currentPath = path ? `${{path}}[${{idx}}]` : `[${{idx}}]`;
-      html += `<div class="tree-line"><span class="key" title="Click to copy path: ${{currentPath}}" onclick="copyPath('${{currentPath}}')">[${{idx}}]</span><span style="margin: 0 4px; color: #565f89;">:</span> ${{renderTree(item, currentPath, '')}}</div>`;
+      html += `<div class="tree-line"><span class="key" title="Click to copy path: ${{escapeHtml(currentPath)}}" data-path="${{escapeHtml(currentPath)}}" onclick="copyPath(this.dataset.path)">[${{idx}}]</span><span style="margin: 0 4px; color: #565f89;">:</span> ${{renderTree(item, currentPath, '')}}</div>`;
     }});
     html += `</div><span class="bracket">]</span>`;
     return html;
@@ -3000,7 +3558,7 @@ function renderTree(obj, path = "", keyName = "") {{
     keys.forEach(k => {{
       const currentPath = path ? `${{path}}.${{k}}` : k;
       const kLineAttr = (lineMap[k]) ? `data-line="${{lineMap[k]}}"` : '';
-      html += `<div class="tree-line" ${{kLineAttr}}><span class="key" title="Click to copy path: ${{currentPath}}" onclick="copyPath('${{currentPath}}')">${{escapeHtml(k)}}</span><span style="margin: 0 4px; color: #565f89;">:</span> ${{renderTree(obj[k], currentPath, k)}}</div>`;
+      html += `<div class="tree-line" ${{kLineAttr}}><span class="key" title="Click to copy path: ${{escapeHtml(currentPath)}}" data-path="${{escapeHtml(currentPath)}}" onclick="copyPath(this.dataset.path)">${{escapeHtml(k)}}</span><span style="margin: 0 4px; color: #565f89;">:</span> ${{renderTree(obj[k], currentPath, k)}}</div>`;
     }});
     html += `</div><span class="bracket">}}</span>`;
     return html;
@@ -3011,7 +3569,7 @@ function renderTree(obj, path = "", keyName = "") {{
 
 function escapeHtml(str) {{
   if (typeof str !== "string") str = String(str);
-  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }}
 function toggle(el) {{
   if (!el) return;
@@ -3049,6 +3607,9 @@ if (data !== null) {{
 </script>
 </body></html>"""
 
+        wset = row.webview.get_settings()
+        wset.set_allow_file_access_from_file_urls(False)  # the tree reads no file
+        row.webview.set_settings(wset)
         row.webview.load_html(doc, "file:///")
 
     def _note_schedule_preview(self, row):
@@ -3859,6 +4420,9 @@ if (data !== null) {{
         if getattr(row, "kind", None) != "note":
             return False
         path = row.file_path
+        if getattr(row, "note_unloaded", None):
+            # its file was never read in: writing would empty it
+            return True
         if path and self._is_binary_render(path):
             # The buffer was never filled from this file, so writing it back
             # would replace an image with an empty text file. Save As is no
@@ -3922,11 +4486,10 @@ if (data !== null) {{
         dialog.set_default_response(Gtk.ResponseType.ACCEPT)
         resp = dialog.run()
         dialog.destroy()
-        if resp == Gtk.ResponseType.CANCEL:
-            return False
         if resp == Gtk.ResponseType.ACCEPT:
             return self._save_note(row)
-        return True  # discard
+        # only Discard throws it away: Esc and the window X keep the note
+        return resp == Gtk.ResponseType.REJECT
 
     def _set_app_icon(self):
         # running from the repo: load the svg next to this script; once
@@ -3968,16 +4531,18 @@ if (data !== null) {{
         # intentional close racing teardown) does NOT kill-session —
         # tabs/groups + tmux sessions must resume/Attach.
         self._shutting_down = True
+        self._remote_stop(unpublish=False)  # keep the Tailscale mapping for next start
         return False
 
-    def _move_session(self, delta):
-        """Reorder the focused tab (Ctrl+Shift+PageUp/Down).
+    def _move_session(self, delta, row=None):
+        """Reorder the focused tab (Ctrl+Shift+PageUp/Down), or `row`.
 
         Collapsed groups are atomic: an ungrouped tab jumps over them and
         never joins. Internal reorder only happens in expanded groups; if the
         tab is somehow inside a collapsed group, expand first then move.
         """
-        row = self.listbox.get_selected_row()
+        if row is None:
+            row = self.listbox.get_selected_row()
         if row is None:
             return
         if getattr(row, "kind", None) == "group_header":
@@ -4586,8 +5151,13 @@ if (data !== null) {{
         # peeks/header aggregates (also scheduled from _refresh_ai_status_widgets)
         self._schedule_ai_summary_refresh()
         # forget names / collapse flags of colors no longer in use
-        if not getattr(self, "_restoring_sessions", False):
-            # forget names / collapse flags of colors no longer in use
+        # (not when the tab list could not be read: its groups are not here)
+        if not (getattr(self, "_restoring_sessions", False)
+                or getattr(self, "_sessions_unreadable", False)):
+            # tabs not restored keep their group: their colors stay in use
+            emitted = set(emitted) | {
+                s.get("color") for s in getattr(self, "_unrestored", [])
+                if isinstance(s, dict)}
             pruned = False
             for c in list(self._group_names):
                 if c not in emitted:
@@ -4778,20 +5348,9 @@ if (data !== null) {{
                 return
 
             if new_color != color:
-                for r in self._session_rows():
-                    if getattr(r, "group_color", None) == color:
-                        r.group_color = new_color
-                        self._apply_group(r, new_color)
+                self._recolor_group(color, new_color)
                 if name:
                     self._group_names[new_color] = name
-                elif color in self._group_names:
-                    self._group_names[new_color] = self._group_names[color]
-                self._group_names.pop(color, None)
-                if color in self._collapsed_groups:
-                    self._collapsed_groups.discard(color)
-                    self._collapsed_groups.add(new_color)
-                    self._save_collapsed_groups()
-                self._save_sessions()
             else:
                 if name:
                     self._group_names[color] = name
@@ -4825,6 +5384,20 @@ if (data !== null) {{
         pop.popup()
         entry.grab_focus()
 
+    def _recolor_group(self, color, new_color):
+        """Give every tab of a group a new colour; its name and fold go along."""
+        for r in self._session_rows():
+            if getattr(r, "group_color", None) == color:
+                r.group_color = new_color
+                self._apply_group(r, new_color)
+        if color in self._group_names:
+            self._group_names[new_color] = self._group_names.pop(color)
+        if color in self._collapsed_groups:
+            self._collapsed_groups.discard(color)
+            self._collapsed_groups.add(new_color)
+            self._save_collapsed_groups()
+        self._save_sessions()
+
     def _ungroup(self, color):
         for r in self._session_rows():
             if r.group_color == color:
@@ -4837,12 +5410,19 @@ if (data !== null) {{
         self._relayout()
         self._save_sessions()
 
-    def _on_child_exited(self, _term, _status, row):
+    def _on_child_exited(self, _term, status, row):
         # VTE child gone (detach / session ended). Do NOT kill the named
         # tmux session here — leave it so the user sees "exited" and can
         # decide; intentional single-tab close (_close_session) kills it.
         # keep the tab and its scrollback; only the x really closes it
         row.dead = True
+        # Gone at once (its folder or program missing after a restore, a
+        # serial device unplugged): it never ran, so keep it in sessions.json
+        # to try again next start. Only the x drops it.
+        # A new tab that ends at once (a quick command, an "exit") is not
+        # this: it would run again at every start.
+        row._died_young = (getattr(row, "_restored", False) and status != 0
+                           and time.monotonic() - getattr(row, "_spawned_at", 0) < 5)
         row.get_style_context().add_class("dead")
         row.dot.hide()
         row.subtitle.set_text("exited")
@@ -4898,7 +5478,11 @@ if (data !== null) {{
                 if (_is_ai_icon(getattr(r, "icon_name", None))
                         and not getattr(r, "dead", False)
                         and getattr(r, "term", None) is not None):
-                    self._update_agent_status(r)
+                    try:
+                        self._update_agent_status(r)
+                    except Exception as e:
+                        # one bad tab must not end this timer for every tab
+                        print(f"[tabit] AI status: {e!r}", file=sys.stderr)
         finally:
             self._agent_status_busy = False
         return True  # keep timer
@@ -6044,12 +6628,17 @@ if (data !== null) {{
             os.chmod(TELEGRAM_FILE, 0o600)
         except OSError:
             pass
-        fd = os.open(TELEGRAM_FILE,
-                     os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # a new file, then one rename: a crash halfway must not leave an
+        # empty file that the next Save turns into "no token" for good
+        tmp = TELEGRAM_FILE + ".new"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
             json.dump({"bot_token": (token or "").strip(),
                        "chat_id": (chat_id or "").strip()}, f, indent=2)
-        os.chmod(TELEGRAM_FILE, 0o600)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, TELEGRAM_FILE)
 
     @classmethod
     def _tg_api_url(cls, token, method):
@@ -6217,6 +6806,14 @@ if (data !== null) {{
     @classmethod
     def _tg_row_trouble(cls, row):
         """Why this tab cannot be typed into from a phone, or None."""
+        why = cls._ai_row_trouble(row)
+        if why is None and not getattr(row, "tg_name", None):
+            return "that tab does not take tasks from Telegram"
+        return why
+
+    @classmethod
+    def _ai_row_trouble(cls, row):
+        """Why this is not a live AI tab that can be typed into, or None."""
         if row is None:
             return "that tab is gone"
         if not _is_ai_icon(getattr(row, "icon_name", None)):
@@ -6225,8 +6822,6 @@ if (data !== null) {{
             return "that tab has exited"
         if getattr(row, "agent_status", None) in cls._TG_NOT_AGENT:
             return "no agent is running in that tab"
-        if not getattr(row, "tg_name", None):
-            return "that tab does not take tasks from Telegram"
         return None
 
     def _tg_targets(self):
@@ -6242,7 +6837,7 @@ if (data !== null) {{
         return out
 
     # Everything a terminal reads as an instruction rather than as text.
-    _TG_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+    _TG_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
     @classmethod
     def _tg_safe_text(cls, text):
@@ -6423,9 +7018,16 @@ if (data !== null) {{
             # O_NOFOLLOW: the path is written into the agent's own prompt,
             # and a link left there pointing at, say, telegram.json would
             # otherwise be read and uploaded as the answer.
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-            with os.fdopen(fd) as f:
-                body = f.read()
+            # O_NONBLOCK, a plain file, one link, a capped read: a FIFO left
+            # there would freeze tabit, a hard link to telegram.json would
+            # upload it, and a huge log would fill memory (chunks cut it
+            # to a few messages anyway).
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as f:
+                st = os.fstat(f.fileno())
+                if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                    return False
+                body = f.read(256 * 1024).decode("utf-8", "replace")
         except OSError:
             return False
         chunks = self._tg_chunks(body)
@@ -6518,6 +7120,15 @@ if (data !== null) {{
                 return
             waiting.pop(token, None)
             self._tg_save_jobs()
+            if not self._load_settings().get("telegram_quote"):
+                # the screen is only sent when quoting is on: it can hold
+                # anything, keys included
+                self._tg_send(
+                    "%s finished without writing a reply. Its screen is in "
+                    "the tab." % job["name"],
+                    row_id=rid, reply_to=job["msg_id"],
+                    dest=self._tg_job_dest(job))
+                return
             lines = self._tg_quote_lines(
                 self._term_tail_text(getattr(row, "term", None), 20), want=5)
             self._tg_send(
@@ -6540,9 +7151,16 @@ if (data !== null) {{
         A file written while the agent keeps working would otherwise wait
         for a status change that may be a long way off.
         """
-        os.makedirs(TELEGRAM_REPLY_DIR, exist_ok=True)
+        try:
+            os.makedirs(TELEGRAM_REPLY_DIR, exist_ok=True)
+            names = os.listdir(TELEGRAM_REPLY_DIR)
+        except OSError as e:
+            # e.g. a file where the folder should be: no answers by file,
+            # but tabit still starts
+            print(f"[telegram] reply folder: {e}", file=sys.stderr)
+            return
         owed = self._tg_jobs()
-        for name in os.listdir(TELEGRAM_REPLY_DIR):
+        for name in names:
             # An answer written while tabit was restarting is still an
             # answer: the agent is in tmux and never stopped. Only files
             # nobody is waiting for go.
@@ -6728,14 +7346,20 @@ if (data !== null) {{
 
     _TG_MSG_MEMORY = 200
 
-    def _tg_remember_msg(self, msg_id, row_id):
+    @staticmethod
+    def _tg_msg_key(dest, msg_id):
+        # message ids are per chat and per bot: the same number in another
+        # chat is another message, and must not reach this tab
+        return "%s|%s|%s" % (dest[0], dest[1], msg_id)
+
+    def _tg_remember_msg(self, msg_id, row_id, dest):
         """Tie a message to a tab, so a reply to it needs no address."""
         if not msg_id or not row_id:
             return
         seen = getattr(self, "_tg_msg_row", None)
         if seen is None:
             seen = self._tg_msg_row = {}
-        seen[str(msg_id)] = row_id
+        seen[self._tg_msg_key(dest, msg_id)] = row_id
         # Bounded: a chat is a log, and only the recent end of it gets
         # replied to. Oldest first, which is insertion order here.
         while len(seen) > self._TG_MSG_MEMORY:
@@ -6744,8 +7368,8 @@ if (data !== null) {{
     def _tg_replied_row_id(self, msg):
         """The tab a replied-to message was about, or None."""
         parent = (msg or {}).get("reply_to_message") or {}
-        return getattr(self, "_tg_msg_row", {}).get(
-            str(parent.get("message_id")))
+        return getattr(self, "_tg_msg_row", {}).get(self._tg_msg_key(
+            self._tg_dest_now(), parent.get("message_id")))
 
     @staticmethod
     def _tg_auth_ok(msg, chat_id):
@@ -6899,11 +7523,17 @@ if (data !== null) {{
                 and token and chat):
             time.sleep(5)
             return wait
+        dest = (chat, self._tg_bot_key(token))
+        # update ids count per bot: another bot's offset would tell this
+        # one to drop every update below it
+        state = self._tg_load_state()
+        offset = (state.get("offset", 0)
+                  if state.get("offset_bot", dest[1]) == dest[1] else 0)
         started = time.monotonic()
         res, err = self._tg_call(
             token, "getUpdates",
             {"timeout": self._TG_POLL_TIMEOUT,
-             "offset": self._tg_load_state().get("offset", 0),
+             "offset": offset,
              "allowed_updates": json.dumps(["message",
                                             "callback_query"])},
             timeout=self._TG_POLL_TIMEOUT + 10)
@@ -6912,12 +7542,13 @@ if (data !== null) {{
             time.sleep(wait)
             return min(60, wait * 2)
         wait = 5
-        if str(self._tg_load_secrets().get("chat_id") or "") != chat:
-            return wait  # answered for a bot that is no longer the one
+        if self._tg_dest_now() != dest:
+            return wait  # answered for a bot or chat that is no longer the one
         for upd in res or []:
             # Written before the message is acted on, so a message
             # that upsets us is lost rather than replayed for ever.
-            self._tg_save_state(offset=int(upd.get("update_id", 0)) + 1)
+            self._tg_save_state(offset=int(upd.get("update_id", 0)) + 1,
+                                offset_bot=dest[1])
             cb = upd.get("callback_query")
             if cb:
                 # A press carries its own sender and the chat the
@@ -6926,12 +7557,12 @@ if (data !== null) {{
                             "from": cb.get("from")}
                 if self._tg_auth_ok(stand_in, chat):
                     GLib.idle_add(self._tg_on_callback, cb.get("id"),
-                                  cb.get("data") or "")
+                                  cb.get("data") or "", dest)
                 continue
             msg = upd.get("message") or {}
             if not self._tg_auth_ok(msg, chat):
                 continue
-            GLib.idle_add(self._tg_on_message, msg)
+            GLib.idle_add(self._tg_on_message, msg, dest)
         time.sleep(self._tg_poll_gap(time.monotonic() - started))
         return wait
 
@@ -6999,6 +7630,10 @@ if (data !== null) {{
         bad = self._tg_row_trouble(row)
         if bad is not None:
             return bad
+        if not self._tg_safe_text(text).strip():
+            # only control characters: typing nothing and then an Enter
+            # would answer whatever prompt the agent is showing
+            return "nothing to type in that message"
         token = self._tg_draft_token()
         ask = (bool(self._load_settings().get("telegram_ask_file", True))
                and not is_answer
@@ -7033,7 +7668,12 @@ if (data !== null) {{
         self._tg_settle_watch(token)
         return False
 
-    def _tg_on_message(self, msg):
+    # A reply older than this is not typed in straight away: it answered
+    # a screen that has long moved on (sent while replies were off, or
+    # while the network was down). It gets the buttons like a new task.
+    _TG_REPLY_FRESH = 600
+
+    def _tg_on_message(self, msg, dest):
         """Answer one message. Runs on the UI thread: GTK is not shared."""
         # Re-read: this was handed over by a poll that may have been in
         # the air for half a minute, and the switch can have gone off in
@@ -7041,6 +7681,8 @@ if (data !== null) {{
         conf = self._load_settings()
         if not (conf.get("telegram_enabled") and conf.get("telegram_reply")):
             return False
+        if dest != self._tg_dest_now():
+            return False  # the chat or bot changed since it was read
         text = (msg.get("text") or "").strip()
         if not text:
             return False
@@ -7050,6 +7692,8 @@ if (data !== null) {{
         # "/deploy", a path -- and reading that as a command answered
         # with the help text instead of sending anything.
         rid = self._tg_replied_row_id(msg)
+        if rid and time.time() - msg.get("date", time.time()) > self._TG_REPLY_FRESH:
+            rid = None
         if rid:
             bad = self._tg_send_task(self._tg_row_by_id(rid), text,
                                      is_answer=True)
@@ -7088,10 +7732,12 @@ if (data !== null) {{
                       markup=self._tg_keyboard(token, targets))
         return False
 
-    def _tg_on_callback(self, cb_id, data):
+    def _tg_on_callback(self, cb_id, data, dest):
         conf = self._load_settings()
         if not (conf.get("telegram_enabled") and conf.get("telegram_reply")):
             return False
+        if dest != self._tg_dest_now():
+            return False  # the chat or bot changed since it was read
         kind, _sep, rest = (data or "").partition(":")
         drafts = getattr(self, "_tg_drafts", None) or {}
         if kind == "x":
@@ -7209,7 +7855,7 @@ if (data !== null) {{
                 # that grows from one thread while another walks it to
                 # trim it is a RuntimeError waiting for a busy day.
                 GLib.idle_add(self._tg_remember_msg,
-                              res.get("message_id"), row_id)
+                              res.get("message_id"), row_id, meant_for)
             if callable(after):
                 GLib.idle_add(after, res.get("message_id"))
 
@@ -9367,6 +10013,21 @@ if (data !== null) {{
             self.listbox.select_row(row)
             self._focus_row_content(row)
 
+    def _set_tab_name(self, row, name):
+        """Show `name` as the tab's title (a note keeps its unsaved mark)."""
+        if getattr(row, "kind", None) == "note":
+            dirty = row.buffer.get_modified()
+            row.title_text = name + (" *" if dirty else "")
+            row.title_label.set_text(row.title_text)
+        else:
+            row.title_text = name
+            row.title_label.set_text(name)
+        shown = row.title_label.get_text()
+        row.session_label = (f"{shown} {row.sub_text}"
+                             if row.sub_text else shown)
+        if self.listbox.get_selected_row() is row:
+            self.set_title(f"{row.session_label} — tabit")
+
     def _rename_session(self, row=None):
         """Rename in a popover bubble anchored to the right of the tab."""
         row = row or self.listbox.get_selected_row()
@@ -9495,18 +10156,7 @@ if (data !== null) {{
                         row.subtitle.show()
 
             if name:
-                if getattr(row, "kind", None) == "note":
-                    dirty = row.buffer.get_modified()
-                    row.title_text = name + (" *" if dirty else "")
-                    row.title_label.set_text(row.title_text)
-                else:
-                    row.title_text = name
-                    row.title_label.set_text(name)
-                shown = row.title_label.get_text()
-                row.session_label = (f"{shown} {row.sub_text}"
-                                     if row.sub_text else shown)
-                if self.listbox.get_selected_row() is row:
-                    self.set_title(f"{row.session_label} — tabit")
+                self._set_tab_name(row, name)
             self._save_sessions()
             pop.popdown()
 
@@ -9982,10 +10632,8 @@ if (data !== null) {{
 
     @staticmethod
     def _save_connect_last(data):
-        os.makedirs(CONFIG_DIR, exist_ok=True)
         try:
-            with open(CONNECT_LAST_FILE, "w") as f:
-                json.dump(data, f, indent=2)
+            _write_json(CONNECT_LAST_FILE, data, mode=0o600)   # holds passwords
         except OSError:
             pass
 
@@ -10066,6 +10714,15 @@ if (data !== null) {{
         magic_words_entry.set_placeholder_text("e.g. word1,word2 (comma-separated)")
         magic_words_entry.set_hexpand(True)
 
+        # 9b. EHR mesh agent (optional): SN is the controller, hop into this agent
+        # Not remembered (like reconnect): a stale value would silently hop
+        # into an agent the next time you only want the controller.
+        agent_entry = Gtk.Entry(width_chars=24)
+        agent_entry.set_placeholder_text("EHR agent SN/MAC/IP or auto (optional)")
+        agent_entry.set_tooltip_text("EHR mesh only: Serial Number is the controller; "
+                                     "after connecting, hop into this agent (--agent)")
+        agent_entry.set_hexpand(True)
+
         # 10. Bypass Cache (--no-cache)
         nocache_chk = Gtk.CheckButton(label="Bypass device cache (--no-cache)")
         nocache_chk.set_active(bool(last.get("no_cache", False)))
@@ -10110,9 +10767,12 @@ if (data !== null) {{
         grid.attach(Gtk.Label(label="Magic Words", xalign=0), 0, 9, 1, 1)
         grid.attach(magic_words_entry, 1, 9, 1, 1)
 
-        grid.attach(nocache_chk, 1, 10, 1, 1)
-        grid.attach(use_tmux_chk, 1, 11, 1, 1)
-        grid.attach(reconnect_chk, 1, 12, 1, 1)
+        grid.attach(Gtk.Label(label="EHR Agent", xalign=0), 0, 10, 1, 1)
+        grid.attach(agent_entry, 1, 10, 1, 1)
+
+        grid.attach(nocache_chk, 1, 11, 1, 1)
+        grid.attach(use_tmux_chk, 1, 12, 1, 1)
+        grid.attach(reconnect_chk, 1, 13, 1, 1)
 
         # Buttons
         btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -10125,7 +10785,7 @@ if (data !== null) {{
         connect_b.connect("clicked", lambda *_: dialog.response(Gtk.ResponseType.OK))
         btns.pack_start(cancel_b, False, False, 0)
         btns.pack_start(connect_b, False, False, 0)
-        grid.attach(btns, 0, 13, 2, 1)
+        grid.attach(btns, 0, 14, 2, 1)
 
         dialog.get_content_area().add(grid)
         dialog.show_all()
@@ -10167,6 +10827,7 @@ if (data !== null) {{
                 reconnect_val = reconnect_chk.get_active()
                 gw_pass_val = gw_pass_entry.get_text().strip()
                 magic_words_val = magic_words_entry.get_text().strip()
+                agent_val = agent_entry.get_text().strip()
 
                 # Save last used credentials/parameters
                 self._save_connect_last({
@@ -10204,10 +10865,16 @@ if (data !== null) {{
                     raw_cmd.extend(["--gateway-pass", gw_pass_val])
                 if magic_words_val:
                     raw_cmd.extend(["--magic-words", magic_words_val])
+                if agent_val:
+                    raw_cmd.extend(["--agent", agent_val])
 
                 if use_tmux_val:
                     _tmux_apply_user_conf()
                     session_name = f"conn-{sn.lower()}"
+                    if agent_val:
+                        # Own session per agent, so it does not attach to
+                        # (or reconnect-kill) the controller's session.
+                        session_name += f"-{agent_val.lower().replace(':', '').replace('.', '-')}"
                     cmd_str = " ".join(shlex.quote(arg) for arg in raw_cmd)
                     if reconnect_val:
                         # One-off action: drop the stale session now. The kill
@@ -10226,6 +10893,8 @@ if (data !== null) {{
                     sub = f"cloud ({env_val})"
 
                 label = f"{sn} (connect)"
+                if agent_val:
+                    label = f"{sn} → {agent_val} (connect)"
                 self._add_session(label=label, argv=cmd, icon_name=icon_name,
                                   sub=sub, cwd=SSH_TOOL_DIR)
 
@@ -10234,6 +10903,833 @@ if (data !== null) {{
 
         dialog.connect("response", _on_connect_response)
         dialog.show_all()
+
+    _REMOTE_TAB_TYPES = {
+        ICON_AI: "ai", ICON_AI_TMUX: "ai",
+        "utilities-terminal-symbolic": "shell",
+        "network-wired-symbolic": "serial",
+        ICON_NOTE: "note", ICON_COMMAND: "command", ICON_TMUX: "tmux",
+        ICON_CONNECT: "connect", ICON_CONNECT_TMUX: "connect",
+    }
+
+    def _remote_snapshot(self):
+        """Every group and tab, in sidebar order, with AI tab status."""
+        tabs, groups = [], {}
+        for row in self._session_rows():
+            color = getattr(row, "group_color", None) or ""
+            tab = {"id": self._tg_row_id(row),
+                   "title": getattr(row, "title_text", None) or "",
+                   "sub": getattr(row, "sub_text", None) or "",
+                   "type": self._REMOTE_TAB_TYPES.get(
+                       getattr(row, "icon_name", None), "other"),
+                   "group": color,
+                   "exited": bool(getattr(row, "dead", False))}
+            if tab["type"] == "ai":
+                tab["ai_status"] = ("exited" if tab["exited"] else
+                                    getattr(row, "agent_status", None)
+                                    or "unknown")
+            if getattr(row, "kind", None) == "term":
+                tab["can_send"] = self._remote_tab_trouble(row) is None
+            if (tab["type"] == "note" and self._remote_files_on
+                    and getattr(row, "file_path", None)):
+                tab["path"] = row.file_path
+            tabs.append(tab)
+            if color and color not in groups:
+                groups[color] = {"color": color,
+                                 "name": self._row_group_name(row),
+                                 "collapsed": color in self._collapsed_groups,
+                                 "tabs": []}
+            if color:
+                groups[color]["tabs"].append(tab["id"])
+        return {"time": int(time.time()), "version": APP_VERSION,
+                "send": self._remote_send_on, "files": self._remote_files_on,
+                "colors": list(GROUP_COLORS),
+                "clis": [e["cli"] for e in self._load_ai_clis()]
+                if self._remote_send_on else [],
+                "groups": list(groups.values()), "tabs": tabs}
+
+    # Keys a phone can press: enough to answer a prompt or drive a shell.
+    _REMOTE_KEYS = {"enter": b"\r", "esc": b"\x1b", "up": b"\x1b[A",
+                    "down": b"\x1b[B", "right": b"\x1b[C", "left": b"\x1b[D",
+                    "tab": b"\t", "backspace": b"\x7f", "space": b" ",
+                    "ctrl-c": b"\x03", "ctrl-d": b"\x04", "ctrl-z": b"\x1a",
+                    "ctrl-l": b"\x0c",
+                    **{str(d): str(d).encode() for d in range(1, 10)},
+                    "y": b"y", "n": b"n"}
+
+    def _remote_manage(self, op, target, body):
+        """GTK thread: tabs and groups from the page -> (code, body).
+
+        op: new | close | group | move (target = tab id) | groupop (target =
+        group colour). Same switch as typing: opening a shell from the
+        phone is no more than typing into one.
+        """
+        if not self._remote_send_on:
+            return 403, {"error": "managing tabs from the phone is off (Settings > Remote)"}
+        # the desk keeps showing what it showed: opening a tab from the
+        # phone selects it here (tabit's own habit), which nobody asked for
+        prev = self.listbox.get_selected_row()
+        prev_header = (prev.group_color
+                       if getattr(prev, "kind", None) == "group_header" else None)
+        self._remote_placing = True         # see _place_tab_row
+        try:
+            return self._remote_manage_op(op, target, body)
+        finally:
+            self._remote_placing = False
+            if prev_header:                 # _relayout made a new header row
+                prev = self._group_header_row(prev_header)
+                if prev is None and op == "groupop" and target == prev_header:
+                    prev = self._group_header_row(body.get("color"))   # recoloured
+            if (prev is not None and prev.get_parent() is not None
+                    and prev.get_visible()
+                    and self.listbox.get_selected_row() is not prev):
+                self.listbox.select_row(prev)
+
+    def _remote_manage_op(self, op, target, body):
+        if op == "new":
+            return self._remote_new(body)
+        if op == "groupop":
+            return self._remote_group_op(target, body)
+        row = self._tg_row_by_id(target)
+        if row is None:
+            return 404, {"error": "that tab is gone"}
+        if op == "close":
+            if getattr(row, "kind", None) == "note" and row.buffer.get_modified():
+                # the save question is a modal dialog here: answer it at the desk
+                return 409, {"error": "that note has unsaved changes; close it in tabit"}
+            if len(self._session_rows()) == 1:
+                # the last tab closes tabit, and the phone cannot start it again
+                return 409, {"error": "that is the last tab; closing it quits tabit, do it in tabit"}
+            self._close_session(row)
+            return 200, {"ok": True}
+        if op == "group":
+            color = body.get("color")
+            if color is not None and color not in GROUP_COLORS:
+                return 400, {"error": "unknown group colour"}
+            self._remote_set_group(row, color)
+            return 200, {"ok": True}
+        if op == "rename":
+            name = body.get("name")
+            if not isinstance(name, str) or not 0 < len(name.strip()) <= 80:
+                return 400, {"error": "name of 1 to 80 characters"}
+            name = name.strip()
+            if getattr(row, "kind", None) == "note" and name.endswith(" *"):
+                name = name[:-2].rstrip()   # the unsaved mark, as the desk drops it
+            if not name:
+                return 400, {"error": "name of 1 to 80 characters"}
+            self._set_tab_name(row, name)
+            self._save_sessions()
+            return 200, {"ok": True}
+        if op == "move":
+            delta = body.get("delta")
+            if delta not in (-1, 1):
+                return 400, {"error": "delta must be -1 or 1"}
+            # same rules as Ctrl+Shift+PageUp/Down, but a collapsed group
+            # the desk folded stays folded
+            g = getattr(row, "group_color", None)
+            folded = g in self._collapsed_groups
+            self._move_session(delta, row=row)
+            if folded and g not in self._collapsed_groups and any(
+                    getattr(r, "group_color", None) == g for r in self._session_rows()):
+                self._set_group_collapsed(g, True)
+            self._save_sessions_soon()
+            return 200, {"ok": True}
+        return 404, {"error": "unknown action"}
+
+    def _remote_new(self, body):
+        kind = body.get("kind")
+        cwd = os.path.expanduser((body.get("cwd") or "").strip() or "~")
+        if not os.path.isdir(cwd):
+            return 400, {"error": f"no such folder: {cwd}"}
+        if kind == "shell":
+            row = self._add_session("shell", [os.environ.get("SHELL", "/bin/bash")],
+                                    "utilities-terminal-symbolic", cwd=cwd,
+                                    track_cwd=True)
+        elif kind == "command":
+            cmd = (body.get("command") or "").strip()
+            if not cmd or len(cmd) > 2000:
+                return 400, {"error": "give a command (up to 2000 characters)"}
+            parts = cmd.split(maxsplit=1)
+            row = self._add_session(parts[0], ["/bin/sh", "-c", cmd], ICON_COMMAND,
+                                    sub=parts[1] if len(parts) > 1 else None, cwd=cwd)
+        elif kind == "ai":
+            # what "+ AI" does with its defaults: a fresh session, resumed
+            # after a restart, inside tmux; bypass as Settings says
+            tool = body.get("cli")
+            entry = next((e for e in self._load_ai_clis() if e["cli"] == tool), None)
+            if entry is None:
+                return 400, {"error": "pick an AI from tabit's list"}
+            launch, argv, icon = self._ai_launch_pair(
+                tool, cwd, list(entry.get("try") or []),
+                bypass=bool(self._load_settings().get("ai_claude_bypass"))
+                and self._ai_is_claude(tool),
+                tmux=True, continue_now=False, resume_later=True,
+                new_sid=(str(uuid.uuid4()) if self._ai_takes_new_id(tool) else None))
+            row = self._add_session(tool, argv, icon, sub=self._ai_sub(cwd),
+                                    cwd=cwd, launch_argv=launch)
+            if row is not None:
+                row.ai_hunt = True
+        else:
+            return 400, {"error": "kind must be shell, ai or command"}
+        if row is None:
+            return 500, {"error": "tabit could not open it"}
+        color = body.get("group")
+        if color in GROUP_COLORS:
+            self._remote_set_group(row, color)
+        self._save_sessions_soon()
+        print(f"[remote] new {kind} tab in {cwd}", file=sys.stderr)
+        return 200, {"id": self._tg_row_id(row)}
+
+    def _remote_set_group(self, row, color):
+        """_set_group without unfolding: a group the desk folded stays so."""
+        self._apply_group(row, color)
+        self._relayout()
+        self._save_sessions()
+
+    def _remote_group_op(self, color, body):
+        rows = self._session_rows()
+        used = {getattr(r, "group_color", None) for r in rows}
+        if color not in GROUP_COLORS:
+            return 404, {"error": "no such group"}
+        # every check before the first change: no half-done answer
+        name = body.get("name")
+        if "name" in body and (not isinstance(name, str) or len(name.strip()) > 40):
+            return 400, {"error": "name up to 40 characters"}
+        new = body.get("color", color)
+        if new not in GROUP_COLORS:
+            return 400, {"error": "unknown group colour"}
+        if new != color and new in used:
+            return 409, {"error": "that colour has a group"}
+        if body.get("loose"):
+            # the tabs without a group become one, in this free colour
+            loose = [r for r in rows if not getattr(r, "group_color", None)]
+            if color in used:
+                return 409, {"error": "that colour has a group"}
+            if not loose:
+                return 404, {"error": "no tabs without a group"}
+            for r in loose:
+                self._apply_group(r, color)
+            self._relayout()
+            self._save_sessions()
+        elif color not in used:
+            return 404, {"error": "no such group"}
+        if new != color:
+            self._recolor_group(color, new)
+            color = new
+            self._save_group_names()
+            self._relayout()
+        if "name" in body:
+            if name.strip():
+                self._group_names[color] = name.strip()
+            else:
+                self._group_names.pop(color, None)
+            self._save_group_names()
+            self._relayout()
+        if "collapsed" in body:
+            self._set_group_collapsed(color, bool(body["collapsed"]))
+        if body.get("delta") in (-1, 1):
+            # _move_block, not _move_group: that one moves the desk's selection
+            self._move_block(lambda b: b[0] == "group" and b[1] == color, body["delta"])
+            self._save_sessions_soon()
+        if body.get("ungroup"):
+            self._ungroup(color)
+        return 200, {"ok": True}
+
+    def _remote_ack(self, row):
+        """The phone opened or answered this tab: its "ready" has been seen.
+
+        Once, like a click on the tab; not for as long as it stays open --
+        a phone left on a tab is easily not being looked at, and a finish
+        should still show as ready there.
+        """
+        if getattr(row, "agent_status", None) != "ready":
+            return
+        # Mark it seen outright. Re-running the detector once (what a
+        # desktop click amounts to, but a click keeps the tab selected for
+        # many ticks) is not enough: one tick that cannot read the screen
+        # leaves ready stuck. A new ready needs a new busy turn.
+        as_ = self._agent_status_mod()
+        disp = getattr(row, "_agent_display", None)
+        if as_ is not None and disp is not None:
+            from dataclasses import replace as _dc_replace
+            row._agent_display = _dc_replace(disp, ui="idle", had_busy_turn=False)
+        self._set_agent_status(row, "idle")
+
+    def _remote_ack_id(self, rid):
+        """GTK thread: POST /api/tabs/<id>/ack, the page opened this tab."""
+        if not self._remote_send_on:
+            return 403, {"error": "AI tab screens are off (Settings > Remote)"}
+        row = self._tg_row_by_id(rid)
+        if row is None:
+            return 404, {"error": "that tab is gone"}
+        self._remote_ack(row)
+        return 200, {"ok": True}
+
+    def _remote_screen(self, rid, color=False):
+        """The last screenful of an AI tab, for a phone to read (GTK thread).
+
+        Returns (code, body, tmux session or None). With color and a tmux
+        session, the handler thread swaps in the coloured pane: tmux is run
+        there, never on the GTK thread, so a slow tmux cannot freeze tabit.
+        """
+        if not self._remote_send_on:
+            # the screen can hold anything; it comes with the typing switch
+            return 403, {"error": "AI tab screens are off (Settings > Remote)"}, None
+        row = self._tg_row_by_id(rid)
+        if row is None or getattr(row, "kind", None) != "term":
+            return 404, {"error": "no such terminal tab"}, None
+        term = getattr(row, "term", None)
+        text = self._term_tail_text(term, 60)
+        out = {"id": rid, "title": getattr(row, "title_text", "") or "",
+               "ai_status": getattr(row, "agent_status", None) or "unknown",
+               "lines": text.rstrip().splitlines()[-60:]}
+        out.update(self._remote_cursor(term, out["lines"]))
+        return 200, out, (self._row_tmux_session(row) if color else None)
+
+    @staticmethod
+    def _remote_cursor(term, lines):
+        """The cursor for a plain tab's text, as the phone page reads it:
+        cursor [col, 0] on the line `rows` from the end. When the cursor
+        row is blank and the last one, an empty line is added for it."""
+        try:
+            col, crow = (int(v) for v in term.get_cursor_position())
+            end_col = max(0, int(term.get_column_count()) - 1)
+            end_row = crow + max(16, int(term.get_row_count()))
+            try:
+                text, _attrs = term.get_text_range(crow, 0, end_row, end_col, None)
+            except TypeError:               # older VTE, as in _term_tail_text
+                text, _attrs = term.get_text_range(
+                    crow, 0, end_row, end_col, lambda *_a: False)
+        except Exception:
+            return {}
+        if text is None:                    # could not read: no cursor, not a wrong one
+            return {}
+        rows = text.splitlines()
+        while rows and not rows[-1].strip():
+            rows.pop()
+        if not rows:                        # on a blank last line
+            lines.append("")
+        return {"cursor": [col, 0], "rows": max(1, len(rows))}
+
+    @staticmethod
+    def _tmux_pane_ansi(name, back=0):
+        """`capture-pane -e` (text + SGR codes only), the pane size and the
+        cursor, or None.
+
+        back: also this many lines of scrollback above the visible pane
+        (agents draw inline, so their old output is in tmux's history).
+        """
+        try:
+            size = subprocess.run(
+                ["tmux", "display-message", "-p", "-t", _tmux_exact(name),
+                 "#{pane_width} #{pane_height} #{cursor_x} #{cursor_y} #{cursor_flag}"],
+                capture_output=True, text=True, timeout=2).stdout.split()
+            cmd = ["tmux", "capture-pane", "-p", "-e", "-t", _tmux_exact(name)]
+            if back > 0:
+                cmd += ["-S", str(-back)]
+            ansi = subprocess.run(cmd, capture_output=True, timeout=3).stdout
+            # keep the newest part if it is huge
+            return {"ansi": ansi[-600000:].decode("utf-8", "replace"),
+                    "cols": int(size[0]), "rows": int(size[1]), "back": back,
+                    # where the cursor is in the visible pane; None when the
+                    # program hides it (agents draw their own)
+                    "cursor": ([int(size[2]), int(size[3])]
+                               if size[4:5] == ["1"] else None)}
+        except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+            return None
+
+    def _remote_tab_trouble(self, row):
+        """Why the phone may not type into this tab, or None. Every live
+        terminal tab takes typing once Settings > Remote allows it."""
+        if row is None:
+            return "that tab is gone"
+        if getattr(row, "kind", None) != "term" or getattr(row, "term", None) is None:
+            return "that is not a terminal tab"
+        if getattr(row, "dead", False):
+            return "that tab has exited"
+        return None
+
+    def _remote_act(self, rid, action, body):
+        """GTK thread: type text or press a key into a terminal tab."""
+        if not self._remote_send_on:
+            return 403, {"error": "typing from the phone is off (Settings > Remote)"}
+        row = self._tg_row_by_id(rid)
+        why = self._remote_tab_trouble(row)
+        if why:
+            return 409, {"error": why}
+        if action == "send":
+            text = body.get("text")
+            if (not isinstance(text, str) or not self._tg_safe_text(text).strip()
+                    or len(text) > 8000):
+                return 400, {"error": "text must be 1..8000 characters"}
+            self._tg_inject(row, text)
+        elif action == "type":
+            # keyboard mode: what was typed, as typed, no Enter; control
+            # characters only ever come as named keys
+            text = body.get("text")
+            text = self._TG_CONTROL.sub("", text.replace("\t", "").replace("\n", "").replace("\r", "")) \
+                if isinstance(text, str) else ""
+            if not text or len(text) > 2000:
+                return 400, {"error": "text must be 1..2000 characters"}
+            row.term.feed_child(text.encode("utf-8"))
+        else:
+            key = body.get("key")
+            key = self._REMOTE_KEYS.get(key) if isinstance(key, str) else None
+            if key is None:
+                return 400, {"error": "unknown key"}
+            row.term.feed_child(key)
+        self._remote_ack(row)               # answering it is reading it
+        print(f"[remote] {action} -> tab {rid} "
+              f"({getattr(row, 'title_text', '')})", file=sys.stderr)
+        return 200, {"ok": True}
+
+    def _remote_call(self, fn, timeout=3):
+        """Run fn on the GTK thread for a server thread; None if busy.
+
+        A call that times out is cancelled, not left queued: the phone was
+        told "busy", and a task typed in later anyway would arrive twice
+        when it presses Send again.
+        """
+        box, done, state = [], threading.Event(), {"cancelled": False}
+        lock = threading.Lock()
+
+        def on_main():
+            with lock:
+                if state["cancelled"]:
+                    return False
+                state["started"] = True
+            try:
+                if self._remote_srv is not None:    # not on a closed window
+                    box.append(fn())
+            except Exception as e:
+                box.append({"error": f"{type(e).__name__}: {e}"})
+            finally:
+                done.set()
+            return False
+
+        GLib.idle_add(on_main)
+        if not done.wait(timeout):
+            with lock:
+                if not state.get("started"):
+                    state["cancelled"] = True
+                    return None
+            done.wait()                     # it is running now: let it finish
+        return box[0] if box else None
+
+    def _remote_page(self):
+        for d in self._agent_detect_roots():
+            path = os.path.join(d, REMOTE_PAGE)
+            if os.path.isfile(path):
+                with open(path, "rb") as f:
+                    return f.read()
+        return None
+
+    def _remote_icon(self, path):
+        """(content type, bytes) for one of REMOTE_ICONS, or None."""
+        name, size = REMOTE_ICONS[path]
+        src = next((os.path.join(d, name) for d in self._agent_detect_roots()
+                    if os.path.isfile(os.path.join(d, name))), None)
+        if src is None:
+            return None
+        try:
+            if size is None:
+                with open(src, "rb") as f:
+                    return "image/svg+xml", f.read()
+            pb = GdkPixbuf.Pixbuf.new_from_file_at_size(src, size, size)
+            return "image/png", bytes(pb.save_to_bufferv("png", [], [])[1])
+        except (OSError, GLib.Error):
+            return None
+
+    def _remote_sync(self):
+        """Start or stop serving to match the setting."""
+        conf = self._load_settings()
+        # read once here (start, Save), not on every request
+        self._remote_send_on = bool(conf.get("remote_send"))
+        self._remote_files_on = bool(conf.get("remote_files"))
+        want = bool(conf.get("remote_enabled"))
+        if not want:
+            self._remote_fresh()
+        self._remote_want = want
+        if want and self._remote_srv is None:
+            self._remote_start()
+        elif not want and getattr(self, "_remote_tried", False):
+            # only undo what tabit did: never touch a Serve setup it did not make
+            self._remote_tried = False
+            self._remote_stop(unpublish=True)
+            self._remote_label.hide()
+
+    def _remote_fresh(self):
+        """A fresh "on" (Remote off, or Save): setup may ask, run each step
+        and open the Serve page once more. Until then it does each at most
+        once, so a retry every minute never nags."""
+        self._remote_declined = False
+        self._remote_agreed = False
+        self._remote_link_opened = False
+        self._remote_steps_done = set()
+
+    def _remote_decline(self):
+        """GTK thread: the setup was declined, so Remote goes off for good
+        (the setting says so too) instead of asking at every start."""
+        self._remote_want = False
+        self._remote_tried = False          # nothing published: nothing to undo
+        self._save_settings({"remote_enabled": False})
+        return False
+
+    def _remote_ts(self, job):
+        """Run a `tailscale` job off the GTK thread, one at a time, in order.
+
+        An "on" and an "off" in quick succession must not finish the wrong
+        way round, so the jobs share a lock, and each looks at what is
+        wanted now, not at what was wanted when it was queued.
+        """
+        lock = self.__dict__.setdefault("_remote_ts_lock", threading.Lock())
+
+        def run():
+            with lock:
+                job()
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _remote_start(self):
+        self._remote_tried = True
+        try:
+            os.unlink(REMOTE_SOCK)
+        except OSError:
+            pass
+        # its own stream list: an old server's streams must not count here
+        handler = type("Handler", (_RemoteHandler,),
+                       {"app": self, "stop": threading.Event(), "owner": None,
+                        "_streams": [], "_streams_lock": threading.Lock()})
+        try:
+            srv = _RemoteServer(REMOTE_SOCK, handler)
+            os.chmod(REMOTE_SOCK, 0o600)
+        except OSError as e:
+            self._remote_fail(None, str(e))
+            return
+        srv.handler_cls = handler
+        self._remote_srv = srv
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self._remote_show("connecting", "asking Tailscale to publish it")
+
+        def publish():
+            if self._remote_srv is not srv:     # turned off while queued
+                return
+            problem = self._tailscale_prepare(srv)
+            if problem:
+                retry = problem.startswith("retry:")
+                GLib.idle_add(self._remote_fail, srv, problem.removeprefix("retry:"), retry)
+                return
+            if self._remote_srv is not srv:     # turned off during the setup
+                return
+            try:
+                # who may look: this login only, not everyone on the tailnet
+                st = json.loads(subprocess.run(
+                    ["tailscale", "status", "--json"], stdin=subprocess.DEVNULL,
+                    capture_output=True, text=True, timeout=10).stdout or "{}")
+                me = st.get("Self", {}).get("UserID")
+                owner = st.get("User", {}).get(str(me), {}).get("LoginName")
+                if not owner:
+                    raise RuntimeError("Tailscale is not logged in here")
+                handler.owner = owner
+                # one mapping for the whole site: https://<host>.ts.net/ -> socket
+                r = subprocess.run(
+                    ["tailscale", "serve", "--bg", "unix:" + REMOTE_SOCK],
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                    timeout=20)
+                out = (r.stdout + r.stderr).strip()
+                url = next((w for w in out.split()
+                            if w.startswith("https://")), "")
+                ok = r.returncode == 0 and url
+                if not ok and re.search(r"denied|must be root|operator", out, re.I):
+                    # tailscaled serves a unix socket only for root, or an
+                    # operator who may also `sudo tailscale`: a minute
+                    # changes nothing, so say it once
+                    GLib.idle_add(self._remote_fail, srv,
+                                  out.splitlines()[-1] if out else "tailscale serve was refused",
+                                  False)
+                    return
+            except subprocess.TimeoutExpired as e:
+                # Serve not enabled for the tailnet: it prints a link and waits
+                out = "".join(x.decode() if isinstance(x, bytes) else (x or "")
+                              for x in (e.stdout, e.stderr))
+                link = next((w for w in out.split()
+                             if "login.tailscale.com" in w), "")
+                ok, url = False, ""
+                if link and not getattr(self, "_remote_link_opened", False):
+                    # one click in the browser; the 60 s retry picks it up
+                    # (once: the next retries must not pile up pages)
+                    self._remote_link_opened = True
+                    GLib.idle_add(lambda: (self._open_uri(link), False)[1])
+                out = ("Enable Serve in the browser page that opened ("
+                       + link + "), tabit retries in a minute") if link \
+                    else "tailscale serve did not answer"
+            except (OSError, ValueError, RuntimeError,
+                    subprocess.SubprocessError) as e:
+                ok, url, out = False, "", str(e)
+            GLib.idle_add(self._remote_published, srv, ok, url, out)
+
+        self._remote_ts(publish)
+
+    def _remote_ask(self, title, body):
+        """Worker thread: ask Yes/No on the GTK thread and wait for it."""
+        box, done = [], threading.Event()
+
+        def ask():
+            d = Gtk.MessageDialog(transient_for=self, modal=True,
+                                  message_type=Gtk.MessageType.QUESTION,
+                                  buttons=Gtk.ButtonsType.YES_NO, text=title)
+            d.format_secondary_text(body)
+
+            def on_resp(dlg, resp):
+                box.append(resp == Gtk.ResponseType.YES)
+                dlg.destroy()
+                done.set()
+            d.connect("response", on_resp)
+            d.show_all()
+            return False
+        GLib.idle_add(ask)
+        done.wait()
+        return box[0]
+
+    def _sudo(self, argv, timeout):
+        """sudo -A with tabit's password window; output text, or raise."""
+        env = os.environ.copy()
+        askpass = self._sudo_askpass_path()
+        if askpass:
+            env["SUDO_ASKPASS"] = askpass
+        r = subprocess.run(["sudo", "-A", *argv], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=timeout, env=env)
+        if r.returncode != 0:
+            raise RuntimeError(((r.stderr or r.stdout).strip().splitlines() or
+                                ["failed"])[-1])
+        return r.stdout
+
+    def _tailscale_prepare(self, srv):
+        """Worker thread: get Tailscale ready, asking first. None when it is;
+        else why not ("retry:" in front when a minute may fix it).
+
+        installed? -> official install script (sudo). daemon up? ->
+        systemctl (sudo). may this user run tailscale? -> `tailscale set
+        --operator=$USER` (sudo). logged in? -> `tailscale up` as this user
+        (no sudo), its login page opened in the browser. Each sudo step runs
+        at most once per "on", and nothing runs once Remote is off again.
+        """
+        user = os.environ.get("USER") or GLib.get_user_name()
+        progress = lambda text: GLib.idle_add(self._remote_show, "connecting", text)
+        asked = []
+        done = self.__dict__.setdefault("_remote_steps_done", set())
+
+        def consent(steps):
+            if asked:
+                return asked[0]
+            if getattr(self, "_remote_declined", False):
+                return False
+            if getattr(self, "_remote_agreed", False):
+                return True                 # a Yes holds until a fresh "on"
+            ok = self._remote_ask(
+                "Set up Tailscale for tabit Remote?",
+                "Remote needs Tailscale ready on this computer. tabit will:\n\n"
+                + "\n".join("  • " + x for x in steps)
+                + "\n\nSteps that change the system ask for your password (sudo).")
+            asked.append(ok)
+            self._remote_agreed = ok
+            if not ok:
+                self._remote_declined = True
+                GLib.idle_add(self._remote_decline)
+            return ok
+
+        def step(name, text, argv, timeout):
+            if self._remote_srv is not srv:
+                raise RuntimeError("Remote was turned off")
+            if name in done:
+                # it ran and did not fix it: once more will not either
+                raise RuntimeError(text.rstrip("…") + " did not help")
+            done.add(name)
+            progress(text)
+            self._sudo(argv, timeout)
+
+        def status():
+            r = subprocess.run(["tailscale", "status", "--json"],
+                               stdin=subprocess.DEVNULL, capture_output=True,
+                               text=True, timeout=10)
+            try:
+                return json.loads(r.stdout), r.stderr
+            except ValueError:
+                return None, r.stderr or r.stdout
+
+        def operator():
+            """OperatorUser, or None when it cannot be read."""
+            r = subprocess.run(["tailscale", "debug", "prefs"], stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, timeout=10)
+            try:
+                return json.loads(r.stdout).get("OperatorUser")
+            except (ValueError, AttributeError):
+                return None
+
+        manage = f"let {user} run Tailscale and its Serve without sudo"
+        login = "open a Tailscale login page in your browser if needed"
+        try:
+            if not shutil.which("tailscale"):
+                if not consent([
+                        "install Tailscale (official script from "
+                        "tailscale.com: adds its apt repository)",
+                        "start the Tailscale service", manage, login]):
+                    return "Tailscale is not installed (setup declined)"
+                step("install", "installing Tailscale…",
+                     ["sh", "-c", "curl -fsSL https://tailscale.com/install.sh | sh"], 900)
+                if not shutil.which("tailscale"):
+                    return "Tailscale did not install"
+            st, err = status()
+            if st is None:
+                active = subprocess.run(
+                    ["systemctl", "is-active", "tailscaled"], stdin=subprocess.DEVNULL,
+                    capture_output=True, text=True, timeout=10).stdout.strip()
+                if active == "activating":      # e.g. just after a boot
+                    return "retry:Tailscale is starting"
+                if active != "active":
+                    if not consent(["start the Tailscale service", manage, login]):
+                        return "the Tailscale service is not running (setup declined)"
+                    step("start", "starting Tailscale…",
+                         ["systemctl", "enable", "--now", "tailscaled"], 60)
+                    for _ in range(10):
+                        time.sleep(1)
+                        st, err = status()
+                        if st is not None:
+                            break
+                if st is None:
+                    # running but not answering: say why, do not loop
+                    return "Tailscale does not answer: " + (
+                        (err or "").strip().splitlines() or ["?"])[-1]
+            if operator() != user:              # unknown counts as no
+                if not consent([manage, login]):
+                    return f"{user} may not run Tailscale (setup declined)"
+                step("operator", "letting you run Tailscale…",
+                     ["tailscale", "set", f"--operator={user}"], 30)
+            state = st.get("BackendState")
+            if state == "Starting":
+                return "retry:Tailscale is starting"
+            if state == "NeedsMachineAuth":
+                return ("retry:this computer waits for approval in the "
+                        "Tailscale admin console")
+            if state != "Running":              # NeedsLogin, Stopped, NoState
+                if not consent([login]):
+                    return "Tailscale is not logged in (setup declined)"
+                if self._remote_srv is not srv:
+                    return "Remote was turned off"
+                if "login" in done:
+                    return "Tailscale login did not finish"
+                done.add("login")
+                progress("log in to Tailscale in your browser…")
+                # as the operator, no sudo; no flags, so it keeps the
+                # settings this computer already has
+                p = subprocess.Popen(["tailscale", "up"],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, text=True)
+                # `tailscale up` waits for the login with no output: a
+                # watchdog ends it after 10 minutes, or when Remote goes off
+                ended = threading.Event()
+
+                def watchdog():
+                    deadline = time.time() + 600
+                    while not ended.wait(1):
+                        if time.time() > deadline or self._remote_srv is not srv:
+                            p.terminate()
+                            if not ended.wait(3):
+                                p.kill()
+                            return
+                threading.Thread(target=watchdog, daemon=True).start()
+                opened, said = False, []
+                try:
+                    for line in p.stdout:
+                        if line.strip():
+                            said.append(line.strip())
+                        url = next((w for w in line.split()
+                                    if w.startswith("https://login.tailscale.com/")), "")
+                        if url and not opened:
+                            opened = True
+                            GLib.idle_add(lambda u=url: (self._open_uri(u), False)[1])
+                            progress("log in to Tailscale in the browser page that opened")
+                    code = p.wait()
+                finally:
+                    ended.set()
+                    p.stdout.close()
+                if code != 0:
+                    # its own words: e.g. it wants this computer's other
+                    # non-default settings spelled out
+                    return "Tailscale login: " + (said[-1] if said else "did not finish")
+                st, err = status()
+                if not st or st.get("BackendState") != "Running":
+                    return "Tailscale is still not logged in"
+        except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+            return f"Tailscale setup: {e}"
+        return None
+
+    def _remote_published(self, srv, ok, url, out):
+        if srv is not self._remote_srv:     # stopped in the meantime
+            return False
+        if ok:
+            self._remote_url = url
+            self._remote_show("online", url + "\nonly " + srv.handler_cls.owner)
+        else:
+            self._remote_fail(srv, out.splitlines()[-1] if out
+                              else "tailscale serve failed")
+        return False
+
+    def _remote_fail(self, srv, detail, retry=True):
+        """Show why, stop serving, and try again in a minute (tailscaled may
+        still be starting after a reboot). retry=False for a setup the user
+        declined or that needs them: asking again every minute would nag."""
+        if srv is not None:
+            if srv is not self._remote_srv:
+                return False                # an old job's news: not this server
+            self._remote_stop(unpublish=False)
+        # declined: the setting is off now, so this is not a failure
+        self._remote_show("failed" if getattr(self, "_remote_want", False) else "off", detail)
+        if not retry:
+            return False
+
+        def retry():
+            if getattr(self, "_remote_want", False) and self._remote_srv is None:
+                self._remote_start()
+            return False
+
+        GLib.timeout_add_seconds(60, retry)
+
+    def _remote_stop(self, unpublish):
+        srv, self._remote_srv = self._remote_srv, None
+        self._remote_url = ""
+        if srv is not None:
+            srv.handler_cls.stop.set()      # ends open /api/events streams
+            srv.shutdown()
+            srv.server_close()
+            try:
+                os.unlink(REMOTE_SOCK)
+            except OSError:
+                pass
+        if unpublish:
+            def off():
+                if getattr(self, "_remote_want", False):
+                    return                  # turned on again meanwhile
+                # tabit owns the https:443 mapping on this host
+                subprocess.run(["tailscale", "serve", "--https=443", "off"],
+                               stdin=subprocess.DEVNULL, capture_output=True,
+                               timeout=20)
+            self._remote_ts(off)
+
+    def _remote_show(self, state, detail):
+        color = {"online": "#9ece6a", "connecting": "#e0af68",
+                 "off": "#565f89"}.get(state, "#f7768e")
+        text = {"online": "Remote on", "off": "Remote off",
+                "connecting": "Remote: " + detail if detail and len(detail) < 60
+                else "Remote starting",
+                }.get(state, "Remote failed")
+        self._remote_detail = detail
+        host = self._remote_url.split("//")[-1].split(".")[0]
+        self._remote_label.set_markup(
+            f'<span foreground="{color}">\u25cf</span> {text}'
+            + (f" · {GLib.markup_escape_text(host)}" if host and state == "online" else ""))
+        self._remote_label.set_tooltip_text(detail)
+        self._remote_label.show()
 
     @staticmethod
     def _screen_sessions():
@@ -10394,21 +11890,31 @@ if (data !== null) {{
                 except ValueError:
                     continue
                 if i + 1 < len(argv) and argv[i + 1]:
-                    return argv[i + 1]
+                    return re.sub(r"^=(.*?):?$", r"\1", argv[i + 1])
             return None
         if (len(argv) >= 3 and argv[0] in ("/bin/sh", "sh")
                 and argv[1] == "-c" and isinstance(argv[2], str)):
             cmd = argv[2]
+            # a tmux tab tabit made starts with tmux; any other command
+            # (ssh to a remote tmux, echo ...) holds no local session
+            if not re.match(r"\s*(?:exec\s+)?tmux\s", cmd):
+                return None
             for pat in (
-                r"attach-session\s+-t\s+['\"]?([^\s'\";]+)",
-                r"has-session\s+-t\s+['\"]?([^\s'\";]+)",
+                r"attach-session\s+-t\s+['\"]?=?([^\s'\";:]+)",
+                r"has-session\s+-t\s+['\"]?=?([^\s'\";:]+)",
                 r"new-session(?:\s+[^;]*?)?\s+-s\s+['\"]?([^\s'\";]+)",
-                r"kill-session\s+-t\s+['\"]?([^\s'\";]+)",
+                r"kill-session\s+-t\s+['\"]?=?([^\s'\";:]+)",
             ):
                 m = re.search(pat, cmd)
                 if m:
                     return m.group(1)
         return None
+
+    def _row_live_tmux(self, row):
+        """The session this tab holds now (argv until it has started)."""
+        if hasattr(row, "_live_tmux"):
+            return row._live_tmux
+        return self._row_tmux_session(row)
 
     def _row_tmux_session(self, row):
         """Named tmux session for a sidebar row, or None if not tmux-backed."""
@@ -10510,14 +12016,29 @@ if (data !== null) {{
         if not old or not new or old == new:
             return
         for row in self._session_rows():
+            if getattr(row, "_live_tmux", None) == old:
+                row._live_tmux = new
             if self._row_tmux_session(row) != old:
                 continue
             argv = list(getattr(row, "argv", None) or [])
             inner, sess = self._ai_tmux_unwrap(argv)
             if sess is not None:
                 row.argv = self._ai_tmux_argv(inner, new)
-            else:
-                row.argv = [new if a == old else a for a in argv]
+            elif argv[:1] == ["tmux"]:
+                # only the name after -s / -t: never the program or a flag
+                row.argv = [new if a == old and i and argv[i - 1] in ("-s", "-t") else a
+                            for i, a in enumerate(argv)]
+            elif len(argv) >= 3 and argv[1] == "-c" and isinstance(argv[2], str):
+                # sh -c "... attach-session -t NAME ...": the forms
+                # _tmux_session_from_argv reads the name from
+                def swap(m):
+                    q = m.group(2)
+                    return (m.group(1) + q + m.group(3)
+                            + (new if q else shlex.quote(new)))
+                row.argv = argv[:2] + [re.sub(
+                    r"(-[st]\s+)(['\"]?)(=?)" + re.escape(old)
+                    + r"(?=[:'\"\s;]|$)",
+                    swap, argv[2])] + argv[3:]
         self._save_sessions_soon()
 
     def _device_tab_name(self, dev):
@@ -10584,7 +12105,9 @@ if (data !== null) {{
         return tag
 
     def _kill_row_tmux_session(self, row):
-        """Kill this tab's tmux session on intentional single-tab close.
+        """Kill this tab's ai-/conn- tmux session on intentional single-tab close.
+
+        Any other session is the user's own: closing the tab only detaches.
 
         Called from `_close_session` only — not from child-exited (exited
         tabs keep their session until the user closes them).
@@ -10596,13 +12119,18 @@ if (data !== null) {{
             return
         if getattr(row, "_tmux_session_killed", False):
             return
-        name = self._row_tmux_session(row)
+        name = self._row_live_tmux(row)
         if not name:
             return
+        if self._tmux_session_category(name) == "other":
+            return                          # the user's own session: detach only
+        if any(r is not row and self._row_live_tmux(r) == name
+               for r in self._session_rows()):
+            return                          # another tab still holds it
         row._tmux_session_killed = True
         try:
             subprocess.run(
-                ["tmux", "kill-session", "-t", name],
+                ["tmux", "kill-session", "-t", _tmux_exact(name)],
                 capture_output=True, timeout=5)
         except (OSError, subprocess.TimeoutExpired):
             pass
@@ -10775,24 +12303,40 @@ if (data !== null) {{
             dialog.response(Gtk.ResponseType.OK)
 
         def create_new(*_a):
-            name = entry.get_text().strip()
+            name = re.sub(r"[.:]", "_", entry.get_text().strip())
+            label = name or "tmux"
+            # unnamed: still give it a name, or closing the tab can never
+            # kill it and each restart leaves one more behind
+            name = name or f"tabit-{os.urandom(3).hex()}"
             # -A: attach if it already exists, otherwise create it
-            argv = (["tmux", "new-session", "-A", "-s", name] if name
-                    else ["tmux"])
-            open_session(name or "tmux", argv)
+            open_session(label, ["tmux", "new-session", "-A", "-s", name])
 
         def do_rename(name):
             new = self._tmux_prompt_rename(dialog, name)
+            # tmux turns "." and ":" into "_" and still says it worked
+            new = re.sub(r"[.:]", "_", new or "")
             if new and new != name:
-                subprocess.run(["tmux", "rename-session", "-t", name, new],
-                               capture_output=True)
+                try:
+                    r = subprocess.run(
+                        ["tmux", "rename-session", "-t", _tmux_exact(name), new],
+                        capture_output=True, text=True, timeout=5)
+                except (OSError, subprocess.SubprocessError) as e:
+                    r = subprocess.CompletedProcess([], 1, "", str(e))
+                if r.returncode != 0:
+                    # tabs keep the old name: it is still the session's name
+                    self._note_msg(Gtk.MessageType.ERROR, "Could not rename",
+                                   (r.stderr or "").strip() or None, parent=dialog)
+                    return
                 self._retarget_tmux_rows(name, new)
                 refresh()
 
         def do_kill(name):
             if self._tmux_confirm_kill(dialog, name):
-                subprocess.run(["tmux", "kill-session", "-t", name],
-                               capture_output=True)
+                try:
+                    subprocess.run(["tmux", "kill-session", "-t", _tmux_exact(name)],
+                                   capture_output=True, timeout=5)
+                except (OSError, subprocess.SubprocessError):
+                    pass
                 refresh()
 
         cat_titles = {"ai": "AI", "connect": "Connect", "other": "Other"}
@@ -11201,8 +12745,9 @@ if (data !== null) {{
             return argv
         inner = shlex.quote(argv[2])
         name = shlex.quote(session)
+        tgt = shlex.quote(_tmux_exact(session))
         opts = " ".join(
-            f"tmux set-option -t {name} {shlex.quote(k)} {shlex.quote(v)}"
+            f"tmux set-option -t {tgt} {shlex.quote(k)} {shlex.quote(v)}"
             f" >/dev/null 2>&1;"
             for k, v in AI_TMUX_OPTS)
         src = ""
@@ -11212,10 +12757,10 @@ if (data !== null) {{
         # keep ";" a separate word — glued to the quoted command it becomes
         # part of that token and the unwrap parses "claude;" as the CLI name
         return ["/bin/sh", "-c",
-                f"{src}tmux has-session -t {name} 2>/dev/null"
+                f"{src}tmux has-session -t {tgt} 2>/dev/null"
                 f" || tmux new-session -d -s {name} {inner} ;"
                 f" {opts}"
-                f" exec tmux attach-session -t {name}"]
+                f" exec tmux attach-session -t {tgt}"]
 
     @classmethod
     def _ai_launch_pair(cls, cli, cwd, tries, bypass=False, tmux=False,
@@ -11374,7 +12919,8 @@ if (data !== null) {{
         string search finds the inner markers and parses the wrong thing.
         """
         if (len(argv) != 3 or argv[0] != "/bin/sh"
-                or "tmux new-session" not in argv[2]):
+                or "tmux new-session" not in argv[2]
+                or not re.match(r"\s*(?:exec\s+)?tmux\s", argv[2])):
             return argv, None
         try:
             toks = shlex.split(argv[2])
@@ -11788,8 +13334,11 @@ if (data !== null) {{
         def kill_session(name):
             if not self._confirm_kill(dialog, f"Kill AI session “{name}”?"):
                 return
-            subprocess.run(["tmux", "kill-session", "-t", name],
-                           capture_output=True)
+            try:
+                subprocess.run(["tmux", "kill-session", "-t", _tmux_exact(name)],
+                               capture_output=True, timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                pass
             refresh_live()
 
         def refresh_live():
@@ -11877,6 +13426,7 @@ if (data !== null) {{
                         # Look for its session even while the stored
                         # command is still a plain start.
                         r.ai_hunt = True
+                        self._save_sessions_soon()  # _add_session saved before the flag
                     self._save_ai_last(tool, cwd,
                                        use_tmux=tmux_chk.get_active())
             self._open_dialogs.discard(dlg)
@@ -12325,6 +13875,26 @@ if (data !== null) {{
         return _rejoin_wrapped_n(
             Tabit._term_screen_text(term), raw, better)
 
+    def _on_preview_policy(self, webview, decision, dtype):
+        """A clicked link leaves the preview for the browser: the pane has no
+        address bar or Back, so a page loaded in it could pass as tabit."""
+        if dtype != WebKit2.PolicyDecisionType.NAVIGATION_ACTION:
+            return False
+        action = decision.get_navigation_action()
+        uri = action.get_request().get_uri() or ""
+        if action.get_navigation_type() != WebKit2.NavigationType.LINK_CLICKED:
+            # a refresh tag or an iframe in the note must not load a site
+            if uri.split(":", 1)[0].lower() in ("http", "https"):
+                decision.ignore()
+                return True
+            return False
+        here = (webview.get_uri() or "").partition("#")[0]
+        if here and uri.partition("#")[0] == here:
+            return False                    # an anchor in this note: scroll
+        decision.ignore()
+        self._open_uri(uri)
+        return True
+
     @staticmethod
     def _open_uri(uri):
         """Hand a URI to the desktop's default handler.
@@ -12554,18 +14124,40 @@ if (data !== null) {{
             with open(SETTINGS_FILE) as f:
                 raw = json.load(f)
             if isinstance(raw, dict):
-                data.update(raw)
-        except (OSError, ValueError):
+                # a hand edit of the wrong type ("11" for a size) would
+                # crash every start: such a value reads as the default
+                # (true is an int to Python, NaN is a float: neither a size)
+                num = (int, float)
+
+                def fits(d, v):
+                    if isinstance(d, bool) or not isinstance(d, num):
+                        return isinstance(v, type(d))
+                    # NaN fails both sides; a huge int never becomes float
+                    return (isinstance(v, num) and not isinstance(v, bool)
+                            and -1e9 < v < 1e9)
+                data.update({k: v for k, v in raw.items()
+                             if k not in DEFAULT_SETTINGS
+                             or fits(DEFAULT_SETTINGS[k], v)})
+            elif not _set_aside(SETTINGS_FILE):   # JSON, but not settings
+                Tabit._settings_unreadable = True
+        except ValueError:
+            if not _set_aside(SETTINGS_FILE):
+                Tabit._settings_unreadable = True
+        except FileNotFoundError:
             pass
+        except OSError as e:
+            Tabit._settings_unreadable = True
+            print(f"[tabit] cannot read {SETTINGS_FILE} ({e}); "
+                  "settings will not be saved this run", file=sys.stderr)
         return data
 
     @staticmethod
     def _save_settings(data):
-        os.makedirs(CONFIG_DIR, exist_ok=True)
         cur = Tabit._load_settings()
+        if getattr(Tabit, "_settings_unreadable", False):
+            return                          # would write defaults over it
         cur.update(data)
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(cur, f, indent=2)
+        _write_json(SETTINGS_FILE, cur)
 
     def _apply_note_wrap_setting(self, wrap_on):
         mode = Gtk.WrapMode.WORD_CHAR if wrap_on else Gtk.WrapMode.NONE
@@ -12633,7 +14225,7 @@ if (data !== null) {{
                 def on_done():
                     if status_label:
                         if is_newer:
-                            status_label.set_markup(f"<span color='#ff9e64'>New version <b>{latest_label}</b> available!</span>")
+                            status_label.set_markup(f"<span color='#ff9e64'>New version <b>{GLib.markup_escape_text(latest_label)}</b> available!</span>")
                         elif latest_tag:
                             status_label.set_markup("<span color='#9ece6a'>✓ You are using the latest version.</span>")
                         else:
@@ -12685,7 +14277,7 @@ if (data !== null) {{
             getattr(box, f"set_margin_{side}")(14)
 
         head = Gtk.Label(xalign=0)
-        head.set_markup(f"<big><b>Release Notes for {title}</b></big>")
+        head.set_markup(f"<big><b>Release Notes for {GLib.markup_escape_text(title)}</b></big>")
         box.pack_start(head, False, False, 0)
 
         frame = Gtk.Frame()
@@ -12726,7 +14318,7 @@ if (data !== null) {{
             getattr(box, f"set_margin_{side}")(14)
 
         head = Gtk.Label(xalign=0)
-        head.set_markup(f"<big><b>A new version of tabit is available!</b></big>\nNew version: <b>{new_disp}</b> (Current: {cur_disp})")
+        head.set_markup(f"<big><b>A new version of tabit is available!</b></big>\nNew version: <b>{GLib.markup_escape_text(new_disp)}</b> (Current: {GLib.markup_escape_text(cur_disp)})")
         box.pack_start(head, False, False, 0)
 
         if notes_body:
@@ -13038,8 +14630,19 @@ if (data !== null) {{
             self._open_dialogs.discard(dlg)
             dlg.destroy()
             if resp == Gtk.ResponseType.OK:
-                # Restart tabit process
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+                # Restart tabit process, after what closing the window does:
+                # ask about unsaved notes, save sessions, stop Remote/Cloud
+                if self._on_delete_event():
+                    return                  # a note's save question said Cancel
+                try:
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                except OSError as e:
+                    # still running: undo the half quit, or a closed tab
+                    # keeps its tmux session and Remote stays off
+                    self._shutting_down = False
+                    self._remote_sync()
+                    self._note_msg(Gtk.MessageType.ERROR,
+                                   "Could not restart tabit", str(e))
 
         dialog.connect("response", _on_update_progress_resp)
         dialog.show_all()
@@ -13484,6 +15087,52 @@ if (data !== null) {{
             "Pre-ticks the +AI bypass checkbox so new Claude tabs start "
             "in bypass instead of auto. Uncheck in +AI for one session.")
 
+        remote_on = Gtk.CheckButton(
+            label="Show tabit on my Tailscale devices")
+        remote_on.set_active(bool(s.get("remote_enabled")))
+        remote_on.set_tooltip_text(
+            "A read-only status page (groups, tabs, AI status) for your "
+            "phone or another computer. Tailscale Serve publishes it to "
+            "your own tailnet only; nothing goes through any cloud.")
+        remote_send = Gtk.CheckButton(
+            label="Allow typing into tabs from that page")
+        remote_send.set_margin_start(22)
+        remote_send.set_active(bool(s.get("remote_send")))
+        remote_send.set_tooltip_text(
+            "The page can then show any terminal tab's screen and type into "
+            "it: text, a keyboard mode and keys (Enter, Esc, Tab, arrows, "
+            "Ctrl+C ...). For a shell or a serial console that is a remote "
+            "shell from your phone. Off by default.")
+        remote_on.connect("toggled",
+                          lambda b: remote_send.set_sensitive(b.get_active()))
+        remote_send.set_sensitive(remote_on.get_active())
+        remote_files = Gtk.CheckButton(
+            label="Allow opening files from that page")
+        remote_files.set_margin_start(22)
+        remote_files.set_active(bool(s.get("remote_files")))
+        remote_files.set_tooltip_text(
+            "Tap a path in an AI screen, or a note tab, to read the file on "
+            "the phone: Markdown laid out, HTML without scripts, images, "
+            "text. Only under home and /tmp, at most 2 MB, never key or "
+            "password folders and files (.ssh, .gnupg, *.key, .env ...).")
+        remote_on.connect("toggled",
+                          lambda b: remote_files.set_sensitive(b.get_active()))
+        remote_files.set_sensitive(remote_on.get_active())
+        remote_note = Gtk.Label(xalign=0, margin_start=22)
+        remote_note.set_line_wrap(True)
+        remote_note.set_max_width_chars(52)
+        remote_note.get_style_context().add_class("session-sub")
+        remote_note.set_text(
+            ("Open it at " + self._remote_url) if self._remote_url else
+            (getattr(self, "_remote_detail", "") or
+             ("Turning this on sets Tailscale up here (it asks first: "
+              "install, start, log in) if it is not ready. The phone needs "
+              "the Tailscale app on the same account."
+              if not shutil.which("tailscale") else
+              "Needs Tailscale on the phone too, logged in to the same "
+              "account.")) + "\nOnly your own login can open "
+            "it. tabit takes over Tailscale Serve on port 443 of this host.")
+
         ver_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         
         cur_v = _get_version_display()
@@ -13524,6 +15173,7 @@ if (data !== null) {{
             # tg_help sits outside the grid on purpose: the grid greys
             # out when Telegram is off, which is when somebody needs it.
             ("Telegram", (tg_on, tg_grid, tg_help)),
+        ) + (("Remote", (remote_on, remote_send, remote_files, remote_note)),) + (
             ("About", (ver_box,)),
         )
         for name, widgets in pages:
@@ -13576,13 +15226,23 @@ if (data !== null) {{
                                      "telegram_reply": tg_reply.get_active(),
                                      "telegram_quote": tg_quote.get_active(),
                                      "telegram_ask_file": tg_ask.get_active(),
+                                     "remote_enabled": remote_on.get_active(),
+                                     "remote_send": remote_send.get_active(),
+                                     "remote_files": remote_files.get_active(),
                                      "ui_font_size": ui_sz,
                                      "term_font": t_font,
                                      "term_font_size": t_sz,
                                      "term_line_spacing": t_line_spacing,
                                      "sidebar_position": side_id})
+                old_tg = self._tg_load_secrets()
                 self._tg_save_secrets(tg_token.get_text(),
                                       tg_chat.get_text())
+                if old_tg != self._tg_load_secrets():
+                    # message ids are per chat: an old id must not send a
+                    # reply in the new chat to the tab it meant before
+                    self._tg_msg_row = {}
+                self._remote_fresh()            # Save is a fresh go: may ask again
+                self._remote_sync()
                 self._sidebar_position = side_id
                 self._apply_sidebar_layout()
                 self._apply_note_wrap_setting(wrap.get_active())

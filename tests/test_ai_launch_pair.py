@@ -102,6 +102,18 @@ class TestAiLaunchPair(unittest.TestCase):
         self.assertIn(sid, Tabit._ai_tmux_unwrap(launch)[0][2])
         self.assertIn(sid, Tabit._ai_tmux_unwrap(stored)[0][2])
 
+    def test_old_wrapper_rewraps_to_exact_targets(self):
+        # an older tabit saved "-t NAME", a tmux prefix match
+        argv = ["/bin/sh", "-c", "cd '/w' || exit 1; exec claude"]
+        new = Tabit._ai_tmux_argv(argv, "ai-1")
+        old = ["/bin/sh", "-c", new[2].replace("=ai-1:", "ai-1")]
+        self.assertNotIn("=ai-1:", old[2])
+        inner, sess = Tabit._ai_tmux_unwrap(old)
+        self.assertEqual(Tabit._ai_tmux_argv(inner, sess), new)
+        # rewrapping a current wrapper changes nothing
+        self.assertEqual(Tabit._ai_tmux_argv(*Tabit._ai_tmux_unwrap(new)),
+                         new)
+
 
 
 SID = "01a0f0c6-686f-7bf3-8770-68a390472632"

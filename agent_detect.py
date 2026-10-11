@@ -431,7 +431,12 @@ class ManifestStore:
             if not isinstance(data, dict) or not data.get("id"):
                 continue
             mid = str(data.get("id") or aid)
-            path = os.path.join(self.cache_dir, fname if fname.endswith(".toml") else f"{mid}.toml")
+            name = fname if fname.endswith(".toml") else f"{mid}.toml"
+            # names come from the server: a plain file name only, never a
+            # path out of the cache dir
+            if os.path.basename(name) != name or name.startswith("."):
+                continue
+            path = os.path.join(self.cache_dir, name)
             old = self._manifests.get(mid)
             if old is None or (_version_key(data.get("version"))
                                >= _version_key(old.get("version"))):
