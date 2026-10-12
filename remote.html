@@ -588,7 +588,9 @@ async function loadScreen() {
   finally { if (gen === screenGen) screenBusy = 0; }
 }
 
-function screenEvery() { return back ? 10000 : 3000; }   // history is bigger: refresh less
+// keyboard mode: you watch each key land, so look often; history is
+// bigger, so refresh it less
+function screenEvery() { return kbdOn ? 1000 : back ? 10000 : 3000; }
 function restartScreenTimer() {
   clearInterval(screenTimer);
   // one poll at a time: on a slow link a new tick would void the answer
@@ -812,6 +814,7 @@ function setKbd(on) {
   $("kbdbtn").classList.toggle("on", on);
   if (on) { $("kbd").value = ""; $("kbd").focus(); dmsg("keyboard: typing goes straight in"); }
   else { $("kbd").blur(); flushTyped(); }
+  restartScreenTimer();
   fitKbd();
 }
 // Keyboard mode on iOS: the keyboard covers the bottom of the page and iOS
