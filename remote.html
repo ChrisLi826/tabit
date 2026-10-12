@@ -150,12 +150,12 @@
   /* a laptop or desktop: tabs on the left, the open tab on the right, like
      tabit itself. pointer: fine keeps a phone out, even in landscape. */
   @media (min-width: 900px) and (pointer: fine) {
-    body { display: grid; grid-template-columns: var(--listw, 340px) 1fr; grid-template-rows: auto auto 1fr;
+    body { display: grid; grid-template-columns: var(--listw, 340px) minmax(0, 1fr); grid-template-rows: auto auto 1fr;
            column-gap: 16px; height: 100vh; overflow: hidden; padding-bottom: 12px; }
     #out { min-height: 0; overflow: auto; }
     /* relative, not static: #kbd is placed inside it */
     #detail { position: relative; inset: auto; display: flex; grid-column: 2; grid-row: 1 / -1;
-              min-height: 0; padding: 0 0 4px; z-index: auto; }
+              min-height: 0; min-width: 0;   /* a long line scrolls, never widens the page */ padding: 0 0 4px; z-index: auto; }
     #detail:not(.on) > * { display: none; }
     #detail:not(.on)::before { content: "Pick a tab"; margin: auto; color: var(--dim); }
     #back { display: none; }
