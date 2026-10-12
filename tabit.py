@@ -10972,6 +10972,36 @@ if (data !== null) {{
                     "ctrl-l": b"\x0c",
                     **{str(d): str(d).encode() for d in range(1, 10)},
                     "y": b"y", "n": b"n"}
+    # Arrows depend on the terminal's mode: a pager (less, git show) asks
+    # for ESC O A and ignores ESC [ A. These go in as a real key press,
+    # so VTE sends what the program asked for.
+    _REMOTE_ARROWS = {"up": Gdk.KEY_Up, "down": Gdk.KEY_Down,
+                      "left": Gdk.KEY_Left, "right": Gdk.KEY_Right}
+
+    @staticmethod
+    def _press_key(term, keyval):
+        """A key press and release on a VTE terminal, as from the keyboard.
+        False when it could not be made (no window yet)."""
+        win = term.get_window()
+        if win is None:
+            return False
+        disp = term.get_display()
+        ok, keys = Gdk.Keymap.get_for_display(disp).get_entries_for_keyval(keyval)
+        seat = disp.get_default_seat()
+        for typ in (Gdk.EventType.KEY_PRESS, Gdk.EventType.KEY_RELEASE):
+            ev = Gdk.Event.new(typ)
+            ev.key.window = win
+            ev.key.send_event = True
+            ev.key.keyval = keyval
+            ev.key.state = 0
+            ev.key.time = Gdk.CURRENT_TIME
+            if ok and keys:
+                ev.key.hardware_keycode = keys[0].keycode
+                ev.key.group = keys[0].group
+            if seat is not None:
+                ev.set_device(seat.get_keyboard())
+            term.event(ev)
+        return True
 
     def _remote_manage(self, op, target, body):
         """GTK thread: tabs and groups from the page -> (code, body).
@@ -11301,11 +11331,13 @@ if (data !== null) {{
                 return 400, {"error": "text must be 1..2000 characters"}
             row.term.feed_child(text.encode("utf-8"))
         else:
-            key = body.get("key")
-            key = self._REMOTE_KEYS.get(key) if isinstance(key, str) else None
+            name = body.get("key")
+            key = self._REMOTE_KEYS.get(name) if isinstance(name, str) else None
             if key is None:
                 return 400, {"error": "unknown key"}
-            row.term.feed_child(key)
+            if not (name in self._REMOTE_ARROWS
+                    and self._press_key(row.term, self._REMOTE_ARROWS[name])):
+                row.term.feed_child(key)
         self._remote_ack(row)               # answering it is reading it
         print(f"[remote] {action} -> tab {rid} "
               f"({getattr(row, 'title_text', '')})", file=sys.stderr)

@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import unittest.mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -509,6 +510,34 @@ class FakeTerm:
 
     def get_text_range(self, *_a):
         return self.text, None
+
+
+class TestRemoteArrows(unittest.TestCase):
+    """An arrow goes in as a key press, so a pager in its own key mode gets it."""
+
+    def _press(self, name, pressed):
+        app = unittest.mock.Mock(_remote_send_on=True, _REMOTE_KEYS=tabit.Tabit._REMOTE_KEYS,
+                                 _REMOTE_ARROWS=tabit.Tabit._REMOTE_ARROWS)
+        app._remote_tab_trouble.return_value = None
+        app._press_key.return_value = pressed
+        row = app._tg_row_by_id.return_value
+        code, _ = tabit.Tabit._remote_act(app, "t", "key", {"key": name})
+        return code, app, row
+
+    def test_an_arrow_is_a_key_press(self):
+        code, app, row = self._press("up", True)
+        self.assertEqual(code, 200)
+        app._press_key.assert_called_once_with(row.term, tabit.Gdk.KEY_Up)
+        row.term.feed_child.assert_not_called()
+
+    def test_no_window_falls_back_to_bytes(self):
+        _, _, row = self._press("down", False)
+        row.term.feed_child.assert_called_once_with(b"\x1b[B")
+
+    def test_other_keys_stay_bytes(self):
+        _, app, row = self._press("enter", True)
+        app._press_key.assert_not_called()
+        row.term.feed_child.assert_called_once_with(b"\r")
 
 
 class TestRemoteCursor(unittest.TestCase):
