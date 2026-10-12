@@ -185,12 +185,22 @@ class TestRemoteServer(_ServerCase):
         head, body = http_get("/icon.svg", self.sock)
         self.assertIn("image/svg+xml", head)
         self.assertIn(b"<svg", body)
-        for path, size in (("/favicon.png", 32), ("/apple-touch-icon.png", 180)):
+        for path, size in (("/favicon.png", 32), ("/apple-touch-icon.png", 180),
+                           ("/icon-192.png", 192), ("/icon-512.png", 512)):
             head, body = http_get(path, self.sock)
             self.assertIn("image/png", head, path)
             self.assertEqual(body[:8], b"\x89PNG\r\n\x1a\n", path)
             self.assertEqual(int.from_bytes(body[16:20], "big"), size, path)   # IHDR width
         head, _ = http_get("/icon.svg", self.sock, login="x@example.com")
+        self.assertIn("403", head.splitlines()[0])
+
+    def test_manifest_installs_the_page(self):
+        head, body = http_get("/manifest.webmanifest", self.sock)
+        self.assertIn("application/manifest+json", head)
+        m = json.loads(body)
+        self.assertEqual(m["display"], "standalone")
+        self.assertEqual({i["src"] for i in m["icons"]}, {"icon-192.png", "icon-512.png"})
+        head, _ = http_get("/manifest.webmanifest", self.sock, login="x@example.com")
         self.assertIn("403", head.splitlines()[0])
 
     def test_never_in_a_frame(self):

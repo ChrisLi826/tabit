@@ -729,9 +729,19 @@ CONNECT_LAST_FILE = os.path.join(CONFIG_DIR, "connect_last.json")
 # Serve publishes it to this user's own devices only (tailnet, HTTPS).
 REMOTE_SOCK = os.path.join(GLib.get_user_runtime_dir(), "tabit-remote.sock")
 REMOTE_PAGE = "remote.html"
-# the page's icons: tab favicon (SVG, and a PNG for Safari), iPhone home screen
+# the page's icons: tab favicon (SVG, and a PNG for Safari), iPhone home
+# screen, and the installed app (Chrome, Edge, Android)
 REMOTE_ICONS = {"/icon.svg": ("tabit.svg", None), "/favicon.png": ("tabit.svg", 32),
-                "/apple-touch-icon.png": ("tabit-touch.svg", 180)}
+                "/apple-touch-icon.png": ("tabit-touch.svg", 180),
+                "/icon-192.png": ("tabit-touch.svg", 192),
+                "/icon-512.png": ("tabit-touch.svg", 512)}
+# lets a browser install the page as an app in its own window
+REMOTE_MANIFEST = json.dumps({
+    "name": "tabit", "short_name": "tabit", "start_url": "./", "scope": "./",
+    "display": "standalone", "background_color": "#1a1b26",
+    "theme_color": "#1a1b26",
+    "icons": [{"src": f"icon-{n}.png", "sizes": f"{n}x{n}", "type": "image/png"}
+              for n in (192, 512)]}).encode()
 REMOTE_PUSH_EVERY = 10       # /api/events checks for a change this often (s)
 # A phone that drops off the network (airplane mode, out of range) leaves
 # its stream open on our side until TCP gives up, which can take many
@@ -1718,6 +1728,8 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             ok = isinstance(snap, dict) and "tabs" in snap
             self._send(200 if ok else (500 if snap else 503), "application/json",
                        json.dumps(snap or {"error": "tabit busy"}).encode())
+        elif path == "/manifest.webmanifest":
+            self._send(200, "application/manifest+json", REMOTE_MANIFEST)
         elif path in REMOTE_ICONS:
             icon = self.app._remote_icon(path)
             if icon is None:

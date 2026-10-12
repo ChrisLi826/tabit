@@ -19,8 +19,9 @@ your own tailnet. Only your own Tailscale login gets in; other people on a
 shared tailnet get 403.
 
 Open `https://<this-host>.<tailnet>.ts.net/` on the other device. On a phone,
-**Share → Add to Home Screen** makes it an app. The phone needs the Tailscale
-app, signed in to the same account.
+**Share → Add to Home Screen** makes it an app. In Chrome or Edge, **Install**
+in the address bar opens it in its own window. The other device needs the
+Tailscale app, signed in to the same account.
 
 ## Turning it on
 
