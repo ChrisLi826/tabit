@@ -533,6 +533,15 @@ class TestPlainTabColours(unittest.TestCase):
         self.assertEqual(lines, ["ok red", "$ "])
         self.assertEqual(ansi, ["ok \x1b[0;38;2;240;80;80mred\x1b[0m", "$ "])
 
+    def test_wide_text_keeps_its_colours(self):
+        # VTE gives one colour per UTF-8 byte: 已 is three
+        fg, bg, red = (200, 200, 200), (20, 20, 30), (240, 80, 80)
+        text = "a已b\n"
+        cols = [(fg, bg)] + [(red, bg)] * 3 + [(fg, bg)] * 2
+        lines, ansi = tabit.Tabit._term_tail_ansi(self._term(text, cols))
+        self.assertEqual(lines, ["a已b"])
+        self.assertEqual(ansi, ["a\x1b[0;38;2;240;80;80m已\x1b[0mb"])
+
     def test_no_colours_reads_as_none(self):
         t = self._term("abc", [])
         self.assertIsNone(tabit.Tabit._term_tail_ansi(t))

@@ -11256,8 +11256,17 @@ if (data !== null) {{
             text, attrs = term.get_text_range(start, 0, end, end_col, None)
         except Exception:
             return None
-        if not text or not attrs or len(attrs) != len(text):
+        if not text or not attrs:
             return None
+        if len(attrs) != len(text):
+            # VTE gives one per UTF-8 byte: keep each character's first
+            if len(attrs) != len(text.encode("utf-8")):
+                return None
+            at, i = [], 0
+            for ch in text:
+                at.append(attrs[i])
+                i += len(ch.encode("utf-8"))
+            attrs = at
         rgb = lambda c: (c.red >> 8, c.green >> 8, c.blue >> 8)
         # the commonest colours are the default ones: no code for them
         count = {}
