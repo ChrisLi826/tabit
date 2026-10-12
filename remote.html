@@ -191,7 +191,6 @@
     <button id="tabmenubtn" type="button" title="group, move, close">⋯</button>
   </div>
   <div class="hist">
-    <button id="earlier" type="button">⇡ Earlier</button>
     <button id="latest" type="button">⇣ Latest</button>
     <span id="histinfo"></span>
     <button id="zoomout" type="button" title="smaller text">A−</button>
@@ -426,6 +425,7 @@ function stopEvents() { if (es) es.close(); es = null; live = false; }
 // --- one AI tab: its screen, keys and a text box ---------------------
 let current = null, screenTimer = null, lastScreen = null;
 let back = 0;                    // lines of tmux scrollback above the pane
+let moreAbove = false;           // more scrollback to load at the top
 const BACK_STEP = 200, BACK_MAX = 3000;
 
 function tabById(id) { return lastSnap && lastSnap.tabs.find((t) => t.id === id); }
@@ -576,7 +576,7 @@ async function loadScreen() {
     else pre.scrollTop = pre.scrollHeight - fromBottom;
     $("histinfo").textContent = back ? `+${back} lines above` : "";
     $("latest").disabled = !back;
-    $("earlier").disabled = body.ansi === undefined || back >= BACK_MAX;
+    moreAbove = body.ansi !== undefined && back < BACK_MAX;
   } catch (e) { dmsg(`screen: ${e.message || e}`, true); }
   finally { if (gen === screenGen) screenBusy = 0; }
 }
@@ -935,14 +935,14 @@ dz.addEventListener("drop", (ev) => {
 // a file dropped anywhere else must not make the browser navigate away
 window.addEventListener("dragover", (ev) => ev.preventDefault());
 window.addEventListener("drop", (ev) => ev.preventDefault());
-$("earlier").onclick = async () => {
+async function loadEarlier() {
   const pre = $("screen"), fromBottom = pre.scrollHeight - pre.scrollTop;
   back = Math.min(BACK_MAX, back + BACK_STEP);
   lastScreen = null;
   await loadScreen();
   pre.scrollTop = Math.max(0, pre.scrollHeight - fromBottom - pre.clientHeight * 0.8);  // show the new lines
   restartScreenTimer();
-};
+}
 $("latest").onclick = async () => {
   back = 0;
   lastScreen = null;
@@ -990,15 +990,15 @@ function zoom(step) {
 }
 $("zoomout").onclick = () => zoom(-1);
 $("zoomin").onclick = () => zoom(1);
-// scrolled up to the top of the history: fetch more, as Earlier does. A
+// scrolled up to the top of the history: fetch 200 more lines. A
 // screen too short to scroll has no scroll event, so a wheel or a swipe
 // up while at the top counts too. One load per gesture: a pause after it.
 let lastTop = 0, earlierBusy = false, earlierAt = 0;
 async function earlierAtTop() {
   const pre = $("screen");
-  if (pre.scrollTop > 4 || earlierBusy || $("earlier").disabled || Date.now() - earlierAt < 800) return;
+  if (pre.scrollTop > 4 || earlierBusy || !moreAbove || Date.now() - earlierAt < 800) return;
   earlierBusy = true;
-  try { await $("earlier").onclick(); }
+  try { await loadEarlier(); }
   finally { earlierBusy = false; earlierAt = Date.now(); lastTop = pre.scrollTop; }
 }
 $("screen").addEventListener("scroll", () => {

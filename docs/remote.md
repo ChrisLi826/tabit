@@ -47,8 +47,8 @@ AI status, live updates.
 tab (shell, serial, tmux, AI) and type into it. For a shell or a serial
 console, that is a remote shell from your phone.
 
-- See the screen: colours for tmux-backed tabs; **Earlier**, or scrolling up
-  to the top, loads more history. A− / A+ set the text size.
+- See the screen: colours for tmux-backed tabs; scrolling up to the top
+  loads more history, **Latest** jumps back down. A− / A+ set the text size.
 - Type: a text box; a ⌨ keyboard mode that sends each key straight in (and
   input-method words when you pick them); and keys: 1–3, Enter, Esc, Tab,
   arrows, ⌫, Ctrl+C/D/L.
