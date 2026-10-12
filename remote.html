@@ -990,14 +990,27 @@ function zoom(step) {
 }
 $("zoomout").onclick = () => zoom(-1);
 $("zoomin").onclick = () => zoom(1);
-// scrolled up to the top of the history: fetch more, as Earlier does
-let lastTop = 0, earlierBusy = false;
-$("screen").addEventListener("scroll", async () => {
+// scrolled up to the top of the history: fetch more, as Earlier does. A
+// screen too short to scroll has no scroll event, so a wheel or a swipe
+// up while at the top counts too. One load per gesture: a pause after it.
+let lastTop = 0, earlierBusy = false, earlierAt = 0;
+async function earlierAtTop() {
+  const pre = $("screen");
+  if (pre.scrollTop > 4 || earlierBusy || $("earlier").disabled || Date.now() - earlierAt < 800) return;
+  earlierBusy = true;
+  try { await $("earlier").onclick(); }
+  finally { earlierBusy = false; earlierAt = Date.now(); lastTop = pre.scrollTop; }
+}
+$("screen").addEventListener("scroll", () => {
   const pre = $("screen"), up = pre.scrollTop < lastTop;
   lastTop = pre.scrollTop;
-  if (!up || pre.scrollTop > 4 || earlierBusy || $("earlier").disabled) return;
-  earlierBusy = true;
-  try { await $("earlier").onclick(); } finally { earlierBusy = false; lastTop = pre.scrollTop; }
+  if (up) earlierAtTop();
+}, { passive: true });
+$("screen").addEventListener("wheel", (ev) => { if (ev.deltaY < 0) earlierAtTop(); }, { passive: true });
+let touchY = null;
+$("screen").addEventListener("touchstart", (ev) => { touchY = ev.touches[0].clientY; }, { passive: true });
+$("screen").addEventListener("touchmove", (ev) => {
+  if (touchY !== null && ev.touches[0].clientY - touchY > 40) { touchY = null; earlierAtTop(); }
 }, { passive: true });
 // laptop layout: drag the gap to set the list width (kept in this browser)
 function setListW(w) {
