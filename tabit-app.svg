@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- installed app (maskable): the logo on a white square with a small
+<!-- installed app (maskable) and iPhone home screen: the logo on a white square with a small
      margin. The system rounds the square itself -->
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 128 128">
   <rect width="128" height="128" fill="#FFFFFF"/>

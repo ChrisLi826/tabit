@@ -732,7 +732,7 @@ REMOTE_PAGE = "remote.html"
 # the page's icons: tab favicon (SVG, and a PNG for Safari), iPhone home
 # screen, and the installed app (Chrome, Edge, Android)
 REMOTE_ICONS = {"/icon.svg": ("tabit.svg", None), "/favicon.png": ("tabit.svg", 32),
-                "/apple-touch-icon.png": ("tabit-touch.svg", 180),
+                "/apple-touch-icon.png": ("tabit-app.svg", 180),
                 "/icon-192.png": ("tabit.svg", 192),       # no backdrop: the
                 "/icon-512.png": ("tabit.svg", 512),       # logo is the tile
                 "/icon-maskable.png": ("tabit-app.svg", 512)}  # macOS, Android
