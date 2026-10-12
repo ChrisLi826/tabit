@@ -743,7 +743,7 @@ REMOTE_MANIFEST = json.dumps({
     "theme_color": "#1a1b26",
     "icons": [{"src": f"icon-{n}.png", "sizes": f"{n}x{n}", "type": "image/png"}
               for n in (192, 512)]
-             # edge to edge: the system rounds it, so it fills its tile
+             # opaque square: the system rounds it, not a grey tile around it
              + [{"src": "icon-maskable.png", "sizes": "512x512",
                  "type": "image/png", "purpose": "maskable"}]}).encode()
 REMOTE_PUSH_EVERY = 10       # /api/events checks for a change this often (s)
