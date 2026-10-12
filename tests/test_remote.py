@@ -512,6 +512,32 @@ class FakeTerm:
         return self.text, None
 
 
+class TestPlainTabColours(unittest.TestCase):
+    """A plain tab's screen comes with the colours tabit draws."""
+
+    def _term(self, text, colours):
+        C = lambda r, g, b: type("C", (), {"red": r << 8, "green": g << 8, "blue": b << 8})()
+        attrs = [type("A", (), {"fore": C(*f), "back": C(*b)})() for f, b in colours]
+        t = unittest.mock.Mock()
+        t.get_cursor_position.return_value = (2, 1)
+        t.get_column_count.return_value = 80
+        t.get_row_count.return_value = 24
+        t.get_text_range.return_value = (text, attrs)
+        return t
+
+    def test_only_a_changed_colour_gets_a_code(self):
+        fg, bg, red = (200, 200, 200), (20, 20, 30), (240, 80, 80)
+        text = "ok red\n$ \n"
+        cols = [(fg, bg)] * 3 + [(red, bg)] * 3 + [(fg, bg)] * 4
+        lines, ansi = tabit.Tabit._term_tail_ansi(self._term(text, cols))
+        self.assertEqual(lines, ["ok red", "$ "])
+        self.assertEqual(ansi, ["ok \x1b[0;38;2;240;80;80mred\x1b[0m", "$ "])
+
+    def test_no_colours_reads_as_none(self):
+        t = self._term("abc", [])
+        self.assertIsNone(tabit.Tabit._term_tail_ansi(t))
+
+
 class TestRemoteArrows(unittest.TestCase):
     """An arrow goes in as a key press, so a pager in its own key mode gets it."""
 

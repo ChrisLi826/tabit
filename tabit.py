@@ -11225,12 +11225,71 @@ if (data !== null) {{
         if row is None or getattr(row, "kind", None) != "term":
             return 404, {"error": "no such terminal tab"}, None
         term = getattr(row, "term", None)
-        text = self._term_tail_text(term, 60)
+        tmux = self._row_tmux_session(row) if color else None
+        coloured = self._term_tail_ansi(term, 60) if color and not tmux else None
+        if coloured:
+            lines, ansi = coloured
+        else:
+            lines = self._term_tail_text(term, 60).rstrip().splitlines()[-60:]
         out = {"id": rid, "title": getattr(row, "title_text", "") or "",
                "ai_status": getattr(row, "agent_status", None) or "unknown",
-               "lines": text.rstrip().splitlines()[-60:]}
-        out.update(self._remote_cursor(term, out["lines"]))
-        return 200, out, (self._row_tmux_session(row) if color else None)
+               "lines": lines}
+        out.update(self._remote_cursor(term, lines))
+        if coloured:
+            # the colours tabit shows; no history to load above it
+            ansi += [""] * (len(lines) - len(ansi))     # the cursor's blank line
+            out.pop("lines")
+            out.update(ansi="".join(a + "\n" for a in ansi), nohist=True,
+                       cols=max(1, int(term.get_column_count())))
+        return 200, out, tmux
+
+    @staticmethod
+    def _term_tail_ansi(term, max_lines=60):
+        """The recent text of a plain tab with its colours, as tabit draws
+        them: (lines, the same lines with SGR colour codes), or None.
+        The rows are those _term_tail_text reads."""
+        try:
+            _col, crow = (int(v) for v in term.get_cursor_position())
+            end_col = max(0, int(term.get_column_count()) - 1)
+            start = max(0, crow - max_lines + 1)
+            end = crow + max(16, int(term.get_row_count()))
+            text, attrs = term.get_text_range(start, 0, end, end_col, None)
+        except Exception:
+            return None
+        if not text or not attrs or len(attrs) != len(text):
+            return None
+        rgb = lambda c: (c.red >> 8, c.green >> 8, c.blue >> 8)
+        # the commonest colours are the default ones: no code for them
+        count = {}
+        for a in attrs:
+            for k in (("f",) + rgb(a.fore), ("b",) + rgb(a.back)):
+                count[k] = count.get(k, 0) + 1
+        fg0 = max((k for k in count if k[0] == "f"), key=count.get, default=None)
+        bg0 = max((k for k in count if k[0] == "b"), key=count.get, default=None)
+        plain, ansi, cur, now = [""], [""], [], None
+        for ch, a in zip(text, attrs):
+            if ch == "\n":
+                if now:
+                    ansi[-1] += "\x1b[0m"
+                    now = None
+                plain.append("")
+                ansi.append("")
+                continue
+            f, b = ("f",) + rgb(a.fore), ("b",) + rgb(a.back)
+            sgr = ([] if f == fg0 else ["38;2;%d;%d;%d" % f[1:]]) + \
+                  ([] if b == bg0 else ["48;2;%d;%d;%d" % b[1:]])
+            sgr = ";".join(sgr) or None
+            if sgr != now:
+                ansi[-1] += "\x1b[0m" if sgr is None else "\x1b[0;%sm" % sgr
+                now = sgr
+            plain[-1] += ch
+            ansi[-1] += ch
+        if now:
+            ansi[-1] += "\x1b[0m"
+        while plain and not plain[-1].strip():          # as text.rstrip()
+            plain.pop()
+            ansi.pop()
+        return plain[-max_lines:], ansi[-max_lines:]
 
     @staticmethod
     def _remote_cursor(term, lines):
