@@ -76,6 +76,8 @@
   #screen.ansi.fit { overflow-x: hidden; }
   .hist { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; font-size: 12px; color: var(--dim); }
   .hist button { padding: 4px 10px; font-size: 13px; }
+  .hist #zoomout { margin-left: auto; }
+  #split { display: none; }
   .keys { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 5px; margin: 8px 0; }
   .keys button { min-width: 0; padding: 9px 0; font-size: 13px; }
   @media (min-width: 800px) {
@@ -148,7 +150,7 @@
   /* a laptop or desktop: tabs on the left, the open tab on the right, like
      tabit itself. pointer: fine keeps a phone out, even in landscape. */
   @media (min-width: 900px) and (pointer: fine) {
-    body { display: grid; grid-template-columns: 340px 1fr; grid-template-rows: auto auto 1fr;
+    body { display: grid; grid-template-columns: var(--listw, 340px) 1fr; grid-template-rows: auto auto 1fr;
            column-gap: 16px; height: 100vh; overflow: hidden; padding-bottom: 12px; }
     #out { min-height: 0; overflow: auto; }
     /* relative, not static: #kbd is placed inside it */
@@ -158,7 +160,11 @@
     #detail:not(.on)::before { content: "Pick a tab"; margin: auto; color: var(--dim); }
     #back { display: none; }
     /* a file opens over the right side only: the list stays */
-    #viewer { left: 372px; right: 16px; bottom: 12px; padding: 0 0 4px; }
+    #viewer { left: calc(var(--listw, 340px) + 32px); right: 16px; bottom: 12px; padding: 0 0 4px; }
+    /* drag the gap between the list and the tab to change the list width */
+    #split { display: block; position: fixed; top: 0; bottom: 0; z-index: 2; width: 10px;
+             left: calc(var(--listw, 340px) + 19px); cursor: col-resize; }
+    #split:hover, #split.drag { background: var(--line); }
     /* the ⌨ glyph is a thin dash in Mac text fonts: take the emoji one */
     #kbdbtn { font: 18px/18px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif; }
   }
@@ -172,6 +178,7 @@
   <button id="refresh" type="button">Refresh</button>
 </header>
 <div id="state">Loading…</div>
+<div id="split" title="drag: list width · double-click: reset"></div>
 <div id="out"></div>
 
 <div id="detail">
@@ -186,6 +193,8 @@
     <button id="earlier" type="button">⇡ Earlier</button>
     <button id="latest" type="button">⇣ Latest</button>
     <span id="histinfo"></span>
+    <button id="zoomout" type="button" title="smaller text">A−</button>
+    <button id="zoomin" type="button" title="bigger text">A+</button>
   </div>
   <pre id="screen"></pre>
   <div id="controls">
@@ -518,14 +527,17 @@ function ansiToHtml(text) {
   return html;
 }
 
-let fit = true;
+let fit = true, fontPx = 11, lastCols = 0;
 try { fit = localStorage.getItem("tabit.fit") !== "0"; } catch {}
+try { fontPx = Math.max(6, Math.min(28, +localStorage.getItem("tabit.font") || 11)); } catch {}
 
 function sizeScreen(cols) {
   const pre = $("screen");
-  pre.classList.toggle("fit", fit);
+  lastCols = cols;
+  pre.classList.toggle("fit", fit && !!cols);
   // a monospace cell is about 0.6 em wide: pick the size that fits the pane
-  pre.style.fontSize = fit && cols ? `${Math.max(5, Math.min(14, (pre.clientWidth - 18) / (cols * 0.6)))}px` : "";
+  pre.style.fontSize = fit && cols ? `${Math.max(5, Math.min(14, (pre.clientWidth - 18) / (cols * 0.6)))}px`
+                                   : `${fontPx}px`;
 }
 
 let screenGen = 0, screenBusy = 0;
@@ -554,8 +566,8 @@ async function loadScreen() {
       pre.innerHTML = `<div class="term">${ansiToHtml(withCursor(body.ansi, body.rows, body.cursor))}</div>`;   // escaped run by run
       sizeScreen(body.cols);
     } else {
-      pre.classList.remove("ansi", "fit");
-      pre.style.fontSize = "";
+      pre.classList.remove("ansi");
+      sizeScreen(0);
       pre.innerHTML = `<div class="term">${ansiToHtml(withCursor(body.lines.join("\n") + "\n", body.rows, body.cursor))}</div>`;
     }
     // follow the output at the bottom; reading history, stay where you were
@@ -962,6 +974,61 @@ $("fitbtn").onclick = () => {
   try { localStorage.setItem("tabit.fit", fit ? "1" : "0"); } catch {}
   loadScreen();
 };
+// A− / A+: your own text size; a fitted screen starts from the size it had
+function zoom(step) {
+  const pre = $("screen"), now = parseFloat(getComputedStyle(pre).fontSize) || fontPx;
+  if (fit) {
+    fit = false;
+    try { localStorage.setItem("tabit.fit", "0"); } catch {}
+  }
+  fontPx = Math.max(6, Math.min(28, Math.round(now) + step));
+  try { localStorage.setItem("tabit.font", String(fontPx)); } catch {}
+  const fromBottom = pre.scrollHeight - pre.scrollTop;
+  sizeScreen(lastCols);
+  pre.scrollTop = pre.scrollHeight - fromBottom;
+}
+$("zoomout").onclick = () => zoom(-1);
+$("zoomin").onclick = () => zoom(1);
+// scrolled up to the top of the history: fetch more, as Earlier does
+let lastTop = 0, earlierBusy = false;
+$("screen").addEventListener("scroll", async () => {
+  const pre = $("screen"), up = pre.scrollTop < lastTop;
+  lastTop = pre.scrollTop;
+  if (!up || pre.scrollTop > 4 || earlierBusy || $("earlier").disabled) return;
+  earlierBusy = true;
+  try { await $("earlier").onclick(); } finally { earlierBusy = false; lastTop = pre.scrollTop; }
+}, { passive: true });
+// laptop layout: drag the gap to set the list width (kept in this browser)
+function setListW(w) {
+  if (w) document.documentElement.style.setProperty("--listw", `${w}px`);
+  else document.documentElement.style.removeProperty("--listw");
+}
+try { setListW(+localStorage.getItem("tabit.listw") || 0); } catch {}
+$("split").addEventListener("pointerdown", (ev) => {
+  const sp = $("split");
+  sp.setPointerCapture(ev.pointerId);
+  sp.classList.add("drag");
+  ev.preventDefault();
+  let w = 0;
+  const move = (e) => {
+    w = Math.round(Math.max(220, Math.min(window.innerWidth - 400, e.clientX - 24)));
+    setListW(w);
+  };
+  const up = () => {
+    sp.removeEventListener("pointermove", move);
+    sp.classList.remove("drag");
+    try { if (w) localStorage.setItem("tabit.listw", String(w)); } catch {}
+    if (lastCols) sizeScreen(lastCols);
+  };
+  sp.addEventListener("pointermove", move);
+  sp.addEventListener("pointerup", up, { once: true });
+  sp.addEventListener("pointercancel", up, { once: true });
+});
+$("split").addEventListener("dblclick", () => {
+  setListW(0);
+  try { localStorage.removeItem("tabit.listw"); } catch {}
+  if (lastCols) sizeScreen(lastCols);
+});
 for (const b of document.querySelectorAll(".keys button[data-key]")) b.onclick = () => {
   flushTyped();
   act("key", { key: b.dataset.key });
