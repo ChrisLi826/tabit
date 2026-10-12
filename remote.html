@@ -78,7 +78,7 @@
   .hist { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; font-size: 12px; color: var(--dim); }
   .hist button { padding: 4px 10px; font-size: 13px; }
   .hist #zoomout { margin-left: auto; }
-  .keys #latest { padding: 9px 2px; }
+  .keys #latest { padding: 0; display: grid; place-items: center; }
   #split { display: none; }
   .keys { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 5px; margin: 8px 0; }
   .keys button { min-width: 0; padding: 9px 0; font-size: 13px; }
@@ -86,7 +86,7 @@
     /* the keys stay small on the left; Latest sits alone at the right edge */
     .keys { grid-template-columns: repeat(8, 56px) 1fr; }
     .keys [data-key=tab] { grid-column: 1; }
-    .keys #latest { grid-column: 9; grid-row: 2; justify-self: end; padding: 9px 14px; }
+    .keys #latest { grid-column: 9; grid-row: 2; justify-self: end; width: 56px; }
   }
   .send { display: flex; gap: 6px; }
   .send textarea { flex: 1; min-height: 44px; max-height: 30vh; background: var(--panel); color: var(--fg);
@@ -209,7 +209,7 @@
       <button data-key="tab">Tab</button><button data-key="left">←</button><button data-key="right">→</button>
       <button data-key="backspace">⌫</button><button data-key="ctrl-c">^C</button>
       <button data-key="ctrl-d">^D</button><button data-key="ctrl-l">^L</button>
-      <button id="latest" type="button" title="back to the newest lines">Latest</button>
+      <button id="latest" type="button" title="Latest: back to the newest lines" aria-label="Latest"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2v8M4 6.5 8 10.5 12 6.5M3 14h10"/></svg></button>
     </div>
     <!-- keyboard mode: an input that is focused but not seen, so the phone's
          keyboard opens; what is typed goes to the terminal at once -->
@@ -430,6 +430,7 @@ function stopEvents() { if (es) es.close(); es = null; live = false; }
 let current = null, screenTimer = null, lastScreen = null;
 let back = 0;                    // lines of tmux scrollback above the pane
 let moreAbove = false;           // more scrollback to load at the top
+let lastTop = 0;                 // a scroll above this is the user going up
 const BACK_STEP = 200, BACK_MAX = 3000;
 
 function tabById(id) { return lastSnap && lastSnap.tabs.find((t) => t.id === id); }
@@ -579,6 +580,7 @@ async function loadScreen() {
     // follow the output at the bottom; reading history, stay where you were
     if (atEnd && !back) pre.scrollTop = pre.scrollHeight;
     else pre.scrollTop = pre.scrollHeight - fromBottom;
+    lastTop = pre.scrollTop;          // our own move: not the user scrolling up
     $("histinfo").textContent = back ? `+${back} lines above` : "";
     $("latest").disabled = !back;
     moreAbove = body.ansi !== undefined && back < BACK_MAX;
@@ -953,6 +955,8 @@ $("latest").onclick = async () => {
   lastScreen = null;
   await loadScreen();
   $("screen").scrollTop = $("screen").scrollHeight;
+  lastTop = $("screen").scrollTop;
+  earlierAt = Date.now();     // the jump down must not load history again
   restartScreenTimer();
 };
 
@@ -998,7 +1002,7 @@ $("zoomin").onclick = () => zoom(1);
 // scrolled up to the top of the history: fetch 200 more lines. A
 // screen too short to scroll has no scroll event, so a wheel or a swipe
 // up while at the top counts too. One load per gesture: a pause after it.
-let lastTop = 0, earlierBusy = false, earlierAt = 0;
+let earlierBusy = false, earlierAt = 0;
 async function earlierAtTop() {
   const pre = $("screen");
   if (pre.scrollTop > 4 || earlierBusy || !moreAbove || Date.now() - earlierAt < 800) return;
