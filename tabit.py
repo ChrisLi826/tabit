@@ -344,10 +344,10 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.0.0"
+APP_VERSION = "v2.0.1"
 # Fresh Taiwan-origin cuisine English name picked at release time (no public
 # future pool). Display: v1.8.0 · Braised Pork Rice
-APP_CODENAME = "Pineapple Cake"
+APP_CODENAME = "Peanut Ice Cream Roll"
 _VERSION_CODENAME_SEP = " · "
 
 
@@ -729,9 +729,23 @@ CONNECT_LAST_FILE = os.path.join(CONFIG_DIR, "connect_last.json")
 # Serve publishes it to this user's own devices only (tailnet, HTTPS).
 REMOTE_SOCK = os.path.join(GLib.get_user_runtime_dir(), "tabit-remote.sock")
 REMOTE_PAGE = "remote.html"
-# the page's icons: tab favicon (SVG, and a PNG for Safari), iPhone home screen
+# the page's icons: tab favicon (SVG, and a PNG for Safari), iPhone home
+# screen, and the installed app (Chrome, Edge, Android)
 REMOTE_ICONS = {"/icon.svg": ("tabit.svg", None), "/favicon.png": ("tabit.svg", 32),
-                "/apple-touch-icon.png": ("tabit-touch.svg", 180)}
+                "/apple-touch-icon.png": ("tabit-app.svg", 180),
+                "/icon-192.png": ("tabit.svg", 192),       # no backdrop: the
+                "/icon-512.png": ("tabit.svg", 512),       # logo is the tile
+                "/icon-maskable.png": ("tabit-app.svg", 512)}  # macOS, Android
+# lets a browser install the page as an app in its own window
+REMOTE_MANIFEST = json.dumps({
+    "name": "tabit", "short_name": "tabit", "start_url": "./", "scope": "./",
+    "display": "standalone", "background_color": "#1a1b26",
+    "theme_color": "#1a1b26",
+    "icons": [{"src": f"icon-{n}.png", "sizes": f"{n}x{n}", "type": "image/png"}
+              for n in (192, 512)]
+             # edge to edge: the system rounds it, not a grey tile around it
+             + [{"src": "icon-maskable.png", "sizes": "512x512",
+                 "type": "image/png", "purpose": "maskable"}]}).encode()
 REMOTE_PUSH_EVERY = 10       # /api/events checks for a change this often (s)
 # A phone that drops off the network (airplane mode, out of range) leaves
 # its stream open on our side until TCP gives up, which can take many
@@ -1718,6 +1732,8 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             ok = isinstance(snap, dict) and "tabs" in snap
             self._send(200 if ok else (500 if snap else 503), "application/json",
                        json.dumps(snap or {"error": "tabit busy"}).encode())
+        elif path == "/manifest.webmanifest":
+            self._send(200, "application/manifest+json", REMOTE_MANIFEST)
         elif path in REMOTE_ICONS:
             icon = self.app._remote_icon(path)
             if icon is None:
@@ -10956,6 +10972,36 @@ if (data !== null) {{
                     "ctrl-l": b"\x0c",
                     **{str(d): str(d).encode() for d in range(1, 10)},
                     "y": b"y", "n": b"n"}
+    # Arrows depend on the terminal's mode: a pager (less, git show) asks
+    # for ESC O A and ignores ESC [ A. These go in as a real key press,
+    # so VTE sends what the program asked for.
+    _REMOTE_ARROWS = {"up": Gdk.KEY_Up, "down": Gdk.KEY_Down,
+                      "left": Gdk.KEY_Left, "right": Gdk.KEY_Right}
+
+    @staticmethod
+    def _press_key(term, keyval):
+        """A key press and release on a VTE terminal, as from the keyboard.
+        False when it could not be made (no window yet)."""
+        win = term.get_window()
+        if win is None:
+            return False
+        disp = term.get_display()
+        ok, keys = Gdk.Keymap.get_for_display(disp).get_entries_for_keyval(keyval)
+        seat = disp.get_default_seat()
+        for typ in (Gdk.EventType.KEY_PRESS, Gdk.EventType.KEY_RELEASE):
+            ev = Gdk.Event.new(typ)
+            ev.key.window = win
+            ev.key.send_event = True
+            ev.key.keyval = keyval
+            ev.key.state = 0
+            ev.key.time = Gdk.CURRENT_TIME
+            if ok and keys:
+                ev.key.hardware_keycode = keys[0].keycode
+                ev.key.group = keys[0].group
+            if seat is not None:
+                ev.set_device(seat.get_keyboard())
+            term.event(ev)
+        return True
 
     def _remote_manage(self, op, target, body):
         """GTK thread: tabs and groups from the page -> (code, body).
@@ -11179,12 +11225,71 @@ if (data !== null) {{
         if row is None or getattr(row, "kind", None) != "term":
             return 404, {"error": "no such terminal tab"}, None
         term = getattr(row, "term", None)
-        text = self._term_tail_text(term, 60)
+        tmux = self._row_tmux_session(row) if color else None
+        coloured = self._term_tail_ansi(term, 60) if color and not tmux else None
+        if coloured:
+            lines, ansi = coloured
+        else:
+            lines = self._term_tail_text(term, 60).rstrip().splitlines()[-60:]
         out = {"id": rid, "title": getattr(row, "title_text", "") or "",
                "ai_status": getattr(row, "agent_status", None) or "unknown",
-               "lines": text.rstrip().splitlines()[-60:]}
-        out.update(self._remote_cursor(term, out["lines"]))
-        return 200, out, (self._row_tmux_session(row) if color else None)
+               "lines": lines}
+        out.update(self._remote_cursor(term, lines))
+        if coloured:
+            # the colours tabit shows; no history to load above it
+            ansi += [""] * (len(lines) - len(ansi))     # the cursor's blank line
+            out.pop("lines")
+            out.update(ansi="".join(a + "\n" for a in ansi), nohist=True,
+                       cols=max(1, int(term.get_column_count())))
+        return 200, out, tmux
+
+    @staticmethod
+    def _term_tail_ansi(term, max_lines=60):
+        """The recent text of a plain tab with its colours, as tabit draws
+        them: (lines, the same lines with SGR colour codes), or None.
+        The rows are those _term_tail_text reads."""
+        try:
+            _col, crow = (int(v) for v in term.get_cursor_position())
+            end_col = max(0, int(term.get_column_count()) - 1)
+            start = max(0, crow - max_lines + 1)
+            end = crow + max(16, int(term.get_row_count()))
+            text, attrs = term.get_text_range(start, 0, end, end_col, None)
+        except Exception:
+            return None
+        if not text or not attrs or len(attrs) != len(text):
+            return None
+        rgb = lambda c: (c.red >> 8, c.green >> 8, c.blue >> 8)
+        # the commonest colours are the default ones: no code for them
+        count = {}
+        for a in attrs:
+            for k in (("f",) + rgb(a.fore), ("b",) + rgb(a.back)):
+                count[k] = count.get(k, 0) + 1
+        fg0 = max((k for k in count if k[0] == "f"), key=count.get, default=None)
+        bg0 = max((k for k in count if k[0] == "b"), key=count.get, default=None)
+        plain, ansi, cur, now = [""], [""], [], None
+        for ch, a in zip(text, attrs):
+            if ch == "\n":
+                if now:
+                    ansi[-1] += "\x1b[0m"
+                    now = None
+                plain.append("")
+                ansi.append("")
+                continue
+            f, b = ("f",) + rgb(a.fore), ("b",) + rgb(a.back)
+            sgr = ([] if f == fg0 else ["38;2;%d;%d;%d" % f[1:]]) + \
+                  ([] if b == bg0 else ["48;2;%d;%d;%d" % b[1:]])
+            sgr = ";".join(sgr) or None
+            if sgr != now:
+                ansi[-1] += "\x1b[0m" if sgr is None else "\x1b[0;%sm" % sgr
+                now = sgr
+            plain[-1] += ch
+            ansi[-1] += ch
+        if now:
+            ansi[-1] += "\x1b[0m"
+        while plain and not plain[-1].strip():          # as text.rstrip()
+            plain.pop()
+            ansi.pop()
+        return plain[-max_lines:], ansi[-max_lines:]
 
     @staticmethod
     def _remote_cursor(term, lines):
@@ -11204,6 +11309,18 @@ if (data !== null) {{
             return {}
         if text is None:                    # could not read: no cursor, not a wrong one
             return {}
+        # VTE gives a long line that wrapped as one line, so the cursor's
+        # column counts from the start of that line, not of the screen row
+        try:
+            r = crow
+            while r > 0 and r > crow - 50:
+                pair, _a = term.get_text_range(r - 1, 0, r, end_col, None)
+                if pair is None or "\n" in pair:
+                    break
+                r -= 1
+            col += (crow - r) * (end_col + 1)
+        except Exception:
+            pass
         rows = text.splitlines()
         while rows and not rows[-1].strip():
             rows.pop()
@@ -11273,11 +11390,13 @@ if (data !== null) {{
                 return 400, {"error": "text must be 1..2000 characters"}
             row.term.feed_child(text.encode("utf-8"))
         else:
-            key = body.get("key")
-            key = self._REMOTE_KEYS.get(key) if isinstance(key, str) else None
+            name = body.get("key")
+            key = self._REMOTE_KEYS.get(name) if isinstance(name, str) else None
             if key is None:
                 return 400, {"error": "unknown key"}
-            row.term.feed_child(key)
+            if not (name in self._REMOTE_ARROWS
+                    and self._press_key(row.term, self._REMOTE_ARROWS[name])):
+                row.term.feed_child(key)
         self._remote_ack(row)               # answering it is reading it
         print(f"[remote] {action} -> tab {rid} "
               f"({getattr(row, 'title_text', '')})", file=sys.stderr)

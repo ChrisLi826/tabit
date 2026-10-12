@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import unittest.mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -185,12 +186,24 @@ class TestRemoteServer(_ServerCase):
         head, body = http_get("/icon.svg", self.sock)
         self.assertIn("image/svg+xml", head)
         self.assertIn(b"<svg", body)
-        for path, size in (("/favicon.png", 32), ("/apple-touch-icon.png", 180)):
+        for path, size in (("/favicon.png", 32), ("/apple-touch-icon.png", 180),
+                           ("/icon-192.png", 192), ("/icon-512.png", 512),
+                           ("/icon-maskable.png", 512)):
             head, body = http_get(path, self.sock)
             self.assertIn("image/png", head, path)
             self.assertEqual(body[:8], b"\x89PNG\r\n\x1a\n", path)
             self.assertEqual(int.from_bytes(body[16:20], "big"), size, path)   # IHDR width
         head, _ = http_get("/icon.svg", self.sock, login="x@example.com")
+        self.assertIn("403", head.splitlines()[0])
+
+    def test_manifest_installs_the_page(self):
+        head, body = http_get("/manifest.webmanifest", self.sock)
+        self.assertIn("application/manifest+json", head)
+        m = json.loads(body)
+        self.assertEqual(m["display"], "standalone")
+        self.assertEqual({i["src"] for i in m["icons"]},
+                         {"icon-192.png", "icon-512.png", "icon-maskable.png"})
+        head, _ = http_get("/manifest.webmanifest", self.sock, login="x@example.com")
         self.assertIn("403", head.splitlines()[0])
 
     def test_never_in_a_frame(self):
@@ -499,6 +512,60 @@ class FakeTerm:
         return self.text, None
 
 
+class TestPlainTabColours(unittest.TestCase):
+    """A plain tab's screen comes with the colours tabit draws."""
+
+    def _term(self, text, colours):
+        C = lambda r, g, b: type("C", (), {"red": r << 8, "green": g << 8, "blue": b << 8})()
+        attrs = [type("A", (), {"fore": C(*f), "back": C(*b)})() for f, b in colours]
+        t = unittest.mock.Mock()
+        t.get_cursor_position.return_value = (2, 1)
+        t.get_column_count.return_value = 80
+        t.get_row_count.return_value = 24
+        t.get_text_range.return_value = (text, attrs)
+        return t
+
+    def test_only_a_changed_colour_gets_a_code(self):
+        fg, bg, red = (200, 200, 200), (20, 20, 30), (240, 80, 80)
+        text = "ok red\n$ \n"
+        cols = [(fg, bg)] * 3 + [(red, bg)] * 3 + [(fg, bg)] * 4
+        lines, ansi = tabit.Tabit._term_tail_ansi(self._term(text, cols))
+        self.assertEqual(lines, ["ok red", "$ "])
+        self.assertEqual(ansi, ["ok \x1b[0;38;2;240;80;80mred\x1b[0m", "$ "])
+
+    def test_no_colours_reads_as_none(self):
+        t = self._term("abc", [])
+        self.assertIsNone(tabit.Tabit._term_tail_ansi(t))
+
+
+class TestRemoteArrows(unittest.TestCase):
+    """An arrow goes in as a key press, so a pager in its own key mode gets it."""
+
+    def _press(self, name, pressed):
+        app = unittest.mock.Mock(_remote_send_on=True, _REMOTE_KEYS=tabit.Tabit._REMOTE_KEYS,
+                                 _REMOTE_ARROWS=tabit.Tabit._REMOTE_ARROWS)
+        app._remote_tab_trouble.return_value = None
+        app._press_key.return_value = pressed
+        row = app._tg_row_by_id.return_value
+        code, _ = tabit.Tabit._remote_act(app, "t", "key", {"key": name})
+        return code, app, row
+
+    def test_an_arrow_is_a_key_press(self):
+        code, app, row = self._press("up", True)
+        self.assertEqual(code, 200)
+        app._press_key.assert_called_once_with(row.term, tabit.Gdk.KEY_Up)
+        row.term.feed_child.assert_not_called()
+
+    def test_no_window_falls_back_to_bytes(self):
+        _, _, row = self._press("down", False)
+        row.term.feed_child.assert_called_once_with(b"\x1b[B")
+
+    def test_other_keys_stay_bytes(self):
+        _, app, row = self._press("enter", True)
+        app._press_key.assert_not_called()
+        row.term.feed_child.assert_called_once_with(b"\r")
+
+
 class TestRemoteCursor(unittest.TestCase):
 
     def test_cursor_counts_lines_from_its_row(self):
@@ -511,6 +578,19 @@ class TestRemoteCursor(unittest.TestCase):
         lines = ["$ ls", "a b"]
         out = tabit.Tabit._remote_cursor(FakeTerm("\n\n"), lines)
         self.assertEqual((out["rows"], lines), (1, ["$ ls", "a b", ""]))
+
+    def test_a_wrapped_line_counts_its_rows_above(self):
+        # an 80-column screen: row 8 is "old", rows 9 and 10 are one long
+        # line that wrapped; the cursor sits at column 4 of row 10
+        class Wrapped(FakeTerm):
+            def get_text_range(self, r0, _c0, r1, _c1, _attrs):
+                if (r0, r1) == (9, 10):
+                    return "x" * 84, None       # joined: no line break
+                if (r0, r1) == (8, 9):
+                    return "old\n" + "x" * 80, None
+                return "x" * 84 + "\n\n", None
+        out = tabit.Tabit._remote_cursor(Wrapped(None, col=4, row=10), ["x" * 84])
+        self.assertEqual(out["cursor"], [84, 0])
 
     def test_failed_read_gives_no_cursor(self):
         lines = ["$ ls"]

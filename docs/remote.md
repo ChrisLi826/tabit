@@ -19,8 +19,9 @@ your own tailnet. Only your own Tailscale login gets in; other people on a
 shared tailnet get 403.
 
 Open `https://<this-host>.<tailnet>.ts.net/` on the other device. On a phone,
-**Share → Add to Home Screen** makes it an app. The phone needs the Tailscale
-app, signed in to the same account.
+**Share → Add to Home Screen** makes it an app. In Chrome or Edge, **Install**
+in the address bar opens it in its own window. The other device needs the
+Tailscale app, signed in to the same account.
 
 ## Turning it on
 
@@ -46,10 +47,14 @@ AI status, live updates.
 tab (shell, serial, tmux, AI) and type into it. For a shell or a serial
 console, that is a remote shell from your phone.
 
-- See the screen: colours for tmux-backed tabs; **Earlier** scrolls back.
+- See the screen in the colours tabit shows; on a tmux tab, scrolling up to the top
+  loads more history, **Latest** jumps back down. A− / A+ set the text size.
 - Type: a text box; a ⌨ keyboard mode that sends each key straight in (and
   input-method words when you pick them); and keys: 1–3, Enter, Esc, Tab,
-  arrows, ⌫, Ctrl+C/D/L.
+  arrows, ⌫, Ctrl+C/D/L. Every tab but an AI tab opens in ⌨ mode, and each
+  tab keeps the mode you pick. In ⌨ mode the text box is hidden, and on a
+  computer the key buttons too. Copy and paste as in a terminal:
+  Ctrl+Shift+C / Ctrl+Shift+V (Cmd+C / Cmd+V on a Mac); Ctrl+C is ^C.
 - Attach files: 📎 on a phone, or drag and drop / paste a screenshot on a
   computer. They are saved to `~/.local/share/tabit/uploads/<date>/` (never
   overwritten, at most 25 MB), and the path goes into the text box.
@@ -70,5 +75,6 @@ up to 2 MB. Key and password files are never shown.
 ## On a laptop or desktop browser
 
 The page looks like tabit itself: tabs on the left (the open one marked), and
-the tab or file on the right. 🔔 shows a browser notice when an AI tab goes
+the tab or file on the right. Drag the gap between them to set the list
+width; double-click it to reset. 🔔 shows a browser notice when an AI tab goes
 from working to ready or blocked.

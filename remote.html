@@ -12,6 +12,7 @@
 <link rel="icon" type="image/svg+xml" href="icon.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="manifest.webmanifest">
 <title>tabit</title>
 <!--
   tabit remote page, served by tabit itself (Settings > Remote) through
@@ -76,10 +77,24 @@
   #screen.ansi.fit { overflow-x: hidden; }
   .hist { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; font-size: 12px; color: var(--dim); }
   .hist button { padding: 4px 10px; font-size: 13px; }
+  .hist #zoomout { margin-left: auto; }
+  .keys #latest { padding: 0; display: grid; place-items: center; }
+  /* ⌨ mode: no text box or Send. A phone keeps the key buttons: its
+     keyboard has no Esc, arrows or Ctrl */
+  #detail.kbd .send { display: none; }
+  #split { display: none; }
   .keys { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 5px; margin: 8px 0; }
   .keys button { min-width: 0; padding: 9px 0; font-size: 13px; }
   @media (min-width: 800px) {
-    .keys { grid-template-columns: repeat(8, 56px); }
+    /* the keys stay small on the left; Latest sits alone at the right edge */
+    .keys { grid-template-columns: repeat(8, 56px) 1fr; }
+    .keys [data-key=tab] { grid-column: 1; }
+    .keys #latest { grid-column: 9; grid-row: 2; justify-self: end; width: 56px; }
+  }
+  @media (min-width: 800px) and (pointer: fine) {
+    /* a real keyboard has every key: only ⌨ (to leave) and Latest stay */
+    #detail.kbd .keys button:not(#kbdbtn):not(#latest) { display: none; }
+    #detail.kbd .keys #latest { grid-row: 1; }
   }
   .send { display: flex; gap: 6px; }
   .send textarea { flex: 1; min-height: 44px; max-height: 30vh; background: var(--panel); color: var(--fg);
@@ -148,17 +163,21 @@
   /* a laptop or desktop: tabs on the left, the open tab on the right, like
      tabit itself. pointer: fine keeps a phone out, even in landscape. */
   @media (min-width: 900px) and (pointer: fine) {
-    body { display: grid; grid-template-columns: 340px 1fr; grid-template-rows: auto auto 1fr;
+    body { display: grid; grid-template-columns: var(--listw, 340px) minmax(0, 1fr); grid-template-rows: auto auto 1fr;
            column-gap: 16px; height: 100vh; overflow: hidden; padding-bottom: 12px; }
     #out { min-height: 0; overflow: auto; }
     /* relative, not static: #kbd is placed inside it */
     #detail { position: relative; inset: auto; display: flex; grid-column: 2; grid-row: 1 / -1;
-              min-height: 0; padding: 0 0 4px; z-index: auto; }
+              min-height: 0; min-width: 0;   /* a long line scrolls, never widens the page */ padding: 0 0 4px; z-index: auto; }
     #detail:not(.on) > * { display: none; }
     #detail:not(.on)::before { content: "Pick a tab"; margin: auto; color: var(--dim); }
     #back { display: none; }
     /* a file opens over the right side only: the list stays */
-    #viewer { left: 372px; right: 16px; bottom: 12px; padding: 0 0 4px; }
+    #viewer { left: calc(var(--listw, 340px) + 32px); right: 16px; bottom: 12px; padding: 0 0 4px; }
+    /* drag the gap between the list and the tab to change the list width */
+    #split { display: block; position: fixed; top: 0; bottom: 0; z-index: 2; width: 10px;
+             left: calc(var(--listw, 340px) + 19px); cursor: col-resize; }
+    #split:hover, #split.drag { background: var(--line); }
     /* the ⌨ glyph is a thin dash in Mac text fonts: take the emoji one */
     #kbdbtn { font: 18px/18px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif; }
   }
@@ -172,6 +191,7 @@
   <button id="refresh" type="button">Refresh</button>
 </header>
 <div id="state">Loading…</div>
+<div id="split" title="drag: list width · double-click: reset"></div>
 <div id="out"></div>
 
 <div id="detail">
@@ -183,9 +203,9 @@
     <button id="tabmenubtn" type="button" title="group, move, close">⋯</button>
   </div>
   <div class="hist">
-    <button id="earlier" type="button">⇡ Earlier</button>
-    <button id="latest" type="button">⇣ Latest</button>
     <span id="histinfo"></span>
+    <button id="zoomout" type="button" title="smaller text">A−</button>
+    <button id="zoomin" type="button" title="bigger text">A+</button>
   </div>
   <pre id="screen"></pre>
   <div id="controls">
@@ -197,6 +217,7 @@
       <button data-key="tab">Tab</button><button data-key="left">←</button><button data-key="right">→</button>
       <button data-key="backspace">⌫</button><button data-key="ctrl-c">^C</button>
       <button data-key="ctrl-d">^D</button><button data-key="ctrl-l">^L</button>
+      <button id="latest" type="button" title="Latest: back to the newest lines" aria-label="Latest"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2v8M4 6.5 8 10.5 12 6.5M3 14h10"/></svg></button>
     </div>
     <!-- keyboard mode: an input that is focused but not seen, so the phone's
          keyboard opens; what is typed goes to the terminal at once -->
@@ -416,6 +437,8 @@ function stopEvents() { if (es) es.close(); es = null; live = false; }
 // --- one AI tab: its screen, keys and a text box ---------------------
 let current = null, screenTimer = null, lastScreen = null;
 let back = 0;                    // lines of tmux scrollback above the pane
+let moreAbove = false;           // more scrollback to load at the top
+let lastTop = 0;                 // a scroll above this is the user going up
 const BACK_STEP = 200, BACK_MAX = 3000;
 
 function tabById(id) { return lastSnap && lastSnap.tabs.find((t) => t.id === id); }
@@ -431,9 +454,10 @@ function updateDetail() {
     : `<span class="badge s-idle">${esc(t.type)}</span>`;
   const why = !lastSnap.send ? "Typing from the phone is off (tabit Settings > Remote)."
     : t.can_send ? "" : "This tab has exited.";
-  if (why && kbdOn) setKbd(false);
+  if (why && kbdOn) setKbd(false, false);
   $("tabmenubtn").hidden = !lastSnap.send;
-  for (const b of $("controls").querySelectorAll("button, textarea")) b.disabled = !!why;
+  // Latest only scrolls the screen: it works with typing off too
+  for (const b of $("controls").querySelectorAll("button:not(#latest), textarea")) b.disabled = !!why;
   if (why) dmsg(why);
 }
 
@@ -518,14 +542,17 @@ function ansiToHtml(text) {
   return html;
 }
 
-let fit = true;
+let fit = true, fontPx = 11, lastCols = 0;
 try { fit = localStorage.getItem("tabit.fit") !== "0"; } catch {}
+try { fontPx = Math.max(6, Math.min(28, +localStorage.getItem("tabit.font") || 11)); } catch {}
 
 function sizeScreen(cols) {
   const pre = $("screen");
-  pre.classList.toggle("fit", fit);
+  lastCols = cols;
+  pre.classList.toggle("fit", fit && !!cols);
   // a monospace cell is about 0.6 em wide: pick the size that fits the pane
-  pre.style.fontSize = fit && cols ? `${Math.max(5, Math.min(14, (pre.clientWidth - 18) / (cols * 0.6)))}px` : "";
+  pre.style.fontSize = fit && cols ? `${Math.max(5, Math.min(14, (pre.clientWidth - 18) / (cols * 0.6)))}px`
+                                   : `${fontPx}px`;
 }
 
 let screenGen = 0, screenBusy = 0;
@@ -554,21 +581,24 @@ async function loadScreen() {
       pre.innerHTML = `<div class="term">${ansiToHtml(withCursor(body.ansi, body.rows, body.cursor))}</div>`;   // escaped run by run
       sizeScreen(body.cols);
     } else {
-      pre.classList.remove("ansi", "fit");
-      pre.style.fontSize = "";
+      pre.classList.remove("ansi");
+      sizeScreen(0);
       pre.innerHTML = `<div class="term">${ansiToHtml(withCursor(body.lines.join("\n") + "\n", body.rows, body.cursor))}</div>`;
     }
     // follow the output at the bottom; reading history, stay where you were
     if (atEnd && !back) pre.scrollTop = pre.scrollHeight;
     else pre.scrollTop = pre.scrollHeight - fromBottom;
+    lastTop = pre.scrollTop;          // our own move: not the user scrolling up
     $("histinfo").textContent = back ? `+${back} lines above` : "";
     $("latest").disabled = !back;
-    $("earlier").disabled = body.ansi === undefined || back >= BACK_MAX;
+    moreAbove = body.ansi !== undefined && !body.nohist && back < BACK_MAX;   // a plain tab has none
   } catch (e) { dmsg(`screen: ${e.message || e}`, true); }
   finally { if (gen === screenGen) screenBusy = 0; }
 }
 
-function screenEvery() { return back ? 10000 : 3000; }   // history is bigger: refresh less
+// keyboard mode: you watch each key land, so look often; history is
+// bigger, so refresh it less
+function screenEvery() { return kbdOn ? 1000 : back ? 10000 : 3000; }
 function restartScreenTimer() {
   clearInterval(screenTimer);
   // one poll at a time: on a slow link a new tick would void the answer
@@ -593,6 +623,9 @@ function openTab(id) {
   updateDetail();
   $("detail").classList.add("on");
   markCur();
+  // each tab keeps its own ⌨ mode (on while the tab can take typing)
+  if (kbdWanted(id) && !$("kbdbtn").disabled) setKbd(true, false);   // also takes the focus back
+  else if (kbdOn) setKbd(false, false);
   // opening the tab: tabit counts its "ready" as read
   if (lastSnap && lastSnap.send) inOrder(() => fetch(`api/tabs/${encodeURIComponent(id)}/ack`, {
     method: "POST", headers: { "Content-Type": "application/json", "X-Tabit": "1" }, body: "{}" }).catch(() => {}));
@@ -601,7 +634,7 @@ function openTab(id) {
 }
 
 function closeTab() {
-  setKbd(false);
+  setKbd(false, false);           // leaving the tab: its ⌨ mode is kept for later
   current = null;
   clearInterval(screenTimer);
   $("detail").classList.remove("on");
@@ -787,11 +820,24 @@ function looseMenu() {
 
 // --- keyboard mode: each key straight into the terminal ---------------
 let kbdOn = false, typed = "", typeTimer = null, screenSoon = null;
-function setKbd(on) {
+// remember=false: the mode changes because the tab is left or cannot take
+// typing, not because you switched it; that tab keeps its choice
+// A tab starts in ⌨ mode unless it is an AI tab (you write it messages).
+const kbdPick = new Map();
+function kbdWanted(id) {
+  if (kbdPick.has(id)) return kbdPick.get(id);
+  const t = tabById(id);
+  return !!t && t.type !== "ai";
+}
+function setKbd(on, remember = true) {
   kbdOn = on;
+  if (remember && current) kbdPick.set(current, on);
+  // ⌨ mode: keys go straight in, so the text box and Send step aside
+  $("detail").classList.toggle("kbd", on);
   $("kbdbtn").classList.toggle("on", on);
   if (on) { $("kbd").value = ""; $("kbd").focus(); dmsg("keyboard: typing goes straight in"); }
   else { $("kbd").blur(); flushTyped(); }
+  restartScreenTimer();
   fitKbd();
 }
 // Keyboard mode on iOS: the keyboard covers the bottom of the page and iOS
@@ -808,7 +854,8 @@ function fitKbd() {
   s.paddingBottom = `${kb + 2}px`;
 }
 if (vv) { vv.addEventListener("resize", fitKbd); vv.addEventListener("scroll", fitKbd); }
-function refreshSoon() { clearTimeout(screenSoon); screenSoon = setTimeout(loadScreen, 350); }
+// a key reached the tab: look 0.1 s later; the 1 s poll catches a slow echo
+function refreshSoon() { clearTimeout(screenSoon); screenSoon = setTimeout(loadScreen, 100); }
 function post(kind, payload) {
   const id = current;
   return inOrder(() => postNow(id, kind, payload));
@@ -836,8 +883,24 @@ async function keyNow(key) { flushTyped(); await post("key", { key }); }
 $("kbdbtn").onclick = () => setKbd(!kbdOn);
 const KEYMAP = { Enter: "enter", Escape: "esc", Tab: "tab", Backspace: "backspace",
                  ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" };
+// ⌨ mode copies and pastes like a terminal: Ctrl+Shift+C / Ctrl+Shift+V
+// (Cmd+C / Cmd+V on a Mac), so Ctrl+C is always ^C for the tab
+function copyShortcut(ev) {
+  if (!((ev.ctrlKey && ev.shiftKey) || ev.metaKey) || ev.key.toLowerCase() !== "c") return false;
+  const sel = String(getSelection());
+  if (sel) navigator.clipboard.writeText(sel).then(() => dmsg("copied"), () => dmsg("copy: not allowed here", true));
+  ev.preventDefault();
+  return true;
+}
+const isPasteKey = (ev) => ((ev.ctrlKey && ev.shiftKey) || ev.metaKey) && ev.key.toLowerCase() === "v";
+$("kbd").addEventListener("paste", (ev) => {
+  const text = ev.clipboardData && ev.clipboardData.getData("text");
+  ev.preventDefault();
+  if (text) queueTyped(text);
+});
 $("kbd").addEventListener("keydown", (ev) => {
   if (ev.isComposing) return;                     // an input method is choosing a word
+  if (copyShortcut(ev) || isPasteKey(ev)) return; // a paste comes as a paste event
   let key = KEYMAP[ev.key];
   if (ev.ctrlKey && /^[cdzl]$/i.test(ev.key)) key = "ctrl-" + ev.key.toLowerCase();
   if (!key) return;
@@ -858,10 +921,39 @@ $("kbd").addEventListener("compositionend", (ev) => {
   if (ev.data) queueTyped(ev.data);               // the word an input method chose
   $("kbd").value = "";
 });
-// focus went to the text box (or the keyboard was put away): mode off.
+// Focus left the hidden input. Selecting text on the screen or clicking
+// a button does that too, and must not end ⌨ mode: only typing into
+// another field (a sheet's name box) pauses it, and the tab keeps its pick.
 // A key button takes focus for a moment and gives it back, so wait a beat.
+const isField = (el) => !!el && el !== $("kbd") && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
 $("kbd").addEventListener("blur", () => {
-  setTimeout(() => { if (kbdOn && document.activeElement !== $("kbd")) setKbd(false); }, 250);
+  const id = current;
+  setTimeout(() => { if (kbdOn && current === id && isField(document.activeElement)) setKbd(false, false); }, 250);
+});
+// a click on the screen gives the keys back to the tab (a phone: the
+// keyboard comes up again), unless it made a selection to copy
+$("screen").addEventListener("click", (ev) => {
+  if (kbdOn && !ev.target.closest("a") && String(getSelection()).length === 0) $("kbd").focus();
+});
+// a key while the focus is elsewhere (after a selection, say) still goes
+// to the tab
+document.addEventListener("keydown", (ev) => {
+  if (!kbdOn || !current || ev.isComposing || document.activeElement === $("kbd")
+      || isField(document.activeElement) || !$("detail").classList.contains("on")) return;
+  if (copyShortcut(ev)) return;
+  if (ev.metaKey && ev.key.toLowerCase() === "a") return;   // select all: the browser's
+  if (isPasteKey(ev)) {
+    ev.preventDefault();
+    navigator.clipboard.readText().then((t) => t && queueTyped(t), () => dmsg("paste: not allowed here", true));
+    $("kbd").focus({ preventScroll: true });
+    return;
+  }
+  let key = KEYMAP[ev.key];
+  if (ev.ctrlKey && /^[cdzl]$/i.test(ev.key)) key = "ctrl-" + ev.key.toLowerCase();
+  if (key) { ev.preventDefault(); keyNow(key); }
+  else if (ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey) { ev.preventDefault(); queueTyped(ev.key); }
+  else return;
+  $("kbd").focus({ preventScroll: true });
 });
 
 // --- attach: 📎 (phone: photos, camera, files), drop, or paste a screenshot.
@@ -877,9 +969,12 @@ async function upload(file, name) {
     });
     const body = await res.json();
     if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
-    const t = $("text");
-    t.value = (t.value && !/\s$/.test(t.value) ? t.value + " " : t.value) + body.path + " ";
-    t.focus();
+    if (kbdOn) { queueTyped(body.path + " "); $("kbd").focus(); }   // ⌨ mode: straight in
+    else {
+      const t = $("text");
+      t.value = (t.value && !/\s$/.test(t.value) ? t.value + " " : t.value) + body.path + " ";
+      t.focus();
+    }
     dmsg(`attached ${body.path.split("/").pop()}`);
   } catch (e) { dmsg(`upload: ${e.message || e}`, true); }
 }
@@ -922,19 +1017,21 @@ dz.addEventListener("drop", (ev) => {
 // a file dropped anywhere else must not make the browser navigate away
 window.addEventListener("dragover", (ev) => ev.preventDefault());
 window.addEventListener("drop", (ev) => ev.preventDefault());
-$("earlier").onclick = async () => {
+async function loadEarlier() {
   const pre = $("screen"), fromBottom = pre.scrollHeight - pre.scrollTop;
   back = Math.min(BACK_MAX, back + BACK_STEP);
   lastScreen = null;
   await loadScreen();
   pre.scrollTop = Math.max(0, pre.scrollHeight - fromBottom - pre.clientHeight * 0.8);  // show the new lines
   restartScreenTimer();
-};
+}
 $("latest").onclick = async () => {
   back = 0;
   lastScreen = null;
   await loadScreen();
   $("screen").scrollTop = $("screen").scrollHeight;
+  lastTop = $("screen").scrollTop;
+  earlierAt = Date.now();     // the jump down must not load history again
   restartScreenTimer();
 };
 
@@ -962,6 +1059,74 @@ $("fitbtn").onclick = () => {
   try { localStorage.setItem("tabit.fit", fit ? "1" : "0"); } catch {}
   loadScreen();
 };
+// A− / A+: your own text size; a fitted screen starts from the size it had
+function zoom(step) {
+  const pre = $("screen"), now = parseFloat(getComputedStyle(pre).fontSize) || fontPx;
+  if (fit) {
+    fit = false;
+    try { localStorage.setItem("tabit.fit", "0"); } catch {}
+  }
+  fontPx = Math.max(6, Math.min(28, Math.round(now) + step));
+  try { localStorage.setItem("tabit.font", String(fontPx)); } catch {}
+  const fromBottom = pre.scrollHeight - pre.scrollTop;
+  sizeScreen(lastCols);
+  pre.scrollTop = pre.scrollHeight - fromBottom;
+}
+$("zoomout").onclick = () => zoom(-1);
+$("zoomin").onclick = () => zoom(1);
+// scrolled up to the top of the history: fetch 200 more lines. A
+// screen too short to scroll has no scroll event, so a wheel or a swipe
+// up while at the top counts too. One load per gesture: a pause after it.
+let earlierBusy = false, earlierAt = 0;
+async function earlierAtTop() {
+  const pre = $("screen");
+  if (pre.scrollTop > 4 || earlierBusy || !moreAbove || Date.now() - earlierAt < 800) return;
+  earlierBusy = true;
+  try { await loadEarlier(); }
+  finally { earlierBusy = false; earlierAt = Date.now(); lastTop = pre.scrollTop; }
+}
+$("screen").addEventListener("scroll", () => {
+  const pre = $("screen"), up = pre.scrollTop < lastTop;
+  lastTop = pre.scrollTop;
+  if (up) earlierAtTop();
+}, { passive: true });
+$("screen").addEventListener("wheel", (ev) => { if (ev.deltaY < 0) earlierAtTop(); }, { passive: true });
+let touchY = null;
+$("screen").addEventListener("touchstart", (ev) => { touchY = ev.touches[0].clientY; }, { passive: true });
+$("screen").addEventListener("touchmove", (ev) => {
+  if (touchY !== null && ev.touches[0].clientY - touchY > 40) { touchY = null; earlierAtTop(); }
+}, { passive: true });
+// laptop layout: drag the gap to set the list width (kept in this browser)
+function setListW(w) {
+  if (w) document.documentElement.style.setProperty("--listw", `${w}px`);
+  else document.documentElement.style.removeProperty("--listw");
+}
+try { setListW(+localStorage.getItem("tabit.listw") || 0); } catch {}
+$("split").addEventListener("pointerdown", (ev) => {
+  const sp = $("split");
+  sp.setPointerCapture(ev.pointerId);
+  sp.classList.add("drag");
+  ev.preventDefault();
+  let w = 0;
+  const move = (e) => {
+    w = Math.round(Math.max(220, Math.min(window.innerWidth - 400, e.clientX - 24)));
+    setListW(w);
+  };
+  const up = () => {
+    sp.removeEventListener("pointermove", move);
+    sp.classList.remove("drag");
+    try { if (w) localStorage.setItem("tabit.listw", String(w)); } catch {}
+    if (lastCols) sizeScreen(lastCols);
+  };
+  sp.addEventListener("pointermove", move);
+  sp.addEventListener("pointerup", up, { once: true });
+  sp.addEventListener("pointercancel", up, { once: true });
+});
+$("split").addEventListener("dblclick", () => {
+  setListW(0);
+  try { localStorage.removeItem("tabit.listw"); } catch {}
+  if (lastCols) sizeScreen(lastCols);
+});
 for (const b of document.querySelectorAll(".keys button[data-key]")) b.onclick = () => {
   flushTyped();
   act("key", { key: b.dataset.key });
