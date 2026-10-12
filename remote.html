@@ -83,7 +83,10 @@
   .keys { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 5px; margin: 8px 0; }
   .keys button { min-width: 0; padding: 9px 0; font-size: 13px; }
   @media (min-width: 800px) {
-    .keys { grid-template-columns: repeat(8, 56px); }
+    /* the keys stay small on the left; Latest sits alone at the right edge */
+    .keys { grid-template-columns: repeat(8, 56px) 1fr; }
+    .keys [data-key=tab] { grid-column: 1; }
+    .keys #latest { grid-column: 9; grid-row: 2; justify-self: end; padding: 9px 14px; }
   }
   .send { display: flex; gap: 6px; }
   .send textarea { flex: 1; min-height: 44px; max-height: 30vh; background: var(--panel); color: var(--fg);
