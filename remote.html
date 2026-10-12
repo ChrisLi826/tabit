@@ -79,6 +79,9 @@
   .hist button { padding: 4px 10px; font-size: 13px; }
   .hist #zoomout { margin-left: auto; }
   .keys #latest { padding: 0; display: grid; place-items: center; }
+  /* ⌨ mode: no text box or Send. A phone keeps the key buttons: its
+     keyboard has no Esc, arrows or Ctrl */
+  #detail.kbd .send { display: none; }
   #split { display: none; }
   .keys { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 5px; margin: 8px 0; }
   .keys button { min-width: 0; padding: 9px 0; font-size: 13px; }
@@ -87,6 +90,11 @@
     .keys { grid-template-columns: repeat(8, 56px) 1fr; }
     .keys [data-key=tab] { grid-column: 1; }
     .keys #latest { grid-column: 9; grid-row: 2; justify-self: end; width: 56px; }
+  }
+  @media (min-width: 800px) and (pointer: fine) {
+    /* a real keyboard has every key: only ⌨ (to leave) and Latest stay */
+    #detail.kbd .keys button:not(#kbdbtn):not(#latest) { display: none; }
+    #detail.kbd .keys #latest { grid-row: 1; }
   }
   .send { display: flex; gap: 6px; }
   .send textarea { flex: 1; min-height: 44px; max-height: 30vh; background: var(--panel); color: var(--fg);
@@ -616,7 +624,7 @@ function openTab(id) {
   $("detail").classList.add("on");
   markCur();
   // each tab keeps its own ⌨ mode (on while the tab can take typing)
-  if (kbdTabs.has(id) && !$("kbdbtn").disabled) setKbd(true, false);   // also takes the focus back
+  if (kbdWanted(id) && !$("kbdbtn").disabled) setKbd(true, false);   // also takes the focus back
   else if (kbdOn) setKbd(false, false);
   // opening the tab: tabit counts its "ready" as read
   if (lastSnap && lastSnap.send) inOrder(() => fetch(`api/tabs/${encodeURIComponent(id)}/ack`, {
@@ -814,10 +822,18 @@ function looseMenu() {
 let kbdOn = false, typed = "", typeTimer = null, screenSoon = null;
 // remember=false: the mode changes because the tab is left or cannot take
 // typing, not because you switched it; that tab keeps its choice
-const kbdTabs = new Set();
+// A tab starts in ⌨ mode unless it is an AI tab (you write it messages).
+const kbdPick = new Map();
+function kbdWanted(id) {
+  if (kbdPick.has(id)) return kbdPick.get(id);
+  const t = tabById(id);
+  return !!t && t.type !== "ai";
+}
 function setKbd(on, remember = true) {
   kbdOn = on;
-  if (remember && current) on ? kbdTabs.add(current) : kbdTabs.delete(current);
+  if (remember && current) kbdPick.set(current, on);
+  // ⌨ mode: keys go straight in, so the text box and Send step aside
+  $("detail").classList.toggle("kbd", on);
   $("kbdbtn").classList.toggle("on", on);
   if (on) { $("kbd").value = ""; $("kbd").focus(); dmsg("keyboard: typing goes straight in"); }
   else { $("kbd").blur(); flushTyped(); }
@@ -910,9 +926,12 @@ async function upload(file, name) {
     });
     const body = await res.json();
     if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
-    const t = $("text");
-    t.value = (t.value && !/\s$/.test(t.value) ? t.value + " " : t.value) + body.path + " ";
-    t.focus();
+    if (kbdOn) { queueTyped(body.path + " "); $("kbd").focus(); }   // ⌨ mode: straight in
+    else {
+      const t = $("text");
+      t.value = (t.value && !/\s$/.test(t.value) ? t.value + " " : t.value) + body.path + " ";
+      t.focus();
+    }
     dmsg(`attached ${body.path.split("/").pop()}`);
   } catch (e) { dmsg(`upload: ${e.message || e}`, true); }
 }

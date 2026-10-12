@@ -51,7 +51,9 @@ console, that is a remote shell from your phone.
   loads more history, **Latest** jumps back down. A− / A+ set the text size.
 - Type: a text box; a ⌨ keyboard mode that sends each key straight in (and
   input-method words when you pick them); and keys: 1–3, Enter, Esc, Tab,
-  arrows, ⌫, Ctrl+C/D/L.
+  arrows, ⌫, Ctrl+C/D/L. Every tab but an AI tab opens in ⌨ mode, and each
+  tab keeps the mode you pick. In ⌨ mode the text box is hidden, and on a
+  computer the key buttons too.
 - Attach files: 📎 on a phone, or drag and drop / paste a screenshot on a
   computer. They are saved to `~/.local/share/tabit/uploads/<date>/` (never
   overwritten, at most 25 MB), and the path goes into the text box.
