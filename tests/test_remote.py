@@ -186,7 +186,8 @@ class TestRemoteServer(_ServerCase):
         self.assertIn("image/svg+xml", head)
         self.assertIn(b"<svg", body)
         for path, size in (("/favicon.png", 32), ("/apple-touch-icon.png", 180),
-                           ("/icon-192.png", 192), ("/icon-512.png", 512)):
+                           ("/icon-192.png", 192), ("/icon-512.png", 512),
+                           ("/icon-maskable.png", 512)):
             head, body = http_get(path, self.sock)
             self.assertIn("image/png", head, path)
             self.assertEqual(body[:8], b"\x89PNG\r\n\x1a\n", path)
@@ -199,7 +200,8 @@ class TestRemoteServer(_ServerCase):
         self.assertIn("application/manifest+json", head)
         m = json.loads(body)
         self.assertEqual(m["display"], "standalone")
-        self.assertEqual({i["src"] for i in m["icons"]}, {"icon-192.png", "icon-512.png"})
+        self.assertEqual({i["src"] for i in m["icons"]},
+                         {"icon-192.png", "icon-512.png", "icon-maskable.png"})
         head, _ = http_get("/manifest.webmanifest", self.sock, login="x@example.com")
         self.assertIn("403", head.splitlines()[0])
 

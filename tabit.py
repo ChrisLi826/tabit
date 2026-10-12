@@ -734,14 +734,18 @@ REMOTE_PAGE = "remote.html"
 REMOTE_ICONS = {"/icon.svg": ("tabit.svg", None), "/favicon.png": ("tabit.svg", 32),
                 "/apple-touch-icon.png": ("tabit-touch.svg", 180),
                 "/icon-192.png": ("tabit.svg", 192),       # no backdrop: the
-                "/icon-512.png": ("tabit.svg", 512)}       # logo is the tile
+                "/icon-512.png": ("tabit.svg", 512),       # logo is the tile
+                "/icon-maskable.png": ("tabit-app.svg", 512)}  # macOS, Android
 # lets a browser install the page as an app in its own window
 REMOTE_MANIFEST = json.dumps({
     "name": "tabit", "short_name": "tabit", "start_url": "./", "scope": "./",
     "display": "standalone", "background_color": "#1a1b26",
     "theme_color": "#1a1b26",
     "icons": [{"src": f"icon-{n}.png", "sizes": f"{n}x{n}", "type": "image/png"}
-              for n in (192, 512)]}).encode()
+              for n in (192, 512)]
+             # edge to edge: the system rounds it, so it fills its tile
+             + [{"src": "icon-maskable.png", "sizes": "512x512",
+                 "type": "image/png", "purpose": "maskable"}]}).encode()
 REMOTE_PUSH_EVERY = 10       # /api/events checks for a change this often (s)
 # A phone that drops off the network (airplane mode, out of range) leaves
 # its stream open on our side until TCP gives up, which can take many
