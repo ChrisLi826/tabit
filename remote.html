@@ -831,7 +831,8 @@ function fitKbd() {
   s.paddingBottom = `${kb + 2}px`;
 }
 if (vv) { vv.addEventListener("resize", fitKbd); vv.addEventListener("scroll", fitKbd); }
-function refreshSoon() { clearTimeout(screenSoon); screenSoon = setTimeout(loadScreen, 350); }
+// a key reached the tab: look 0.1 s later; the 1 s poll catches a slow echo
+function refreshSoon() { clearTimeout(screenSoon); screenSoon = setTimeout(loadScreen, 100); }
 function post(kind, payload) {
   const id = current;
   return inOrder(() => postNow(id, kind, payload));
