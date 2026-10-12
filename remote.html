@@ -78,6 +78,7 @@
   .hist { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; font-size: 12px; color: var(--dim); }
   .hist button { padding: 4px 10px; font-size: 13px; }
   .hist #zoomout { margin-left: auto; }
+  .keys #latest { padding: 9px 2px; }
   #split { display: none; }
   .keys { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 5px; margin: 8px 0; }
   .keys button { min-width: 0; padding: 9px 0; font-size: 13px; }
@@ -191,7 +192,6 @@
     <button id="tabmenubtn" type="button" title="group, move, close">⋯</button>
   </div>
   <div class="hist">
-    <button id="latest" type="button">⇣ Latest</button>
     <span id="histinfo"></span>
     <button id="zoomout" type="button" title="smaller text">A−</button>
     <button id="zoomin" type="button" title="bigger text">A+</button>
@@ -206,6 +206,7 @@
       <button data-key="tab">Tab</button><button data-key="left">←</button><button data-key="right">→</button>
       <button data-key="backspace">⌫</button><button data-key="ctrl-c">^C</button>
       <button data-key="ctrl-d">^D</button><button data-key="ctrl-l">^L</button>
+      <button id="latest" type="button" title="back to the newest lines">Latest</button>
     </div>
     <!-- keyboard mode: an input that is focused but not seen, so the phone's
          keyboard opens; what is typed goes to the terminal at once -->
@@ -443,7 +444,8 @@ function updateDetail() {
     : t.can_send ? "" : "This tab has exited.";
   if (why && kbdOn) setKbd(false);
   $("tabmenubtn").hidden = !lastSnap.send;
-  for (const b of $("controls").querySelectorAll("button, textarea")) b.disabled = !!why;
+  // Latest only scrolls the screen: it works with typing off too
+  for (const b of $("controls").querySelectorAll("button:not(#latest), textarea")) b.disabled = !!why;
   if (why) dmsg(why);
 }
 
