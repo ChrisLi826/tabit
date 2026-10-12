@@ -446,7 +446,7 @@ function updateDetail() {
     : `<span class="badge s-idle">${esc(t.type)}</span>`;
   const why = !lastSnap.send ? "Typing from the phone is off (tabit Settings > Remote)."
     : t.can_send ? "" : "This tab has exited.";
-  if (why && kbdOn) setKbd(false);
+  if (why && kbdOn) setKbd(false, false);
   $("tabmenubtn").hidden = !lastSnap.send;
   // Latest only scrolls the screen: it works with typing off too
   for (const b of $("controls").querySelectorAll("button:not(#latest), textarea")) b.disabled = !!why;
@@ -615,6 +615,9 @@ function openTab(id) {
   updateDetail();
   $("detail").classList.add("on");
   markCur();
+  // each tab keeps its own ⌨ mode (on while the tab can take typing)
+  if (kbdTabs.has(id) && !$("kbdbtn").disabled) setKbd(true, false);   // also takes the focus back
+  else if (kbdOn) setKbd(false, false);
   // opening the tab: tabit counts its "ready" as read
   if (lastSnap && lastSnap.send) inOrder(() => fetch(`api/tabs/${encodeURIComponent(id)}/ack`, {
     method: "POST", headers: { "Content-Type": "application/json", "X-Tabit": "1" }, body: "{}" }).catch(() => {}));
@@ -623,7 +626,7 @@ function openTab(id) {
 }
 
 function closeTab() {
-  setKbd(false);
+  setKbd(false, false);           // leaving the tab: its ⌨ mode is kept for later
   current = null;
   clearInterval(screenTimer);
   $("detail").classList.remove("on");
@@ -809,8 +812,12 @@ function looseMenu() {
 
 // --- keyboard mode: each key straight into the terminal ---------------
 let kbdOn = false, typed = "", typeTimer = null, screenSoon = null;
-function setKbd(on) {
+// remember=false: the mode changes because the tab is left or cannot take
+// typing, not because you switched it; that tab keeps its choice
+const kbdTabs = new Set();
+function setKbd(on, remember = true) {
   kbdOn = on;
+  if (remember && current) on ? kbdTabs.add(current) : kbdTabs.delete(current);
   $("kbdbtn").classList.toggle("on", on);
   if (on) { $("kbd").value = ""; $("kbd").focus(); dmsg("keyboard: typing goes straight in"); }
   else { $("kbd").blur(); flushTyped(); }
@@ -884,8 +891,10 @@ $("kbd").addEventListener("compositionend", (ev) => {
 });
 // focus went to the text box (or the keyboard was put away): mode off.
 // A key button takes focus for a moment and gives it back, so wait a beat.
+// Another tab opened meanwhile: that tab set its own mode, leave it.
 $("kbd").addEventListener("blur", () => {
-  setTimeout(() => { if (kbdOn && document.activeElement !== $("kbd")) setKbd(false); }, 250);
+  const id = current;
+  setTimeout(() => { if (kbdOn && current === id && document.activeElement !== $("kbd")) setKbd(false); }, 250);
 });
 
 // --- attach: 📎 (phone: photos, camera, files), drop, or paste a screenshot.
