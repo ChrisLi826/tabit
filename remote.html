@@ -883,8 +883,24 @@ async function keyNow(key) { flushTyped(); await post("key", { key }); }
 $("kbdbtn").onclick = () => setKbd(!kbdOn);
 const KEYMAP = { Enter: "enter", Escape: "esc", Tab: "tab", Backspace: "backspace",
                  ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" };
+// ⌨ mode copies and pastes like a terminal: Ctrl+Shift+C / Ctrl+Shift+V
+// (Cmd+C / Cmd+V on a Mac), so Ctrl+C is always ^C for the tab
+function copyShortcut(ev) {
+  if (!((ev.ctrlKey && ev.shiftKey) || ev.metaKey) || ev.key.toLowerCase() !== "c") return false;
+  const sel = String(getSelection());
+  if (sel) navigator.clipboard.writeText(sel).then(() => dmsg("copied"), () => dmsg("copy: not allowed here", true));
+  ev.preventDefault();
+  return true;
+}
+const isPasteKey = (ev) => ((ev.ctrlKey && ev.shiftKey) || ev.metaKey) && ev.key.toLowerCase() === "v";
+$("kbd").addEventListener("paste", (ev) => {
+  const text = ev.clipboardData && ev.clipboardData.getData("text");
+  ev.preventDefault();
+  if (text) queueTyped(text);
+});
 $("kbd").addEventListener("keydown", (ev) => {
   if (ev.isComposing) return;                     // an input method is choosing a word
+  if (copyShortcut(ev) || isPasteKey(ev)) return; // a paste comes as a paste event
   let key = KEYMAP[ev.key];
   if (ev.ctrlKey && /^[cdzl]$/i.test(ev.key)) key = "ctrl-" + ev.key.toLowerCase();
   if (!key) return;
@@ -905,12 +921,39 @@ $("kbd").addEventListener("compositionend", (ev) => {
   if (ev.data) queueTyped(ev.data);               // the word an input method chose
   $("kbd").value = "";
 });
-// focus went to the text box (or the keyboard was put away): mode off.
+// Focus left the hidden input. Selecting text on the screen or clicking
+// a button does that too, and must not end ⌨ mode: only typing into
+// another field (a sheet's name box) pauses it, and the tab keeps its pick.
 // A key button takes focus for a moment and gives it back, so wait a beat.
-// Another tab opened meanwhile: that tab set its own mode, leave it.
+const isField = (el) => !!el && el !== $("kbd") && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
 $("kbd").addEventListener("blur", () => {
   const id = current;
-  setTimeout(() => { if (kbdOn && current === id && document.activeElement !== $("kbd")) setKbd(false); }, 250);
+  setTimeout(() => { if (kbdOn && current === id && isField(document.activeElement)) setKbd(false, false); }, 250);
+});
+// a click on the screen gives the keys back to the tab (a phone: the
+// keyboard comes up again), unless it made a selection to copy
+$("screen").addEventListener("click", (ev) => {
+  if (kbdOn && !ev.target.closest("a") && String(getSelection()).length === 0) $("kbd").focus();
+});
+// a key while the focus is elsewhere (after a selection, say) still goes
+// to the tab
+document.addEventListener("keydown", (ev) => {
+  if (!kbdOn || !current || ev.isComposing || document.activeElement === $("kbd")
+      || isField(document.activeElement) || !$("detail").classList.contains("on")) return;
+  if (copyShortcut(ev)) return;
+  if (ev.metaKey && ev.key.toLowerCase() === "a") return;   // select all: the browser's
+  if (isPasteKey(ev)) {
+    ev.preventDefault();
+    navigator.clipboard.readText().then((t) => t && queueTyped(t), () => dmsg("paste: not allowed here", true));
+    $("kbd").focus({ preventScroll: true });
+    return;
+  }
+  let key = KEYMAP[ev.key];
+  if (ev.ctrlKey && /^[cdzl]$/i.test(ev.key)) key = "ctrl-" + ev.key.toLowerCase();
+  if (key) { ev.preventDefault(); keyNow(key); }
+  else if (ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey) { ev.preventDefault(); queueTyped(ev.key); }
+  else return;
+  $("kbd").focus({ preventScroll: true });
 });
 
 // --- attach: 📎 (phone: photos, camera, files), drop, or paste a screenshot.

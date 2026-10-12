@@ -53,7 +53,8 @@ console, that is a remote shell from your phone.
   input-method words when you pick them); and keys: 1–3, Enter, Esc, Tab,
   arrows, ⌫, Ctrl+C/D/L. Every tab but an AI tab opens in ⌨ mode, and each
   tab keeps the mode you pick. In ⌨ mode the text box is hidden, and on a
-  computer the key buttons too.
+  computer the key buttons too. Copy and paste as in a terminal:
+  Ctrl+Shift+C / Ctrl+Shift+V (Cmd+C / Cmd+V on a Mac); Ctrl+C is ^C.
 - Attach files: 📎 on a phone, or drag and drop / paste a screenshot on a
   computer. They are saved to `~/.local/share/tabit/uploads/<date>/` (never
   overwritten, at most 25 MB), and the path goes into the text box.
