@@ -524,6 +524,19 @@ class TestRemoteCursor(unittest.TestCase):
         out = tabit.Tabit._remote_cursor(FakeTerm("\n\n"), lines)
         self.assertEqual((out["rows"], lines), (1, ["$ ls", "a b", ""]))
 
+    def test_a_wrapped_line_counts_its_rows_above(self):
+        # an 80-column screen: row 8 is "old", rows 9 and 10 are one long
+        # line that wrapped; the cursor sits at column 4 of row 10
+        class Wrapped(FakeTerm):
+            def get_text_range(self, r0, _c0, r1, _c1, _attrs):
+                if (r0, r1) == (9, 10):
+                    return "x" * 84, None       # joined: no line break
+                if (r0, r1) == (8, 9):
+                    return "old\n" + "x" * 80, None
+                return "x" * 84 + "\n\n", None
+        out = tabit.Tabit._remote_cursor(Wrapped(None, col=4, row=10), ["x" * 84])
+        self.assertEqual(out["cursor"], [84, 0])
+
     def test_failed_read_gives_no_cursor(self):
         lines = ["$ ls"]
         self.assertEqual(tabit.Tabit._remote_cursor(FakeTerm(None), lines), {})

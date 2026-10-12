@@ -11220,6 +11220,18 @@ if (data !== null) {{
             return {}
         if text is None:                    # could not read: no cursor, not a wrong one
             return {}
+        # VTE gives a long line that wrapped as one line, so the cursor's
+        # column counts from the start of that line, not of the screen row
+        try:
+            r = crow
+            while r > 0 and r > crow - 50:
+                pair, _a = term.get_text_range(r - 1, 0, r, end_col, None)
+                if pair is None or "\n" in pair:
+                    break
+                r -= 1
+            col += (crow - r) * (end_col + 1)
+        except Exception:
+            pass
         rows = text.splitlines()
         while rows and not rows[-1].strip():
             rows.pop()
