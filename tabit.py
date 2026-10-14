@@ -4019,7 +4019,8 @@ if (data !== null) {{
         def on_search_changed(entry_widget):
             text = entry_widget.get_text()
             search_settings.set_search_text(text or None)
-            if text:  # jump to the first match as you type
+            if text or self._note_find_page(row) is not None:
+                # jump to the first match as you type
                 self._search_find(row, forward=True)
             else:
                 self._update_note_search_status(row)
@@ -4040,6 +4041,10 @@ if (data !== null) {{
             search_box.set_no_show_all(True)
             search_box.hide()
             search_settings.set_search_text(None)
+            fc = self._note_find_page(row)
+            if fc is not None:
+                fc.search_finish()
+                row._page_find = None
             lbl_status.set_text("")
             view.grab_focus()
 
@@ -4069,6 +4074,8 @@ if (data !== null) {{
         lbl = getattr(row, "search_status_lbl", None)
         if lbl is None or not hasattr(row, "search_context"):
             return
+        if self._note_find_page(row) is not None:
+            return                          # the page find sets it
         settings = row.search_settings
         ctx = row.search_context
         if not settings.get_search_text():
@@ -4381,8 +4388,59 @@ if (data !== null) {{
         row.search_entry.grab_focus()
         row.search_entry.select_region(0, -1)
 
+    def _note_find_page(self, row):
+        """The webview's find, when a page preview stands in for the
+        source (HTML, Markdown): the hidden source cannot show a match."""
+        if not (getattr(row, "preview_on", False)
+                and getattr(row, "webview", None) is not None
+                and self._opens_full_width(row.file_path or "")):
+            return None
+        return row.webview.get_find_controller()
+
+    def _note_page_find(self, row, fc, forward=True):
+        """Find in the page preview: matches highlighted, the current one
+        scrolled into view. A new text or option starts over."""
+        text = row.search_settings.get_search_text()
+        if not text:
+            fc.search_finish()
+            row._page_find = None
+            row.search_status_lbl.set_text("")
+            return
+        F = WebKit2.FindOptions
+        opts = F.WRAP_AROUND
+        if not row.search_settings.get_case_sensitive():
+            opts |= F.CASE_INSENSITIVE
+        if row.search_settings.get_at_word_boundaries():
+            opts |= F.AT_WORD_STARTS
+        lbl = row.search_status_lbl
+        n = getattr(row, "_page_find_n", 0)
+        if getattr(row, "_page_find", None) == (text, int(opts)):
+            if n:
+                # WebKit says 1 for a next, so count the place here: 2/5
+                row._page_find_i = ((row._page_find_i if forward
+                                     else row._page_find_i - 2) % n) + 1
+                lbl.set_text(f"{row._page_find_i}/{n}")
+            fc.search_next() if forward else fc.search_previous()
+            return
+        row._page_find = (text, int(opts))
+        row._page_find_n = 0
+        if not getattr(row, "_page_find_hooked", False):
+            row._page_find_hooked = True
+
+            def found(_f, count):
+                if not row._page_find_n:        # the new search's total
+                    row._page_find_n, row._page_find_i = count, 1
+                    lbl.set_text(f"1/{count}")
+            fc.connect("found-text", found)
+            fc.connect("failed-to-find-text", lambda _f: lbl.set_text("No matches"))
+        fc.search(text, opts | (0 if forward else F.BACKWARDS), 1000)
+
     def _search_find(self, row, forward=True):
         if not hasattr(row, "search_context"):
+            return
+        fc = self._note_find_page(row)
+        if fc is not None:
+            self._note_page_find(row, fc, forward)
             return
         buf = row.buffer
         insert_mark = buf.get_insert()
