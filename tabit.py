@@ -104,6 +104,51 @@ ICON_AI_TMUX = "tabit-ai-tmux"
 def _is_ai_icon(name):
     return name in (ICON_AI, ICON_AI_TMUX)
 # sessions.json argv[0] for note tabs; argv[1] is path or ""
+# Find in a page preview: every match, and the current one stronger, in
+# tabit's colours with dark text (WebKit's own is light text on yellow).
+# The page adopts it when Find first runs there: a user style sheet's
+# colour is not used for a highlight.
+PREVIEW_FIND_CSS = (
+    "::highlight(tabit-all){background-color:#e0af68;color:#1a1b26}"
+    "::highlight(tabit-cur){background-color:#ff9e64;color:#1a1b26}")
+PREVIEW_FIND_JS = r"""(function (a) {
+  const [q, cs, word, step, all, css] = a;
+  if (typeof Highlight === "undefined" || !window.CSS || !CSS.highlights) return "nohl";
+  const S = window.__tabitFind || (window.__tabitFind = {});
+  if (!S.sheet) {
+    S.sheet = new CSSStyleSheet(); S.sheet.replaceSync(css);
+    document.adoptedStyleSheets = [...document.adoptedStyleSheets, S.sheet];
+  }
+  const key = JSON.stringify([q, cs, word]);
+  if (S.key !== key || step === 0) {
+    S.key = key; S.ranges = []; S.i = -1;
+    if (q) {
+      const nq = cs ? q : q.toLowerCase(), isW = c => /[\p{L}\p{N}_]/u.test(c || "");
+      const tw = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT, {
+        acceptNode: n => /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/.test(n.parentNode.nodeName)
+          ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
+      for (let n; (n = tw.nextNode());) {
+        const t = cs ? n.data : n.data.toLowerCase();
+        for (let k = t.indexOf(nq); k >= 0; k = t.indexOf(nq, k + nq.length)) {
+          if (word && (isW(t[k - 1]) || isW(t[k + nq.length]))) continue;
+          const r = document.createRange(); r.setStart(n, k); r.setEnd(n, k + nq.length);
+          S.ranges.push(r);
+        }
+      }
+    }
+  }
+  const n = S.ranges.length;
+  CSS.highlights.delete("tabit-all"); CSS.highlights.delete("tabit-cur");
+  if (!n) return "0";
+  S.i = step === 0 || S.i < 0 ? (step < 0 ? n - 1 : 0) : (S.i + step + n) % n;
+  if (all) CSS.highlights.set("tabit-all", new Highlight(...S.ranges));
+  const cur = new Highlight(S.ranges[S.i]); cur.priority = 1;
+  CSS.highlights.set("tabit-cur", cur);
+  const b = S.ranges[S.i].getBoundingClientRect();
+  if (b.top < 0 || b.bottom > innerHeight) window.scrollBy(0, b.top - innerHeight / 2);
+  if (b.left < 0 || b.right > innerWidth) window.scrollBy(b.left - innerWidth / 2, 0);
+  return (S.i + 1) + "/" + n;
+})"""
 NOTE_SENTINEL = "__tabit_note__"
 ICON_NOTE = "text-x-generic-symbolic"
 ICON_COMMAND = "system-run-symbolic"
@@ -3073,7 +3118,7 @@ class Tabit(Gtk.Window):
         if HAS_WEBKIT:
             webview = WebKit2.WebView()
             wset = webview.get_settings()
-            wset.set_enable_javascript(True)
+            self._set_page_scripts(wset, True)
             wset.set_allow_file_access_from_file_urls(True)
             webview.connect("decide-policy", self._on_preview_policy)
             content = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -3283,8 +3328,9 @@ class Tabit(Gtk.Window):
         # A file from terminal output is not necessarily yours. Scripts stay
         # on for a page, because a real report needs them, but they may not
         # read the rest of the disk and post it somewhere. Markdown needs no
-        # script: raw HTML in it must not run any.
-        wset.set_enable_javascript(page)
+        # script: raw HTML in it must not run any. (tabit's own Find script
+        # still runs there; see _set_page_scripts.)
+        self._set_page_scripts(wset, page)
         wset.set_allow_file_access_from_file_urls(False)
         row.webview.set_settings(wset)
         if page and not self._has_source(path):
@@ -3724,7 +3770,7 @@ if (data !== null) {{
 
         if on:
             wset = row.webview.get_settings()
-            wset.set_enable_javascript(True)
+            self._set_page_scripts(wset, True)
             row.webview.set_settings(wset)
             self._note_render_yaml(row)
             row.webview.set_no_show_all(False)
@@ -4007,9 +4053,13 @@ if (data !== null) {{
 
         chk_case.connect("toggled", lambda b: search_settings.set_case_sensitive(b.get_active()))
         chk_word.connect("toggled", lambda b: search_settings.set_at_word_boundaries(b.get_active()))
-        chk_highlight.connect(
-            "toggled",
-            lambda b: search_context.set_highlight(b.get_active()))
+        def on_highlight(b):
+            search_context.set_highlight(b.get_active())
+            if (self._note_find_page(row) is not None
+                    and getattr(row, "_page_find_js", True)
+                    and hasattr(row.webview, "evaluate_javascript")):
+                self._note_page_find_js(row, 0)
+        chk_highlight.connect("toggled", on_highlight)
 
         lbl_status = Gtk.Label(label="")
         lbl_status.get_style_context().add_class("session-sub")
@@ -4045,6 +4095,9 @@ if (data !== null) {{
             if fc is not None:
                 fc.search_finish()
                 row._page_find = None
+                if getattr(row, "_page_find_js", True) \
+                        and hasattr(row.webview, "evaluate_javascript"):
+                    self._note_page_find_js(row, 0)     # empty text: clears
             lbl_status.set_text("")
             view.grab_focus()
 
@@ -4388,6 +4441,45 @@ if (data !== null) {{
         row.search_entry.grab_focus()
         row.search_entry.select_region(0, -1)
 
+    @staticmethod
+    def _set_page_scripts(wset, on):
+        """Turn the page's own scripts on or off. Where WebKit can tell them
+        apart (2.24+), JavaScript stays on with only the page's scripts off,
+        so tabit's Find can still mark the matches; an older WebKit keeps
+        all script off."""
+        if hasattr(wset, "set_enable_javascript_markup"):
+            wset.set_enable_javascript(True)
+            wset.set_enable_javascript_markup(on)
+        else:
+            wset.set_enable_javascript(on)
+
+    def _note_page_find_js(self, row, step):
+        """Find in the page in tabit's colours (CSS highlights, run in a
+        world of its own). step: 1 next, -1 previous, 0 again from the
+        start. Falls back to WebKit's find where this cannot run."""
+        st = row.search_settings
+        text = st.get_search_text() or ""
+        args = json.dumps([text, bool(st.get_case_sensitive()),
+                           bool(st.get_at_word_boundaries()), step,
+                           bool(row.search_context.get_highlight()),
+                           PREVIEW_FIND_CSS])
+        lbl = row.search_status_lbl
+
+        def done(view, res):
+            try:
+                out = view.evaluate_javascript_finish(res).to_string()
+            except Exception:
+                out = "nohl"
+            if out == "nohl":                   # no CSS highlights here
+                row._page_find_js = False
+                if text:
+                    self._search_find(row, forward=step >= 0)
+                return
+            lbl.set_text("" if not text else
+                         "No matches" if out == "0" else out)
+        row.webview.evaluate_javascript(PREVIEW_FIND_JS + "(" + args + ")", -1,
+                                        "tabit-find", None, None, done)
+
     def _note_find_page(self, row):
         """The webview's find, when a page preview stands in for the
         source (HTML, Markdown): the hidden source cannot show a match."""
@@ -4440,7 +4532,11 @@ if (data !== null) {{
             return
         fc = self._note_find_page(row)
         if fc is not None:
-            self._note_page_find(row, fc, forward)
+            if (getattr(row, "_page_find_js", True)
+                    and hasattr(row.webview, "evaluate_javascript")):
+                self._note_page_find_js(row, 1 if forward else -1)
+            else:
+                self._note_page_find(row, fc, forward)
             return
         buf = row.buffer
         insert_mark = buf.get_insert()
