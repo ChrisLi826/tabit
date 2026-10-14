@@ -860,5 +860,25 @@ class TestTailscaleSetup(unittest.TestCase):
         self.assertEqual(stopped, [])
 
 
+class TestRemoteSetupLinks(unittest.TestCase):
+    """A setup that waits for the user shows the page to open."""
+
+    def test_a_link_keeps_its_query(self):
+        m = tabit.Tabit._link_markup("https://login.tailscale.com/a/x?a=1&b=2", "open")
+        self.assertEqual(m, '<a href="https://login.tailscale.com/a/x?a=1&amp;b=2">open</a>')
+
+    def test_stop_ends_a_waiting_login(self):
+        app = unittest.mock.Mock(_remote_srv=None)
+        proc = app._remote_login_proc
+        proc.poll.return_value = None
+        tabit.Tabit._remote_stop(app, unpublish=False)
+        proc.terminate.assert_called_once_with()
+
+    def test_a_new_on_forgets_the_old_step(self):
+        app = unittest.mock.Mock(_remote_pending=("log in to Tailscale", "https://x"))
+        tabit.Tabit._remote_fresh(app)
+        self.assertIsNone(app._remote_pending)
+
+
 if __name__ == "__main__":
     unittest.main()

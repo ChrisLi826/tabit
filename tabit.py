@@ -104,6 +104,9 @@ ICON_AI_TMUX = "tabit-ai-tmux"
 def _is_ai_icon(name):
     return name in (ICON_AI, ICON_AI_TMUX)
 # sessions.json argv[0] for note tabs; argv[1] is path or ""
+# Where an admin approves a new computer for the tailnet
+TAILSCALE_MACHINES_URL = "https://login.tailscale.com/admin/machines"
+
 # Find in a page preview: every match yellow, the current one cyan, both
 # with dark text (WebKit's own is light text on yellow).
 # The page adopts it when Find first runs there: a user style sheet's
@@ -2176,6 +2179,9 @@ class Tabit(Gtk.Window):
         self._remote_label.set_margin_top(4)
         self._remote_label.set_ellipsize(Pango.EllipsizeMode.END)
         self._remote_label.set_no_show_all(True)
+        self._remote_label.connect(
+            "activate-link", lambda _l, uri: (self._open_uri(uri), True)[1])
+        self._remote_pending = None
         adders.pack_start(self._remote_label, False, False, 0)
         GLib.idle_add(lambda: (self._remote_sync(), False)[1])
         self.sidebar.pack_start(adders, False, False, 0)
@@ -11656,6 +11662,7 @@ if (data !== null) {{
         self._remote_agreed = False
         self._remote_link_opened = False
         self._remote_steps_done = set()
+        self._remote_pending = None
 
     def _remote_decline(self):
         """GTK thread: the setup was declined, so Remote goes off for good
@@ -11704,6 +11711,8 @@ if (data !== null) {{
         def publish():
             if self._remote_srv is not srv:     # turned off while queued
                 return
+            # what the user must still do, found again on each try
+            self._remote_pending = None
             problem = self._tailscale_prepare(srv)
             if problem:
                 retry = problem.startswith("retry:")
@@ -11745,6 +11754,8 @@ if (data !== null) {{
                 link = next((w for w in out.split()
                              if "login.tailscale.com" in w), "")
                 ok, url = False, ""
+                if link:
+                    self._remote_pending = ("turn on Serve for your tailnet", link)
                 if link and not getattr(self, "_remote_link_opened", False):
                     # one click in the browser; the 60 s retry picks it up
                     # (once: the next retries must not pile up pages)
@@ -11899,6 +11910,8 @@ if (data !== null) {{
             if state == "Starting":
                 return "retry:Tailscale is starting"
             if state == "NeedsMachineAuth":
+                self._remote_pending = ("approve this computer in Tailscale",
+                                        TAILSCALE_MACHINES_URL)
                 return ("retry:this computer waits for approval in the "
                         "Tailscale admin console")
             if state != "Running":              # NeedsLogin, Stopped, NoState
@@ -11915,6 +11928,9 @@ if (data !== null) {{
                 p = subprocess.Popen(["tailscale", "up"],
                                      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True)
+                # ended with Remote (and tabit): its login link dies with it,
+                # and a next start runs a fresh one
+                self._remote_login_proc = p
                 # `tailscale up` waits for the login with no output: a
                 # watchdog ends it after 10 minutes, or when Remote goes off
                 ended = threading.Event()
@@ -11937,12 +11953,14 @@ if (data !== null) {{
                                     if w.startswith("https://login.tailscale.com/")), "")
                         if url and not opened:
                             opened = True
+                            self._remote_pending = ("log in to Tailscale", url)
                             GLib.idle_add(lambda u=url: (self._open_uri(u), False)[1])
                             progress("log in to Tailscale in the browser page that opened")
                     code = p.wait()
                 finally:
                     ended.set()
                     p.stdout.close()
+                    self._remote_login_proc = None
                 if code != 0:
                     # its own words: e.g. it wants this computer's other
                     # non-default settings spelled out
@@ -11950,6 +11968,7 @@ if (data !== null) {{
                 st, err = status()
                 if not st or st.get("BackendState") != "Running":
                     return "Tailscale is still not logged in"
+                self._remote_pending = None     # logged in: that page is done
         except (OSError, RuntimeError, subprocess.SubprocessError) as e:
             return f"Tailscale setup: {e}"
         return None
@@ -11959,6 +11978,7 @@ if (data !== null) {{
             return False
         if ok:
             self._remote_url = url
+            self._remote_pending = None
             self._remote_show("online", url + "\nonly " + srv.handler_cls.owner)
         else:
             self._remote_fail(srv, out.splitlines()[-1] if out
@@ -11988,6 +12008,9 @@ if (data !== null) {{
     def _remote_stop(self, unpublish):
         srv, self._remote_srv = self._remote_srv, None
         self._remote_url = ""
+        login = getattr(self, "_remote_login_proc", None)
+        if login is not None and login.poll() is None:
+            login.terminate()
         if srv is not None:
             srv.handler_cls.stop.set()      # ends open /api/events streams
             srv.shutdown()
@@ -12015,11 +12038,24 @@ if (data !== null) {{
                 }.get(state, "Remote failed")
         self._remote_detail = detail
         host = self._remote_url.split("//")[-1].split(".")[0]
+        pending = getattr(self, "_remote_pending", None) if state != "online" else None
+        if pending:
+            # the setup waits for the user: say for what, with the page
+            text = "Remote: " + pending[0]
+        text = GLib.markup_escape_text(text)
         self._remote_label.set_markup(
             f'<span foreground="{color}">\u25cf</span> {text}'
-            + (f" · {GLib.markup_escape_text(host)}" if host and state == "online" else ""))
-        self._remote_label.set_tooltip_text(detail)
+            + (f" · {GLib.markup_escape_text(host)}" if host and state == "online" else "")
+            + (f' · {self._link_markup(pending[1], "open")}' if pending else ""))
+        self._remote_label.set_tooltip_text(
+            detail + (f"\n{pending[1]}" if pending else ""))
         self._remote_label.show()
+
+    @staticmethod
+    def _link_markup(url, text=None):
+        """A Pango link; a URL keeps its & etc. only when escaped."""
+        u = GLib.markup_escape_text(url)
+        return f'<a href="{u}">{GLib.markup_escape_text(text) if text else u}</a>'
 
     @staticmethod
     def _screen_sessions():
@@ -12056,7 +12092,7 @@ if (data !== null) {{
         if fn:
             fn()
 
-    def _copy_name_button(self, name):
+    def _copy_name_button(self, name, tip="Copy session name"):
         """Copy-icon button; flashes a dim 'copied' for 3s. No focus ring."""
         wrap = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         btn = Gtk.Button.new_from_icon_name("edit-copy-symbolic",
@@ -12064,7 +12100,7 @@ if (data !== null) {{
         btn.set_relief(Gtk.ReliefStyle.NONE)
         btn.set_can_focus(False)
         btn.set_focus_on_click(False)
-        btn.set_tooltip_text("Copy session name")
+        btn.set_tooltip_text(tip)
         lab = Gtk.Label(label="copied")
         lab.get_style_context().add_class("session-sub")
         lab.set_no_show_all(True)
@@ -15412,15 +15448,35 @@ if (data !== null) {{
         remote_note.set_line_wrap(True)
         remote_note.set_max_width_chars(52)
         remote_note.get_style_context().add_class("session-sub")
+        # the address, or the step the setup waits for, as a link to open
+        # or copy (as the dialog opens; it does not follow later changes)
+        remote_link = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4,
+                              margin_start=22)
+        pending = getattr(self, "_remote_pending", None)
+        link_url = self._remote_url or (pending[1] if pending else "")
+        if link_url:
+            link_lbl = Gtk.Label(xalign=0)
+            link_lbl.set_line_wrap(True)
+            link_lbl.set_max_width_chars(52)
+            link_lbl.set_markup(
+                ("Open it at " if self._remote_url else
+                 GLib.markup_escape_text(f"Setup waits for you: {pending[0]} at ")
+                 ) + self._link_markup(link_url))
+            link_lbl.connect("activate-link",
+                             lambda _l, uri: (self._open_uri(uri), True)[1])
+            remote_link.pack_start(link_lbl, False, False, 0)
+            remote_link.pack_start(self._copy_name_button(link_url, "Copy the link"),
+                                   False, False, 0)
         remote_note.set_text(
-            ("Open it at " + self._remote_url) if self._remote_url else
-            (getattr(self, "_remote_detail", "") or
-             ("Turning this on sets Tailscale up here (it asks first: "
-              "install, start, log in) if it is not ready. The phone needs "
-              "the Tailscale app on the same account."
-              if not shutil.which("tailscale") else
-              "Needs Tailscale on the phone too, logged in to the same "
-              "account.")) + "\nOnly your own login can open "
+            ("" if link_url else
+             (getattr(self, "_remote_detail", "") or
+              ("Turning this on sets Tailscale up here (it asks first: "
+               "install, start, log in) if it is not ready. The phone needs "
+               "the Tailscale app on the same account."
+               if not shutil.which("tailscale") else
+               "Needs Tailscale on the phone too, logged in to the same "
+               "account.")) + "\n")
+            + "Only your own login can open "
             "it. tabit takes over Tailscale Serve on port 443 of this host.")
 
         ver_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -15463,7 +15519,7 @@ if (data !== null) {{
             # tg_help sits outside the grid on purpose: the grid greys
             # out when Telegram is off, which is when somebody needs it.
             ("Telegram", (tg_on, tg_grid, tg_help)),
-        ) + (("Remote", (remote_on, remote_send, remote_files, remote_note)),) + (
+        ) + (("Remote", (remote_on, remote_send, remote_files, remote_link, remote_note)),) + (
             ("About", (ver_box,)),
         )
         for name, widgets in pages:
