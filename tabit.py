@@ -118,6 +118,10 @@ PREVIEW_FIND_JS = r"""(function (a) {
   if (!S.sheet) {
     S.sheet = new CSSStyleSheet(); S.sheet.replaceSync(css);
     document.adoptedStyleSheets = [...document.adoptedStyleSheets, S.sheet];
+    // registered once and only emptied after: WebKit does not repaint
+    // when a highlight is taken out of the registry
+    S.all = new Highlight(); S.cur = new Highlight(); S.cur.priority = 1;
+    CSS.highlights.set("tabit-all", S.all); CSS.highlights.set("tabit-cur", S.cur);
   }
   const key = JSON.stringify([q, cs, word]);
   if (S.key !== key || step === 0) {
@@ -138,12 +142,11 @@ PREVIEW_FIND_JS = r"""(function (a) {
     }
   }
   const n = S.ranges.length;
-  CSS.highlights.delete("tabit-all"); CSS.highlights.delete("tabit-cur");
+  S.all.clear(); S.cur.clear();
   if (!n) return "0";
   S.i = step === 0 || S.i < 0 ? (step < 0 ? n - 1 : 0) : (S.i + step + n) % n;
-  if (all) CSS.highlights.set("tabit-all", new Highlight(...S.ranges));
-  const cur = new Highlight(S.ranges[S.i]); cur.priority = 1;
-  CSS.highlights.set("tabit-cur", cur);
+  if (all) for (const r of S.ranges) S.all.add(r);
+  S.cur.add(S.ranges[S.i]);
   const b = S.ranges[S.i].getBoundingClientRect();
   if (b.top < 0 || b.bottom > innerHeight) window.scrollBy(0, b.top - innerHeight / 2);
   if (b.left < 0 || b.right > innerWidth) window.scrollBy(b.left - innerWidth / 2, 0);
@@ -4051,15 +4054,20 @@ if (data !== null) {{
         search_box.pack_start(chk_highlight, False, False, 0)
         search_box.pack_start(btn_close, False, False, 0)
 
-        chk_case.connect("toggled", lambda b: search_settings.set_case_sensitive(b.get_active()))
-        chk_word.connect("toggled", lambda b: search_settings.set_at_word_boundaries(b.get_active()))
-        def on_highlight(b):
-            search_context.set_highlight(b.get_active())
+        def page_again():
+            # the editor's search follows its settings by itself; a page
+            # preview's marks are made once, so make them again
             if (self._note_find_page(row) is not None
                     and getattr(row, "_page_find_js", True)
                     and hasattr(row.webview, "evaluate_javascript")):
                 self._note_page_find_js(row, 0)
-        chk_highlight.connect("toggled", on_highlight)
+
+        def on_option(b, set_it):
+            set_it(b.get_active())
+            page_again()
+        chk_case.connect("toggled", on_option, search_settings.set_case_sensitive)
+        chk_word.connect("toggled", on_option, search_settings.set_at_word_boundaries)
+        chk_highlight.connect("toggled", on_option, search_context.set_highlight)
 
         lbl_status = Gtk.Label(label="")
         lbl_status.get_style_context().add_class("session-sub")
