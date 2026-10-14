@@ -104,13 +104,13 @@ ICON_AI_TMUX = "tabit-ai-tmux"
 def _is_ai_icon(name):
     return name in (ICON_AI, ICON_AI_TMUX)
 # sessions.json argv[0] for note tabs; argv[1] is path or ""
-# Find in a page preview: every match lightly tinted, the current one solid
-# orange with dark text (WebKit's own is light text on yellow).
+# Find in a page preview: every match yellow, the current one cyan, both
+# with dark text (WebKit's own is light text on yellow).
 # The page adopts it when Find first runs there: a user style sheet's
 # colour is not used for a highlight.
 PREVIEW_FIND_CSS = (
-    "::highlight(tabit-all){background-color:rgba(224,175,104,.32)}"
-    "::highlight(tabit-cur){background-color:#ff9e64;color:#1a1b26}")
+    "::highlight(tabit-all){background-color:#e0af68;color:#1a1b26}"
+    "::highlight(tabit-cur){background-color:#7dcfff;color:#1a1b26}")
 PREVIEW_FIND_JS = r"""(function (a) {
   const [q, cs, word, step, all, css] = a;
   if (typeof Highlight === "undefined" || !window.CSS || !CSS.highlights) return "nohl";
