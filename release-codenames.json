@@ -1,5 +1,5 @@
 {
-  "_comment": "Shipped release codenames only (history). Do NOT add upcoming candidates — that spoils the surprise. At release time RD picks a fresh Taiwan-origin cuisine English name, sets APP_CODENAME in tabit.py, and records it here with scripts/release-codename.py record.",
+  "_comment": "Shipped release codenames only (history). Do NOT add upcoming candidates — that spoils the surprise. At release time RD keeps the major version's Taiwan main dish and picks a fresh snack or drink (\"Main Dish + Snack\", see docs/releasing.md), sets APP_CODENAME in tabit.py, and records it here with scripts/release-codename.py record.",
   "shipped": [
     {
       "version": "v1.7.11",
@@ -56,6 +56,10 @@
     {
       "version": "v2.0.1",
       "english": "Peanut Ice Cream Roll"
+    },
+    {
+      "version": "v2.0.2",
+      "english": "Danzai Noodles + Mango Shaved Ice"
     }
   ]
 }

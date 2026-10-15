@@ -1,14 +1,18 @@
 # Releasing (cuisine codenames)
 
-Each release gets a fresh **Taiwan-origin cuisine** English codename. There is
+Each release gets a **Taiwan-origin food** English codename in two parts: a
+savoury main dish for the major version, and a snack or drink for the release
+inside it. There is
 **no public menu of upcoming names** in the repo (that would spoil the
 surprise). RD picks the name when cutting the release.
 
 Public label:
 
 ```text
-v1.7.12 · Oyster Omelette
+v2.0.2 · Danzai Noodles + Mango Shaved Ice
 ```
+
+Up to v2.0.1 a codename was one dish (`v1.7.12 · Oyster Omelette`).
 
 That same string appears in:
 
@@ -20,11 +24,12 @@ That same string appears in:
 
 | Rule | Detail |
 |---|---|
-| Origin | Must be **Taiwan-origin cuisine** (not limited to street snacks) |
-| Major / minor | 1st and 2nd version digits → more **internationally known** names |
-| Patch | 3rd digit → more **obscure** names |
+| Origin | Must be **Taiwan-origin** food |
+| Form | `Main Dish + Snack`, joined by ` + ` |
+| Main dish | A well-known **savoury main dish**. It belongs to the major version (1st digit): every `v2.x.y` release keeps the same one, and a new major version picks a new one |
+| Snack or drink | A Taiwan **snack, dessert or drink**. Every release picks a new one |
 | Language | **English** display name in the public label; optional Chinese only in private notes if needed — never a browsable public catalog |
-| Reuse | Do not reuse a name already in shipped history — except a **hotfix**, which is the same release with bugs taken out and keeps its name (`v1.8.3` → `v1.8.3.1`) |
+| Reuse | Do not reuse a snack or drink, or a main dish of another major version, already in shipped history — except a **hotfix**, which is the same release with bugs taken out and keeps its whole name (`v1.8.3` → `v1.8.3.1`) |
 
 ## Files
 
@@ -36,7 +41,7 @@ That same string appears in:
 
 ## Checklist when cutting a release
 
-1. Pick a fresh English codename per the rules above (`python3 scripts/release-codename.py list` shows names already used).
+1. Keep the major version's main dish, and pick a fresh snack or drink per the rules above (`python3 scripts/release-codename.py list` shows names already used).
 2. Bump `APP_VERSION` and set `APP_CODENAME` in `tabit.py` to that English name.
 3. Record history (no candidate pool):  
    `python3 scripts/release-codename.py record vX.Y.Z --name "English Name"`
