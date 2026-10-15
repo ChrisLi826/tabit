@@ -12,7 +12,8 @@ runs, so tabit then reads the session's transcript for the interrupt. The
 hooks add to your own Claude settings and replace none of them.
 
 Every other tab is read from its screen: codex, grok and other CLIs, and
-a Claude tab opened before this release, until it is opened again.
+a Claude tab opened before this release. Open a new one, or change the old
+one in its rename popover, to give it the hooks.
 
 ## The popup
 

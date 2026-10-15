@@ -1682,7 +1682,8 @@ def _claude_hooks_settings(hook_dir):
     ask = ('s=working; case "$p" in *\'"tool_name":"AskUserQuestion"\'*'
            '|*\'"tool_name":"ExitPlanMode"\'*) s=blocked;; esac; ')
     return {"hooks": {
-        "SessionStart": ev("idle"),
+        # not "compact": claude compacts in the middle of a turn
+        "SessionStart": ev("idle", "startup|resume|clear"),
         "UserPromptSubmit": ev("working"),
         "PreToolUse": [{"matcher": "*", "hooks": [put(ask)]}],
         "PostToolUse": ev("working", "*"),
@@ -2950,8 +2951,14 @@ class Tabit(Gtk.Window):
                 envv = [f"{k}={v}" for k, v in os.environ.items()
                         if k not in ("TMUX", "TMUX_PANE")]
                 envv.append(f"TABIT_AGENT={row._agent_key}")
+        flags = GLib.SpawnFlags.SEARCH_PATH
+        if envv is not None:
+            # without this VTE puts envv on top of tabit's own environment,
+            # and a TMUX from it would stay
+            flags = GLib.SpawnFlags(
+                int(flags) | getattr(Vte, "SPAWN_NO_PARENT_ENVV", 0))
         term.spawn_async(Vte.PtyFlags.DEFAULT, workdir, run,
-                         envv, GLib.SpawnFlags.SEARCH_PATH, None, None,
+                         envv, flags, None, None,
                          -1, None, self._on_term_spawned, row)
         return row
 
@@ -6628,7 +6635,7 @@ if (data !== null) {{
     @classmethod
     def _agent_hook_raw(cls, row):
         """working / blocked / idle from the tab's claude hooks, or None
-        when it has none (another CLI, an older tab, an older claude)."""
+        when it has none (another CLI, a tab built before the hooks)."""
         key = cls._agent_hook_key(row)
         if not key:
             return None
@@ -6709,9 +6716,14 @@ if (data !== null) {{
         # fallback for every other tab
         hook_raw = self._agent_hook_raw(row)
         term = getattr(row, "term", None)
-        text = "" if hook_raw in ("blocked", "idle") else self._term_tail_text(
+        text = "" if hook_raw == "idle" else self._term_tail_text(
             term, max_lines=self._AGENT_TAIL_LINES)
         now = time.time()
+        if hook_raw == "blocked" and as_ is not None and as_.bottom_live_busy(
+                text or ""):
+            # approved: no hook runs until the tool ends, but the busy line
+            # is back (it is not on screen while claude asks)
+            hook_raw = "working"
         if hook_raw == "working" and not self._agent_hook_still_busy(
                 row, text, now):
             hook_raw = "idle"

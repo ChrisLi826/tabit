@@ -20,9 +20,10 @@ working = [
   "\\bcompacting…|\\bcompacting\\.\\.\\.",
   "[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]",
   "[◐◓◑◒]",
-  # live counters: "… (50s · ↓ 2.2k tokens)" not "Baked for 3m 40s"
-  "[a-z]{4,}ing\\.\\.\\.\\s*\\(\\d+s\\b",
-  "\\(\\d+s\\s*[·•]",
+  # live counters: "… (50s · ↓ 2.2k tokens)", "(1m 5s · …)" past a
+  # minute, not "Baked for 3m 40s"
+  "[a-z]{4,}ing\\.\\.\\.\\s*\\((?:\\d+h\\s*)?(?:\\d+m\\s*)?\\d+s\\b",
+  "\\((?:\\d+h\\s*)?(?:\\d+m\\s*)?\\d+s\\s*[·•]",
   "ctrl\\+b to run in background",
 ]
 

@@ -83,6 +83,10 @@ class TestHookCommand(unittest.TestCase):
             self.run_hook("PreToolUse", {"transcript_path": self.tx, "tool_name": tool})
             self.assertEqual(self.state()[0], "blocked", tool)
 
+    def test_compaction_is_not_the_end_of_a_turn(self):
+        self.assertEqual(self.hooks["SessionStart"][0]["matcher"],
+                         "startup|resume|clear")
+
     def test_events(self):
         for event, want in (("SessionStart", "idle"), ("UserPromptSubmit", "working"),
                             ("PermissionRequest", "blocked"), ("PostToolUse", "working"),
@@ -158,6 +162,12 @@ class TestHookBeatsScreen(unittest.TestCase):
             "  ◆ Haiku 5.5 │ ░░░░░░░░░░ 0% 1M │ $0.00\n  w2\n"
             "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents\n")
     BUSY = "❯ Write an essay.\n· Simmering… (2s · thinking)\n" + FOOT.format("")
+    # past a minute the timer reads "1m 5s"
+    BUSY_LONG = ("❯ Write an essay.\n✻ Moonwalking… (1m 5s · ↓ 2.2k tokens · thinking)\n"
+                 + FOOT.format(""))
+    # claude asks: the busy line is not on screen
+    ASKING = ("● Bash(mkdir newdir)\n  ⎿  Waiting…\n Do you want to proceed?\n"
+              " ❯ 1. Yes\n   2. No\n")
     QUIET = "\n" + FOOT.format("Write an essay.")
 
     def run_update(self, state, screen, quiet_for=0.0, event_age=10.0):
@@ -198,8 +208,19 @@ class TestHookBeatsScreen(unittest.TestCase):
         # the screen rules read this busy screen as idle; the hook knows
         self.assertEqual(self.run_update("working", self.BUSY, quiet_for=5)[0], "working")
 
-    def test_blocked_and_idle_do_not_read_the_screen(self):
-        self.assertEqual(self.run_update("blocked", self.QUIET), ("blocked", False))
+    def test_idle_does_not_read_the_screen(self):
+        self.assertEqual(self.run_update("idle", self.BUSY), ("idle", False))
+
+    def test_blocked_while_claude_asks(self):
+        self.assertEqual(self.run_update("blocked", self.ASKING)[0], "blocked")
+
+    def test_blocked_then_approved_tool_runs(self):
+        # no hook runs between the approval and the end of the tool
+        self.assertEqual(self.run_update("blocked", self.BUSY)[0], "working")
+
+    def test_turn_past_a_minute_stays_working(self):
+        self.assertEqual(self.run_update("working", self.BUSY_LONG, quiet_for=5)[0],
+                         "working")
 
     def test_busy_line_gone_for_a_while_is_idle(self):
         self.assertEqual(self.run_update("working", self.QUIET, quiet_for=5)[0], "idle")
