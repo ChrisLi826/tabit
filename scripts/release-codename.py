@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Release codename helpers for tabit (history + title — no public future pool).
 
-Codenames are Taiwan-origin cuisine English names. There is no candidate menu
+Codenames are Taiwan-origin food English names. There is no candidate menu
 in the repo; RD picks a fresh name when cutting a release. This file only
 tracks names already shipped (to avoid reuse) and formats the release title
 from APP_VERSION / APP_CODENAME in tabit.py.
 
-Rules (also in README):
-  - Must be Taiwan-origin cuisine (not limited to street snacks)
-  - Major/minor (1st/2nd version digits): more internationally known names
-  - Patch (3rd digit): more obscure names
+Rules (also in docs/releasing.md):
+  - Must be Taiwan-origin food, written "Main Dish + Snack"
+  - Main dish: a well-known savoury main dish, one per major version
+  - Snack: a snack, dessert or drink, new for every release
   - Public label is English only; optional Chinese stays in private notes
 
 Usage:

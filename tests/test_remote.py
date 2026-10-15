@@ -533,6 +533,15 @@ class TestPlainTabColours(unittest.TestCase):
         self.assertEqual(lines, ["ok red", "$ "])
         self.assertEqual(ansi, ["ok \x1b[0;38;2;240;80;80mred\x1b[0m", "$ "])
 
+    def test_wide_text_keeps_its_colours(self):
+        # VTE gives one colour per UTF-8 byte: 已 is three
+        fg, bg, red = (200, 200, 200), (20, 20, 30), (240, 80, 80)
+        text = "a已b\n"
+        cols = [(fg, bg)] + [(red, bg)] * 3 + [(fg, bg)] * 2
+        lines, ansi = tabit.Tabit._term_tail_ansi(self._term(text, cols))
+        self.assertEqual(lines, ["a已b"])
+        self.assertEqual(ansi, ["a\x1b[0;38;2;240;80;80m已\x1b[0mb"])
+
     def test_no_colours_reads_as_none(self):
         t = self._term("abc", [])
         self.assertIsNone(tabit.Tabit._term_tail_ansi(t))
@@ -849,6 +858,26 @@ class TestTailscaleSetup(unittest.TestCase):
         stub = type("S", (), {"_remote_srv": "new", "_remote_stop": lambda s, unpublish: stopped.append(1)})()
         self.assertFalse(tabit.Tabit._remote_fail(stub, "old", "boom"))
         self.assertEqual(stopped, [])
+
+
+class TestRemoteSetupLinks(unittest.TestCase):
+    """A setup that waits for the user shows the page to open."""
+
+    def test_a_link_keeps_its_query(self):
+        m = tabit.Tabit._link_markup("https://login.tailscale.com/a/x?a=1&b=2", "open")
+        self.assertEqual(m, '<a href="https://login.tailscale.com/a/x?a=1&amp;b=2">open</a>')
+
+    def test_stop_ends_a_waiting_login(self):
+        app = unittest.mock.Mock(_remote_srv=None)
+        proc = app._remote_login_proc
+        proc.poll.return_value = None
+        tabit.Tabit._remote_stop(app, unpublish=False)
+        proc.terminate.assert_called_once_with()
+
+    def test_a_new_on_forgets_the_old_step(self):
+        app = unittest.mock.Mock(_remote_pending=("log in to Tailscale", "https://x"))
+        tabit.Tabit._remote_fresh(app)
+        self.assertIsNone(app._remote_pending)
 
 
 if __name__ == "__main__":

@@ -119,5 +119,25 @@ class TestPreviewLinks(unittest.TestCase):
         decision.ignore.assert_not_called()
 
 
+class TestPreviewScripts(unittest.TestCase):
+    """A Markdown preview runs no script from the file, even with Find's on."""
+
+    def test_new_webkit_turns_off_only_the_page_scripts(self):
+        w = unittest.mock.Mock()
+        tabit.Tabit._set_page_scripts(w, False)
+        w.set_enable_javascript.assert_called_once_with(True)
+        w.set_enable_javascript_markup.assert_called_once_with(False)
+
+    def test_old_webkit_turns_off_all_script(self):
+        w = unittest.mock.Mock(spec=["set_enable_javascript"])
+        tabit.Tabit._set_page_scripts(w, False)
+        w.set_enable_javascript.assert_called_once_with(False)
+
+    def test_a_page_keeps_its_scripts(self):
+        w = unittest.mock.Mock()
+        tabit.Tabit._set_page_scripts(w, True)
+        w.set_enable_javascript_markup.assert_called_once_with(True)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -104,6 +104,57 @@ ICON_AI_TMUX = "tabit-ai-tmux"
 def _is_ai_icon(name):
     return name in (ICON_AI, ICON_AI_TMUX)
 # sessions.json argv[0] for note tabs; argv[1] is path or ""
+# Where an admin approves a new computer for the tailnet
+TAILSCALE_MACHINES_URL = "https://login.tailscale.com/admin/machines"
+
+# Find in a page preview: every match yellow, the current one cyan, both
+# with dark text (WebKit's own is light text on yellow).
+# The page adopts it when Find first runs there: a user style sheet's
+# colour is not used for a highlight.
+PREVIEW_FIND_CSS = (
+    "::highlight(tabit-all){background-color:#e0af68;color:#1a1b26}"
+    "::highlight(tabit-cur){background-color:#7dcfff;color:#1a1b26}")
+PREVIEW_FIND_JS = r"""(function (a) {
+  const [q, cs, word, step, all, css] = a;
+  if (typeof Highlight === "undefined" || !window.CSS || !CSS.highlights) return "nohl";
+  const S = window.__tabitFind || (window.__tabitFind = {});
+  if (!S.sheet) {
+    S.sheet = new CSSStyleSheet(); S.sheet.replaceSync(css);
+    document.adoptedStyleSheets = [...document.adoptedStyleSheets, S.sheet];
+    // registered once and only emptied after: WebKit does not repaint
+    // when a highlight is taken out of the registry
+    S.all = new Highlight(); S.cur = new Highlight(); S.cur.priority = 1;
+    CSS.highlights.set("tabit-all", S.all); CSS.highlights.set("tabit-cur", S.cur);
+  }
+  const key = JSON.stringify([q, cs, word]);
+  if (S.key !== key || step === 0) {
+    S.key = key; S.ranges = []; S.i = -1;
+    if (q) {
+      const nq = cs ? q : q.toLowerCase(), isW = c => /[\p{L}\p{N}_]/u.test(c || "");
+      const tw = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT, {
+        acceptNode: n => /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/.test(n.parentNode.nodeName)
+          ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
+      for (let n; (n = tw.nextNode());) {
+        const t = cs ? n.data : n.data.toLowerCase();
+        for (let k = t.indexOf(nq); k >= 0; k = t.indexOf(nq, k + nq.length)) {
+          if (word && (isW(t[k - 1]) || isW(t[k + nq.length]))) continue;
+          const r = document.createRange(); r.setStart(n, k); r.setEnd(n, k + nq.length);
+          S.ranges.push(r);
+        }
+      }
+    }
+  }
+  const n = S.ranges.length;
+  S.all.clear(); S.cur.clear();
+  if (!n) return "0";
+  S.i = step === 0 || S.i < 0 ? (step < 0 ? n - 1 : 0) : (S.i + step + n) % n;
+  if (all) for (const r of S.ranges) S.all.add(r);
+  S.cur.add(S.ranges[S.i]);
+  const b = S.ranges[S.i].getBoundingClientRect();
+  if (b.top < 0 || b.bottom > innerHeight) window.scrollBy(0, b.top - innerHeight / 2);
+  if (b.left < 0 || b.right > innerWidth) window.scrollBy(b.left - innerWidth / 2, 0);
+  return (S.i + 1) + "/" + n;
+})"""
 NOTE_SENTINEL = "__tabit_note__"
 ICON_NOTE = "text-x-generic-symbolic"
 ICON_COMMAND = "system-run-symbolic"
@@ -344,10 +395,10 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.0.1"
-# Fresh Taiwan-origin cuisine English name picked at release time (no public
-# future pool). Display: v1.8.0 · Braised Pork Rice
-APP_CODENAME = "Peanut Ice Cream Roll"
+APP_VERSION = "v2.0.2"
+# Taiwan main dish of the major version + a fresh snack or drink, picked at
+# release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
+APP_CODENAME = "Danzai Noodles + Mango Shaved Ice"
 _VERSION_CODENAME_SEP = " · "
 
 
@@ -2128,6 +2179,9 @@ class Tabit(Gtk.Window):
         self._remote_label.set_margin_top(4)
         self._remote_label.set_ellipsize(Pango.EllipsizeMode.END)
         self._remote_label.set_no_show_all(True)
+        self._remote_label.connect(
+            "activate-link", lambda _l, uri: (self._open_uri(uri), True)[1])
+        self._remote_pending = None
         adders.pack_start(self._remote_label, False, False, 0)
         GLib.idle_add(lambda: (self._remote_sync(), False)[1])
         self.sidebar.pack_start(adders, False, False, 0)
@@ -3073,7 +3127,7 @@ class Tabit(Gtk.Window):
         if HAS_WEBKIT:
             webview = WebKit2.WebView()
             wset = webview.get_settings()
-            wset.set_enable_javascript(True)
+            self._set_page_scripts(wset, True)
             wset.set_allow_file_access_from_file_urls(True)
             webview.connect("decide-policy", self._on_preview_policy)
             content = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -3283,8 +3337,9 @@ class Tabit(Gtk.Window):
         # A file from terminal output is not necessarily yours. Scripts stay
         # on for a page, because a real report needs them, but they may not
         # read the rest of the disk and post it somewhere. Markdown needs no
-        # script: raw HTML in it must not run any.
-        wset.set_enable_javascript(page)
+        # script: raw HTML in it must not run any. (tabit's own Find script
+        # still runs there; see _set_page_scripts.)
+        self._set_page_scripts(wset, page)
         wset.set_allow_file_access_from_file_urls(False)
         row.webview.set_settings(wset)
         if page and not self._has_source(path):
@@ -3724,7 +3779,7 @@ if (data !== null) {{
 
         if on:
             wset = row.webview.get_settings()
-            wset.set_enable_javascript(True)
+            self._set_page_scripts(wset, True)
             row.webview.set_settings(wset)
             self._note_render_yaml(row)
             row.webview.set_no_show_all(False)
@@ -3930,6 +3985,13 @@ if (data !== null) {{
             if text.endswith("\n"):
                 out += "\n"
         except json.JSONDecodeError as e:
+            # put the cursor where the parser stopped, so the line shows
+            it = start.copy()
+            it.forward_chars(e.pos)
+            row.buffer.place_cursor(it)
+            if row.view is not None:
+                row.view.scroll_to_iter(it, 0.1, False, 0.0, 0.0)
+                row.view.grab_focus()
             self._note_msg(
                 Gtk.MessageType.ERROR, "Invalid JSON",
                 f"Line {e.lineno}, col {e.colno}: {e.msg}")
@@ -4005,11 +4067,20 @@ if (data !== null) {{
         search_box.pack_start(chk_highlight, False, False, 0)
         search_box.pack_start(btn_close, False, False, 0)
 
-        chk_case.connect("toggled", lambda b: search_settings.set_case_sensitive(b.get_active()))
-        chk_word.connect("toggled", lambda b: search_settings.set_at_word_boundaries(b.get_active()))
-        chk_highlight.connect(
-            "toggled",
-            lambda b: search_context.set_highlight(b.get_active()))
+        def page_again():
+            # the editor's search follows its settings by itself; a page
+            # preview's marks are made once, so make them again
+            if (self._note_find_page(row) is not None
+                    and getattr(row, "_page_find_js", True)
+                    and hasattr(row.webview, "evaluate_javascript")):
+                self._note_page_find_js(row, 0)
+
+        def on_option(b, set_it):
+            set_it(b.get_active())
+            page_again()
+        chk_case.connect("toggled", on_option, search_settings.set_case_sensitive)
+        chk_word.connect("toggled", on_option, search_settings.set_at_word_boundaries)
+        chk_highlight.connect("toggled", on_option, search_context.set_highlight)
 
         lbl_status = Gtk.Label(label="")
         lbl_status.get_style_context().add_class("session-sub")
@@ -4019,7 +4090,8 @@ if (data !== null) {{
         def on_search_changed(entry_widget):
             text = entry_widget.get_text()
             search_settings.set_search_text(text or None)
-            if text:  # jump to the first match as you type
+            if text or self._note_find_page(row) is not None:
+                # jump to the first match as you type
                 self._search_find(row, forward=True)
             else:
                 self._update_note_search_status(row)
@@ -4040,6 +4112,13 @@ if (data !== null) {{
             search_box.set_no_show_all(True)
             search_box.hide()
             search_settings.set_search_text(None)
+            fc = self._note_find_page(row)
+            if fc is not None:
+                fc.search_finish()
+                row._page_find = None
+                if getattr(row, "_page_find_js", True) \
+                        and hasattr(row.webview, "evaluate_javascript"):
+                    self._note_page_find_js(row, 0)     # empty text: clears
             lbl_status.set_text("")
             view.grab_focus()
 
@@ -4069,6 +4148,8 @@ if (data !== null) {{
         lbl = getattr(row, "search_status_lbl", None)
         if lbl is None or not hasattr(row, "search_context"):
             return
+        if self._note_find_page(row) is not None:
+            return                          # the page find sets it
         settings = row.search_settings
         ctx = row.search_context
         if not settings.get_search_text():
@@ -4381,8 +4462,102 @@ if (data !== null) {{
         row.search_entry.grab_focus()
         row.search_entry.select_region(0, -1)
 
+    @staticmethod
+    def _set_page_scripts(wset, on):
+        """Turn the page's own scripts on or off. Where WebKit can tell them
+        apart (2.24+), JavaScript stays on with only the page's scripts off,
+        so tabit's Find can still mark the matches; an older WebKit keeps
+        all script off."""
+        if hasattr(wset, "set_enable_javascript_markup"):
+            wset.set_enable_javascript(True)
+            wset.set_enable_javascript_markup(on)
+        else:
+            wset.set_enable_javascript(on)
+
+    def _note_page_find_js(self, row, step):
+        """Find in the page in tabit's colours (CSS highlights, run in a
+        world of its own). step: 1 next, -1 previous, 0 again from the
+        start. Falls back to WebKit's find where this cannot run."""
+        st = row.search_settings
+        text = st.get_search_text() or ""
+        args = json.dumps([text, bool(st.get_case_sensitive()),
+                           bool(st.get_at_word_boundaries()), step,
+                           bool(row.search_context.get_highlight()),
+                           PREVIEW_FIND_CSS])
+        lbl = row.search_status_lbl
+
+        def done(view, res):
+            try:
+                out = view.evaluate_javascript_finish(res).to_string()
+            except Exception:
+                out = "nohl"
+            if out == "nohl":                   # no CSS highlights here
+                row._page_find_js = False
+                if text:
+                    self._search_find(row, forward=step >= 0)
+                return
+            lbl.set_text("" if not text else
+                         "No matches" if out == "0" else out)
+        row.webview.evaluate_javascript(PREVIEW_FIND_JS + "(" + args + ")", -1,
+                                        "tabit-find", None, None, done)
+
+    def _note_find_page(self, row):
+        """The webview's find, when a page preview stands in for the
+        source (HTML, Markdown): the hidden source cannot show a match."""
+        if not (getattr(row, "preview_on", False)
+                and getattr(row, "webview", None) is not None
+                and self._opens_full_width(row.file_path or "")):
+            return None
+        return row.webview.get_find_controller()
+
+    def _note_page_find(self, row, fc, forward=True):
+        """Find in the page preview: matches highlighted, the current one
+        scrolled into view. A new text or option starts over."""
+        text = row.search_settings.get_search_text()
+        if not text:
+            fc.search_finish()
+            row._page_find = None
+            row.search_status_lbl.set_text("")
+            return
+        F = WebKit2.FindOptions
+        opts = F.WRAP_AROUND
+        if not row.search_settings.get_case_sensitive():
+            opts |= F.CASE_INSENSITIVE
+        if row.search_settings.get_at_word_boundaries():
+            opts |= F.AT_WORD_STARTS
+        lbl = row.search_status_lbl
+        n = getattr(row, "_page_find_n", 0)
+        if getattr(row, "_page_find", None) == (text, int(opts)):
+            if n:
+                # WebKit says 1 for a next, so count the place here: 2/5
+                row._page_find_i = ((row._page_find_i if forward
+                                     else row._page_find_i - 2) % n) + 1
+                lbl.set_text(f"{row._page_find_i}/{n}")
+            fc.search_next() if forward else fc.search_previous()
+            return
+        row._page_find = (text, int(opts))
+        row._page_find_n = 0
+        if not getattr(row, "_page_find_hooked", False):
+            row._page_find_hooked = True
+
+            def found(_f, count):
+                if not row._page_find_n:        # the new search's total
+                    row._page_find_n, row._page_find_i = count, 1
+                    lbl.set_text(f"1/{count}")
+            fc.connect("found-text", found)
+            fc.connect("failed-to-find-text", lambda _f: lbl.set_text("No matches"))
+        fc.search(text, opts | (0 if forward else F.BACKWARDS), 1000)
+
     def _search_find(self, row, forward=True):
         if not hasattr(row, "search_context"):
+            return
+        fc = self._note_find_page(row)
+        if fc is not None:
+            if (getattr(row, "_page_find_js", True)
+                    and hasattr(row.webview, "evaluate_javascript")):
+                self._note_page_find_js(row, 1 if forward else -1)
+            else:
+                self._note_page_find(row, fc, forward)
             return
         buf = row.buffer
         insert_mark = buf.get_insert()
@@ -11256,8 +11431,17 @@ if (data !== null) {{
             text, attrs = term.get_text_range(start, 0, end, end_col, None)
         except Exception:
             return None
-        if not text or not attrs or len(attrs) != len(text):
+        if not text or not attrs:
             return None
+        if len(attrs) != len(text):
+            # VTE gives one per UTF-8 byte: keep each character's first
+            if len(attrs) != len(text.encode("utf-8")):
+                return None
+            at, i = [], 0
+            for ch in text:
+                at.append(attrs[i])
+                i += len(ch.encode("utf-8"))
+            attrs = at
         rgb = lambda c: (c.red >> 8, c.green >> 8, c.blue >> 8)
         # the commonest colours are the default ones: no code for them
         count = {}
@@ -11485,6 +11669,7 @@ if (data !== null) {{
         self._remote_agreed = False
         self._remote_link_opened = False
         self._remote_steps_done = set()
+        self._remote_pending = None
 
     def _remote_decline(self):
         """GTK thread: the setup was declined, so Remote goes off for good
@@ -11533,6 +11718,8 @@ if (data !== null) {{
         def publish():
             if self._remote_srv is not srv:     # turned off while queued
                 return
+            # what the user must still do, found again on each try
+            self._remote_pending = None
             problem = self._tailscale_prepare(srv)
             if problem:
                 retry = problem.startswith("retry:")
@@ -11574,6 +11761,8 @@ if (data !== null) {{
                 link = next((w for w in out.split()
                              if "login.tailscale.com" in w), "")
                 ok, url = False, ""
+                if link:
+                    self._remote_pending = ("turn on Serve for your tailnet", link)
                 if link and not getattr(self, "_remote_link_opened", False):
                     # one click in the browser; the 60 s retry picks it up
                     # (once: the next retries must not pile up pages)
@@ -11728,6 +11917,8 @@ if (data !== null) {{
             if state == "Starting":
                 return "retry:Tailscale is starting"
             if state == "NeedsMachineAuth":
+                self._remote_pending = ("approve this computer in Tailscale",
+                                        TAILSCALE_MACHINES_URL)
                 return ("retry:this computer waits for approval in the "
                         "Tailscale admin console")
             if state != "Running":              # NeedsLogin, Stopped, NoState
@@ -11744,6 +11935,9 @@ if (data !== null) {{
                 p = subprocess.Popen(["tailscale", "up"],
                                      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True)
+                # ended with Remote (and tabit): its login link dies with it,
+                # and a next start runs a fresh one
+                self._remote_login_proc = p
                 # `tailscale up` waits for the login with no output: a
                 # watchdog ends it after 10 minutes, or when Remote goes off
                 ended = threading.Event()
@@ -11766,12 +11960,14 @@ if (data !== null) {{
                                     if w.startswith("https://login.tailscale.com/")), "")
                         if url and not opened:
                             opened = True
+                            self._remote_pending = ("log in to Tailscale", url)
                             GLib.idle_add(lambda u=url: (self._open_uri(u), False)[1])
                             progress("log in to Tailscale in the browser page that opened")
                     code = p.wait()
                 finally:
                     ended.set()
                     p.stdout.close()
+                    self._remote_login_proc = None
                 if code != 0:
                     # its own words: e.g. it wants this computer's other
                     # non-default settings spelled out
@@ -11779,6 +11975,7 @@ if (data !== null) {{
                 st, err = status()
                 if not st or st.get("BackendState") != "Running":
                     return "Tailscale is still not logged in"
+                self._remote_pending = None     # logged in: that page is done
         except (OSError, RuntimeError, subprocess.SubprocessError) as e:
             return f"Tailscale setup: {e}"
         return None
@@ -11788,6 +11985,7 @@ if (data !== null) {{
             return False
         if ok:
             self._remote_url = url
+            self._remote_pending = None
             self._remote_show("online", url + "\nonly " + srv.handler_cls.owner)
         else:
             self._remote_fail(srv, out.splitlines()[-1] if out
@@ -11817,6 +12015,9 @@ if (data !== null) {{
     def _remote_stop(self, unpublish):
         srv, self._remote_srv = self._remote_srv, None
         self._remote_url = ""
+        login = getattr(self, "_remote_login_proc", None)
+        if login is not None and login.poll() is None:
+            login.terminate()
         if srv is not None:
             srv.handler_cls.stop.set()      # ends open /api/events streams
             srv.shutdown()
@@ -11844,11 +12045,24 @@ if (data !== null) {{
                 }.get(state, "Remote failed")
         self._remote_detail = detail
         host = self._remote_url.split("//")[-1].split(".")[0]
+        pending = getattr(self, "_remote_pending", None) if state != "online" else None
+        if pending:
+            # the setup waits for the user: say for what, with the page
+            text = "Remote: " + pending[0]
+        text = GLib.markup_escape_text(text)
         self._remote_label.set_markup(
             f'<span foreground="{color}">\u25cf</span> {text}'
-            + (f" · {GLib.markup_escape_text(host)}" if host and state == "online" else ""))
-        self._remote_label.set_tooltip_text(detail)
+            + (f" · {GLib.markup_escape_text(host)}" if host and state == "online" else "")
+            + (f' · {self._link_markup(pending[1], "open")}' if pending else ""))
+        self._remote_label.set_tooltip_text(
+            detail + (f"\n{pending[1]}" if pending else ""))
         self._remote_label.show()
+
+    @staticmethod
+    def _link_markup(url, text=None):
+        """A Pango link; a URL keeps its & etc. only when escaped."""
+        u = GLib.markup_escape_text(url)
+        return f'<a href="{u}">{GLib.markup_escape_text(text) if text else u}</a>'
 
     @staticmethod
     def _screen_sessions():
@@ -11885,7 +12099,7 @@ if (data !== null) {{
         if fn:
             fn()
 
-    def _copy_name_button(self, name):
+    def _copy_name_button(self, name, tip="Copy session name"):
         """Copy-icon button; flashes a dim 'copied' for 3s. No focus ring."""
         wrap = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         btn = Gtk.Button.new_from_icon_name("edit-copy-symbolic",
@@ -11893,7 +12107,7 @@ if (data !== null) {{
         btn.set_relief(Gtk.ReliefStyle.NONE)
         btn.set_can_focus(False)
         btn.set_focus_on_click(False)
-        btn.set_tooltip_text("Copy session name")
+        btn.set_tooltip_text(tip)
         lab = Gtk.Label(label="copied")
         lab.get_style_context().add_class("session-sub")
         lab.set_no_show_all(True)
@@ -15241,15 +15455,35 @@ if (data !== null) {{
         remote_note.set_line_wrap(True)
         remote_note.set_max_width_chars(52)
         remote_note.get_style_context().add_class("session-sub")
+        # the address, or the step the setup waits for, as a link to open
+        # or copy (as the dialog opens; it does not follow later changes)
+        remote_link = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4,
+                              margin_start=22)
+        pending = getattr(self, "_remote_pending", None)
+        link_url = self._remote_url or (pending[1] if pending else "")
+        if link_url:
+            link_lbl = Gtk.Label(xalign=0)
+            link_lbl.set_line_wrap(True)
+            link_lbl.set_max_width_chars(52)
+            link_lbl.set_markup(
+                ("Open it at " if self._remote_url else
+                 GLib.markup_escape_text(f"Setup waits for you: {pending[0]} at ")
+                 ) + self._link_markup(link_url))
+            link_lbl.connect("activate-link",
+                             lambda _l, uri: (self._open_uri(uri), True)[1])
+            remote_link.pack_start(link_lbl, False, False, 0)
+            remote_link.pack_start(self._copy_name_button(link_url, "Copy the link"),
+                                   False, False, 0)
         remote_note.set_text(
-            ("Open it at " + self._remote_url) if self._remote_url else
-            (getattr(self, "_remote_detail", "") or
-             ("Turning this on sets Tailscale up here (it asks first: "
-              "install, start, log in) if it is not ready. The phone needs "
-              "the Tailscale app on the same account."
-              if not shutil.which("tailscale") else
-              "Needs Tailscale on the phone too, logged in to the same "
-              "account.")) + "\nOnly your own login can open "
+            ("" if link_url else
+             (getattr(self, "_remote_detail", "") or
+              ("Turning this on sets Tailscale up here (it asks first: "
+               "install, start, log in) if it is not ready. The phone needs "
+               "the Tailscale app on the same account."
+               if not shutil.which("tailscale") else
+               "Needs Tailscale on the phone too, logged in to the same "
+               "account.")) + "\n")
+            + "Only your own login can open "
             "it. tabit takes over Tailscale Serve on port 443 of this host.")
 
         ver_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -15292,7 +15526,7 @@ if (data !== null) {{
             # tg_help sits outside the grid on purpose: the grid greys
             # out when Telegram is off, which is when somebody needs it.
             ("Telegram", (tg_on, tg_grid, tg_help)),
-        ) + (("Remote", (remote_on, remote_send, remote_files, remote_note)),) + (
+        ) + (("Remote", (remote_on, remote_send, remote_files, remote_link, remote_note)),) + (
             ("About", (ver_box,)),
         )
         for name, widgets in pages:
