@@ -3985,6 +3985,13 @@ if (data !== null) {{
             if text.endswith("\n"):
                 out += "\n"
         except json.JSONDecodeError as e:
+            # put the cursor where the parser stopped, so the line shows
+            it = start.copy()
+            it.forward_chars(e.pos)
+            row.buffer.place_cursor(it)
+            if row.view is not None:
+                row.view.scroll_to_iter(it, 0.1, False, 0.0, 0.0)
+                row.view.grab_focus()
             self._note_msg(
                 Gtk.MessageType.ERROR, "Invalid JSON",
                 f"Line {e.lineno}, col {e.colno}: {e.msg}")
