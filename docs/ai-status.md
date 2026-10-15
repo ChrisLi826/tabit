@@ -2,6 +2,18 @@
 
 How tabit tells you an agent finished or wants you. Back to the [README](../README.md).
 
+## How tabit knows
+
+A **Claude** tab opened by tabit runs `claude --settings
+~/.local/share/tabit/claude-hooks.json`. Its hooks tell tabit what the agent
+does: a prompt or a tool is working, a permission, a question or a plan is
+blocked, the end of a turn is done. When you press Esc or say No, no hook
+runs, so tabit then reads the session's transcript for the interrupt. The
+hooks add to your own Claude settings and replace none of them.
+
+Every other tab is read from its screen: codex, grok and other CLIs, and
+a Claude tab opened before this release, until it is opened again.
+
 ## The popup
 
 When an AI tab stops working — it finished, or it wants input — a popup

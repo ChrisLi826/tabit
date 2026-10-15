@@ -780,6 +780,11 @@ CONNECT_LAST_FILE = os.path.join(CONFIG_DIR, "connect_last.json")
 # Serve publishes it to this user's own devices only (tailnet, HTTPS).
 REMOTE_SOCK = os.path.join(GLib.get_user_runtime_dir(), "tabit-remote.sock")
 REMOTE_PAGE = "remote.html"
+# Claude AI tabs report their status through Claude Code hooks: each event
+# writes the state to a file named after the tab, and tabit reads it there
+# instead of guessing from the screen
+AGENT_HOOK_DIR = os.path.join(GLib.get_user_runtime_dir(), "tabit-agent")
+CLAUDE_HOOKS_FILE = os.path.expanduser("~/.local/share/tabit/claude-hooks.json")
 # the page's icons: tab favicon (SVG, and a PNG for Safari), iPhone home
 # screen, and the installed app (Chrome, Edge, Android)
 REMOTE_ICONS = {"/icon.svg": ("tabit.svg", None), "/favicon.png": ("tabit.svg", 32),
@@ -1647,6 +1652,65 @@ def _set_aside(path):
         return False
 
 
+def _claude_hooks_settings(hook_dir):
+    """Claude Code settings whose hooks write `state, transcript, size`.
+
+    The file is named after the tab: its tmux session, or TABIT_AGENT for
+    a plain tab. tmux first, since a tmux server keeps the environment of
+    whoever started it. Reads stdin first and never fails, so claude never
+    shows a hook error.
+    """
+    d = shlex.quote(hook_dir)
+
+    def put(state):
+        return {"type": "command", "command": (
+            'p=$(cat); k=$TABIT_AGENT; '
+            'if [ -n "$TMUX_PANE" ]; then '
+            'k=$(tmux display-message -p -t "$TMUX_PANE" "#S" 2>/dev/null); fi; '
+            'if [ -z "$k" ]; then exit 0; fi; ' + state +
+            't=$(printf %s "$p" | sed -n \'s/.*"transcript_path":"\\([^"]*\\)".*/\\1/p\'); '
+            'n=$(stat -c %s "$t" 2>/dev/null); '
+            f'printf "%s\\n%s\\n%s\\n" "$s" "$t" "$n" >{d}/"$k".tmp 2>/dev/null '
+            f'&& mv -f {d}/"$k".tmp {d}/"$k" 2>/dev/null; exit 0')}
+
+    def ev(state, matcher=None):
+        e = {"hooks": [put(f"s={state}; ")]}
+        if matcher is not None:
+            e["matcher"] = matcher
+        return [e]
+    # a question or a plan waits for the user like a permission does
+    ask = ('s=working; case "$p" in *\'"tool_name":"AskUserQuestion"\'*'
+           '|*\'"tool_name":"ExitPlanMode"\'*) s=blocked;; esac; ')
+    return {"hooks": {
+        "SessionStart": ev("idle"),
+        "UserPromptSubmit": ev("working"),
+        "PreToolUse": [{"matcher": "*", "hooks": [put(ask)]}],
+        "PostToolUse": ev("working", "*"),
+        "PostToolUseFailure": ev("working", "*"),
+        "PermissionRequest": ev("blocked", "*"),
+        "Stop": ev("idle"),
+        "StopFailure": ev("idle"),
+    }}
+
+
+def _ensure_claude_hooks():
+    """Write the hooks file a claude AI tab needs: without it claude does
+    not start. Only when it changed: claude notices a settings file that
+    changes under a running session."""
+    want = _claude_hooks_settings(AGENT_HOOK_DIR)
+    try:
+        os.makedirs(AGENT_HOOK_DIR, mode=0o700, exist_ok=True)
+        with open(CLAUDE_HOOKS_FILE) as f:
+            if json.load(f) == want:
+                return
+    except (OSError, ValueError):
+        pass
+    try:
+        _write_json(CLAUDE_HOOKS_FILE, want)
+    except OSError as e:
+        print(f"[tabit] cannot write {CLAUDE_HOOKS_FILE}: {e}", file=sys.stderr)
+
+
 class _RemoteServer(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
 
@@ -2289,6 +2353,8 @@ class Tabit(Gtk.Window):
         st = self._load_settings()
         ai_migrate = (st.get("ai_fresh_on_restore", False)
                       and not st.get("ai_resume_per_tab", False))
+        # claude AI tabs load this file; without it they would not start
+        _ensure_claude_hooks()
         # Keep collapsed_groups from settings; do not expand while replaying sessions.
         self._restoring_sessions = True
         last_row = None
@@ -2365,6 +2431,13 @@ class Tabit(Gtk.Window):
         # AI status: load manifests after first paint (avoid startup freeze)
         self._agent_store = None
         GLib.idle_add(self._deferred_init_agent_store)
+        # a hook that just wrote a state shows at once, not at the next poll
+        try:
+            self._agent_hook_mon = Gio.File.new_for_path(
+                AGENT_HOOK_DIR).monitor_directory(Gio.FileMonitorFlags.NONE, None)
+            self._agent_hook_mon.connect("changed", self._on_agent_hook_changed)
+        except GLib.Error:
+            self._agent_hook_mon = None
         GLib.timeout_add_seconds(self._AGENT_POLL_SEC, self._poll_ai_agent_statuses)
         GLib.timeout_add_seconds(self._AI_HUNT_SEC, self._ai_hunt_session_ids)
         _tmux_apply_user_conf()
@@ -2865,8 +2938,20 @@ class Tabit(Gtk.Window):
                 return False
 
             GLib.timeout_add(800, _kick)
-        term.spawn_async(Vte.PtyFlags.DEFAULT, workdir, launch_argv or argv,
-                         None, GLib.SpawnFlags.SEARCH_PATH, None, None,
+        envv = None
+        run = launch_argv or argv
+        if _is_ai_icon(icon_name):
+            if CLAUDE_HOOKS_FILE in " ".join(run):
+                _ensure_claude_hooks()
+            if self._ai_tmux_unwrap(run)[1] is None:
+                # the name its claude hooks write under (a tmux tab uses its
+                # session); TMUX is dropped since this tab is not in tmux
+                row._agent_key = os.urandom(6).hex()
+                envv = [f"{k}={v}" for k, v in os.environ.items()
+                        if k not in ("TMUX", "TMUX_PANE")]
+                envv.append(f"TABIT_AGENT={row._agent_key}")
+        term.spawn_async(Vte.PtyFlags.DEFAULT, workdir, run,
+                         envv, GLib.SpawnFlags.SEARCH_PATH, None, None,
                          -1, None, self._on_term_spawned, row)
         return row
 
@@ -6529,6 +6614,78 @@ if (data !== null) {{
             ev, ep or as_.Episode(), now, argv=argv, text=text or "",
         )
 
+    @classmethod
+    def _agent_hook_key(cls, row):
+        """The name a tab's claude hooks write under: its tmux session, or
+        the key a plain tab was started with."""
+        _inner, session = cls._ai_tmux_unwrap(getattr(row, "argv", None) or [])
+        return session or getattr(row, "_agent_key", None)
+
+    # the transcript line claude writes when the user presses Esc or says
+    # No to a tool: no hook runs then, so a turn would look busy for good
+    _AGENT_INTERRUPTED = b'"text":"[Request interrupted by user'
+
+    @classmethod
+    def _agent_hook_raw(cls, row):
+        """working / blocked / idle from the tab's claude hooks, or None
+        when it has none (another CLI, an older tab, an older claude)."""
+        key = cls._agent_hook_key(row)
+        if not key:
+            return None
+        path = os.path.join(AGENT_HOOK_DIR, key)
+        try:
+            mtime = os.stat(path).st_mtime
+            with open(path) as f:
+                state, tx, size = (f.read().split("\n") + ["", "", ""])[:3]
+        except OSError:
+            return None
+        if state not in ("working", "blocked", "idle"):
+            return None
+        row._agent_hook_mtime = mtime
+        if state == "idle" or not tx:
+            return state
+        # Esc or No since this event: read only what the transcript gained
+        # since the hook ran (an older interrupt further up must not count),
+        # and only what was not read on an earlier look
+        mark = cls._AGENT_INTERRUPTED
+        seen = getattr(row, "_agent_hook_scan", None)
+        if seen is None or seen[0] != mtime:
+            seen = (mtime, int(size) if size.isdigit() else 0, False, True)
+        if not seen[2]:
+            # after the first look, back up so a line cut in two still counts
+            start = seen[1] if seen[3] else max(0, seen[1] - len(mark) + 1)
+            try:
+                with open(tx, "rb") as f:
+                    f.seek(start)
+                    data = f.read(8 << 20)
+                seen = (mtime, start + len(data), mark in data, False)
+            except OSError:
+                pass
+        row._agent_hook_scan = seen
+        return "idle" if seen[2] else state
+
+    # Esc before claude wrote a word leaves no hook and no transcript line;
+    # only its busy line leaving the screen shows the turn is over
+    _AGENT_HOOK_QUIET_S = 3.0
+
+    def _agent_hook_still_busy(self, row, text, now):
+        as_ = self._agent_status_mod()
+        if as_ is None or as_.bottom_live_busy(text or ""):
+            row._agent_hook_quiet = None
+            return True
+        # quiet since the later of: the first quiet look, the last hook event
+        since = max(getattr(row, "_agent_hook_quiet", None) or now,
+                    getattr(row, "_agent_hook_mtime", 0))
+        row._agent_hook_quiet = since
+        return now - since < self._AGENT_HOOK_QUIET_S
+
+    def _on_agent_hook_changed(self, _mon, f, other, _event):
+        names = {x.get_basename() for x in (f, other) if x is not None}
+        for row in self._session_rows():
+            if (_is_ai_icon(getattr(row, "icon_name", None))
+                    and self._agent_hook_key(row) in names):
+                self._update_agent_status(row)
+
     def _update_agent_status(self, row):
         if row is None or row.get_parent() is None:
             return
@@ -6548,9 +6705,16 @@ if (data !== null) {{
             self._set_agent_status(row, "exited")
             return
 
+        # a claude tab with hooks says what it does; the screen is the
+        # fallback for every other tab
+        hook_raw = self._agent_hook_raw(row)
         term = getattr(row, "term", None)
-        text = self._term_tail_text(term, max_lines=self._AGENT_TAIL_LINES)
+        text = "" if hook_raw in ("blocked", "idle") else self._term_tail_text(
+            term, max_lines=self._AGENT_TAIL_LINES)
         now = time.time()
+        if hook_raw == "working" and not self._agent_hook_still_busy(
+                row, text, now):
+            hook_raw = "idle"
         # Selected means the user is watching, which a tab in a window
         # behind something else is not. The FSM holds a selected tab at
         # idle rather than letting it reach ready, so without this a tab
@@ -6560,7 +6724,7 @@ if (data !== null) {{
                     and self.is_active())
 
         if as_ is None:
-            raw = self._detect_agent_status(
+            raw = hook_raw or self._detect_agent_status(
                 text, getattr(row, "argv", None), row=row)
             self._set_agent_status(row, raw if raw != "unknown" else "unknown")
             return
@@ -6573,20 +6737,23 @@ if (data !== null) {{
             from dataclasses import replace as _dc_replace
             disp = _dc_replace(disp, ui=row.agent_status)
 
-        osc_title = getattr(row, "_agent_window_title", "") or ""
-        state, matched_rule, flags = self._manifest_evaluate(
-            text, getattr(row, "argv", None), osc_title=osc_title)
-        ev = as_.gather_evidence(
-            text or "",
-            osc_title=osc_title,
-            manifest_state=state,
-            matched_rule=matched_rule,
-            flags=flags,
-        )
         prev_raw = ep.prev_raw
-        raw = as_.detect_raw(
-            ev, ep, now, argv=getattr(row, "argv", None), text=text or "",
-        )
+        if hook_raw:
+            raw = hook_raw
+        else:
+            osc_title = getattr(row, "_agent_window_title", "") or ""
+            state, matched_rule, flags = self._manifest_evaluate(
+                text, getattr(row, "argv", None), osc_title=osc_title)
+            ev = as_.gather_evidence(
+                text or "",
+                osc_title=osc_title,
+                manifest_state=state,
+                matched_rule=matched_rule,
+                flags=flags,
+            )
+            raw = as_.detect_raw(
+                ev, ep, now, argv=getattr(row, "argv", None), text=text or "",
+            )
         ep = as_.apply_raw_to_episode(ep, raw, now)
         row._agent_episode = ep
         disp = as_.display_step(
@@ -12925,6 +13092,13 @@ if (data !== null) {{
             return list(cls.CLAUDE_BYPASS_FLAGS)
         return []
 
+    @classmethod
+    def _ai_hook_tokens(cls, cli):
+        """Claude loads tabit's hooks, which report its status exactly."""
+        if cls._ai_is_claude(cli):
+            return ["--settings", CLAUDE_HOOKS_FILE]
+        return []
+
     @staticmethod
     def _ai_strip_bypass_tokens(tokens):
         out = []
@@ -12933,6 +13107,11 @@ if (data !== null) {{
             t = tokens[i]
             if t == "--dangerously-skip-permissions":
                 i += 1
+                continue
+            # tabit adds its hooks to every claude it builds
+            if t == "--settings" and i + 1 < len(tokens) \
+                    and tokens[i + 1] == CLAUDE_HOOKS_FILE:
+                i += 2
                 continue
             if t == "--permission-mode" and i + 1 < len(tokens) \
                     and tokens[i + 1] == "bypassPermissions":
@@ -12959,7 +13138,8 @@ if (data !== null) {{
         # For each try string T: run `cli T`; if all fail, plain `cli`.
         c = shlex.quote(cli)
         d = shlex.quote(path)
-        tail = " ".join(shlex.quote(t) for t in cls._ai_bypass_tokens(cli, bypass))
+        tail = " ".join(shlex.quote(t) for t in (
+            cls._ai_bypass_tokens(cli, bypass) + cls._ai_hook_tokens(cli)))
         tail = f" {tail}" if tail else ""
         parts = [f"cd {d} || exit 1"]
         cmds = []

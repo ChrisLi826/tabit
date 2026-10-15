@@ -23,6 +23,10 @@ Invariants
 5. AI wording changes belong in tabit_chrome.toml and agent-detection/*.toml,
    not in transition tables.
 
+A Claude tab with tabit's hooks skips the screen: tabit feeds the state its
+hooks wrote straight in as the raw status (Tabit._agent_hook_raw), and only
+display_step() runs on it.
+
 Wording changes: edit the TOML pattern packs, add a fixture under
 tests/fixtures/agent_status/, run tests/test_agent_status.py.
 """
