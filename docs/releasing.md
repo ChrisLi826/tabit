@@ -28,6 +28,7 @@ That same string appears in:
 | Form | `Main Dish + Snack`, joined by ` + ` |
 | Main dish | A well-known **savoury main dish**. It belongs to the major version (1st digit): every `v2.x.y` release keeps the same one, and a new major version picks a new one |
 | Snack or drink | A Taiwan **snack, dessert or drink**. Every release picks a new one |
+| Choosing | Let the name hint at the release: tie it to what the release adds or changes (a feature that ties tabs together, a fix that clears things up), or to the season it ships in (shaved ice in summer, ginger tea in winter). The same goes for a new main dish |
 | Language | **English** display name in the public label; optional Chinese only in private notes if needed — never a browsable public catalog |
 | Reuse | Do not reuse a snack or drink, or a main dish of another major version, already in shipped history — except a **hotfix**, which is the same release with bugs taken out and keeps its whole name (`v1.8.3` → `v1.8.3.1`) |
 
