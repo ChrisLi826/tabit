@@ -574,6 +574,14 @@ class TestRemoteArrows(unittest.TestCase):
         app._press_key.assert_not_called()
         row.term.feed_child.assert_called_once_with(b"\r")
 
+    def test_esc_and_ctrl_c_are_noted_for_the_status(self):
+        # they run no claude hook, so the status needs to hear of them
+        for name in ("esc", "ctrl-c"):
+            _, app, row = self._press(name, True)
+            app._agent_note_interrupt.assert_called_once_with(row)
+        _, app, _ = self._press("enter", True)
+        app._agent_note_interrupt.assert_not_called()
+
 
 class TestRemoteCursor(unittest.TestCase):
 

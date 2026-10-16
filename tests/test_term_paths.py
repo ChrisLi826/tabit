@@ -816,6 +816,20 @@ class TestAgentNotifyRule(unittest.TestCase):
             self.assertIsNone(Tabit._agent_notify_text("ready", status),
                               status)
 
+    def test_replying_with_agents_still_running_is_news(self):
+        self.assertIsNotNone(Tabit._agent_notify_text("working", "background"))
+
+    def test_leaving_background_for_a_wait_is_news(self):
+        # background is not a wait: its agents finish, or one asks
+        for status in ("ready", "blocked"):
+            self.assertIsNotNone(
+                Tabit._agent_notify_text("background", status), status)
+
+    def test_a_wait_to_background_is_not_news(self):
+        for prev in ("blocked", "ready", "background"):
+            self.assertIsNone(Tabit._agent_notify_text(prev, "background"),
+                              prev)
+
 
 class TestAgentNotifyTitle(unittest.TestCase):
     """Which tab the popup is about: group first, as the sidebar reads."""
@@ -884,6 +898,7 @@ class TestTelegramShouldSend(unittest.TestCase):
     def test_only_the_two_that_want_you(self):
         for st, want in (("blocked", True), ("ready", True),
                          ("working", False), ("idle", False),
+                         ("background", False),
                          ("exited", False), ("unknown", False)):
             self.assertEqual(
                 Tabit._tg_should_send(self.ON, False, st), want, st)
@@ -917,6 +932,77 @@ class TestTelegramMessage(unittest.TestCase):
         msg = Tabit._tg_message("t", "ready")
         self.assertTrue(msg.startswith("\u2705 Finished"))
         self.assertTrue(msg.endswith(Tabit._AGENT_NOTIFY["ready"]))
+
+
+class _FireRow:
+    def __init__(self, status):
+        self.agent_status = status
+        self.title_text = "t"
+        self.tg_id = "ab12cd"
+        self._notify_src = None
+
+    def get_parent(self):
+        return object()
+
+
+class _FireSink:
+    """Stands in for the window: records each popup and each push."""
+
+    _agent_notify_fire = Tabit._agent_notify_fire
+    _agent_notify_text = Tabit._agent_notify_text
+    _agent_notify_title = staticmethod(Tabit._agent_notify_title)
+    _tg_should_send = Tabit._tg_should_send
+    _notify_urgency_name = Tabit._notify_urgency_name
+
+    def __init__(self):
+        self.toasts, self.sent = [], []
+        self.listbox = self
+
+    def get_selected_row(self):
+        return None
+
+    def is_active(self):
+        return True
+
+    def _load_settings(self):
+        return {"telegram_enabled": True, "telegram_when": "always"}
+
+    def _row_group_name(self, _row):
+        return ""
+
+    def _tg_jobs(self):
+        return {}
+
+    def _tg_row_id(self, row):
+        return row.tg_id
+
+    def _tg_push_text(self, _row, title, status, _conf):
+        return status
+
+    def _tg_send(self, text, row_id=None):
+        self.sent.append(text)
+
+    def _tg_task_fallback(self, _row, _status):
+        pass
+
+    def _show_toast(self, row, status, _sticky):
+        self.toasts.append((row, status))
+
+
+class TestNotifyFireBackground(unittest.TestCase):
+    """Background is a popup, never a buzz on the phone."""
+
+    def test_background_pops_up_but_sends_nothing(self):
+        sink, row = _FireSink(), _FireRow("background")
+        sink._agent_notify_fire(row, "background")
+        self.assertEqual(sink.toasts, [(row, "background")])
+        self.assertEqual(sink.sent, [])
+
+    def test_ready_still_does_both(self):
+        sink, row = _FireSink(), _FireRow("ready")
+        sink._agent_notify_fire(row, "ready")
+        self.assertEqual(sink.toasts, [(row, "ready")])
+        self.assertEqual(sink.sent, ["ready"])
 
 
 class TestTelegramErrorText(unittest.TestCase):
@@ -1061,7 +1147,7 @@ class TestTelegramRowTroubleStatus(unittest.TestCase):
             self.assertIn("no agent", Tabit._tg_row_trouble(row), status)
 
     def test_a_working_or_waiting_agent_is_fine(self):
-        for status in ("working", "idle", "blocked", "ready"):
+        for status in ("working", "idle", "blocked", "ready", "background"):
             row = _TgRow(name="acl")
             row.agent_status = status
             self.assertIsNone(Tabit._tg_row_trouble(row), status)
@@ -1770,6 +1856,13 @@ class TestTelegramBoard(unittest.TestCase):
         self.assertTrue(line.startswith("? blocked"))
         self.assertTrue(line.endswith("x"))
 
+    def test_background_sits_between_ready_and_working(self):
+        lines = Tabit._tg_board_lines(
+            [("working", "a"), ("background", "b"), ("ready", "c")])
+        self.assertEqual([l.split(None, 2)[2] for l in lines],
+                         ["c", "b", "a"])
+        self.assertTrue(lines[1].startswith("\u21bb background"))
+
     def test_an_unknown_state_still_prints(self):
         line = Tabit._tg_board_lines([("unknown", "x")])[0]
         self.assertIn("unknown", line)
@@ -2145,6 +2238,20 @@ class TestShouldArmNotify(unittest.TestCase):
 
     def test_a_pending_one_still_dies_when_it_goes_back_to_work(self):
         self.assertFalse(Tabit._should_arm_notify("ready", "working", True))
+
+    def test_background_is_news_on_the_way_in(self):
+        self.assertTrue(Tabit._should_arm_notify("working", "background", False))
+
+    def test_background_is_not_a_wait(self):
+        # its agents finish or one asks: both are news
+        for status in ("ready", "blocked"):
+            self.assertTrue(
+                Tabit._should_arm_notify("background", status, False), status)
+
+    def test_a_shown_wait_to_background_is_not_news(self):
+        for prev in ("blocked", "ready", "background"):
+            self.assertFalse(
+                Tabit._should_arm_notify(prev, "background", False), prev)
 
 
 class TestFollowToastStatus(unittest.TestCase):

@@ -73,8 +73,10 @@ class TestAiLaunchPair(unittest.TestCase):
         # one command, no fallback that would start a second agent
         self.assertNotIn("||", launch[2].split("exit 1;", 1)[1])
         # its own id, then a plain start; never another tab's session
-        self.assertIn("--resume 11111111-2222-3333-4444-555555555555 ||",
-                      stored[2])
+        # (claude also loads tabit's hooks file after the id)
+        self.assertRegex(
+            stored[2], r"--resume 11111111-2222-3333-4444-555555555555"
+                       r"(?: --settings \S+)? \|\|")
         self.assertNotIn("--continue", stored[2])
 
     def test_new_id_only_where_it_applies(self):

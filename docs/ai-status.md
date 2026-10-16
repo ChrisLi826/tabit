@@ -2,9 +2,35 @@
 
 How tabit tells you an agent finished or wants you. Back to the [README](../README.md).
 
+## How tabit knows
+
+A **Claude** tab opened by tabit runs `claude --settings
+~/.local/share/tabit/claude-hooks.json`. Its hooks tell tabit what the agent
+does: a prompt or a tool is working, a permission, a question or a plan is
+blocked, the end of a turn is done. A turn that ends while sub-agents it
+started still run is **background** (`↻`): Claude goes on by itself once
+they finish, and is done after that.
+
+Esc, Ctrl+C and No run no hook. For those tabit reads the session's
+transcript for the interrupt, and after an Esc or Ctrl+C pressed in the
+tab (in tabit, or on the Remote page) the turn is over once Claude's busy
+line has gone. A pause while a reply streams in is not the end: without
+one of those keys, only a hook ends a turn. An Esc typed into the same
+Claude from somewhere else, such as another terminal attached to its tmux
+session, is not seen, and the tab shows working until the next prompt.
+
+The hooks add to your own Claude settings and replace none of them. Claude
+reads them once, when it starts: after an update that changes them, a
+Claude that was already running keeps the old ones until it starts again.
+
+Every other tab is read from its screen: codex, grok and other CLIs, and
+a Claude tab opened before this release. Open a new Claude tab to give it
+the hooks.
+
 ## The popup
 
-When an AI tab stops working — it finished, or it wants input — a popup
+When an AI tab stops working — it finished, it replied while its
+sub-agents still run, or it wants input — a popup
 inside tabit says so, **at the foot of the tab list**, shaped like the tab
 row it is about: the group's colour bar, the same status glyph, the group
 and tab names, and the time. Click anywhere on it to switch to that tab.
@@ -38,9 +64,9 @@ without it.
 ## The count row
 
 The foot of the sidebar counts **every** AI tab by status — `?` blocked,
-`✓` done, play working, pause idle — next to a clock. The off-viewport
+`✓` done, `↻` background, play working, pause idle — next to a clock. The off-viewport
 peeks only cover tabs scrolled out of sight, so with a long list an agent
 waiting on you could still be missed; this row cannot miss one. Click a
 count to jump to that agent, and click again to cycle through the rest.
 
-The same news can go to your phone: see [telegram.md](telegram.md) and [remote.md](remote.md).
+The same news, background aside, can go to your phone: see [telegram.md](telegram.md) and [remote.md](remote.md).

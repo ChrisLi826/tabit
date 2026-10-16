@@ -23,6 +23,10 @@ Invariants
 5. AI wording changes belong in tabit_chrome.toml and agent-detection/*.toml,
    not in transition tables.
 
+A Claude tab with tabit's hooks skips the screen: tabit feeds the state its
+hooks wrote straight in as the raw status (Tabit._agent_hook_raw), and only
+display_step() runs on it.
+
 Wording changes: edit the TOML pattern packs, add a fixture under
 tests/fixtures/agent_status/, run tests/test_agent_status.py.
 """
@@ -318,6 +322,19 @@ def hard_idle_prompt(text: str, patterns: Optional[PatternPack] = None) -> bool:
     return True
 
 
+# Claude's own question dialog: an option under the cursor and the footer
+# under the options. Narrower than the blocked pack, which also takes the
+# "accept edits on" mode line and "Do you want to …" in a reply.
+_DIALOG_CURSOR = re.compile(r"^\s*❯\s*\d+\.\s", re.M)
+_DIALOG_FOOT = re.compile(r"^\s*Esc to cancel\b", re.M | re.I)
+
+
+def dialog_open(text: str) -> bool:
+    """True while a Claude Code question dialog is at the bottom."""
+    bottom = bottom_text(text or "")
+    return bool(_DIALOG_CURSOR.search(bottom) and _DIALOG_FOOT.search(bottom))
+
+
 def bottom_blocked(text: str, patterns: Optional[PatternPack] = None) -> bool:
     p = patterns or get_patterns()
     if not text:
@@ -527,7 +544,7 @@ def apply_raw_to_episode(ep: Episode, raw: str, now: float) -> Episode:
 # ---------------------------------------------------------------------------
 # Display mini-FSM
 # ---------------------------------------------------------------------------
-# States: working | blocked | idle | ready | exited | unknown
+# States: working | blocked | background | idle | ready | exited | unknown
 #
 # Sticky ✔ only after a real busy turn (working/blocked) while the tab was
 # not reviewed. Bare PTY noise (cursor blink, redraw, keystrokes on another
@@ -535,14 +552,18 @@ def apply_raw_to_episode(ep: Episode, raw: str, now: float) -> Episode:
 #
 # Events:
 #   raw=working|blocked → set had_busy_turn, show ▶/?
+#   raw=background (hooks only) → set had_busy_turn, show ↻
 #   raw=idle + unselected + had_busy_turn + stable → ✔
 #   tab_selected → clear had_busy_turn, ✔→⏸
 #   dead → exited
 # ---------------------------------------------------------------------------
 
-RAW_STATES = frozenset({"working", "idle", "blocked", "unknown", "exited"})
+RAW_STATES = frozenset({
+    "working", "idle", "blocked", "background", "unknown", "exited",
+})
 UI_STATES = frozenset({
-    "working", "idle", "blocked", "ready", "exited", "unknown", "done",
+    "working", "idle", "blocked", "background", "ready", "exited", "unknown",
+    "done",
 })
 
 
@@ -602,6 +623,14 @@ def display_step(
         d.ui = "blocked"
         return d
 
+    # the turn is over, but background sub-agents still run and claude
+    # goes on by itself once they are done: still busy, watched or not
+    if raw == "background":
+        d.had_busy_turn = True
+        d.idle_since = 0.0
+        d.ui = "background"
+        return d
+
     if raw == "idle":
         if prev_raw != "idle":
             d.idle_since = now
@@ -609,7 +638,7 @@ def display_step(
         # Real busy episode only — not PTY redraw noise.
         want_ready = bool(
             d.had_busy_turn
-            or prev_ui in ("working", "ready", "blocked")
+            or prev_ui in ("working", "ready", "blocked", "background")
         )
         if selected:
             d.had_busy_turn = False
@@ -624,7 +653,7 @@ def display_step(
         if want_ready:
             # Hold ▶/? until ready fires — no brief ⏸ flash
             d.ui = (
-                prev_ui if prev_ui in ("working", "blocked", "ready")
+                prev_ui if prev_ui in ("working", "blocked", "ready", "background")
                 else "working"
             )
             return d

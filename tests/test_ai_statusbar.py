@@ -59,7 +59,14 @@ class TestStatusBarCounts(unittest.TestCase):
         win = _Win([_FakeRow("working"), _FakeRow("working"),
                     _FakeRow("idle"), _FakeRow("blocked")])
         self.assertEqual(win.counts(),
-                         {"blocked": 1, "ready": 0, "working": 2, "idle": 1})
+                         {"blocked": 1, "ready": 0, "background": 0,
+                          "working": 2, "idle": 1})
+
+    def test_background_counts_between_ready_and_working(self):
+        win = _Win([_FakeRow("background")])
+        self.assertEqual(win.counts()["background"], 1)
+        self.assertEqual(list(win.counts()),
+                         ["blocked", "ready", "background", "working", "idle"])
 
     def test_counts_tabs_inside_collapsed_groups(self):
         """A collapsed group hides rows from the list, not from the count."""

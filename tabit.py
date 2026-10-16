@@ -395,10 +395,10 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.0.2"
+APP_VERSION = "v2.0.3"
 # Taiwan main dish of the major version + a fresh snack or drink, picked at
 # release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
-APP_CODENAME = "Danzai Noodles + Mango Shaved Ice"
+APP_CODENAME = "Danzai Noodles + Roasted Sweet Potato"
 _VERSION_CODENAME_SEP = " · "
 
 
@@ -477,6 +477,79 @@ def _get_tabit_repo_dir():
     if os.path.isdir(os.path.join(home_tabit, ".git")):
         return home_tabit
     return None
+
+def _update_pull(repo, log):
+    """Bring a tabit checkout up to origin/main, keeping the user's own work.
+
+    A plain `git pull` stops at a branch with commits of its own
+    ("divergent branches"). So: fast-forward when that is all it takes;
+    put commits that exist only here on top of the new main; merge when
+    some are already pushed somewhere, since a rebase would rewrite them.
+    Uncommitted changes are stashed and put back. On a clash the folder is
+    left as it was and the error says what to run. Only on main: another
+    branch, or no branch, is someone's own work, and is left alone.
+    """
+    def git(*args, quiet=False):
+        p = subprocess.run(["git", *args], cwd=repo, text=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if not quiet:
+            log("$ git " + " ".join(args))
+            for line in p.stdout.splitlines():
+                if line.strip():
+                    log(line.rstrip())
+        return p.returncode, p.stdout.split()
+
+    # a rebase, merge or cherry-pick left half done: aborting ours would
+    # throw away what was resolved so far
+    for name in ("rebase-merge", "rebase-apply", "MERGE_HEAD",
+                 "CHERRY_PICK_HEAD", "REVERT_HEAD"):
+        rc, path = git("rev-parse", "--git-path", name, quiet=True)
+        if not rc and path and os.path.exists(os.path.join(repo, " ".join(path))):
+            raise RuntimeError(
+                f"{repo} is in the middle of a git operation ({name}), so "
+                "Update leaves it alone. Finish it, or undo it with "
+                "git rebase --abort or git merge --abort, then Update again")
+    rc, branch = git("symbolic-ref", "--short", "-q", "HEAD", quiet=True)
+    if rc or branch != ["main"]:
+        where = f"on branch {branch[0]}" if not rc and branch else "on no branch"
+        raise RuntimeError(
+            f"{repo} is {where}, not main, so Update leaves it alone. "
+            f"To update it: cd {repo} && git checkout main, then Update again")
+    # all of origin, so --remotes below knows every branch pushed there
+    rc, _out = git("fetch", "origin")
+    if rc:
+        raise RuntimeError(f"git fetch failed (exit {rc}): is the network up?")
+    orig = git("rev-parse", "HEAD", quiet=True)[1]
+    if git("merge", "--ff-only", "origin/main")[0] == 0:
+        return
+    mine = git("rev-list", "origin/main..HEAD", quiet=True)[1]
+    local = git("rev-list", "origin/main..HEAD", "--not", "--remotes",
+                quiet=True)[1]
+    # another remote may hold these commits without this clone knowing
+    only_origin = git("remote", quiet=True)[1] == ["origin"]
+    if mine and mine == local and only_origin:
+        log("Your own commits go on top of the new version.")
+        rc, _out = git("rebase", "--autostash", "origin/main")
+        undo, by_hand = ("rebase", "--abort"), "--rebase"
+    else:
+        rc, _out = git("merge", "--no-edit", "--autostash", "origin/main")
+        undo, by_hand = ("merge", "--abort"), "--no-rebase"
+    if rc == 0 and not git("diff", "--name-only", "--diff-filter=U",
+                           quiet=True)[1]:
+        return
+    if rc == 0:
+        # the update went in, but the stashed changes clashed with it when
+        # they were put back: git says so and still exits 0. Go back to
+        # where it was, changes and all (the stash was made right there).
+        git("reset", "--hard", *orig)
+        git("stash", "pop")
+    else:
+        git(*undo)
+    raise RuntimeError(
+        f"your own changes in {repo} clash with the new version, so "
+        f"nothing was changed. To update by hand: cd {repo} && "
+        f"git pull {by_hand} origin main")
+
 
 def _get_current_version():
     """Version of the *running* binary.
@@ -780,6 +853,11 @@ CONNECT_LAST_FILE = os.path.join(CONFIG_DIR, "connect_last.json")
 # Serve publishes it to this user's own devices only (tailnet, HTTPS).
 REMOTE_SOCK = os.path.join(GLib.get_user_runtime_dir(), "tabit-remote.sock")
 REMOTE_PAGE = "remote.html"
+# Claude AI tabs report their status through Claude Code hooks: each event
+# writes the state to a file named after the tab, and tabit reads it there
+# instead of guessing from the screen
+AGENT_HOOK_DIR = os.path.join(GLib.get_user_runtime_dir(), "tabit-agent")
+CLAUDE_HOOKS_FILE = os.path.expanduser("~/.local/share/tabit/claude-hooks.json")
 # the page's icons: tab favicon (SVG, and a PNG for Safari), iPhone home
 # screen, and the installed app (Chrome, Edge, Android)
 REMOTE_ICONS = {"/icon.svg": ("tabit.svg", None), "/favicon.png": ("tabit.svg", 32),
@@ -1219,6 +1297,17 @@ def get_theme_css(theme_key):
 .ai-peek .agent-status.ready, .ai-peek .agent-status-glyph.ready {{
     color: #e0af68;
 }}
+.agent-status.subagents, .agent-status-glyph.subagents,
+.sidebar row .agent-status.subagents, .sidebar row .agent-status-glyph.subagents,
+.sidebar row:selected .agent-status.subagents,
+.sidebar row:selected .agent-status-glyph.subagents,
+.sidebar row.group-header .agent-status.subagents,
+.sidebar row.group-header .agent-status-glyph.subagents,
+.sidebar row:selected.group-header .agent-status.subagents,
+.sidebar row:selected.group-header .agent-status-glyph.subagents,
+.ai-peek .agent-status.subagents, .ai-peek .agent-status-glyph.subagents {{
+    color: #bb9af7;
+}}
 .agent-status.done, .agent-status-glyph.done,
 .agent-status.exited, .agent-status-glyph.exited,
 .sidebar row .agent-status.done, .sidebar row .agent-status-glyph.done,
@@ -1264,11 +1353,13 @@ def get_theme_css(theme_key):
     font-weight: 600;
     color: {s['subtext']};
 }}
-/* The same two colours the glyph beside them already uses, from the
-   .agent-status-glyph rules above: amber for ready, red for blocked.
+/* The same colours the glyph beside them already uses, from the
+   .agent-status-glyph rules above: amber for ready, red for blocked,
+   purple for background.
    Not the green -- that one is idle, a different thing entirely. */
 .ai-toast-ready .ai-toast-state {{ color: #e0af68; }}
 .ai-toast-blocked .ai-toast-state {{ color: #f7768e; }}
+.ai-toast-background .ai-toast-state {{ color: #bb9af7; }}
 .ai-toast .ai-toast-time {{
     font-size: {sz_sub}pt;
     color: {s['subtext']};
@@ -1645,6 +1736,104 @@ def _set_aside(path):
         print(f"[tabit] {path} does not parse and cannot be moved ({e}); "
               "it will not be saved this run", file=sys.stderr)
         return False
+
+
+def _claude_hooks_settings(hook_dir):
+    """Claude Code settings whose hooks write `state, transcript, size,
+    back, who`: a sub-agent's question returns to back once who, the
+    sub-agent that asked, goes on.
+
+    The file is named after the tab: its tmux session, or TABIT_AGENT for
+    a plain tab. tmux first, since a tmux server keeps the environment of
+    whoever started it. Reads stdin first and never fails, so claude never
+    shows a hook error.
+    """
+    d = shlex.quote(hook_dir)
+
+    def put(state):
+        return {"type": "command", "command": (
+            'p=$(cat); k=$TABIT_AGENT; '
+            'if [ -n "$TMUX_PANE" ]; then '
+            'k=$(tmux display-message -p -t "$TMUX_PANE" "#S" 2>/dev/null); fi; '
+            'if [ -z "$k" ]; then exit 0; fi; b=; w=; ' + state +
+            't=$(printf %s "$p" | sed -n \'s/.*"transcript_path":"\\([^"]*\\)".*/\\1/p\'); '
+            'n=$(stat -c %s "$t" 2>/dev/null); '
+            f'printf "%s\\n%s\\n%s\\n%s\\n%s\\n" "$s" "$t" "$n" "$b" "$w" >{d}/"$k".tmp 2>/dev/null '
+            f'&& mv -f {d}/"$k".tmp {d}/"$k" 2>/dev/null; exit 0')}
+
+    def ev(state, matcher=None):
+        e = {"hooks": [put(state)]}
+        if matcher is not None:
+            e["matcher"] = matcher
+        return [e]
+    # every event from a sub-agent carries its agent_id; the state is the
+    # main agent's, so a sub-agent only changes it to ask and to go back.
+    # who: the sub-agents asking now, back: the state to return to then.
+    sub = '*\'"agent_id":"\'*'
+    now = (f'cur=; back=; who=; {{ IFS= read -r cur; read -r _; read -r _; '
+           f'IFS= read -r back; IFS= read -r who; }} 2>/dev/null <{d}/"$k"; ')
+    aid = 'a=$(printf %s "$p" | sed -n \'s/.*"agent_id":"\\([^"]*\\)".*/\\1/p\'); '
+    # while a sub-agent asks, the main agent's events change only where
+    # to go back to: its question is still on screen
+    # (back=blocked: the main agent asks too, after the sub-agents)
+    keep = ('if [ "$cur" = blocked ] && [ -n "$who" ]; then '
+            'back=$s; s=blocked; b=$back; w=$who; fi; ')
+    # a question or a plan waits for the user like a permission does; a
+    # sub-agent cannot ask either way
+    ask = (now + f'case "$p" in {sub}) exit 0;; esac; '
+           's=working; case "$p" in *\'"tool_name":"AskUserQuestion"\'*'
+           '|*\'"tool_name":"ExitPlanMode"\'*) s=blocked;; esac; ' + keep)
+    # a sub-agent that asked goes on: it no longer asks, and when none
+    # does, back to where it was
+    done = now + ('s=working; case "$p" in ' + sub + ') ' + aid +
+                  'case " $who " in *" $a "*) ;; *) exit 0;; esac; '
+                  '[ "$cur" = blocked ] || exit 0; '
+                  'w=; for x in $who; do [ "$x" = "$a" ] || w="$w $x"; done; '
+                  'w=${w# }; s=blocked; b=$back; '
+                  'if [ -z "$w" ]; then s=$back; b=; fi; '
+                  'if [ -z "$s" ]; then s=blocked; fi;; '
+                  '*) ' + keep + ';; esac; ')
+    # asks: a sub-agent joins those asking; the main agent's own question
+    # has nothing to go back to
+    asks = now + ('s=blocked; case "$p" in ' + sub + ') ' + aid +
+                  'if [ "$cur" = blocked ] && [ -n "$who" ]; then b=$back; '
+                  'case " $who " in *" $a "*) w=$who;; *) w="$who $a";; esac; '
+                  'else b=${cur:-background}; w=$a; fi;; '
+                  '*) ' + keep + ';; esac; ')
+    # the turn is over, but claude goes on by itself once its background
+    # sub-agents are done
+    stop = now + ('s=idle; case "$p" in *\'"type":"subagent","status":"running"\'*) '
+                  's=background;; esac; ' + keep)
+    return {"hooks": {
+        # not "compact": claude compacts in the middle of a turn. These two
+        # start afresh: no question can be up when a prompt was typed
+        "SessionStart": ev("s=idle; ", "startup|resume|clear"),
+        "UserPromptSubmit": ev("s=working; "),
+        "PreToolUse": ev(ask, "*"),
+        "PostToolUse": ev(done, "*"),
+        "PostToolUseFailure": ev(done, "*"),
+        "PermissionRequest": ev(asks, "*"),
+        "Stop": ev(stop),
+        "StopFailure": ev(stop),
+    }}
+
+
+def _ensure_claude_hooks():
+    """Write the hooks file a claude AI tab needs: without it claude does
+    not start. Only when it changed: claude notices a settings file that
+    changes under a running session."""
+    want = _claude_hooks_settings(AGENT_HOOK_DIR)
+    try:
+        os.makedirs(AGENT_HOOK_DIR, mode=0o700, exist_ok=True)
+        with open(CLAUDE_HOOKS_FILE) as f:
+            if json.load(f) == want:
+                return
+    except (OSError, ValueError):
+        pass
+    try:
+        _write_json(CLAUDE_HOOKS_FILE, want)
+    except OSError as e:
+        print(f"[tabit] cannot write {CLAUDE_HOOKS_FILE}: {e}", file=sys.stderr)
 
 
 class _RemoteServer(socketserver.ThreadingUnixStreamServer):
@@ -2289,6 +2478,8 @@ class Tabit(Gtk.Window):
         st = self._load_settings()
         ai_migrate = (st.get("ai_fresh_on_restore", False)
                       and not st.get("ai_resume_per_tab", False))
+        # claude AI tabs load this file; without it they would not start
+        _ensure_claude_hooks()
         # Keep collapsed_groups from settings; do not expand while replaying sessions.
         self._restoring_sessions = True
         last_row = None
@@ -2365,6 +2556,13 @@ class Tabit(Gtk.Window):
         # AI status: load manifests after first paint (avoid startup freeze)
         self._agent_store = None
         GLib.idle_add(self._deferred_init_agent_store)
+        # a hook that just wrote a state shows at once, not at the next poll
+        try:
+            self._agent_hook_mon = Gio.File.new_for_path(
+                AGENT_HOOK_DIR).monitor_directory(Gio.FileMonitorFlags.NONE, None)
+            self._agent_hook_mon.connect("changed", self._on_agent_hook_changed)
+        except GLib.Error:
+            self._agent_hook_mon = None
         GLib.timeout_add_seconds(self._AGENT_POLL_SEC, self._poll_ai_agent_statuses)
         GLib.timeout_add_seconds(self._AI_HUNT_SEC, self._ai_hunt_session_ids)
         _tmux_apply_user_conf()
@@ -2853,6 +3051,8 @@ class Tabit(Gtk.Window):
             else:
                 row._agent_episode = None
                 row._agent_display = None
+            # Esc or Ctrl+C runs no claude hook; tabit sees the key itself
+            term.connect("key-press-event", self._on_ai_term_key, row)
             try:
                 term.connect("window-title-changed",
                              self._on_ai_term_title_changed, row)
@@ -2865,8 +3065,26 @@ class Tabit(Gtk.Window):
                 return False
 
             GLib.timeout_add(800, _kick)
-        term.spawn_async(Vte.PtyFlags.DEFAULT, workdir, launch_argv or argv,
-                         None, GLib.SpawnFlags.SEARCH_PATH, None, None,
+        envv = None
+        run = launch_argv or argv
+        if _is_ai_icon(icon_name):
+            if CLAUDE_HOOKS_FILE in " ".join(run):
+                _ensure_claude_hooks()
+            if self._ai_tmux_unwrap(run)[1] is None:
+                # the name its claude hooks write under (a tmux tab uses its
+                # session); TMUX is dropped since this tab is not in tmux
+                row._agent_key = os.urandom(6).hex()
+                envv = [f"{k}={v}" for k, v in os.environ.items()
+                        if k not in ("TMUX", "TMUX_PANE")]
+                envv.append(f"TABIT_AGENT={row._agent_key}")
+        flags = GLib.SpawnFlags.SEARCH_PATH
+        if envv is not None:
+            # without this VTE puts envv on top of tabit's own environment,
+            # and a TMUX from it would stay
+            flags = GLib.SpawnFlags(
+                int(flags) | getattr(Vte, "SPAWN_NO_PARENT_ENVV", 0))
+        term.spawn_async(Vte.PtyFlags.DEFAULT, workdir, run,
+                         envv, flags, None, None,
                          -1, None, self._on_term_spawned, row)
         return row
 
@@ -5854,10 +6072,11 @@ if (data !== null) {{
     # --- AI attention summaries (viewport peeks + collapsed headers) -------
     # Fixed slot order (severity → quieter). working/idle use themed media
     # icons (same as tab rows) — never emoji ⏸/▶ which draw yellow/blue buttons.
-    _AI_ATTENTION_ORDER = ("blocked", "ready", "working", "idle")
+    _AI_ATTENTION_ORDER = ("blocked", "ready", "background", "working", "idle")
     _AI_AGG_GLYPHS = {
         "blocked": "?",
         "ready": "✓",  # U+2713 text check, not emoji
+        "background": "↻",  # U+21BB
     }
     _AI_AGG_MEDIA = {
         "working": ("media-playback-start-symbolic", "media-playback-start"),
@@ -5866,6 +6085,7 @@ if (data !== null) {{
     _AI_AGG_TIPS = {
         "blocked": "Needs input",
         "ready": "Done — review",
+        "background": "Replied — agents still running",
         "working": "Working",
         "idle": "Idle",
     }
@@ -5883,20 +6103,20 @@ if (data !== null) {{
         glyph.set_xalign(0.5)
         glyph.get_style_context().add_class("agent-status-glyph")
         glyph.get_style_context().add_class("ai-peek-slot")
-        glyph.get_style_context().add_class(st)
+        glyph.get_style_context().add_class(self._AGENT_CSS.get(st, st))
         glyph.set_no_show_all(True)
         glyph.hide()
         img = Gtk.Image()
         img.set_pixel_size(14)
         img.get_style_context().add_class("agent-status")
-        img.get_style_context().add_class(st)
+        img.get_style_context().add_class(self._AGENT_CSS.get(st, st))
         img.set_no_show_all(True)
         img.hide()
         count = Gtk.Label(label="")
         count.set_xalign(0)
         count.get_style_context().add_class("agent-status-glyph")
         count.get_style_context().add_class("ai-peek-slot")
-        count.get_style_context().add_class(st)
+        count.get_style_context().add_class(self._AGENT_CSS.get(st, st))
         count.set_no_show_all(True)
         count.hide()
         inner.pack_start(img, False, False, 0)
@@ -6529,6 +6749,151 @@ if (data !== null) {{
             ev, ep or as_.Episode(), now, argv=argv, text=text or "",
         )
 
+    @classmethod
+    def _agent_hook_key(cls, row):
+        """The name a tab's claude hooks write under: its tmux session, or
+        the key a plain tab was started with."""
+        _inner, session = cls._ai_tmux_unwrap(getattr(row, "argv", None) or [])
+        return session or getattr(row, "_agent_key", None)
+
+    # the transcript line claude writes when the user presses Esc or says
+    # No to a tool: no hook runs then, so a turn would look busy for good
+    _AGENT_INTERRUPTED = b'"text":"[Request interrupted by user'
+
+    @classmethod
+    def _agent_hook_raw(cls, row):
+        """working / blocked / idle / background (done, sub-agents still
+        running) from the tab's claude hooks, or None when it has none
+        (another CLI, a tab built before the hooks)."""
+        key = cls._agent_hook_key(row)
+        if not key:
+            return None
+        path = os.path.join(AGENT_HOOK_DIR, key)
+        try:
+            mtime = os.stat(path).st_mtime
+            with open(path) as f:
+                state, tx, size, back = (f.read().split("\n") + [""] * 4)[:4]
+        except OSError:
+            return None
+        if state not in ("working", "blocked", "idle", "background"):
+            return None
+        row._agent_hook_mtime = mtime
+        # where a sub-agent's question goes back to; empty for the main one
+        row._agent_hook_back = back
+        if state == "idle" or not tx:
+            return state
+        # Esc or No since this event: read only what the transcript gained
+        # since the hook ran (an older interrupt further up must not count),
+        # and only what was not read on an earlier look
+        mark = cls._AGENT_INTERRUPTED
+        seen = getattr(row, "_agent_hook_scan", None)
+        if seen is None or seen[0] != mtime:
+            seen = (mtime, int(size) if size.isdigit() else 0, False, True)
+        if not seen[2]:
+            # after the first look, back up so a line cut in two still counts
+            start = seen[1] if seen[3] else max(0, seen[1] - len(mark) + 1)
+            try:
+                with open(tx, "rb") as f:
+                    f.seek(start)
+                    data = f.read(8 << 20)
+                seen = (mtime, start + len(data), mark in data, False)
+            except OSError:
+                pass
+        row._agent_hook_scan = seen
+        return "idle" if seen[2] else state
+
+    # Esc or Ctrl+C runs no hook. After one pressed in tabit, the turn is
+    # over once claude's busy line has been gone this long
+    _AGENT_HOOK_QUIET_S = 3.0
+
+    @classmethod
+    def _agent_hook_scrolled(cls, row):
+        """True while a tmux tab is scrolled up (copy mode). It shows old
+        lines that do not move, and keys go to tmux, so nobody can stop
+        claude then. Asked of tmux: the VTE of a tmux tab cannot tell."""
+        session = cls._ai_tmux_unwrap(getattr(row, "argv", None) or [])[1]
+        if session is None:
+            return False
+        try:
+            out = subprocess.run(
+                ["tmux", "display-message", "-p", "-t", _tmux_exact(session),
+                 "#{pane_in_mode}"],
+                capture_output=True, text=True, timeout=1).stdout
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return out.strip() == "1"
+
+    def _agent_hook_screen_says(self, row, what, seen):
+        """seen, the screen's word on a sub-agent's question, unless the
+        tab is scrolled up and shows old lines. tmux is asked once per hook
+        event: a denied question leaves the state blocked until the next
+        one, and this runs on every look."""
+        if not seen:
+            return False
+        mtime = getattr(row, "_agent_hook_mtime", 0)
+        if getattr(row, "_agent_hook_seen", None) == (what, mtime):
+            return True
+        if self._agent_hook_scrolled(row):
+            return False
+        row._agent_hook_seen = (what, mtime)
+        return True
+
+    def _agent_note_interrupt(self, row):
+        """Esc or Ctrl+C went to this tab. Not when a tmux tab is scrolled
+        up: the key then goes to tmux, not to claude."""
+        if self._agent_hook_key(row) and not self._agent_hook_scrolled(row):
+            row._agent_esc_at = time.time()
+
+    def _on_ai_term_key(self, _term, event, row):
+        ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
+        shift = event.state & Gdk.ModifierType.SHIFT_MASK
+        if event.state & Gdk.ModifierType.MOD1_MASK:
+            return False        # Alt+Esc, Alt+Ctrl+C: not an interrupt
+        # Ctrl+Shift+C is copy and never reaches claude; C as well as c
+        # for Caps Lock, and the key's first layout for a Cyrillic or
+        # other non-Latin one
+        if event.keyval == Gdk.KEY_Escape or (
+                ctrl and not shift
+                and self._key_in_first_layout(event) in (Gdk.KEY_c, Gdk.KEY_C)):
+            self._agent_note_interrupt(row)
+        return False
+
+    @staticmethod
+    def _key_in_first_layout(event):
+        """The keyval of this key in the first keyboard layout."""
+        try:
+            ok, keyval, _g, _l, _c = Gdk.Keymap.get_default().translate_keyboard_state(
+                event.hardware_keycode, Gdk.ModifierType(0), 0)
+            if ok:
+                return keyval
+        except (AttributeError, TypeError):
+            pass
+        return event.keyval
+
+    def _agent_hook_still_busy(self, row, text, now):
+        """Only a hook ends a turn, and a reply streaming in shows no busy
+        line, so a quiet screen alone is not the end. Esc or Ctrl+C runs
+        no hook: after one pressed here since the last event, the turn is
+        over once the busy line has been gone for a few seconds. Typing
+        into the prompt claude put back does not count; a busy line does,
+        since then the key did not stop it."""
+        esc = getattr(row, "_agent_esc_at", 0) or 0
+        if esc <= getattr(row, "_agent_hook_mtime", 0):
+            return True
+        as_ = self._agent_status_mod()
+        if as_ is None or as_.bottom_live_busy(text or ""):
+            row._agent_hook_busy_at = now
+            return True
+        since = max(esc, getattr(row, "_agent_hook_busy_at", 0) or 0)
+        return now - since < self._AGENT_HOOK_QUIET_S
+
+    def _on_agent_hook_changed(self, _mon, f, other, _event):
+        names = {x.get_basename() for x in (f, other) if x is not None}
+        for row in self._session_rows():
+            if (_is_ai_icon(getattr(row, "icon_name", None))
+                    and self._agent_hook_key(row) in names):
+                self._update_agent_status(row)
+
     def _update_agent_status(self, row):
         if row is None or row.get_parent() is None:
             return
@@ -6548,9 +6913,38 @@ if (data !== null) {{
             self._set_agent_status(row, "exited")
             return
 
+        # a claude tab with hooks says what it does; the screen is the
+        # fallback for every other tab
+        hook_raw = self._agent_hook_raw(row)
         term = getattr(row, "term", None)
-        text = self._term_tail_text(term, max_lines=self._AGENT_TAIL_LINES)
+        text = "" if hook_raw == "idle" else self._term_tail_text(
+            term, max_lines=self._AGENT_TAIL_LINES)
         now = time.time()
+        if hook_raw == "blocked" and as_ is not None and as_.bottom_live_busy(
+                text or ""):
+            # approved: no hook runs until the tool ends, but the busy line
+            # is back (it is not on screen while claude asks)
+            hook_raw = "working"
+        elif (hook_raw == "blocked" and getattr(row, "_agent_hook_back", "")
+                and as_ is not None and self._agent_hook_screen_says(
+                    row, "answered", not as_.dialog_open(text))):
+            # a sub-agent's question is gone from the screen: approved or
+            # denied, and No runs no hook
+            hook_raw = row._agent_hook_back
+        elif (hook_raw == "background" and as_ is not None
+                and self._agent_hook_screen_says(
+                    row, "asking", as_.dialog_open(text))):
+            # a sub-agent asks; a Stop from an older hooks file did not know
+            hook_raw = "blocked"
+        if (hook_raw == "working" and as_ is not None
+                and self._agent_hook_screen_says(
+                    row, "asking", as_.dialog_open(text))):
+            # claude asks, but another tool of the turn ended after the
+            # question and its hook wrote working
+            hook_raw = "blocked"
+        if hook_raw == "working" and not self._agent_hook_still_busy(
+                row, text, now):
+            hook_raw = "idle"
         # Selected means the user is watching, which a tab in a window
         # behind something else is not. The FSM holds a selected tab at
         # idle rather than letting it reach ready, so without this a tab
@@ -6560,7 +6954,7 @@ if (data !== null) {{
                     and self.is_active())
 
         if as_ is None:
-            raw = self._detect_agent_status(
+            raw = hook_raw or self._detect_agent_status(
                 text, getattr(row, "argv", None), row=row)
             self._set_agent_status(row, raw if raw != "unknown" else "unknown")
             return
@@ -6573,20 +6967,23 @@ if (data !== null) {{
             from dataclasses import replace as _dc_replace
             disp = _dc_replace(disp, ui=row.agent_status)
 
-        osc_title = getattr(row, "_agent_window_title", "") or ""
-        state, matched_rule, flags = self._manifest_evaluate(
-            text, getattr(row, "argv", None), osc_title=osc_title)
-        ev = as_.gather_evidence(
-            text or "",
-            osc_title=osc_title,
-            manifest_state=state,
-            matched_rule=matched_rule,
-            flags=flags,
-        )
         prev_raw = ep.prev_raw
-        raw = as_.detect_raw(
-            ev, ep, now, argv=getattr(row, "argv", None), text=text or "",
-        )
+        if hook_raw:
+            raw = hook_raw
+        else:
+            osc_title = getattr(row, "_agent_window_title", "") or ""
+            state, matched_rule, flags = self._manifest_evaluate(
+                text, getattr(row, "argv", None), osc_title=osc_title)
+            ev = as_.gather_evidence(
+                text or "",
+                osc_title=osc_title,
+                manifest_state=state,
+                matched_rule=matched_rule,
+                flags=flags,
+            )
+            raw = as_.detect_raw(
+                ev, ep, now, argv=getattr(row, "argv", None), text=text or "",
+            )
         ep = as_.apply_raw_to_episode(ep, raw, now)
         row._agent_episode = ep
         disp = as_.display_step(
@@ -6621,6 +7018,12 @@ if (data !== null) {{
             "object-select-symbolic",
             "emblem-default-symbolic",
         ),
+        # replied, sub-agents still running
+        "background": (
+            "emblem-synchronizing-symbolic",
+            "view-refresh-symbolic",
+            "media-playlist-repeat-symbolic",
+        ),
         "exited": (
             "window-close-symbolic",
             "edit-delete-symbolic",
@@ -6654,9 +7057,14 @@ if (data !== null) {{
         return cands[0]
 
     # Bold unicode glyphs — denser stroke than thin symbolic ? / check / x
+    # the CSS class a status paints with: GTK's own "background" class
+    # would put the window colour behind the glyph
+    _AGENT_CSS = {"background": "subagents"}
+
     _AGENT_STATUS_GLYPHS = {
         "blocked": "?",
         "ready": "✔",   # heavy check mark (U+2714)
+        "background": "↻",  # clockwise open circle arrow (U+21BB)
         "exited": "✕",  # heavy multiplication X (U+2715)
         "done": "✕",
         "unknown": "·",
@@ -6666,7 +7074,11 @@ if (data !== null) {{
     _AGENT_NOTIFY = {
         "ready": "Finished — open the tab to review.",
         "blocked": "Waiting for input or approval.",
+        "background": "Replied — sub-agents still running.",
     }
+    # The two that wait on you. Background does not: its agents finish or
+    # one of them asks, and either is news.
+    _AGENT_WAITING = ("ready", "blocked")
     # How hard the popup insists, which is the only lever an app has over
     # how long it stays: GNOME gives every non-critical notification four
     # seconds and ignores any timeout an app asks for. Critical stays until
@@ -6717,7 +7129,8 @@ if (data !== null) {{
         it is already waiting, saying so again is noise, and so is moving
         between the two ways of waiting.
         """
-        if status not in cls._AGENT_NOTIFY or prev in cls._AGENT_NOTIFY:
+        if (status not in cls._AGENT_NOTIFY or prev == status
+                or prev in cls._AGENT_WAITING):
             return None
         return cls._AGENT_NOTIFY[status]
 
@@ -6772,7 +7185,7 @@ if (data !== null) {{
         """
         if status not in cls._AGENT_NOTIFY:
             return False
-        if prev in cls._AGENT_NOTIFY and not pending:
+        if (prev == status or prev in cls._AGENT_WAITING) and not pending:
             return False
         return True
 
@@ -7493,8 +7906,10 @@ if (data !== null) {{
     # six seconds. This is the floor that cannot happen under.
     _TG_POLL_MIN = 2
     _TG_BOARD_GLYPH = {"blocked": "?", "ready": "\u2713", "working": "\u25b6",
-                       "idle": "\u23f8", "exited": "\u2715"}
-    _TG_BOARD_ORDER = {"blocked": 0, "ready": 1, "working": 2, "idle": 3}
+                       "idle": "\u23f8", "exited": "\u2715",
+                       "background": "\u21bb"}
+    _TG_BOARD_ORDER = {"blocked": 0, "ready": 1, "background": 2,
+                       "working": 3, "idle": 4}
 
     @classmethod
     def _tg_poll_gap(cls, spent):
@@ -7642,8 +8057,8 @@ if (data !== null) {{
         if not tabs:
             return ["No AI tabs."]
         ranked = sorted(
-            tabs, key=lambda t: (cls._TG_BOARD_ORDER.get(t[0], 4), t[1]))
-        return ["%s %-7s %s" % (cls._TG_BOARD_GLYPH.get(st, "\u00b7"),
+            tabs, key=lambda t: (cls._TG_BOARD_ORDER.get(t[0], 5), t[1]))
+        return ["%s %-10s %s" % (cls._TG_BOARD_GLYPH.get(st, "\u00b7"),
                                 st, title) for st, title in ranked]
 
     def _tg_board_text_full(self):
@@ -8451,7 +8866,7 @@ if (data !== null) {{
         body.pack_start(bar, False, False, 0)
         glyph = Gtk.Label(label=self._AGENT_STATUS_GLYPHS.get(status, "\u00b7"))
         glyph.get_style_context().add_class("agent-status-glyph")
-        glyph.get_style_context().add_class(status)
+        glyph.get_style_context().add_class(self._AGENT_CSS.get(status, status))
         # A fixed column, or the text beside it starts at a different
         # place in each popup, because ? and the check are not one width.
         glyph.set_size_request(16, -1)
@@ -8626,12 +9041,14 @@ if (data !== null) {{
         if notify:
             self._notify_agent_status(row, prev_status, status)
         self._follow_toast_status(row, status)
-        css_class = "done" if status in ("done", "exited") else status
+        css_class = ("done" if status in ("done", "exited")
+                     else self._AGENT_CSS.get(status, status))
         tips = {
             "working": "▶ Working",
             "idle": "⏸ Idle — waiting for prompt",
             "blocked": "? Needs input / approval",
             "ready": "✓ Done — open tab to review",
+            "background": "↻ Replied — sub-agents still running",
             "exited": "✕ Process exited",
             "done": "✕ Process exited",
             "unknown": "Status unknown",
@@ -8646,8 +9063,8 @@ if (data !== null) {{
             img.set_no_show_all(True)
             img.hide()
             gctx = glyph.get_style_context()
-            for s in ("working", "blocked", "idle", "ready", "done", "exited",
-                      "unknown"):
+            for s in ("working", "blocked", "idle", "ready", "subagents",
+                      "done", "exited", "unknown"):
                 gctx.remove_class(s)
             gctx.add_class(css_class)
             glyph.set_markup(
@@ -8663,8 +9080,8 @@ if (data !== null) {{
                 glyph.set_no_show_all(True)
                 glyph.hide()
             ctx = img.get_style_context()
-            for s in ("working", "blocked", "idle", "ready", "done", "exited",
-                      "unknown"):
+            for s in ("working", "blocked", "idle", "ready", "subagents",
+                      "done", "exited", "unknown"):
                 ctx.remove_class(s)
             ctx.add_class(css_class)
             icon = self._agent_status_icon_name(
@@ -11578,6 +11995,8 @@ if (data !== null) {{
             key = self._REMOTE_KEYS.get(name) if isinstance(name, str) else None
             if key is None:
                 return 400, {"error": "unknown key"}
+            if name in ("esc", "ctrl-c"):
+                self._agent_note_interrupt(row)
             if not (name in self._REMOTE_ARROWS
                     and self._press_key(row.term, self._REMOTE_ARROWS[name])):
                 row.term.feed_child(key)
@@ -12925,6 +13344,13 @@ if (data !== null) {{
             return list(cls.CLAUDE_BYPASS_FLAGS)
         return []
 
+    @classmethod
+    def _ai_hook_tokens(cls, cli):
+        """Claude loads tabit's hooks, which report its status exactly."""
+        if cls._ai_is_claude(cli):
+            return ["--settings", CLAUDE_HOOKS_FILE]
+        return []
+
     @staticmethod
     def _ai_strip_bypass_tokens(tokens):
         out = []
@@ -12933,6 +13359,11 @@ if (data !== null) {{
             t = tokens[i]
             if t == "--dangerously-skip-permissions":
                 i += 1
+                continue
+            # tabit adds its hooks to every claude it builds
+            if t == "--settings" and i + 1 < len(tokens) \
+                    and tokens[i + 1] == CLAUDE_HOOKS_FILE:
+                i += 2
                 continue
             if t == "--permission-mode" and i + 1 < len(tokens) \
                     and tokens[i + 1] == "bypassPermissions":
@@ -12959,7 +13390,8 @@ if (data !== null) {{
         # For each try string T: run `cli T`; if all fail, plain `cli`.
         c = shlex.quote(cli)
         d = shlex.quote(path)
-        tail = " ".join(shlex.quote(t) for t in cls._ai_bypass_tokens(cli, bypass))
+        tail = " ".join(shlex.quote(t) for t in (
+            cls._ai_bypass_tokens(cli, bypass) + cls._ai_hook_tokens(cli)))
         tail = f" {tail}" if tail else ""
         parts = [f"cd {d} || exit 1"]
         cmds = []
@@ -14847,24 +15279,10 @@ if (data !== null) {{
                     GLib.idle_add(lambda: progress.set_text("35% - git pull"))
                     GLib.idle_add(
                         append_log,
-                        f">>> git pull origin main (in {tabit_dir})")
+                        f">>> update {tabit_dir} from origin/main")
 
-                    p1 = subprocess.Popen(
-                        ["git", "pull", "origin", "main"],
-                        cwd=tabit_dir,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                    )
-                    for line in p1.stdout:
-                        line_str = line.strip()
-                        if line_str:
-                            GLib.idle_add(append_log, line_str)
-                    p1.wait()
-                    if p1.returncode != 0:
-                        raise RuntimeError(
-                            "git pull failed with exit code "
-                            + str(p1.returncode))
+                    _update_pull(
+                        tabit_dir, lambda m: GLib.idle_add(append_log, m))
                 else:
                     # Step 1b: no checkout (e.g. ~/.local/bin install) —
                     # download the release source tarball and install from it.
@@ -15217,8 +15635,9 @@ if (data !== null) {{
             label="Notify me when an agent finishes or needs input")
         ai_notify.set_active(bool(s.get("ai_notify", True)))
         ai_notify.set_tooltip_text(
-            "A desktop popup when an AI tab goes from working to done or "
-            "to needs-input, with a button that switches to it. Nothing "
+            "A desktop popup when an AI tab goes from working to done, "
+            "to needs-input, or to replied with sub-agents still running, "
+            "with a button that switches to it. Nothing "
             "pops for the tab you are looking at. Default is on.")
         urg_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         urg_lbl = Gtk.Label(label="Notification urgency:", xalign=0)

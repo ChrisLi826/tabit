@@ -188,6 +188,26 @@ class TestDisplayFSM(unittest.TestCase):
         )
         self.assertEqual(d.ui, "idle")
 
+    def test_background_shows_while_watched(self):
+        # the turn is over but sub-agents still run, watched or not
+        for selected in (False, True):
+            d = as_.display_step(
+                "background", as_.Display(ui="working"), selected=selected,
+                now=10.0, prev_raw="working")
+            self.assertEqual(d.ui, "background", selected)
+
+    def test_background_then_idle_is_ready(self):
+        # claude goes on by itself and may run no hook before Stop
+        disp = as_.Display(ui="background", had_busy_turn=False)
+        d1 = as_.display_step(
+            "idle", disp, selected=False, now=10.0, prev_raw="background",
+            ready_stable_s=1.0)
+        self.assertEqual(d1.ui, "background")
+        d2 = as_.display_step(
+            "idle", d1, selected=False, now=11.5, prev_raw="idle",
+            ready_stable_s=1.0)
+        self.assertEqual(d2.ui, "ready")
+
     def test_select_clears_busy_flag(self):
         d = as_.Display(had_busy_turn=True)
         d = as_.note_tab_selected(d)
