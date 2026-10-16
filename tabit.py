@@ -3020,6 +3020,8 @@ class Tabit(Gtk.Window):
             else:
                 row._agent_episode = None
                 row._agent_display = None
+            # Esc or Ctrl+C runs no claude hook; tabit sees the key itself
+            term.connect("key-press-event", self._on_ai_term_key, row)
             try:
                 term.connect("window-title-changed",
                              self._on_ai_term_title_changed, row)
@@ -6769,8 +6771,8 @@ if (data !== null) {{
         row._agent_hook_scan = seen
         return "idle" if seen[2] else state
 
-    # Esc before claude wrote a word leaves no hook and no transcript line;
-    # only its busy line leaving the screen shows the turn is over
+    # Esc or Ctrl+C runs no hook. After one pressed in tabit, the turn is
+    # over once claude's busy line has been gone this long
     _AGENT_HOOK_QUIET_S = 3.0
 
     @classmethod
@@ -6790,32 +6792,35 @@ if (data !== null) {{
             return False
         return out.strip() == "1"
 
+    def _agent_note_interrupt(self, row):
+        """Esc or Ctrl+C went to this tab. Not when a tmux tab is scrolled
+        up: the key then goes to tmux, not to claude."""
+        if self._agent_hook_key(row) and not self._agent_hook_scrolled(row):
+            row._agent_esc_at = time.time()
+
+    def _on_ai_term_key(self, _term, event, row):
+        ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
+        if event.keyval == Gdk.KEY_Escape or (
+                ctrl and event.keyval in (Gdk.KEY_c, Gdk.KEY_C)):
+            self._agent_note_interrupt(row)
+        return False
+
     def _agent_hook_still_busy(self, row, text, now):
+        """Only a hook ends a turn, and a reply streaming in shows no busy
+        line, so a quiet screen alone is not the end. Esc or Ctrl+C runs
+        no hook: after one pressed here since the last event, the turn is
+        over once the busy line has been gone for a few seconds. Typing
+        into the prompt claude put back does not count; a busy line does,
+        since then the key did not stop it."""
+        esc = getattr(row, "_agent_esc_at", 0) or 0
+        if esc <= getattr(row, "_agent_hook_mtime", 0):
+            return True
         as_ = self._agent_status_mod()
         if as_ is None or as_.bottom_live_busy(text or ""):
-            row._agent_hook_quiet = None
-            row._agent_hook_ended = None
+            row._agent_hook_busy_at = now
             return True
-        mtime = getattr(row, "_agent_hook_mtime", 0)
-        if getattr(row, "_agent_hook_ended", None) == mtime:
-            # still once since this event: output alone (typing into the
-            # prompt claude put back after an Esc) does not bring the turn
-            # back, only a busy line or a new hook event does
-            return False
-        # quiet since the later of: the first quiet look, the last hook
-        # event, the last screen output (claude shows no busy line while
-        # the reply text streams in)
-        ep = getattr(row, "_agent_episode", None)
-        since = max(getattr(row, "_agent_hook_quiet", None) or now, mtime,
-                    getattr(ep, "last_pty", 0) or 0,
-                    getattr(row, "_agent_last_pty_activity", 0) or 0)
-        row._agent_hook_quiet = since
-        # tmux is asked only once the screen has been still that long
-        if (now - since < self._AGENT_HOOK_QUIET_S
-                or self._agent_hook_scrolled(row)):
-            return True
-        row._agent_hook_ended = mtime
-        return False
+        since = max(esc, getattr(row, "_agent_hook_busy_at", 0) or 0)
+        return now - since < self._AGENT_HOOK_QUIET_S
 
     def _on_agent_hook_changed(self, _mon, f, other, _event):
         names = {x.get_basename() for x in (f, other) if x is not None}
@@ -11918,6 +11923,8 @@ if (data !== null) {{
             key = self._REMOTE_KEYS.get(name) if isinstance(name, str) else None
             if key is None:
                 return 400, {"error": "unknown key"}
+            if name in ("esc", "ctrl-c"):
+                self._agent_note_interrupt(row)
             if not (name in self._REMOTE_ARROWS
                     and self._press_key(row.term, self._REMOTE_ARROWS[name])):
                 row.term.feed_child(key)

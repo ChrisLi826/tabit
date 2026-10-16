@@ -246,8 +246,8 @@ class TestHookBeatsScreen(unittest.TestCase):
     STREAMING = ("● The Cat\n\n  One\n\n  At the end of the lane, an old bookshop.\n\n\n"
                  + FOOT.format(""))
 
-    def run_update(self, state, screen, quiet_for=0.0, event_age=10.0, pty_age=None,
-                   scrolled=False, ended=False, back=""):
+    def run_update(self, state, screen, esc_age=None, event_age=10.0, pty_age=None,
+                   scrolled=False, back="", busy_age=None):
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
         old = tabit.AGENT_HOOK_DIR
@@ -265,9 +265,10 @@ class TestHookBeatsScreen(unittest.TestCase):
             term=object(), agent_status="idle", _agent_episode=as_.Episode(
                 last_pty=0.0 if pty_age is None else time.time() - pty_age),
             _agent_display=as_.Display(ui="idle"), get_parent=lambda: object(),
-            _agent_hook_quiet=(time.time() - quiet_for) if quiet_for else None,
-            # an earlier look already found this event's screen still
-            _agent_hook_ended=os.stat(path).st_mtime if ended is True else ended or None)
+            # Esc or Ctrl+C pressed in tabit that long ago
+            _agent_esc_at=None if esc_age is None else time.time() - esc_age,
+            _agent_hook_busy_at=None if busy_age is None else time.time() - busy_age,
+            _agent_last_pty_activity=0.0 if pty_age is None else time.time() - pty_age)
         self.row = row
         read = []
 
@@ -284,10 +285,6 @@ class TestHookBeatsScreen(unittest.TestCase):
         app._agent_hook_still_busy = lambda *a: T._agent_hook_still_busy(app, *a)
         T._update_agent_status(app, row)
         return got[-1], bool(read)
-
-    def test_working_hook_over_idle_looking_screen(self):
-        # the screen rules read this busy screen as idle; the hook knows
-        self.assertEqual(self.run_update("working", self.BUSY, quiet_for=5)[0], "working")
 
     def test_idle_does_not_read_the_screen(self):
         self.assertEqual(self.run_update("idle", self.BUSY), ("idle", False))
@@ -321,58 +318,68 @@ class TestHookBeatsScreen(unittest.TestCase):
         # no hook runs between the approval and the end of the tool
         self.assertEqual(self.run_update("blocked", self.BUSY)[0], "working")
 
+    def test_working_hook_over_idle_looking_screen(self):
+        # the screen rules read this busy screen as idle; the hook knows
+        self.assertEqual(self.run_update("working", self.BUSY, esc_age=5)[0], "working")
+
     def test_turn_past_a_minute_stays_working(self):
-        self.assertEqual(self.run_update("working", self.BUSY_LONG, quiet_for=5)[0],
+        self.assertEqual(self.run_update("working", self.BUSY_LONG, esc_age=5)[0],
                          "working")
 
-    def test_busy_line_gone_for_a_while_is_idle(self):
-        self.assertEqual(self.run_update("working", self.QUIET, quiet_for=5)[0], "idle")
+    def test_a_stalled_reply_with_no_esc_stays_working(self):
+        # a reply that streams in shows no busy line; a pause in it is not
+        # the end unless someone pressed Esc
+        for screen in (self.STREAMING, self.QUIET):
+            self.assertEqual(self.run_update("working", screen, event_age=60)[0],
+                             "working")
 
-    def test_busy_line_just_gone_is_still_working(self):
-        self.assertEqual(self.run_update("working", self.QUIET, quiet_for=1)[0], "working")
+    def test_esc_then_quiet_is_idle(self):
+        self.assertEqual(self.run_update("working", self.QUIET, esc_age=5)[0], "idle")
 
-    def test_a_fresh_hook_event_restarts_the_wait(self):
+    def test_esc_just_now_is_still_working(self):
+        self.assertEqual(self.run_update("working", self.QUIET, esc_age=1)[0], "working")
+
+    def test_esc_before_the_last_event_does_not_count(self):
         self.assertEqual(self.run_update(
-            "working", self.QUIET, quiet_for=5, event_age=1)[0], "working")
+            "working", self.QUIET, esc_age=5, event_age=1)[0], "working")
 
-    def test_reply_streaming_without_busy_line_stays_working(self):
-        # no busy line, but the text is still coming in
+    def test_typing_after_an_esc_does_not_hold_working(self):
+        # the prompt claude put back after an early Esc, being typed into
         self.assertEqual(self.run_update(
-            "working", self.STREAMING, quiet_for=5, pty_age=0.5)[0], "working")
+            "working", self.QUIET, esc_age=5, pty_age=0.2)[0], "idle")
 
-    def test_screen_still_for_a_while_is_idle(self):
-        # Esc before claude wrote anything: no hook, no busy line, no output
+    def test_busy_line_after_an_esc_holds_working(self):
+        # the key did not stop claude; it waits for the busy line to go
+        self.assertEqual(self.run_update("working", self.BUSY, esc_age=5)[0], "working")
         self.assertEqual(self.run_update(
-            "working", self.QUIET, quiet_for=5, pty_age=5)[0], "idle")
-
-    def test_typing_after_an_early_esc_stays_idle(self):
-        # Esc put the prompt back in the box; editing it is output, not work
-        self.assertEqual(self.run_update(
-            "working", self.QUIET, quiet_for=5, pty_age=0.5, ended=True)[0], "idle")
-
-    def test_going_idle_remembers_the_event(self):
-        self.assertEqual(self.run_update(
-            "working", self.QUIET, quiet_for=5, pty_age=5)[0], "idle")
-        self.assertEqual(self.row._agent_hook_ended, self.row._agent_hook_mtime)
-
-    def test_a_new_hook_event_after_going_idle_is_working_again(self):
-        # the next prompt: the earlier event went still, this one is new
-        self.assertEqual(self.run_update(
-            "working", self.QUIET, quiet_for=5, event_age=1, ended=1.0)[0], "working")
-
-    def test_busy_line_after_going_idle_is_working_again(self):
-        self.assertEqual(self.run_update(
-            "working", self.BUSY, quiet_for=5, ended=True)[0], "working")
-        self.assertIsNone(self.row._agent_hook_ended)
-
-    def test_tmux_tab_scrolled_up_stays_working(self):
-        # the wheel put tmux in copy mode: old lines, still, no busy line
-        self.assertEqual(self.run_update(
-            "working", self.STREAMING, quiet_for=5, pty_age=5, scrolled=True)[0],
-            "working")
+            "working", self.QUIET, esc_age=5, busy_age=1)[0], "working")
 
 
-@unittest.skipUnless(shutil.which("tmux"), "needs tmux")
+class TestInterruptKey(unittest.TestCase):
+    """tabit sees Esc and Ctrl+C itself: claude runs no hook for them."""
+
+    def press(self, keyval, ctrl=False, scrolled=False, key="k1"):
+        row = types.SimpleNamespace(_agent_key=key, argv=["claude"])
+        app = types.SimpleNamespace(_agent_hook_key=T._agent_hook_key,
+                                    _agent_hook_scrolled=lambda r: scrolled)
+        app._agent_note_interrupt = lambda r: T._agent_note_interrupt(app, r)
+        ev = types.SimpleNamespace(
+            keyval=keyval, state=tabit.Gdk.ModifierType.CONTROL_MASK if ctrl else 0)
+        self.assertFalse(T._on_ai_term_key(app, None, ev, row))  # the key goes on
+        return getattr(row, "_agent_esc_at", None)
+
+    def test_esc_and_ctrl_c(self):
+        self.assertIsNotNone(self.press(tabit.Gdk.KEY_Escape))
+        self.assertIsNotNone(self.press(tabit.Gdk.KEY_c, ctrl=True))
+
+    def test_other_keys(self):
+        self.assertIsNone(self.press(tabit.Gdk.KEY_c))
+        self.assertIsNone(self.press(tabit.Gdk.KEY_Return))
+
+    def test_scrolled_up_tmux_takes_the_key(self):
+        self.assertIsNone(self.press(tabit.Gdk.KEY_Escape, scrolled=True))
+
+
 class TestTmuxScrolled(unittest.TestCase):
     """tmux itself says whether a tab is scrolled up (copy mode)."""
 
