@@ -486,7 +486,8 @@ def _update_pull(repo, log):
     put commits that exist only here on top of the new main; merge when
     some are already pushed somewhere, since a rebase would rewrite them.
     Uncommitted changes are stashed and put back. On a clash the folder is
-    left as it was and the error says what to run.
+    left as it was and the error says what to run. Only on main: another
+    branch, or no branch, is someone's own work, and is left alone.
     """
     def git(*args, quiet=False):
         p = subprocess.run(["git", *args], cwd=repo, text=True,
@@ -498,9 +499,16 @@ def _update_pull(repo, log):
                     log(line.rstrip())
         return p.returncode, p.stdout.split()
 
+    rc, branch = git("symbolic-ref", "--short", "-q", "HEAD", quiet=True)
+    if rc or branch != ["main"]:
+        where = f"on branch {branch[0]}" if not rc and branch else "on no branch"
+        raise RuntimeError(
+            f"{repo} is {where}, not main, so Update leaves it alone. "
+            f"To update it: cd {repo} && git checkout main, then Update again")
     rc, _out = git("fetch", "origin", "main")
     if rc:
         raise RuntimeError(f"git fetch failed (exit {rc}): is the network up?")
+    orig = git("rev-parse", "HEAD", quiet=True)[1]
     if git("merge", "--ff-only", "FETCH_HEAD")[0] == 0:
         return
     mine = git("rev-list", "FETCH_HEAD..HEAD", quiet=True)[1]
@@ -513,9 +521,17 @@ def _update_pull(repo, log):
     else:
         rc, _out = git("merge", "--no-edit", "--autostash", "FETCH_HEAD")
         undo = ("merge", "--abort")
-    if rc == 0:
+    if rc == 0 and not git("diff", "--name-only", "--diff-filter=U",
+                           quiet=True)[1]:
         return
-    git(*undo)
+    if rc == 0:
+        # the update went in, but the stashed changes clashed with it when
+        # they were put back: git says so and still exits 0. Go back to
+        # where it was, changes and all (the stash was made right there).
+        git("reset", "--hard", *orig)
+        git("stash", "pop")
+    else:
+        git(*undo)
     raise RuntimeError(
         f"your own changes in {repo} clash with the new version, so "
         f"nothing was changed. To update by hand: cd {repo} && "

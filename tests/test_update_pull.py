@@ -112,6 +112,47 @@ class TestUpdatePull(unittest.TestCase):
         self.assertEqual(git(self.me, "status", "--porcelain"), "")
         self.assertFalse(os.path.exists(os.path.join(self.me, ".git", "rebase-merge")))
 
+    def test_clashing_uncommitted_change_is_put_back(self):
+        # git exits 0 here and leaves conflict markers: Update must not
+        # go on and install that
+        self.write(self.me, "a.txt", "editing\n")
+        before = git(self.me, "rev-parse", "HEAD")
+        self.write(self.up, "a.txt", "theirs\n")
+        self.commit(self.up, "release")
+        with self.assertRaises(RuntimeError):
+            self.pull()
+        self.assertEqual(git(self.me, "rev-parse", "HEAD"), before)
+        self.assertEqual(self.read("a.txt"), "editing\n")
+        self.assertEqual(git(self.me, "stash", "list"), "")
+
+    def test_clash_with_commit_and_uncommitted_change(self):
+        self.write(self.me, "b.txt", "my fix\n")
+        mine = self.commit(self.me, "my fix")
+        self.write(self.me, "a.txt", "editing\n")
+        self.write(self.up, "a.txt", "theirs\n")
+        self.commit(self.up, "release")
+        with self.assertRaises(RuntimeError):
+            self.pull()
+        self.assertEqual(git(self.me, "rev-parse", "HEAD"), mine)
+        self.assertEqual(self.read("a.txt"), "editing\n")
+        self.assertEqual(git(self.me, "stash", "list"), "")
+
+    def test_other_branch_is_left_alone(self):
+        git(self.me, "checkout", "-q", "-b", "work")
+        here = git(self.me, "rev-parse", "HEAD")
+        self.new_upstream()
+        with self.assertRaises(RuntimeError) as cm:
+            self.pull()
+        self.assertIn("on branch work", str(cm.exception))
+        self.assertEqual(git(self.me, "rev-parse", "HEAD"), here)
+
+    def test_detached_head_is_left_alone(self):
+        git(self.me, "checkout", "-q", "--detach")
+        self.new_upstream()
+        with self.assertRaises(RuntimeError) as cm:
+            self.pull()
+        self.assertIn("on no branch", str(cm.exception))
+
     def test_no_network(self):
         git(self.me, "remote", "set-url", "origin", "/nonexistent/repo")
         with self.assertRaises(RuntimeError) as cm:
