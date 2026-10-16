@@ -100,6 +100,20 @@ class TestUpdatePull(unittest.TestCase):
             cwd=self.me).returncode, 0)
         self.assertEqual(self.read("c.txt"), "new\n")
 
+    def test_another_remote_means_merge(self):
+        # the commit may sit on a fork this clone never fetched: no rewrite
+        fork = os.path.join(os.path.dirname(self.up), "fork")
+        git(os.path.dirname(self.up), "init", "-q", "--bare", fork)
+        git(self.me, "remote", "add", "fork", fork)
+        self.write(self.me, "b.txt", "mine\n")
+        mine = self.commit(self.me, "mine")
+        self.new_upstream()
+        self.pull()
+        self.assertEqual(subprocess.run(
+            ["git", "merge-base", "--is-ancestor", mine, "HEAD"],
+            cwd=self.me).returncode, 0)
+        self.assertEqual(self.read("c.txt"), "new\n")
+
     def test_clash_leaves_the_folder_as_it_was(self):
         self.write(self.me, "a.txt", "mine\n")
         mine = self.commit(self.me, "mine")

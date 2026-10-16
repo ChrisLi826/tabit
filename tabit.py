@@ -505,21 +505,24 @@ def _update_pull(repo, log):
         raise RuntimeError(
             f"{repo} is {where}, not main, so Update leaves it alone. "
             f"To update it: cd {repo} && git checkout main, then Update again")
-    rc, _out = git("fetch", "origin", "main")
+    # all of origin, so --remotes below knows every branch pushed there
+    rc, _out = git("fetch", "origin")
     if rc:
         raise RuntimeError(f"git fetch failed (exit {rc}): is the network up?")
     orig = git("rev-parse", "HEAD", quiet=True)[1]
-    if git("merge", "--ff-only", "FETCH_HEAD")[0] == 0:
+    if git("merge", "--ff-only", "origin/main")[0] == 0:
         return
-    mine = git("rev-list", "FETCH_HEAD..HEAD", quiet=True)[1]
-    local = git("rev-list", "FETCH_HEAD..HEAD", "--not", "--remotes",
+    mine = git("rev-list", "origin/main..HEAD", quiet=True)[1]
+    local = git("rev-list", "origin/main..HEAD", "--not", "--remotes",
                 quiet=True)[1]
-    if mine and mine == local:
+    # another remote may hold these commits without this clone knowing
+    only_origin = git("remote", quiet=True)[1] == ["origin"]
+    if mine and mine == local and only_origin:
         log("Your own commits go on top of the new version.")
-        rc, _out = git("rebase", "--autostash", "FETCH_HEAD")
+        rc, _out = git("rebase", "--autostash", "origin/main")
         undo = ("rebase", "--abort")
     else:
-        rc, _out = git("merge", "--no-edit", "--autostash", "FETCH_HEAD")
+        rc, _out = git("merge", "--no-edit", "--autostash", "origin/main")
         undo = ("merge", "--abort")
     if rc == 0 and not git("diff", "--name-only", "--diff-filter=U",
                            quiet=True)[1]:
@@ -1762,9 +1765,9 @@ def _claude_hooks_settings(hook_dir):
     aid = 'a=$(printf %s "$p" | sed -n \'s/.*"agent_id":"\\([^"]*\\)".*/\\1/p\'); '
     # while a sub-agent asks, the main agent's events change only where
     # to go back to: its question is still on screen
+    # (back=blocked: the main agent asks too, after the sub-agents)
     keep = ('if [ "$cur" = blocked ] && [ -n "$who" ]; then '
-            'if [ "$s" != blocked ]; then back=$s; fi; '
-            's=blocked; b=$back; w=$who; fi; ')
+            'back=$s; s=blocked; b=$back; w=$who; fi; ')
     # a question or a plan waits for the user like a permission does; a
     # sub-agent cannot ask either way
     ask = (now + f'case "$p" in {sub}) exit 0;; esac; '
@@ -6833,8 +6836,11 @@ if (data !== null) {{
 
     def _on_ai_term_key(self, _term, event, row):
         ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
+        shift = event.state & Gdk.ModifierType.SHIFT_MASK
+        # Ctrl+Shift+C is copy and never reaches claude; C as well as c
+        # for Caps Lock
         if event.keyval == Gdk.KEY_Escape or (
-                ctrl and event.keyval in (Gdk.KEY_c, Gdk.KEY_C)):
+                ctrl and not shift and event.keyval in (Gdk.KEY_c, Gdk.KEY_C)):
             self._agent_note_interrupt(row)
         return False
 

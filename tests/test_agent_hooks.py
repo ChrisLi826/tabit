@@ -192,6 +192,15 @@ class TestHookCommand(unittest.TestCase):
         self.tool_end()
         self.assertEqual(self.state()[0], "working")
 
+    def test_subagent_then_main_agent_ask(self):
+        self.run_hook("UserPromptSubmit", {"transcript_path": self.tx})
+        self.ask("a1")
+        self.ask()                      # the main agent asks after it
+        self.tool_end("a1")
+        self.assertEqual(self.state()[0], "blocked")   # the main one still asks
+        self.tool_end()
+        self.assertEqual(self.state()[0], "working")
+
     def test_a_typed_prompt_starts_afresh(self):
         self.ask("a1")                  # denied: no tool end ever comes
         self.run_hook("UserPromptSubmit", {"transcript_path": self.tx})
@@ -435,13 +444,17 @@ class TestScreenSaysOncePerEvent(unittest.TestCase):
 class TestInterruptKey(unittest.TestCase):
     """tabit sees Esc and Ctrl+C itself: claude runs no hook for them."""
 
-    def press(self, keyval, ctrl=False, scrolled=False, key="k1"):
+    def press(self, keyval, ctrl=False, scrolled=False, key="k1", shift=False):
         row = types.SimpleNamespace(_agent_key=key, argv=["claude"])
         app = types.SimpleNamespace(_agent_hook_key=T._agent_hook_key,
                                     _agent_hook_scrolled=lambda r: scrolled)
         app._agent_note_interrupt = lambda r: T._agent_note_interrupt(app, r)
-        ev = types.SimpleNamespace(
-            keyval=keyval, state=tabit.Gdk.ModifierType.CONTROL_MASK if ctrl else 0)
+        mods = tabit.Gdk.ModifierType(0)
+        if ctrl:
+            mods |= tabit.Gdk.ModifierType.CONTROL_MASK
+        if shift:
+            mods |= tabit.Gdk.ModifierType.SHIFT_MASK
+        ev = types.SimpleNamespace(keyval=keyval, state=mods)
         self.assertFalse(T._on_ai_term_key(app, None, ev, row))  # the key goes on
         return getattr(row, "_agent_esc_at", None)
 
@@ -452,6 +465,11 @@ class TestInterruptKey(unittest.TestCase):
     def test_other_keys(self):
         self.assertIsNone(self.press(tabit.Gdk.KEY_c))
         self.assertIsNone(self.press(tabit.Gdk.KEY_Return))
+
+    def test_copy_is_not_an_interrupt(self):
+        # Ctrl+Shift+C copies; claude never gets it
+        for kv in (tabit.Gdk.KEY_c, tabit.Gdk.KEY_C):
+            self.assertIsNone(self.press(kv, ctrl=True, shift=True))
 
     def test_scrolled_up_tmux_takes_the_key(self):
         self.assertIsNone(self.press(tabit.Gdk.KEY_Escape, scrolled=True))
