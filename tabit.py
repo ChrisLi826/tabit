@@ -6719,16 +6719,49 @@ if (data !== null) {{
     # only its busy line leaving the screen shows the turn is over
     _AGENT_HOOK_QUIET_S = 3.0
 
+    @classmethod
+    def _agent_hook_scrolled(cls, row):
+        """True while a tmux tab is scrolled up (copy mode). It shows old
+        lines that do not move, and keys go to tmux, so nobody can stop
+        claude then. Asked of tmux: the VTE of a tmux tab cannot tell."""
+        session = cls._ai_tmux_unwrap(getattr(row, "argv", None) or [])[1]
+        if session is None:
+            return False
+        try:
+            out = subprocess.run(
+                ["tmux", "display-message", "-p", "-t", _tmux_exact(session),
+                 "#{pane_in_mode}"],
+                capture_output=True, text=True, timeout=1).stdout
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return out.strip() == "1"
+
     def _agent_hook_still_busy(self, row, text, now):
         as_ = self._agent_status_mod()
         if as_ is None or as_.bottom_live_busy(text or ""):
             row._agent_hook_quiet = None
+            row._agent_hook_ended = None
             return True
-        # quiet since the later of: the first quiet look, the last hook event
-        since = max(getattr(row, "_agent_hook_quiet", None) or now,
-                    getattr(row, "_agent_hook_mtime", 0))
+        mtime = getattr(row, "_agent_hook_mtime", 0)
+        if getattr(row, "_agent_hook_ended", None) == mtime:
+            # still once since this event: output alone (typing into the
+            # prompt claude put back after an Esc) does not bring the turn
+            # back, only a busy line or a new hook event does
+            return False
+        # quiet since the later of: the first quiet look, the last hook
+        # event, the last screen output (claude shows no busy line while
+        # the reply text streams in)
+        ep = getattr(row, "_agent_episode", None)
+        since = max(getattr(row, "_agent_hook_quiet", None) or now, mtime,
+                    getattr(ep, "last_pty", 0) or 0,
+                    getattr(row, "_agent_last_pty_activity", 0) or 0)
         row._agent_hook_quiet = since
-        return now - since < self._AGENT_HOOK_QUIET_S
+        # tmux is asked only once the screen has been still that long
+        if (now - since < self._AGENT_HOOK_QUIET_S
+                or self._agent_hook_scrolled(row)):
+            return True
+        row._agent_hook_ended = mtime
+        return False
 
     def _on_agent_hook_changed(self, _mon, f, other, _event):
         names = {x.get_basename() for x in (f, other) if x is not None}

@@ -2,12 +2,14 @@
 """Claude AI tabs report their status through Claude Code hooks."""
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import types
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -169,8 +171,12 @@ class TestHookBeatsScreen(unittest.TestCase):
     ASKING = ("● Bash(mkdir newdir)\n  ⎿  Waiting…\n Do you want to proceed?\n"
               " ❯ 1. Yes\n   2. No\n")
     QUIET = "\n" + FOOT.format("Write an essay.")
+    # v2.1.301 drops the busy line while the reply text streams in
+    STREAMING = ("● The Cat\n\n  One\n\n  At the end of the lane, an old bookshop.\n\n\n"
+                 + FOOT.format(""))
 
-    def run_update(self, state, screen, quiet_for=0.0, event_age=10.0):
+    def run_update(self, state, screen, quiet_for=0.0, event_age=10.0, pty_age=None,
+                   scrolled=False, ended=False):
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
         old = tabit.AGENT_HOOK_DIR
@@ -185,9 +191,13 @@ class TestHookBeatsScreen(unittest.TestCase):
         got = []
         row = types.SimpleNamespace(
             icon_name=tabit.ICON_AI, _agent_key="k1", argv=["claude"], dead=False,
-            term=object(), agent_status="idle", _agent_episode=as_.Episode(),
+            term=object(), agent_status="idle", _agent_episode=as_.Episode(
+                last_pty=0.0 if pty_age is None else time.time() - pty_age),
             _agent_display=as_.Display(ui="idle"), get_parent=lambda: object(),
-            _agent_hook_quiet=(time.time() - quiet_for) if quiet_for else None)
+            _agent_hook_quiet=(time.time() - quiet_for) if quiet_for else None,
+            # an earlier look already found this event's screen still
+            _agent_hook_ended=os.stat(path).st_mtime if ended is True else ended or None)
+        self.row = row
         read = []
 
         def tail(*_a, **_k):
@@ -198,7 +208,7 @@ class TestHookBeatsScreen(unittest.TestCase):
             listbox=types.SimpleNamespace(get_selected_row=lambda: None),
             is_active=lambda: True, _AGENT_TAIL_LINES=40, _AGENT_READY_STABLE_S=1.0,
             _AGENT_HOOK_QUIET_S=T._AGENT_HOOK_QUIET_S,
-            _agent_hook_raw=T._agent_hook_raw,
+            _agent_hook_raw=T._agent_hook_raw, _agent_hook_scrolled=lambda r: scrolled,
             _set_agent_status=lambda r, s: got.append(s))
         app._agent_hook_still_busy = lambda *a: T._agent_hook_still_busy(app, *a)
         T._update_agent_status(app, row)
@@ -231,6 +241,71 @@ class TestHookBeatsScreen(unittest.TestCase):
     def test_a_fresh_hook_event_restarts_the_wait(self):
         self.assertEqual(self.run_update(
             "working", self.QUIET, quiet_for=5, event_age=1)[0], "working")
+
+    def test_reply_streaming_without_busy_line_stays_working(self):
+        # no busy line, but the text is still coming in
+        self.assertEqual(self.run_update(
+            "working", self.STREAMING, quiet_for=5, pty_age=0.5)[0], "working")
+
+    def test_screen_still_for_a_while_is_idle(self):
+        # Esc before claude wrote anything: no hook, no busy line, no output
+        self.assertEqual(self.run_update(
+            "working", self.QUIET, quiet_for=5, pty_age=5)[0], "idle")
+
+    def test_typing_after_an_early_esc_stays_idle(self):
+        # Esc put the prompt back in the box; editing it is output, not work
+        self.assertEqual(self.run_update(
+            "working", self.QUIET, quiet_for=5, pty_age=0.5, ended=True)[0], "idle")
+
+    def test_going_idle_remembers_the_event(self):
+        self.assertEqual(self.run_update(
+            "working", self.QUIET, quiet_for=5, pty_age=5)[0], "idle")
+        self.assertEqual(self.row._agent_hook_ended, self.row._agent_hook_mtime)
+
+    def test_a_new_hook_event_after_going_idle_is_working_again(self):
+        # the next prompt: the earlier event went still, this one is new
+        self.assertEqual(self.run_update(
+            "working", self.QUIET, quiet_for=5, event_age=1, ended=1.0)[0], "working")
+
+    def test_busy_line_after_going_idle_is_working_again(self):
+        self.assertEqual(self.run_update(
+            "working", self.BUSY, quiet_for=5, ended=True)[0], "working")
+        self.assertIsNone(self.row._agent_hook_ended)
+
+    def test_tmux_tab_scrolled_up_stays_working(self):
+        # the wheel put tmux in copy mode: old lines, still, no busy line
+        self.assertEqual(self.run_update(
+            "working", self.STREAMING, quiet_for=5, pty_age=5, scrolled=True)[0],
+            "working")
+
+
+@unittest.skipUnless(shutil.which("tmux"), "needs tmux")
+class TestTmuxScrolled(unittest.TestCase):
+    """tmux itself says whether a tab is scrolled up (copy mode)."""
+
+    def setUp(self):
+        # a tmux server of its own, never the one these tests may run in
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+        env["TMUX_TMPDIR"] = d.name
+        patcher = mock.patch.dict(os.environ, env, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(subprocess.run, ["tmux", "kill-server"], capture_output=True)
+        subprocess.run(["tmux", "new-session", "-d", "-s", "ai-t-1", "sleep 60"], check=True)
+        inner = T._ai_argv("claude", "/tmp/x", [])
+        self.row = types.SimpleNamespace(argv=T._ai_tmux_argv(inner, "ai-t-1"))
+
+    def test_at_the_bottom(self):
+        self.assertFalse(T._agent_hook_scrolled(self.row))
+
+    def test_scrolled_up(self):
+        subprocess.run(["tmux", "copy-mode", "-t", "=ai-t-1:"], check=True)
+        self.assertTrue(T._agent_hook_scrolled(self.row))
+
+    def test_plain_tab_is_never_scrolled(self):
+        self.assertFalse(T._agent_hook_scrolled(types.SimpleNamespace(argv=["claude"])))
 
 
 if __name__ == "__main__":
