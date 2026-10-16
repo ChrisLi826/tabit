@@ -77,4 +77,4 @@ up to 2 MB. Key and password files are never shown.
 The page looks like tabit itself: tabs on the left (the open one marked), and
 the tab or file on the right. Drag the gap between them to set the list
 width; double-click it to reset. 🔔 shows a browser notice when an AI tab goes
-from working to ready or blocked.
+from working (or ↻, sub-agents still running) to ready or blocked.

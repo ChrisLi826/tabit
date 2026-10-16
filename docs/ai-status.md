@@ -7,9 +7,14 @@ How tabit tells you an agent finished or wants you. Back to the [README](../READ
 A **Claude** tab opened by tabit runs `claude --settings
 ~/.local/share/tabit/claude-hooks.json`. Its hooks tell tabit what the agent
 does: a prompt or a tool is working, a permission, a question or a plan is
-blocked, the end of a turn is done. When you press Esc or say No, no hook
+blocked, the end of a turn is done. A turn that ends while sub-agents it
+started still run is **background** (`↻`): Claude goes on by itself once
+they finish, and is done after that. When you press Esc or say No, no hook
 runs, so tabit then reads the session's transcript for the interrupt. The
-hooks add to your own Claude settings and replace none of them.
+hooks add to your own Claude settings and replace none of them. Claude
+reads them once, when it starts: after an update that changes them, a
+Claude tab that was already running keeps the old ones until you open it
+again.
 
 Every other tab is read from its screen: codex, grok and other CLIs, and
 a Claude tab opened before this release. Open a new one, or change the old
@@ -17,7 +22,8 @@ one in its rename popover, to give it the hooks.
 
 ## The popup
 
-When an AI tab stops working — it finished, or it wants input — a popup
+When an AI tab stops working — it finished, it replied while its
+sub-agents still run, or it wants input — a popup
 inside tabit says so, **at the foot of the tab list**, shaped like the tab
 row it is about: the group's colour bar, the same status glyph, the group
 and tab names, and the time. Click anywhere on it to switch to that tab.
@@ -51,9 +57,9 @@ without it.
 ## The count row
 
 The foot of the sidebar counts **every** AI tab by status — `?` blocked,
-`✓` done, play working, pause idle — next to a clock. The off-viewport
+`✓` done, `↻` background, play working, pause idle — next to a clock. The off-viewport
 peeks only cover tabs scrolled out of sight, so with a long list an agent
 waiting on you could still be missed; this row cannot miss one. Click a
 count to jump to that agent, and click again to cycle through the rest.
 
-The same news can go to your phone: see [telegram.md](telegram.md) and [remote.md](remote.md).
+The same news, background aside, can go to your phone: see [telegram.md](telegram.md) and [remote.md](remote.md).

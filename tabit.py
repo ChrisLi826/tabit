@@ -1268,6 +1268,17 @@ def get_theme_css(theme_key):
 .ai-peek .agent-status.ready, .ai-peek .agent-status-glyph.ready {{
     color: #e0af68;
 }}
+.agent-status.subagents, .agent-status-glyph.subagents,
+.sidebar row .agent-status.subagents, .sidebar row .agent-status-glyph.subagents,
+.sidebar row:selected .agent-status.subagents,
+.sidebar row:selected .agent-status-glyph.subagents,
+.sidebar row.group-header .agent-status.subagents,
+.sidebar row.group-header .agent-status-glyph.subagents,
+.sidebar row:selected.group-header .agent-status.subagents,
+.sidebar row:selected.group-header .agent-status-glyph.subagents,
+.ai-peek .agent-status.subagents, .ai-peek .agent-status-glyph.subagents {{
+    color: #bb9af7;
+}}
 .agent-status.done, .agent-status-glyph.done,
 .agent-status.exited, .agent-status-glyph.exited,
 .sidebar row .agent-status.done, .sidebar row .agent-status-glyph.done,
@@ -1313,11 +1324,13 @@ def get_theme_css(theme_key):
     font-weight: 600;
     color: {s['subtext']};
 }}
-/* The same two colours the glyph beside them already uses, from the
-   .agent-status-glyph rules above: amber for ready, red for blocked.
+/* The same colours the glyph beside them already uses, from the
+   .agent-status-glyph rules above: amber for ready, red for blocked,
+   purple for background.
    Not the green -- that one is idle, a different thing entirely. */
 .ai-toast-ready .ai-toast-state {{ color: #e0af68; }}
 .ai-toast-blocked .ai-toast-state {{ color: #f7768e; }}
+.ai-toast-background .ai-toast-state {{ color: #bb9af7; }}
 .ai-toast .ai-toast-time {{
     font-size: {sz_sub}pt;
     color: {s['subtext']};
@@ -1697,7 +1710,9 @@ def _set_aside(path):
 
 
 def _claude_hooks_settings(hook_dir):
-    """Claude Code settings whose hooks write `state, transcript, size`.
+    """Claude Code settings whose hooks write `state, transcript, size,
+    back, who`: a sub-agent's question returns to back once who, the
+    sub-agent that asked, goes on.
 
     The file is named after the tab: its tmux session, or TABIT_AGENT for
     a plain tab. tmux first, since a tmux server keeps the environment of
@@ -1711,30 +1726,48 @@ def _claude_hooks_settings(hook_dir):
             'p=$(cat); k=$TABIT_AGENT; '
             'if [ -n "$TMUX_PANE" ]; then '
             'k=$(tmux display-message -p -t "$TMUX_PANE" "#S" 2>/dev/null); fi; '
-            'if [ -z "$k" ]; then exit 0; fi; ' + state +
+            'if [ -z "$k" ]; then exit 0; fi; b=; w=; ' + state +
             't=$(printf %s "$p" | sed -n \'s/.*"transcript_path":"\\([^"]*\\)".*/\\1/p\'); '
             'n=$(stat -c %s "$t" 2>/dev/null); '
-            f'printf "%s\\n%s\\n%s\\n" "$s" "$t" "$n" >{d}/"$k".tmp 2>/dev/null '
+            f'printf "%s\\n%s\\n%s\\n%s\\n%s\\n" "$s" "$t" "$n" "$b" "$w" >{d}/"$k".tmp 2>/dev/null '
             f'&& mv -f {d}/"$k".tmp {d}/"$k" 2>/dev/null; exit 0')}
 
     def ev(state, matcher=None):
-        e = {"hooks": [put(f"s={state}; ")]}
+        e = {"hooks": [put(state)]}
         if matcher is not None:
             e["matcher"] = matcher
         return [e]
-    # a question or a plan waits for the user like a permission does
-    ask = ('s=working; case "$p" in *\'"tool_name":"AskUserQuestion"\'*'
+    # every event from a sub-agent carries its agent_id; the state is the
+    # main agent's, so a sub-agent only changes it to ask and to go back
+    sub = '*\'"agent_id":"\'*'
+    now = (f'cur=; back=; who=; {{ IFS= read -r cur; read -r _; read -r _; '
+           f'IFS= read -r back; IFS= read -r who; }} 2>/dev/null <{d}/"$k"; ')
+    aid = 'a=$(printf %s "$p" | sed -n \'s/.*"agent_id":"\\([^"]*\\)".*/\\1/p\'); '
+    # a question or a plan waits for the user like a permission does; a
+    # sub-agent cannot ask either way
+    ask = (f'case "$p" in {sub}) exit 0;; esac; '
+           's=working; case "$p" in *\'"tool_name":"AskUserQuestion"\'*'
            '|*\'"tool_name":"ExitPlanMode"\'*) s=blocked;; esac; ')
+    done = now + ('s=working; case "$p" in ' + sub + ') ' + aid +
+                  '[ "$cur" = blocked ] && [ -n "$back" ] && [ "$a" = "$who" ] '
+                  '|| exit 0; s=$back;; esac; ')
+    # the main agent's own question has nothing to go back to
+    asks = now + ('s=blocked; case "$p" in ' + sub + ') ' + aid + 'w=$a; '
+                  'b=${cur:-background}; [ "$cur" = blocked ] && b=$back;; esac; ')
+    # the turn is over, but claude goes on by itself once its background
+    # sub-agents are done
+    stop = ('s=idle; case "$p" in *\'"type":"subagent","status":"running"\'*) '
+            's=background;; esac; ')
     return {"hooks": {
         # not "compact": claude compacts in the middle of a turn
-        "SessionStart": ev("idle", "startup|resume|clear"),
-        "UserPromptSubmit": ev("working"),
-        "PreToolUse": [{"matcher": "*", "hooks": [put(ask)]}],
-        "PostToolUse": ev("working", "*"),
-        "PostToolUseFailure": ev("working", "*"),
-        "PermissionRequest": ev("blocked", "*"),
-        "Stop": ev("idle"),
-        "StopFailure": ev("idle"),
+        "SessionStart": ev("s=idle; ", "startup|resume|clear"),
+        "UserPromptSubmit": ev("s=working; "),
+        "PreToolUse": ev(ask, "*"),
+        "PostToolUse": ev(done, "*"),
+        "PostToolUseFailure": ev(done, "*"),
+        "PermissionRequest": ev(asks, "*"),
+        "Stop": ev(stop),
+        "StopFailure": ev(stop),
     }}
 
 
@@ -5990,10 +6023,11 @@ if (data !== null) {{
     # --- AI attention summaries (viewport peeks + collapsed headers) -------
     # Fixed slot order (severity → quieter). working/idle use themed media
     # icons (same as tab rows) — never emoji ⏸/▶ which draw yellow/blue buttons.
-    _AI_ATTENTION_ORDER = ("blocked", "ready", "working", "idle")
+    _AI_ATTENTION_ORDER = ("blocked", "ready", "background", "working", "idle")
     _AI_AGG_GLYPHS = {
         "blocked": "?",
         "ready": "✓",  # U+2713 text check, not emoji
+        "background": "↻",  # U+21BB
     }
     _AI_AGG_MEDIA = {
         "working": ("media-playback-start-symbolic", "media-playback-start"),
@@ -6002,6 +6036,7 @@ if (data !== null) {{
     _AI_AGG_TIPS = {
         "blocked": "Needs input",
         "ready": "Done — review",
+        "background": "Replied — agents still running",
         "working": "Working",
         "idle": "Idle",
     }
@@ -6019,20 +6054,20 @@ if (data !== null) {{
         glyph.set_xalign(0.5)
         glyph.get_style_context().add_class("agent-status-glyph")
         glyph.get_style_context().add_class("ai-peek-slot")
-        glyph.get_style_context().add_class(st)
+        glyph.get_style_context().add_class(self._AGENT_CSS.get(st, st))
         glyph.set_no_show_all(True)
         glyph.hide()
         img = Gtk.Image()
         img.set_pixel_size(14)
         img.get_style_context().add_class("agent-status")
-        img.get_style_context().add_class(st)
+        img.get_style_context().add_class(self._AGENT_CSS.get(st, st))
         img.set_no_show_all(True)
         img.hide()
         count = Gtk.Label(label="")
         count.set_xalign(0)
         count.get_style_context().add_class("agent-status-glyph")
         count.get_style_context().add_class("ai-peek-slot")
-        count.get_style_context().add_class(st)
+        count.get_style_context().add_class(self._AGENT_CSS.get(st, st))
         count.set_no_show_all(True)
         count.hide()
         inner.pack_start(img, False, False, 0)
@@ -6678,8 +6713,9 @@ if (data !== null) {{
 
     @classmethod
     def _agent_hook_raw(cls, row):
-        """working / blocked / idle from the tab's claude hooks, or None
-        when it has none (another CLI, a tab built before the hooks)."""
+        """working / blocked / idle / background (done, sub-agents still
+        running) from the tab's claude hooks, or None when it has none
+        (another CLI, a tab built before the hooks)."""
         key = cls._agent_hook_key(row)
         if not key:
             return None
@@ -6687,12 +6723,14 @@ if (data !== null) {{
         try:
             mtime = os.stat(path).st_mtime
             with open(path) as f:
-                state, tx, size = (f.read().split("\n") + ["", "", ""])[:3]
+                state, tx, size, back = (f.read().split("\n") + [""] * 4)[:4]
         except OSError:
             return None
-        if state not in ("working", "blocked", "idle"):
+        if state not in ("working", "blocked", "idle", "background"):
             return None
         row._agent_hook_mtime = mtime
+        # where a sub-agent's question goes back to; empty for the main one
+        row._agent_hook_back = back
         if state == "idle" or not tx:
             return state
         # Esc or No since this event: read only what the transcript gained
@@ -6801,6 +6839,16 @@ if (data !== null) {{
             # approved: no hook runs until the tool ends, but the busy line
             # is back (it is not on screen while claude asks)
             hook_raw = "working"
+        elif (hook_raw == "blocked" and getattr(row, "_agent_hook_back", "")
+                and as_ is not None and not as_.dialog_open(text)
+                and not self._agent_hook_scrolled(row)):
+            # a sub-agent's question is gone from the screen: approved or
+            # denied, and No runs no hook
+            hook_raw = row._agent_hook_back
+        elif (hook_raw == "background" and as_ is not None
+                and as_.dialog_open(text) and not self._agent_hook_scrolled(row)):
+            # a sub-agent asks; the Stop that came after it did not know
+            hook_raw = "blocked"
         if hook_raw == "working" and not self._agent_hook_still_busy(
                 row, text, now):
             hook_raw = "idle"
@@ -6877,6 +6925,12 @@ if (data !== null) {{
             "object-select-symbolic",
             "emblem-default-symbolic",
         ),
+        # replied, sub-agents still running
+        "background": (
+            "emblem-synchronizing-symbolic",
+            "view-refresh-symbolic",
+            "media-playlist-repeat-symbolic",
+        ),
         "exited": (
             "window-close-symbolic",
             "edit-delete-symbolic",
@@ -6910,9 +6964,14 @@ if (data !== null) {{
         return cands[0]
 
     # Bold unicode glyphs — denser stroke than thin symbolic ? / check / x
+    # the CSS class a status paints with: GTK's own "background" class
+    # would put the window colour behind the glyph
+    _AGENT_CSS = {"background": "subagents"}
+
     _AGENT_STATUS_GLYPHS = {
         "blocked": "?",
         "ready": "✔",   # heavy check mark (U+2714)
+        "background": "↻",  # clockwise open circle arrow (U+21BB)
         "exited": "✕",  # heavy multiplication X (U+2715)
         "done": "✕",
         "unknown": "·",
@@ -6922,7 +6981,11 @@ if (data !== null) {{
     _AGENT_NOTIFY = {
         "ready": "Finished — open the tab to review.",
         "blocked": "Waiting for input or approval.",
+        "background": "Replied — sub-agents still running.",
     }
+    # The two that wait on you. Background does not: its agents finish or
+    # one of them asks, and either is news.
+    _AGENT_WAITING = ("ready", "blocked")
     # How hard the popup insists, which is the only lever an app has over
     # how long it stays: GNOME gives every non-critical notification four
     # seconds and ignores any timeout an app asks for. Critical stays until
@@ -6973,7 +7036,8 @@ if (data !== null) {{
         it is already waiting, saying so again is noise, and so is moving
         between the two ways of waiting.
         """
-        if status not in cls._AGENT_NOTIFY or prev in cls._AGENT_NOTIFY:
+        if (status not in cls._AGENT_NOTIFY or prev == status
+                or prev in cls._AGENT_WAITING):
             return None
         return cls._AGENT_NOTIFY[status]
 
@@ -7028,7 +7092,7 @@ if (data !== null) {{
         """
         if status not in cls._AGENT_NOTIFY:
             return False
-        if prev in cls._AGENT_NOTIFY and not pending:
+        if (prev == status or prev in cls._AGENT_WAITING) and not pending:
             return False
         return True
 
@@ -7749,8 +7813,10 @@ if (data !== null) {{
     # six seconds. This is the floor that cannot happen under.
     _TG_POLL_MIN = 2
     _TG_BOARD_GLYPH = {"blocked": "?", "ready": "\u2713", "working": "\u25b6",
-                       "idle": "\u23f8", "exited": "\u2715"}
-    _TG_BOARD_ORDER = {"blocked": 0, "ready": 1, "working": 2, "idle": 3}
+                       "idle": "\u23f8", "exited": "\u2715",
+                       "background": "\u21bb"}
+    _TG_BOARD_ORDER = {"blocked": 0, "ready": 1, "background": 2,
+                       "working": 3, "idle": 4}
 
     @classmethod
     def _tg_poll_gap(cls, spent):
@@ -7898,8 +7964,8 @@ if (data !== null) {{
         if not tabs:
             return ["No AI tabs."]
         ranked = sorted(
-            tabs, key=lambda t: (cls._TG_BOARD_ORDER.get(t[0], 4), t[1]))
-        return ["%s %-7s %s" % (cls._TG_BOARD_GLYPH.get(st, "\u00b7"),
+            tabs, key=lambda t: (cls._TG_BOARD_ORDER.get(t[0], 5), t[1]))
+        return ["%s %-10s %s" % (cls._TG_BOARD_GLYPH.get(st, "\u00b7"),
                                 st, title) for st, title in ranked]
 
     def _tg_board_text_full(self):
@@ -8707,7 +8773,7 @@ if (data !== null) {{
         body.pack_start(bar, False, False, 0)
         glyph = Gtk.Label(label=self._AGENT_STATUS_GLYPHS.get(status, "\u00b7"))
         glyph.get_style_context().add_class("agent-status-glyph")
-        glyph.get_style_context().add_class(status)
+        glyph.get_style_context().add_class(self._AGENT_CSS.get(status, status))
         # A fixed column, or the text beside it starts at a different
         # place in each popup, because ? and the check are not one width.
         glyph.set_size_request(16, -1)
@@ -8882,12 +8948,14 @@ if (data !== null) {{
         if notify:
             self._notify_agent_status(row, prev_status, status)
         self._follow_toast_status(row, status)
-        css_class = "done" if status in ("done", "exited") else status
+        css_class = ("done" if status in ("done", "exited")
+                     else self._AGENT_CSS.get(status, status))
         tips = {
             "working": "▶ Working",
             "idle": "⏸ Idle — waiting for prompt",
             "blocked": "? Needs input / approval",
             "ready": "✓ Done — open tab to review",
+            "background": "↻ Replied — sub-agents still running",
             "exited": "✕ Process exited",
             "done": "✕ Process exited",
             "unknown": "Status unknown",
@@ -8902,8 +8970,8 @@ if (data !== null) {{
             img.set_no_show_all(True)
             img.hide()
             gctx = glyph.get_style_context()
-            for s in ("working", "blocked", "idle", "ready", "done", "exited",
-                      "unknown"):
+            for s in ("working", "blocked", "idle", "ready", "subagents",
+                      "done", "exited", "unknown"):
                 gctx.remove_class(s)
             gctx.add_class(css_class)
             glyph.set_markup(
@@ -8919,8 +8987,8 @@ if (data !== null) {{
                 glyph.set_no_show_all(True)
                 glyph.hide()
             ctx = img.get_style_context()
-            for s in ("working", "blocked", "idle", "ready", "done", "exited",
-                      "unknown"):
+            for s in ("working", "blocked", "idle", "ready", "subagents",
+                      "done", "exited", "unknown"):
                 ctx.remove_class(s)
             ctx.add_class(css_class)
             icon = self._agent_status_icon_name(
@@ -15472,8 +15540,9 @@ if (data !== null) {{
             label="Notify me when an agent finishes or needs input")
         ai_notify.set_active(bool(s.get("ai_notify", True)))
         ai_notify.set_tooltip_text(
-            "A desktop popup when an AI tab goes from working to done or "
-            "to needs-input, with a button that switches to it. Nothing "
+            "A desktop popup when an AI tab goes from working to done, "
+            "to needs-input, or to replied with sub-agents still running, "
+            "with a button that switches to it. Nothing "
             "pops for the tab you are looking at. Default is on.")
         urg_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         urg_lbl = Gtk.Label(label="Notification urgency:", xalign=0)

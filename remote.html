@@ -149,6 +149,7 @@
   .badge { font-size: 12px; border-radius: 6px; padding: 2px 7px; flex: none; }
   .s-blocked { background: var(--red); color: #111; }
   .s-ready { background: var(--green); color: #111; }
+  .s-background { background: var(--purple); color: #111; }
   .s-working { background: var(--blue); color: #111; }
   .s-idle, .s-unknown { background: var(--line); color: var(--dim); }
   .s-exited { background: transparent; color: var(--dim); border: 1px solid var(--line); }
@@ -247,7 +248,7 @@
 
 <script>
 const KIND = { ai: "AI", shell: ">_", serial: "⌁", note: "≡", command: "▶", tmux: "▦", connect: "⇄", other: "·" };
-const ORDER = { blocked: 0, ready: 1, working: 2, idle: 3, unknown: 4, exited: 5 };
+const ORDER = { blocked: 0, ready: 1, background: 2, working: 3, idle: 4, unknown: 5, exited: 6 };
 const $ = (id) => document.getElementById(id);
 
 let openGroups = null, lastOk = 0, live = false, es = null, lastSnap = null;
@@ -361,8 +362,8 @@ function show(snap, how) {
   checked(how);
 }
 
-// Laptop only: a browser notice when an AI tab goes from working to ready
-// or blocked. While it is on, the page keeps listening when hidden.
+// Laptop only: a browser notice when an AI tab goes from working (or
+// background, sub-agents still running) to ready or blocked. While it is on, the page keeps listening when hidden.
 const NOTE_OK = "Notification" in window && matchMedia("(pointer: fine)").matches;
 let noteOn = false, lastStatus = null;
 try { noteOn = NOTE_OK && Notification.permission === "granted" && localStorage.getItem("tabit-notify") === "1"; } catch (e) {}
@@ -370,7 +371,8 @@ function notifyChanges(snap) {
   const was = lastStatus;
   lastStatus = Object.fromEntries(snap.tabs.map((t) => [t.id, t.ai_status]));
   if (noteOn && was) for (const t of snap.tabs) {
-    if (was[t.id] === "working" && (t.ai_status === "ready" || t.ai_status === "blocked")) {
+    if ((was[t.id] === "working" || was[t.id] === "background")
+        && (t.ai_status === "ready" || t.ai_status === "blocked")) {
       try {           // permission taken back: no notice, but the list still updates
         const n = new Notification(`${t.title || "AI tab"}: ${t.ai_status}`, { body: t.sub || "", tag: `tabit-${t.id}` });
         n.onclick = () => { window.focus(); openTab(t.id); n.close(); };

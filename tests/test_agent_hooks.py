@@ -96,6 +96,57 @@ class TestHookCommand(unittest.TestCase):
             self.run_hook(event, {"transcript_path": self.tx})
             self.assertEqual(self.state()[0], want, event)
 
+    # Claude Code 2.1.301: Stop lists the background tasks still running,
+    # and every event from a sub-agent carries its agent_id
+    RUNNING = [{"id": "a1", "type": "subagent", "status": "running",
+                "description": "x", "agent_type": "general-purpose"}]
+
+    def test_stop_with_a_subagent_running_is_background(self):
+        for event in ("Stop", "StopFailure"):
+            self.run_hook(event, {"transcript_path": self.tx,
+                                  "background_tasks": self.RUNNING})
+            self.assertEqual(self.state()[0], "background", event)
+
+    def test_stop_with_no_subagent_running_is_idle(self):
+        shell = [{"id": "b1", "type": "shell", "status": "running"}]
+        for tasks in ([], shell):
+            self.run_hook("Stop", {"transcript_path": self.tx, "background_tasks": tasks})
+            self.assertEqual(self.state()[0], "idle", tasks)
+
+    def test_subagent_tool_use_leaves_the_state(self):
+        self.run_hook("Stop", {"transcript_path": self.tx, "background_tasks": self.RUNNING})
+        for event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
+            self.run_hook(event, {"transcript_path": self.tx, "tool_name": "Bash",
+                                  "agent_id": "a1"})
+            self.assertEqual(self.state()[0], "background", event)
+
+    def test_subagent_asks_then_goes_back(self):
+        for before, event, payload in (
+                ("background", "Stop", {"background_tasks": self.RUNNING}),
+                ("working", "UserPromptSubmit", {})):
+            self.run_hook(event, {"transcript_path": self.tx, **payload})
+            self.run_hook("PermissionRequest", {"transcript_path": self.tx, "agent_id": "a1"})
+            self.assertEqual(self.state()[0], "blocked", before)
+            self.run_hook("PostToolUse", {"transcript_path": self.tx, "agent_id": "a1"})
+            self.assertEqual(self.state()[0], before)
+
+    def test_another_subagent_does_not_answer(self):
+        self.run_hook("Stop", {"transcript_path": self.tx, "background_tasks": self.RUNNING})
+        self.run_hook("PermissionRequest", {"transcript_path": self.tx, "agent_id": "a1"})
+        self.run_hook("PostToolUse", {"transcript_path": self.tx, "agent_id": "a2"})
+        self.assertEqual(self.state()[0], "blocked")
+        self.run_hook("PostToolUse", {"transcript_path": self.tx, "agent_id": "a1"})
+        self.assertEqual(self.state()[0], "background")
+
+    def test_subagent_asks_with_no_state_yet(self):
+        self.run_hook("PermissionRequest", {"transcript_path": self.tx, "agent_id": "a1"})
+        self.assertEqual(self.state()[:5:3], ["blocked", "background"])
+
+    def test_subagent_does_not_undo_the_main_agent_asking(self):
+        self.run_hook("PermissionRequest", {"transcript_path": self.tx})
+        self.run_hook("PostToolUse", {"transcript_path": self.tx, "agent_id": "a1"})
+        self.assertEqual(self.state()[0], "blocked")
+
     def test_no_key_writes_nothing(self):
         self.run_hook("Stop", {"transcript_path": self.tx}, env={"TABIT_AGENT": ""})
         self.assertEqual(os.listdir(self.dir), ["s.jsonl"])
@@ -129,9 +180,20 @@ class TestHookRaw(unittest.TestCase):
         self.assertIsNone(self.raw())
 
     def test_plain_states(self):
-        for s in ("working", "blocked", "idle"):
+        for s in ("working", "blocked", "idle", "background"):
             self.write(s)
             self.assertEqual(self.raw(), s)
+
+    def test_esc_after_background_is_idle(self):
+        # the sub-agents are done, claude went on and was stopped: no hook
+        marker = b'{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}\n'
+        self.write("background", after=marker)
+        self.assertEqual(self.raw(), "idle")
+
+    def test_esc_before_background_does_not_count(self):
+        marker = b'{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}\n'
+        self.write("background", before=marker)
+        self.assertEqual(self.raw(), "background")
 
     def test_esc_after_the_event_is_idle(self):
         marker = b'{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}\n'
@@ -171,12 +233,21 @@ class TestHookBeatsScreen(unittest.TestCase):
     ASKING = ("● Bash(mkdir newdir)\n  ⎿  Waiting…\n Do you want to proceed?\n"
               " ❯ 1. Yes\n   2. No\n")
     QUIET = "\n" + FOOT.format("Write an essay.")
+    # Claude Code 2.1.301: the permission dialog, as a sub-agent's shows too
+    DIALOG = ("● Bash(touch /tmp/t)\n  ⎿  Waiting…\n\n Bash command\n  touch /tmp/t\n"
+              " Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and always allow access"
+              " to /tmp from this project\n   3. No\n\n Esc to cancel · Tab to amend\n")
+    # idle screens a loose "blocked" pattern took for a question
+    NOT_ASKING = (
+        "\n" + FOOT.replace("bypass permissions on", "accept edits on").format(""),
+        "● Two agents still run. Do you want to merge once they finish?\n\n"
+        + FOOT.format(""))
     # v2.1.301 drops the busy line while the reply text streams in
     STREAMING = ("● The Cat\n\n  One\n\n  At the end of the lane, an old bookshop.\n\n\n"
                  + FOOT.format(""))
 
     def run_update(self, state, screen, quiet_for=0.0, event_age=10.0, pty_age=None,
-                   scrolled=False, ended=False):
+                   scrolled=False, ended=False, back=""):
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
         old = tabit.AGENT_HOOK_DIR
@@ -184,7 +255,7 @@ class TestHookBeatsScreen(unittest.TestCase):
         self.addCleanup(setattr, tabit, "AGENT_HOOK_DIR", old)
         path = os.path.join(d.name, "k1")
         with open(path, "w") as f:
-            f.write(f"{state}\n\n0\n")
+            f.write(f"{state}\n\n0\n{back}\n")
         t = time.time() - event_age
         os.utime(path, (t, t))
         import agent_status as as_
@@ -220,6 +291,28 @@ class TestHookBeatsScreen(unittest.TestCase):
 
     def test_idle_does_not_read_the_screen(self):
         self.assertEqual(self.run_update("idle", self.BUSY), ("idle", False))
+
+    def test_background_with_nobody_asking(self):
+        for screen in (self.QUIET,) + self.NOT_ASKING:
+            self.assertEqual(self.run_update("background", screen)[0], "background", screen)
+
+    def test_background_while_a_subagent_asks_is_blocked(self):
+        # Stop does not know a sub-agent is asking; the screen does
+        self.assertEqual(self.run_update("background", self.DIALOG)[0], "blocked")
+
+    def test_subagent_answered_goes_back(self):
+        # approved or denied, the question is gone from the screen
+        for screen in (self.QUIET,) + self.NOT_ASKING:
+            self.assertEqual(self.run_update(
+                "blocked", screen, back="background")[0], "background", screen)
+
+    def test_subagent_still_asking_stays_blocked(self):
+        self.assertEqual(self.run_update(
+            "blocked", self.DIALOG, back="background")[0], "blocked")
+
+    def test_main_agent_asking_needs_no_question_on_screen(self):
+        # its own question ends with a hook; nothing to go back to
+        self.assertEqual(self.run_update("blocked", self.QUIET)[0], "blocked")
 
     def test_blocked_while_claude_asks(self):
         self.assertEqual(self.run_update("blocked", self.ASKING)[0], "blocked")

@@ -37,7 +37,8 @@ Native GTK + VTE. No Electron, no pip. One install script.
 Then every tab works the same way:
 
 - **Colour groups**: one colour per project; collapse what you are not using.
-- **Status at a glance**: an AI tab shows ▶ working, ❚❚ idle, ? needs you, ✔ ready.
+- **Status at a glance**: an AI tab shows ▶ working, ❚❚ idle, ? needs you, ✔ ready,
+  ↻ replied with sub-agents still running.
   A popup says when an agent finishes or wants you.
 - **Two side by side**: pin any tab to a right pane.
 - **Remembered**: the next start brings back the same tabs. tmux-backed agents
