@@ -1754,28 +1754,46 @@ def _claude_hooks_settings(hook_dir):
             e["matcher"] = matcher
         return [e]
     # every event from a sub-agent carries its agent_id; the state is the
-    # main agent's, so a sub-agent only changes it to ask and to go back
+    # main agent's, so a sub-agent only changes it to ask and to go back.
+    # who: the sub-agents asking now, back: the state to return to then.
     sub = '*\'"agent_id":"\'*'
     now = (f'cur=; back=; who=; {{ IFS= read -r cur; read -r _; read -r _; '
            f'IFS= read -r back; IFS= read -r who; }} 2>/dev/null <{d}/"$k"; ')
     aid = 'a=$(printf %s "$p" | sed -n \'s/.*"agent_id":"\\([^"]*\\)".*/\\1/p\'); '
+    # while a sub-agent asks, the main agent's events change only where
+    # to go back to: its question is still on screen
+    keep = ('if [ "$cur" = blocked ] && [ -n "$who" ]; then '
+            'if [ "$s" != blocked ]; then back=$s; fi; '
+            's=blocked; b=$back; w=$who; fi; ')
     # a question or a plan waits for the user like a permission does; a
     # sub-agent cannot ask either way
-    ask = (f'case "$p" in {sub}) exit 0;; esac; '
+    ask = (now + f'case "$p" in {sub}) exit 0;; esac; '
            's=working; case "$p" in *\'"tool_name":"AskUserQuestion"\'*'
-           '|*\'"tool_name":"ExitPlanMode"\'*) s=blocked;; esac; ')
+           '|*\'"tool_name":"ExitPlanMode"\'*) s=blocked;; esac; ' + keep)
+    # a sub-agent that asked goes on: it no longer asks, and when none
+    # does, back to where it was
     done = now + ('s=working; case "$p" in ' + sub + ') ' + aid +
-                  '[ "$cur" = blocked ] && [ -n "$back" ] && [ "$a" = "$who" ] '
-                  '|| exit 0; s=$back;; esac; ')
-    # the main agent's own question has nothing to go back to
-    asks = now + ('s=blocked; case "$p" in ' + sub + ') ' + aid + 'w=$a; '
-                  'b=${cur:-background}; [ "$cur" = blocked ] && b=$back;; esac; ')
+                  'case " $who " in *" $a "*) ;; *) exit 0;; esac; '
+                  '[ "$cur" = blocked ] || exit 0; '
+                  'w=; for x in $who; do [ "$x" = "$a" ] || w="$w $x"; done; '
+                  'w=${w# }; s=blocked; b=$back; '
+                  'if [ -z "$w" ]; then s=$back; b=; fi; '
+                  'if [ -z "$s" ]; then s=blocked; fi;; '
+                  '*) ' + keep + ';; esac; ')
+    # asks: a sub-agent joins those asking; the main agent's own question
+    # has nothing to go back to
+    asks = now + ('s=blocked; case "$p" in ' + sub + ') ' + aid +
+                  'if [ "$cur" = blocked ] && [ -n "$who" ]; then b=$back; '
+                  'case " $who " in *" $a "*) w=$who;; *) w="$who $a";; esac; '
+                  'else b=${cur:-background}; w=$a; fi;; '
+                  '*) ' + keep + ';; esac; ')
     # the turn is over, but claude goes on by itself once its background
     # sub-agents are done
-    stop = ('s=idle; case "$p" in *\'"type":"subagent","status":"running"\'*) '
-            's=background;; esac; ')
+    stop = now + ('s=idle; case "$p" in *\'"type":"subagent","status":"running"\'*) '
+                  's=background;; esac; ' + keep)
     return {"hooks": {
-        # not "compact": claude compacts in the middle of a turn
+        # not "compact": claude compacts in the middle of a turn. These two
+        # start afresh: no question can be up when a prompt was typed
         "SessionStart": ev("s=idle; ", "startup|resume|clear"),
         "UserPromptSubmit": ev("s=working; "),
         "PreToolUse": ev(ask, "*"),
@@ -6792,6 +6810,21 @@ if (data !== null) {{
             return False
         return out.strip() == "1"
 
+    def _agent_hook_screen_says(self, row, what, seen):
+        """seen, the screen's word on a sub-agent's question, unless the
+        tab is scrolled up and shows old lines. tmux is asked once per hook
+        event: a denied question leaves the state blocked until the next
+        one, and this runs on every look."""
+        if not seen:
+            return False
+        mtime = getattr(row, "_agent_hook_mtime", 0)
+        if getattr(row, "_agent_hook_seen", None) == (what, mtime):
+            return True
+        if self._agent_hook_scrolled(row):
+            return False
+        row._agent_hook_seen = (what, mtime)
+        return True
+
     def _agent_note_interrupt(self, row):
         """Esc or Ctrl+C went to this tab. Not when a tmux tab is scrolled
         up: the key then goes to tmux, not to claude."""
@@ -6861,14 +6894,15 @@ if (data !== null) {{
             # is back (it is not on screen while claude asks)
             hook_raw = "working"
         elif (hook_raw == "blocked" and getattr(row, "_agent_hook_back", "")
-                and as_ is not None and not as_.dialog_open(text)
-                and not self._agent_hook_scrolled(row)):
+                and as_ is not None and self._agent_hook_screen_says(
+                    row, "answered", not as_.dialog_open(text))):
             # a sub-agent's question is gone from the screen: approved or
             # denied, and No runs no hook
             hook_raw = row._agent_hook_back
         elif (hook_raw == "background" and as_ is not None
-                and as_.dialog_open(text) and not self._agent_hook_scrolled(row)):
-            # a sub-agent asks; the Stop that came after it did not know
+                and self._agent_hook_screen_says(
+                    row, "asking", as_.dialog_open(text))):
+            # a sub-agent asks; a Stop from an older hooks file did not know
             hook_raw = "blocked"
         if hook_raw == "working" and not self._agent_hook_still_busy(
                 row, text, now):

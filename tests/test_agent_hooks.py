@@ -68,7 +68,8 @@ class TestHookCommand(unittest.TestCase):
         cmd = self.hooks[event][0]["hooks"][0]["command"]
         e = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
         e.update(env or {"TABIT_AGENT": "k1"})
-        r = subprocess.run(["/bin/sh", "-c", cmd], input=json.dumps(
+        # dash where it is there: the /bin/sh of most systems, and stricter
+        r = subprocess.run([shutil.which("dash") or "/bin/sh", "-c", cmd], input=json.dumps(
             payload, separators=(",", ":")), text=True, env=e, timeout=10)
         self.assertEqual(r.returncode, 0)
 
@@ -146,6 +147,55 @@ class TestHookCommand(unittest.TestCase):
         self.run_hook("PermissionRequest", {"transcript_path": self.tx})
         self.run_hook("PostToolUse", {"transcript_path": self.tx, "agent_id": "a1"})
         self.assertEqual(self.state()[0], "blocked")
+
+    def ask(self, agent=None):
+        self.run_hook("PermissionRequest", {"transcript_path": self.tx,
+                                            **({"agent_id": agent} if agent else {})})
+
+    def tool_end(self, agent=None):
+        self.run_hook("PostToolUse", {"transcript_path": self.tx,
+                                      **({"agent_id": agent} if agent else {})})
+
+    def test_stop_keeps_a_subagent_asking(self):
+        self.run_hook("UserPromptSubmit", {"transcript_path": self.tx})
+        self.ask("a1")
+        self.run_hook("Stop", {"transcript_path": self.tx, "background_tasks": self.RUNNING})
+        self.assertEqual(self.state()[0:5:3] + [self.state()[4]],
+                         ["blocked", "background", "a1"])
+        self.tool_end("a1")
+        self.assertEqual(self.state()[0], "background")
+
+    def test_two_subagents_ask_at_once(self):
+        self.run_hook("Stop", {"transcript_path": self.tx, "background_tasks": self.RUNNING})
+        self.ask("a1")
+        self.ask("a2")
+        self.assertEqual(self.state()[4], "a1 a2")
+        self.tool_end("a2")
+        self.assertEqual((self.state()[0], self.state()[4]), ("blocked", "a1"))
+        self.tool_end("a1")
+        self.assertEqual(self.state()[0], "background")
+
+    def test_main_agent_works_on_while_a_subagent_asks(self):
+        self.run_hook("UserPromptSubmit", {"transcript_path": self.tx})
+        self.ask("a1")
+        self.tool_end()                 # the main agent's own tool
+        self.assertEqual(self.state()[0:5:3], ["blocked", "working"])
+        self.tool_end("a1")
+        self.assertEqual(self.state()[0], "working")
+
+    def test_main_and_subagent_both_ask(self):
+        self.run_hook("UserPromptSubmit", {"transcript_path": self.tx})
+        self.ask()                      # the main agent asks first
+        self.ask("a1")
+        self.tool_end("a1")             # the sub-agent is answered first
+        self.assertEqual(self.state()[0], "blocked")   # the main one still asks
+        self.tool_end()
+        self.assertEqual(self.state()[0], "working")
+
+    def test_a_typed_prompt_starts_afresh(self):
+        self.ask("a1")                  # denied: no tool end ever comes
+        self.run_hook("UserPromptSubmit", {"transcript_path": self.tx})
+        self.assertEqual(self.state()[0:5:3] + [self.state()[4]], ["working", "", ""])
 
     def test_no_key_writes_nothing(self):
         self.run_hook("Stop", {"transcript_path": self.tx}, env={"TABIT_AGENT": ""})
@@ -283,6 +333,7 @@ class TestHookBeatsScreen(unittest.TestCase):
             _agent_hook_raw=T._agent_hook_raw, _agent_hook_scrolled=lambda r: scrolled,
             _set_agent_status=lambda r, s: got.append(s))
         app._agent_hook_still_busy = lambda *a: T._agent_hook_still_busy(app, *a)
+        app._agent_hook_screen_says = lambda *a: T._agent_hook_screen_says(app, *a)
         T._update_agent_status(app, row)
         return got[-1], bool(read)
 
@@ -353,6 +404,32 @@ class TestHookBeatsScreen(unittest.TestCase):
         self.assertEqual(self.run_update("working", self.BUSY, esc_age=5)[0], "working")
         self.assertEqual(self.run_update(
             "working", self.QUIET, esc_age=5, busy_age=1)[0], "working")
+
+
+class TestScreenSaysOncePerEvent(unittest.TestCase):
+    """tmux is asked once per hook event, not on every look."""
+
+    def test_tmux_asked_once(self):
+        calls = []
+        row = types.SimpleNamespace(_agent_hook_mtime=5.0)
+        app = types.SimpleNamespace(_agent_hook_scrolled=lambda r: calls.append(1) or False)
+        for _ in range(5):
+            self.assertTrue(T._agent_hook_screen_says(app, row, "answered", True))
+        self.assertEqual(len(calls), 1)
+        row._agent_hook_mtime = 6.0     # a new hook event asks again
+        T._agent_hook_screen_says(app, row, "answered", True)
+        self.assertEqual(len(calls), 2)
+
+    def test_screen_still_decides(self):
+        row = types.SimpleNamespace(_agent_hook_mtime=5.0)
+        app = types.SimpleNamespace(_agent_hook_scrolled=lambda r: False)
+        T._agent_hook_screen_says(app, row, "answered", True)
+        self.assertFalse(T._agent_hook_screen_says(app, row, "answered", False))
+
+    def test_scrolled_up_says_nothing(self):
+        row = types.SimpleNamespace(_agent_hook_mtime=5.0)
+        app = types.SimpleNamespace(_agent_hook_scrolled=lambda r: True)
+        self.assertFalse(T._agent_hook_screen_says(app, row, "asking", True))
 
 
 class TestInterruptKey(unittest.TestCase):
