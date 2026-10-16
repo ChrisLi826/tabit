@@ -478,6 +478,50 @@ def _get_tabit_repo_dir():
         return home_tabit
     return None
 
+def _update_pull(repo, log):
+    """Bring a tabit checkout up to origin/main, keeping the user's own work.
+
+    A plain `git pull` stops at a branch with commits of its own
+    ("divergent branches"). So: fast-forward when that is all it takes;
+    put commits that exist only here on top of the new main; merge when
+    some are already pushed somewhere, since a rebase would rewrite them.
+    Uncommitted changes are stashed and put back. On a clash the folder is
+    left as it was and the error says what to run.
+    """
+    def git(*args, quiet=False):
+        p = subprocess.run(["git", *args], cwd=repo, text=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if not quiet:
+            log("$ git " + " ".join(args))
+            for line in p.stdout.splitlines():
+                if line.strip():
+                    log(line.rstrip())
+        return p.returncode, p.stdout.split()
+
+    rc, _out = git("fetch", "origin", "main")
+    if rc:
+        raise RuntimeError(f"git fetch failed (exit {rc}): is the network up?")
+    if git("merge", "--ff-only", "FETCH_HEAD")[0] == 0:
+        return
+    mine = git("rev-list", "FETCH_HEAD..HEAD", quiet=True)[1]
+    local = git("rev-list", "FETCH_HEAD..HEAD", "--not", "--remotes",
+                quiet=True)[1]
+    if mine and mine == local:
+        log("Your own commits go on top of the new version.")
+        rc, _out = git("rebase", "--autostash", "FETCH_HEAD")
+        undo = ("rebase", "--abort")
+    else:
+        rc, _out = git("merge", "--no-edit", "--autostash", "FETCH_HEAD")
+        undo = ("merge", "--abort")
+    if rc == 0:
+        return
+    git(*undo)
+    raise RuntimeError(
+        f"your own changes in {repo} clash with the new version, so "
+        f"nothing was changed. To update by hand: cd {repo} && "
+        "git pull --rebase origin main")
+
+
 def _get_current_version():
     """Version of the *running* binary.
 
@@ -15039,24 +15083,10 @@ if (data !== null) {{
                     GLib.idle_add(lambda: progress.set_text("35% - git pull"))
                     GLib.idle_add(
                         append_log,
-                        f">>> git pull origin main (in {tabit_dir})")
+                        f">>> update {tabit_dir} from origin/main")
 
-                    p1 = subprocess.Popen(
-                        ["git", "pull", "origin", "main"],
-                        cwd=tabit_dir,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                    )
-                    for line in p1.stdout:
-                        line_str = line.strip()
-                        if line_str:
-                            GLib.idle_add(append_log, line_str)
-                    p1.wait()
-                    if p1.returncode != 0:
-                        raise RuntimeError(
-                            "git pull failed with exit code "
-                            + str(p1.returncode))
+                    _update_pull(
+                        tabit_dir, lambda m: GLib.idle_add(append_log, m))
                 else:
                     # Step 1b: no checkout (e.g. ~/.local/bin install) —
                     # download the release source tarball and install from it.
