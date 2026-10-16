@@ -155,7 +155,7 @@ class TestUpdatePull(unittest.TestCase):
         git(self.me, "checkout", "-q", "-b", "work")
         here = git(self.me, "rev-parse", "HEAD")
         self.new_upstream()
-        with self.assertRaises(RuntimeError) as cm:
+        with self.assertRaises(tabit._LeaveCheckout) as cm:
             self.pull()
         self.assertIn("on branch work", str(cm.exception))
         self.assertEqual(git(self.me, "rev-parse", "HEAD"), here)
@@ -163,7 +163,7 @@ class TestUpdatePull(unittest.TestCase):
     def test_detached_head_is_left_alone(self):
         git(self.me, "checkout", "-q", "--detach")
         self.new_upstream()
-        with self.assertRaises(RuntimeError) as cm:
+        with self.assertRaises(tabit._LeaveCheckout) as cm:
             self.pull()
         self.assertIn("on no branch", str(cm.exception))
 
@@ -176,7 +176,7 @@ class TestUpdatePull(unittest.TestCase):
         git(self.me, "fetch", "-q", "origin")
         subprocess.run(["git", "rebase", "origin/main"], cwd=self.me, capture_output=True)
         self.write(self.me, "a.txt", "resolved by hand\n")
-        with self.assertRaises(RuntimeError) as cm:
+        with self.assertRaises(tabit._LeaveCheckout) as cm:
             self.pull()
         self.assertIn("middle of a git operation", str(cm.exception))
         self.assertTrue(os.path.isdir(os.path.join(self.me, ".git", "rebase-merge")))
@@ -193,6 +193,41 @@ class TestUpdatePull(unittest.TestCase):
         with self.assertRaises(RuntimeError) as cm:
             self.pull()
         self.assertIn("git pull --no-rebase origin main", str(cm.exception))
+
+    def source(self, repo):
+        fetched = []
+
+        def fetch(ver, log):
+            fetched.append(ver)
+            return "/tmp/release"
+        got = tabit._update_source_dir(repo, "v9.9.9", self.log.append,
+                                       lambda *_a: None, fetch)
+        return got, fetched
+
+    def test_source_is_the_checkout_on_main(self):
+        self.new_upstream()
+        self.assertEqual(self.source(self.me), (self.me, []))
+
+    def test_source_is_the_release_for_a_work_branch(self):
+        # the developer's own branch: left as it is, the release installs
+        git(self.me, "checkout", "-q", "-b", "work")
+        here = git(self.me, "rev-parse", "HEAD")
+        self.new_upstream()
+        self.assertEqual(self.source(self.me), ("/tmp/release", ["v9.9.9"]))
+        self.assertEqual(git(self.me, "rev-parse", "HEAD"), here)
+        self.assertEqual(git(self.me, "rev-parse", "--abbrev-ref", "HEAD"), "work")
+
+    def test_source_is_the_release_with_no_checkout(self):
+        self.assertEqual(self.source(None), ("/tmp/release", ["v9.9.9"]))
+
+    def test_a_clash_is_not_answered_with_the_release(self):
+        # the user's own changes are involved: stop and say so
+        self.write(self.me, "a.txt", "mine\n")
+        self.commit(self.me, "mine")
+        self.write(self.up, "a.txt", "theirs\n")
+        self.commit(self.up, "theirs")
+        with self.assertRaises(RuntimeError):
+            self.source(self.me)
 
     def test_no_network(self):
         git(self.me, "remote", "set-url", "origin", "/nonexistent/repo")
