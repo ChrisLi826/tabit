@@ -9,16 +9,23 @@ A **Claude** tab opened by tabit runs `claude --settings
 does: a prompt or a tool is working, a permission, a question or a plan is
 blocked, the end of a turn is done. A turn that ends while sub-agents it
 started still run is **background** (`↻`): Claude goes on by itself once
-they finish, and is done after that. When you press Esc or say No, no hook
-runs, so tabit then reads the session's transcript for the interrupt. The
-hooks add to your own Claude settings and replace none of them. Claude
+they finish, and is done after that.
+
+Esc, Ctrl+C and No run no hook. For those tabit reads the session's
+transcript for the interrupt, and after an Esc or Ctrl+C pressed in the
+tab (in tabit, or on the Remote page) the turn is over once Claude's busy
+line has gone. A pause while a reply streams in is not the end: without
+one of those keys, only a hook ends a turn. An Esc typed into the same
+Claude from somewhere else, such as another terminal attached to its tmux
+session, is not seen, and the tab shows working until the next prompt.
+
+The hooks add to your own Claude settings and replace none of them. Claude
 reads them once, when it starts: after an update that changes them, a
-Claude tab that was already running keeps the old ones until you open it
-again.
+Claude that was already running keeps the old ones until it starts again.
 
 Every other tab is read from its screen: codex, grok and other CLIs, and
-a Claude tab opened before this release. Open a new one, or change the old
-one in its rename popover, to give it the hooks.
+a Claude tab opened before this release. Open a new Claude tab to give it
+the hooks.
 
 ## The popup
 
