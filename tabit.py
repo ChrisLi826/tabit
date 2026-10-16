@@ -395,10 +395,10 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.0.3"
+APP_VERSION = "v2.0.4"
 # Taiwan main dish of the major version + a fresh snack or drink, picked at
 # release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
-APP_CODENAME = "Danzai Noodles + Roasted Sweet Potato"
+APP_CODENAME = "Danzai Noodles + Sun Cake"
 _VERSION_CODENAME_SEP = " · "
 
 
@@ -460,23 +460,56 @@ def _release_display_name(tag, name=None):
     return tag or name
 
 
-def _get_tabit_repo_dir():
-    """Return a local git checkout of tabit, or None.
+# install.sh writes the folder it installed from here
+SOURCE_DIR_FILE = os.path.expanduser("~/.local/share/tabit/source-dir")
 
-    install.sh copies tabit into ~/.local/bin with no .git next to it.
-    Update Now must fall back to a release tarball in that case.
+
+def _get_tabit_repo_dir(running=None):
+    """Return the git checkout this tabit was installed from, or None.
+
+    install.sh copies tabit into ~/.local/bin with no .git next to it, and
+    records the folder it ran from. A release download is no checkout:
+    Update Now then installs the release again. An install from before
+    that record existed is guessed to come from ~/tabit.
     """
+    def checkout(d):
+        return bool(d) and os.path.exists(os.path.join(d, ".git"))
+
+    here = os.path.dirname(os.path.realpath(os.path.abspath(running or __file__)))
+    if checkout(here):
+        return here                     # run straight from a checkout
     try:
-        real_file = os.path.realpath(os.path.abspath(__file__))
-        repo_dir = os.path.dirname(real_file)
-        if os.path.isdir(os.path.join(repo_dir, ".git")):
-            return repo_dir
-    except Exception:
-        pass
-    home_tabit = os.path.expanduser("~/tabit")
-    if os.path.isdir(os.path.join(home_tabit, ".git")):
-        return home_tabit
-    return None
+        with open(SOURCE_DIR_FILE) as f:
+            src = f.read().strip()
+    except OSError:
+        src = None
+    if src is not None:
+        return src if checkout(src) else None
+    guess = os.path.expanduser("~/tabit")
+    return guess if checkout(guess) else None
+
+class _LeaveCheckout(RuntimeError):
+    """The checkout is someone's work in progress: Update does not touch it."""
+
+
+def _update_source_dir(repo, ver, log, step, fetch):
+    """The folder to install from: the checkout brought up to origin/main,
+    or the release from GitHub when there is no checkout, or one that is
+    someone's work in progress (it is then left as it is)."""
+    if repo:
+        step("Pulling latest changes from GitHub…", "update the checkout")
+        log(f">>> update {repo} from origin/main")
+        try:
+            _update_pull(repo, log)
+            return repo
+        except _LeaveCheckout as e:
+            log(str(e))
+            log("The folder stays as it is; installing the release from "
+                "GitHub instead.")
+    step(f"Downloading {ver or 'release'}…", "download release")
+    log(">>> fetching release source from GitHub")
+    return fetch(ver, log)
+
 
 def _update_pull(repo, log):
     """Bring a tabit checkout up to origin/main, keeping the user's own work.
@@ -505,16 +538,12 @@ def _update_pull(repo, log):
                  "CHERRY_PICK_HEAD", "REVERT_HEAD"):
         rc, path = git("rev-parse", "--git-path", name, quiet=True)
         if not rc and path and os.path.exists(os.path.join(repo, " ".join(path))):
-            raise RuntimeError(
-                f"{repo} is in the middle of a git operation ({name}), so "
-                "Update leaves it alone. Finish it, or undo it with "
-                "git rebase --abort or git merge --abort, then Update again")
+            raise _LeaveCheckout(
+                f"{repo} is in the middle of a git operation ({name}).")
     rc, branch = git("symbolic-ref", "--short", "-q", "HEAD", quiet=True)
     if rc or branch != ["main"]:
         where = f"on branch {branch[0]}" if not rc and branch else "on no branch"
-        raise RuntimeError(
-            f"{repo} is {where}, not main, so Update leaves it alone. "
-            f"To update it: cd {repo} && git checkout main, then Update again")
+        raise _LeaveCheckout(f"{repo} is {where}, not main.")
     # all of origin, so --remotes below knows every branch pushed there
     rc, _out = git("fetch", "origin")
     if rc:
@@ -15227,6 +15256,8 @@ if (data !== null) {{
         box.pack_start(head, False, False, 0)
 
         status_lbl = Gtk.Label(label="Initializing update...", xalign=0)
+        status_lbl.set_line_wrap(True)
+        status_lbl.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
         box.pack_start(status_lbl, False, False, 0)
 
         progress = Gtk.ProgressBar()
@@ -15245,6 +15276,7 @@ if (data !== null) {{
         text_view.set_editable(False)
         text_view.set_cursor_visible(False)
         text_view.set_monospace(True)
+        text_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         buf = text_view.get_buffer()
 
         sc.add(text_view)
@@ -15270,37 +15302,18 @@ if (data !== null) {{
 
         def do_bg_update():
             try:
-                tabit_dir = _get_tabit_repo_dir()
-                if tabit_dir:
-                    # Step 1a: git pull when a local checkout exists
+                def step(text, short):
                     GLib.idle_add(lambda: status_lbl.set_markup(
-                        "<b>Step 1/2:</b> Pulling latest changes from GitHub..."))
+                        "<b>Step 1/2:</b> " + GLib.markup_escape_text(text)))
                     GLib.idle_add(lambda: progress.set_fraction(0.35))
-                    GLib.idle_add(lambda: progress.set_text("35% - git pull"))
-                    GLib.idle_add(
-                        append_log,
-                        f">>> update {tabit_dir} from origin/main")
+                    GLib.idle_add(lambda: progress.set_text("35% - " + short))
 
-                    _update_pull(
-                        tabit_dir, lambda m: GLib.idle_add(append_log, m))
-                else:
-                    # Step 1b: no checkout (e.g. ~/.local/bin install) —
-                    # download the release source tarball and install from it.
-                    ver = target_ver or ""
-                    GLib.idle_add(lambda: status_lbl.set_markup(
-                        f"<b>Step 1/2:</b> Downloading {ver or 'release'}…"))
-                    GLib.idle_add(lambda: progress.set_fraction(0.35))
-                    GLib.idle_add(lambda: progress.set_text(
-                        "35% - download release"))
-                    GLib.idle_add(
-                        append_log,
-                        ">>> no local git checkout; "
-                        "fetching release source from GitHub")
-
-                    def _sync_log(msg):
-                        GLib.idle_add(append_log, msg)
-
-                    tabit_dir = self._fetch_release_source(ver, _sync_log)
+                # Step 1: the checkout, or the release tarball when there is
+                # none (~/.local/bin install) or it is work in progress
+                tabit_dir = _update_source_dir(
+                    _get_tabit_repo_dir(), target_ver or "",
+                    lambda m: GLib.idle_add(append_log, m), step,
+                    self._fetch_release_source)
 
                 # Step 2: install.sh (sudo via GUI askpass when needed)
                 GLib.idle_add(lambda: status_lbl.set_markup(

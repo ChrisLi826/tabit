@@ -155,7 +155,7 @@ class TestUpdatePull(unittest.TestCase):
         git(self.me, "checkout", "-q", "-b", "work")
         here = git(self.me, "rev-parse", "HEAD")
         self.new_upstream()
-        with self.assertRaises(RuntimeError) as cm:
+        with self.assertRaises(tabit._LeaveCheckout) as cm:
             self.pull()
         self.assertIn("on branch work", str(cm.exception))
         self.assertEqual(git(self.me, "rev-parse", "HEAD"), here)
@@ -163,7 +163,7 @@ class TestUpdatePull(unittest.TestCase):
     def test_detached_head_is_left_alone(self):
         git(self.me, "checkout", "-q", "--detach")
         self.new_upstream()
-        with self.assertRaises(RuntimeError) as cm:
+        with self.assertRaises(tabit._LeaveCheckout) as cm:
             self.pull()
         self.assertIn("on no branch", str(cm.exception))
 
@@ -176,7 +176,7 @@ class TestUpdatePull(unittest.TestCase):
         git(self.me, "fetch", "-q", "origin")
         subprocess.run(["git", "rebase", "origin/main"], cwd=self.me, capture_output=True)
         self.write(self.me, "a.txt", "resolved by hand\n")
-        with self.assertRaises(RuntimeError) as cm:
+        with self.assertRaises(tabit._LeaveCheckout) as cm:
             self.pull()
         self.assertIn("middle of a git operation", str(cm.exception))
         self.assertTrue(os.path.isdir(os.path.join(self.me, ".git", "rebase-merge")))
@@ -194,6 +194,41 @@ class TestUpdatePull(unittest.TestCase):
             self.pull()
         self.assertIn("git pull --no-rebase origin main", str(cm.exception))
 
+    def source(self, repo):
+        fetched = []
+
+        def fetch(ver, log):
+            fetched.append(ver)
+            return "/tmp/release"
+        got = tabit._update_source_dir(repo, "v9.9.9", self.log.append,
+                                       lambda *_a: None, fetch)
+        return got, fetched
+
+    def test_source_is_the_checkout_on_main(self):
+        self.new_upstream()
+        self.assertEqual(self.source(self.me), (self.me, []))
+
+    def test_source_is_the_release_for_a_work_branch(self):
+        # the developer's own branch: left as it is, the release installs
+        git(self.me, "checkout", "-q", "-b", "work")
+        here = git(self.me, "rev-parse", "HEAD")
+        self.new_upstream()
+        self.assertEqual(self.source(self.me), ("/tmp/release", ["v9.9.9"]))
+        self.assertEqual(git(self.me, "rev-parse", "HEAD"), here)
+        self.assertEqual(git(self.me, "rev-parse", "--abbrev-ref", "HEAD"), "work")
+
+    def test_source_is_the_release_with_no_checkout(self):
+        self.assertEqual(self.source(None), ("/tmp/release", ["v9.9.9"]))
+
+    def test_a_clash_is_not_answered_with_the_release(self):
+        # the user's own changes are involved: stop and say so
+        self.write(self.me, "a.txt", "mine\n")
+        self.commit(self.me, "mine")
+        self.write(self.up, "a.txt", "theirs\n")
+        self.commit(self.up, "theirs")
+        with self.assertRaises(RuntimeError):
+            self.source(self.me)
+
     def test_no_network(self):
         git(self.me, "remote", "set-url", "origin", "/nonexistent/repo")
         with self.assertRaises(RuntimeError) as cm:
@@ -203,3 +238,61 @@ class TestUpdatePull(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRepoDir(unittest.TestCase):
+    """Update Now finds the checkout tabit was installed from, wherever it is."""
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.d = d.name
+        self.home = os.path.join(d.name, "home")
+        os.makedirs(self.home)
+        self.installed = os.path.join(self.home, ".local", "bin", "tabit")
+        os.makedirs(os.path.dirname(self.installed))
+        open(self.installed, "w").close()
+        self.record = os.path.join(self.home, ".local", "share", "tabit", "source-dir")
+        os.makedirs(os.path.dirname(self.record))
+        for name, value in (("SOURCE_DIR_FILE", self.record),):
+            old = getattr(tabit, name)
+            setattr(tabit, name, value)
+            self.addCleanup(setattr, tabit, name, old)
+        old_home = os.environ.get("HOME")
+        os.environ["HOME"] = self.home
+        self.addCleanup(os.environ.__setitem__, "HOME", old_home)
+
+    def checkout(self, *parts):
+        path = os.path.join(self.d, *parts)
+        os.makedirs(os.path.join(path, ".git"))
+        return path
+
+    def find(self):
+        return tabit._get_tabit_repo_dir(self.installed)
+
+    def test_the_recorded_folder_anywhere(self):
+        src = self.checkout("src", "my-tabit")
+        with open(self.record, "w") as f:
+            f.write(src + "\n")
+        self.assertEqual(self.find(), src)
+
+    def test_a_release_download_is_no_checkout(self):
+        self.checkout("home", "tabit")          # a dev folder that is not it
+        with open(self.record, "w") as f:
+            f.write(os.path.join(self.d, "cache", "tabit-2.0.3") + "\n")
+        self.assertIsNone(self.find())
+
+    def test_an_old_install_guesses_home_tabit(self):
+        guess = self.checkout("home", "tabit")
+        self.assertEqual(self.find(), guess)
+
+    def test_an_old_install_with_nothing_there(self):
+        self.assertIsNone(self.find())
+
+    def test_run_straight_from_a_checkout(self):
+        src = self.checkout("work", "tabit")
+        self.assertEqual(tabit._get_tabit_repo_dir(os.path.join(src, "tabit.py")), src)
+
+    def test_install_sh_records_its_folder(self):
+        with open(os.path.join(ROOT, "install.sh")) as f:
+            self.assertIn('pwd -P > "$HOME/.local/share/tabit/source-dir"', f.read())
