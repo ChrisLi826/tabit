@@ -49,6 +49,9 @@ install -m 755 sudo_askpass.py "$HOME/.local/share/tabit/sudo_askpass.py"
 rm -rf "$HOME/.local/share/tabit/agent-detection" "$HOME/.local/share/tabit/vendor"
 cp -a agent-detection "$HOME/.local/share/tabit/agent-detection"
 cp -a vendor "$HOME/.local/share/tabit/vendor"
+# where this copy came from, so Update Now finds the checkout wherever it
+# lives (a release download is no checkout, and is updated as a release)
+pwd -P > "$HOME/.local/share/tabit/source-dir"
 gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 
 # leftover from the pre-v2 window-tab version

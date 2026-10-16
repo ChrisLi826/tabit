@@ -460,23 +460,33 @@ def _release_display_name(tag, name=None):
     return tag or name
 
 
-def _get_tabit_repo_dir():
-    """Return a local git checkout of tabit, or None.
+# install.sh writes the folder it installed from here
+SOURCE_DIR_FILE = os.path.expanduser("~/.local/share/tabit/source-dir")
 
-    install.sh copies tabit into ~/.local/bin with no .git next to it.
-    Update Now must fall back to a release tarball in that case.
+
+def _get_tabit_repo_dir(running=None):
+    """Return the git checkout this tabit was installed from, or None.
+
+    install.sh copies tabit into ~/.local/bin with no .git next to it, and
+    records the folder it ran from. A release download is no checkout:
+    Update Now then installs the release again. An install from before
+    that record existed is guessed to come from ~/tabit.
     """
+    def checkout(d):
+        return bool(d) and os.path.exists(os.path.join(d, ".git"))
+
+    here = os.path.dirname(os.path.realpath(os.path.abspath(running or __file__)))
+    if checkout(here):
+        return here                     # run straight from a checkout
     try:
-        real_file = os.path.realpath(os.path.abspath(__file__))
-        repo_dir = os.path.dirname(real_file)
-        if os.path.isdir(os.path.join(repo_dir, ".git")):
-            return repo_dir
-    except Exception:
-        pass
-    home_tabit = os.path.expanduser("~/tabit")
-    if os.path.isdir(os.path.join(home_tabit, ".git")):
-        return home_tabit
-    return None
+        with open(SOURCE_DIR_FILE) as f:
+            src = f.read().strip()
+    except OSError:
+        src = None
+    if src is not None:
+        return src if checkout(src) else None
+    guess = os.path.expanduser("~/tabit")
+    return guess if checkout(guess) else None
 
 class _LeaveCheckout(RuntimeError):
     """The checkout is someone's work in progress: Update does not touch it."""

@@ -238,3 +238,61 @@ class TestUpdatePull(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRepoDir(unittest.TestCase):
+    """Update Now finds the checkout tabit was installed from, wherever it is."""
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.d = d.name
+        self.home = os.path.join(d.name, "home")
+        os.makedirs(self.home)
+        self.installed = os.path.join(self.home, ".local", "bin", "tabit")
+        os.makedirs(os.path.dirname(self.installed))
+        open(self.installed, "w").close()
+        self.record = os.path.join(self.home, ".local", "share", "tabit", "source-dir")
+        os.makedirs(os.path.dirname(self.record))
+        for name, value in (("SOURCE_DIR_FILE", self.record),):
+            old = getattr(tabit, name)
+            setattr(tabit, name, value)
+            self.addCleanup(setattr, tabit, name, old)
+        old_home = os.environ.get("HOME")
+        os.environ["HOME"] = self.home
+        self.addCleanup(os.environ.__setitem__, "HOME", old_home)
+
+    def checkout(self, *parts):
+        path = os.path.join(self.d, *parts)
+        os.makedirs(os.path.join(path, ".git"))
+        return path
+
+    def find(self):
+        return tabit._get_tabit_repo_dir(self.installed)
+
+    def test_the_recorded_folder_anywhere(self):
+        src = self.checkout("src", "my-tabit")
+        with open(self.record, "w") as f:
+            f.write(src + "\n")
+        self.assertEqual(self.find(), src)
+
+    def test_a_release_download_is_no_checkout(self):
+        self.checkout("home", "tabit")          # a dev folder that is not it
+        with open(self.record, "w") as f:
+            f.write(os.path.join(self.d, "cache", "tabit-2.0.3") + "\n")
+        self.assertIsNone(self.find())
+
+    def test_an_old_install_guesses_home_tabit(self):
+        guess = self.checkout("home", "tabit")
+        self.assertEqual(self.find(), guess)
+
+    def test_an_old_install_with_nothing_there(self):
+        self.assertIsNone(self.find())
+
+    def test_run_straight_from_a_checkout(self):
+        src = self.checkout("work", "tabit")
+        self.assertEqual(tabit._get_tabit_repo_dir(os.path.join(src, "tabit.py")), src)
+
+    def test_install_sh_records_its_folder(self):
+        with open(os.path.join(ROOT, "install.sh")) as f:
+            self.assertIn('pwd -P > "$HOME/.local/share/tabit/source-dir"', f.read())
