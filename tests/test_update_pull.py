@@ -167,6 +167,33 @@ class TestUpdatePull(unittest.TestCase):
             self.pull()
         self.assertIn("on no branch", str(cm.exception))
 
+    def test_rebase_in_progress_is_left_alone(self):
+        # a rebase stopped on a conflict, half resolved: never abort it
+        self.write(self.me, "a.txt", "mine\n")
+        self.commit(self.me, "mine")
+        self.write(self.up, "a.txt", "theirs\n")
+        self.commit(self.up, "theirs")
+        git(self.me, "fetch", "-q", "origin")
+        subprocess.run(["git", "rebase", "origin/main"], cwd=self.me, capture_output=True)
+        self.write(self.me, "a.txt", "resolved by hand\n")
+        with self.assertRaises(RuntimeError) as cm:
+            self.pull()
+        self.assertIn("middle of a git operation", str(cm.exception))
+        self.assertTrue(os.path.isdir(os.path.join(self.me, ".git", "rebase-merge")))
+        self.assertEqual(self.read("a.txt"), "resolved by hand\n")
+
+    def test_merge_path_says_merge_by_hand(self):
+        fork = os.path.join(os.path.dirname(self.up), "fork")
+        git(os.path.dirname(self.up), "init", "-q", "--bare", fork)
+        git(self.me, "remote", "add", "fork", fork)
+        self.write(self.me, "a.txt", "mine\n")
+        self.commit(self.me, "mine")
+        self.write(self.up, "a.txt", "theirs\n")
+        self.commit(self.up, "theirs")
+        with self.assertRaises(RuntimeError) as cm:
+            self.pull()
+        self.assertIn("git pull --no-rebase origin main", str(cm.exception))
+
     def test_no_network(self):
         git(self.me, "remote", "set-url", "origin", "/nonexistent/repo")
         with self.assertRaises(RuntimeError) as cm:

@@ -499,6 +499,16 @@ def _update_pull(repo, log):
                     log(line.rstrip())
         return p.returncode, p.stdout.split()
 
+    # a rebase, merge or cherry-pick left half done: aborting ours would
+    # throw away what was resolved so far
+    for name in ("rebase-merge", "rebase-apply", "MERGE_HEAD",
+                 "CHERRY_PICK_HEAD", "REVERT_HEAD"):
+        rc, path = git("rev-parse", "--git-path", name, quiet=True)
+        if not rc and path and os.path.exists(os.path.join(repo, " ".join(path))):
+            raise RuntimeError(
+                f"{repo} is in the middle of a git operation ({name}), so "
+                "Update leaves it alone. Finish it, or undo it with "
+                "git rebase --abort or git merge --abort, then Update again")
     rc, branch = git("symbolic-ref", "--short", "-q", "HEAD", quiet=True)
     if rc or branch != ["main"]:
         where = f"on branch {branch[0]}" if not rc and branch else "on no branch"
@@ -520,10 +530,10 @@ def _update_pull(repo, log):
     if mine and mine == local and only_origin:
         log("Your own commits go on top of the new version.")
         rc, _out = git("rebase", "--autostash", "origin/main")
-        undo = ("rebase", "--abort")
+        undo, by_hand = ("rebase", "--abort"), "--rebase"
     else:
         rc, _out = git("merge", "--no-edit", "--autostash", "origin/main")
-        undo = ("merge", "--abort")
+        undo, by_hand = ("merge", "--abort"), "--no-rebase"
     if rc == 0 and not git("diff", "--name-only", "--diff-filter=U",
                            quiet=True)[1]:
         return
@@ -538,7 +548,7 @@ def _update_pull(repo, log):
     raise RuntimeError(
         f"your own changes in {repo} clash with the new version, so "
         f"nothing was changed. To update by hand: cd {repo} && "
-        "git pull --rebase origin main")
+        f"git pull {by_hand} origin main")
 
 
 def _get_current_version():
@@ -6837,12 +6847,28 @@ if (data !== null) {{
     def _on_ai_term_key(self, _term, event, row):
         ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
         shift = event.state & Gdk.ModifierType.SHIFT_MASK
+        if event.state & Gdk.ModifierType.MOD1_MASK:
+            return False        # Alt+Esc, Alt+Ctrl+C: not an interrupt
         # Ctrl+Shift+C is copy and never reaches claude; C as well as c
-        # for Caps Lock
+        # for Caps Lock, and the key's first layout for a Cyrillic or
+        # other non-Latin one
         if event.keyval == Gdk.KEY_Escape or (
-                ctrl and not shift and event.keyval in (Gdk.KEY_c, Gdk.KEY_C)):
+                ctrl and not shift
+                and self._key_in_first_layout(event) in (Gdk.KEY_c, Gdk.KEY_C)):
             self._agent_note_interrupt(row)
         return False
+
+    @staticmethod
+    def _key_in_first_layout(event):
+        """The keyval of this key in the first keyboard layout."""
+        try:
+            ok, keyval, _g, _l, _c = Gdk.Keymap.get_default().translate_keyboard_state(
+                event.hardware_keycode, Gdk.ModifierType(0), 0)
+            if ok:
+                return keyval
+        except (AttributeError, TypeError):
+            pass
+        return event.keyval
 
     def _agent_hook_still_busy(self, row, text, now):
         """Only a hook ends a turn, and a reply streaming in shows no busy
@@ -6909,6 +6935,12 @@ if (data !== null) {{
                 and self._agent_hook_screen_says(
                     row, "asking", as_.dialog_open(text))):
             # a sub-agent asks; a Stop from an older hooks file did not know
+            hook_raw = "blocked"
+        if (hook_raw == "working" and as_ is not None
+                and self._agent_hook_screen_says(
+                    row, "asking", as_.dialog_open(text))):
+            # claude asks, but another tool of the turn ended after the
+            # question and its hook wrote working
             hook_raw = "blocked"
         if hook_raw == "working" and not self._agent_hook_still_busy(
                 row, text, now):

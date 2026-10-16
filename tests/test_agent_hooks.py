@@ -408,6 +408,11 @@ class TestHookBeatsScreen(unittest.TestCase):
         self.assertEqual(self.run_update(
             "working", self.QUIET, esc_age=5, pty_age=0.2)[0], "idle")
 
+    def test_question_on_screen_beats_working(self):
+        # another tool of the turn ended after claude asked: its hook
+        # wrote working, but the question is still up
+        self.assertEqual(self.run_update("working", self.DIALOG)[0], "blocked")
+
     def test_busy_line_after_an_esc_holds_working(self):
         # the key did not stop claude; it waits for the busy line to go
         self.assertEqual(self.run_update("working", self.BUSY, esc_age=5)[0], "working")
@@ -444,16 +449,19 @@ class TestScreenSaysOncePerEvent(unittest.TestCase):
 class TestInterruptKey(unittest.TestCase):
     """tabit sees Esc and Ctrl+C itself: claude runs no hook for them."""
 
-    def press(self, keyval, ctrl=False, scrolled=False, key="k1", shift=False):
+    def press(self, keyval, ctrl=False, scrolled=False, key="k1", shift=False, alt=False):
         row = types.SimpleNamespace(_agent_key=key, argv=["claude"])
         app = types.SimpleNamespace(_agent_hook_key=T._agent_hook_key,
-                                    _agent_hook_scrolled=lambda r: scrolled)
+                                    _agent_hook_scrolled=lambda r: scrolled,
+                                    _key_in_first_layout=T._key_in_first_layout)
         app._agent_note_interrupt = lambda r: T._agent_note_interrupt(app, r)
         mods = tabit.Gdk.ModifierType(0)
         if ctrl:
             mods |= tabit.Gdk.ModifierType.CONTROL_MASK
         if shift:
             mods |= tabit.Gdk.ModifierType.SHIFT_MASK
+        if alt:
+            mods |= tabit.Gdk.ModifierType.MOD1_MASK
         ev = types.SimpleNamespace(keyval=keyval, state=mods)
         self.assertFalse(T._on_ai_term_key(app, None, ev, row))  # the key goes on
         return getattr(row, "_agent_esc_at", None)
@@ -465,6 +473,19 @@ class TestInterruptKey(unittest.TestCase):
     def test_other_keys(self):
         self.assertIsNone(self.press(tabit.Gdk.KEY_c))
         self.assertIsNone(self.press(tabit.Gdk.KEY_Return))
+
+    def test_ctrl_c_on_a_cyrillic_layout(self):
+        # the C key gives Cyrillic es there; the first layout says c
+        km = tabit.Gdk.Keymap.get_default()
+        ok, keys = km.get_entries_for_keyval(tabit.Gdk.KEY_c) if km else (False, [])
+        if not ok:
+            self.skipTest("no keymap")
+        ev = types.SimpleNamespace(keyval=tabit.Gdk.KEY_Cyrillic_es,
+                                   hardware_keycode=keys[0].keycode)
+        self.assertEqual(T._key_in_first_layout(ev), tabit.Gdk.KEY_c)
+
+    def test_alt_is_not_an_interrupt(self):
+        self.assertIsNone(self.press(tabit.Gdk.KEY_Escape, alt=True))
 
     def test_copy_is_not_an_interrupt(self):
         # Ctrl+Shift+C copies; claude never gets it
