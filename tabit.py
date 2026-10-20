@@ -609,7 +609,7 @@ DEFAULT_AI_TRY = ["--continue", "resume --last", "--resume latest"]
 # in ~/.config/tabit/ai_clis.json.
 DEFAULT_AI_RESUME_ID = "--resume {id}"
 AI_RESUME_ID_ARGS = {"codex": "resume {id}", "agy": "--conversation {id}"}
-# +AI "Create new session": start with an id tabit chose, so "Resume when
+# +AI new session (Resume session unticked): start with an id tabit chose, so "Resume when
 # tabit reopens" can resume this tab's own session and not just the newest
 # one in the folder. Only for CLIs that take an id for a new session, and
 # only once `--help` shows the flag: the `grok` on PATH may be a different
@@ -13469,6 +13469,16 @@ if (data !== null) {{
                 break
         return out
 
+    def _ai_newest_free_session(self, tool, folder):
+        """The session "Resume session" with no id continues: claude's
+        newest in the folder that no AI tab holds, or None. Other CLIs
+        keep their own continue tries."""
+        if not self._ai_is_claude(tool):
+            return None
+        found = self._claude_free_sessions(
+            os.path.expanduser(folder or GLib.get_home_dir()), limit=1)
+        return found[0] if found else None
+
     @staticmethod
     def _ago(t):
         secs = max(0, time.time() - t)
@@ -14219,11 +14229,12 @@ if (data !== null) {{
         path_box.pack_start(path, True, True, 0)
         path_box.pack_start(browse, False, False, 0)
 
-        new_chk = Gtk.CheckButton(label="Create new session")
-        new_chk.set_active(True)
-        new_chk.set_tooltip_text(
-            "Ticked: start a new session.\nUnticked: pick up the last "
-            "session in this folder (or the Session ID below).")
+        resume_chk = Gtk.CheckButton(label="Resume session")
+        resume_chk.set_active(False)
+        resume_chk.set_tooltip_text(
+            "Unticked: start a new session.\nTicked: continue one: the "
+            "Session ID below, or else the newest session in this folder "
+            "that no AI tab holds.")
         # What the tab does the next time tabit opens it. Settings →
         # "New +AI tabs: start fresh after tabit reopens" is the default.
         later_chk = Gtk.CheckButton(
@@ -14232,9 +14243,8 @@ if (data !== null) {{
             not self._load_settings().get("ai_fresh_on_restore", False))
         later_chk.set_tooltip_text(
             "Ticked: after tabit restarts, this tab continues its session.\n"
-            "With “Create new session”, Claude resumes this tab's own "
-            "session; otherwise it continues the newest one in this "
-            "folder.\n"
+            "Claude resumes this tab's own session: the new one, or the one "
+            "it resumed.\n"
             "Unticked: it starts a new one each time.\n"
             "In tmux, a still-running agent is always reattached; this only "
             "matters once the tmux session is gone (reboot, killed).")
@@ -14328,8 +14338,10 @@ if (data !== null) {{
                     return e.get("try") or []
             return list(DEFAULT_AI_TRY)
 
+        newest_free = self._ai_newest_free_session
+
         def update_try_hint(*_a):
-            on = not new_chk.get_active()  # continue now
+            on = resume_chk.get_active()  # continue now
             # show(), not show_all(): show_all() skips a no_show_all widget
             for w in (sid_lbl, sid_box, sid):
                 w.set_visible(on)
@@ -14341,6 +14353,18 @@ if (data !== null) {{
                 now = f"Now: {first} only"
                 later = ("After restart: this session" if later_chk.get_active()
                          else "After restart: new session")
+            elif on and self._ai_is_claude(tool):
+                found = newest_free(tool, (path.get_text() or "").strip())
+                if found:
+                    now = (f"Now: the newest free session, “{found[1][:40]}” "
+                           f"({self._ago(found[2])}, {found[0][:8]})")
+                    later = ("After restart: this session"
+                             if later_chk.get_active()
+                             else "After restart: new session")
+                else:
+                    now = "Now: no session to resume here, so a new one"
+                    later = ("After restart: continue" if later_chk.get_active()
+                             else "After restart: new session")
             else:
                 tries = cli_tries(tool)
                 chain = (" → ".join(tries) + " → plain") if tries \
@@ -14350,8 +14374,24 @@ if (data !== null) {{
                          else "After restart: new session")
             try_hint.set_text(f"{now}\n{later}")
 
+        # the hint names the session it would resume: follow the folder,
+        # once typing pauses (it reads session files)
+        hint_wait = {"id": 0}
+
+        def on_path_changed(*_a):
+            if hint_wait["id"]:
+                GLib.source_remove(hint_wait["id"])
+
+            def later_hint():
+                hint_wait["id"] = 0
+                update_try_hint()
+                return False
+            hint_wait["id"] = GLib.timeout_add(400, later_hint)
+
+        path.connect("changed", on_path_changed)
+
         cli.connect("changed", update_try_hint)
-        new_chk.connect("toggled", update_try_hint)
+        resume_chk.connect("toggled", update_try_hint)
         later_chk.connect("toggled", update_try_hint)
         sid.connect("changed", update_try_hint)
         update_try_hint()
@@ -14460,7 +14500,7 @@ if (data !== null) {{
 
         refresh_live()
 
-        grid.attach(new_chk, 1, 2, 1, 1)
+        grid.attach(resume_chk, 1, 2, 1, 1)
         grid.attach(sid_lbl, 0, 3, 1, 1)
         grid.attach(sid_box, 1, 3, 1, 1)
         grid.attach(later_chk, 1, 4, 1, 1)
@@ -14479,11 +14519,20 @@ if (data !== null) {{
                 cwd = (path.get_text() or "").strip() or GLib.get_home_dir()
                 cwd = os.path.expanduser(cwd)
                 if tool:
-                    now = not new_chk.get_active()
-                    # a Session ID only belongs to "continue now"
+                    now = resume_chk.get_active()
+                    # a Session ID only belongs to "continue now"; with none,
+                    # claude continues the newest session no tab holds, and
+                    # a folder with none starts a new one
+                    resume_id = sid.get_text().strip() if now else ""
+                    if now and not resume_id and self._ai_is_claude(tool):
+                        found = newest_free(tool, cwd)
+                        if found:
+                            resume_id = found[0]
+                        else:
+                            now = False
                     launch, argv, icon = self._ai_launch_pair(
                         tool, cwd, cli_tries(tool),
-                        resume_id=sid.get_text() if now else None,
+                        resume_id=resume_id or None,
                         bypass=bypass_chk.get_active()
                         and self._ai_is_claude(tool),
                         tmux=tmux_chk.get_active(),
@@ -14507,7 +14556,7 @@ if (data !== null) {{
         dialog.connect("response", _on_ai_response)
         dialog.show_all()
         update_bypass_visible()
-        update_try_hint()   # the Session ID row follows Create new session
+        update_try_hint()   # the Session ID row follows Resume session
 
     # --- keyboard -----------------------------------------------------------
 

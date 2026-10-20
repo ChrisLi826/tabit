@@ -182,6 +182,19 @@ class TestSessionList(unittest.TestCase):
         self.assertEqual(got[0][1], "free and newest")
         self.assertEqual(got[0][3], "free and newest")     # its last prompt
 
+    def test_resume_with_no_id_takes_the_newest_free_one(self):
+        self.session(A, [self.user("held")], age=1)
+        self.session(B, [self.user("newest free")], age=50)
+        self.session(C, [self.user("older free")], age=500)
+        tab = types.SimpleNamespace(icon_name=tabit.ICON_AI,
+                                    argv=["/bin/sh", "-c", f"claude --resume {A}"])
+        app = self.app([tab])
+        app._claude_free_sessions = lambda *a, **k: T._claude_free_sessions(app, *a, **k)
+        app._ai_is_claude = T._ai_is_claude
+        self.assertEqual(T._ai_newest_free_session(app, "claude", self.folder)[0], B)
+        self.assertIsNone(T._ai_newest_free_session(app, "codex", self.folder))
+        self.assertIsNone(T._ai_newest_free_session(app, "claude", "/no/such/folder"))
+
     def test_folder_with_no_sessions(self):
         self.assertEqual(T._claude_free_sessions(self.app([]), "/no/such/folder"), [])
 
