@@ -48,11 +48,19 @@ class TestExactSession(unittest.TestCase):
         launch = T._ai_tmux_unwrap(pair(resume_id=A)[0])[0][2]
         self.assertIn(f"--resume {A}", launch)
         self.assertNotIn("--continue", launch)
-        self.assertIn("found no session", launch)       # says so, and stays
+        self.assertIn("could not open session", launch)  # says so, and stays
+
+    def test_background_session_is_attached(self):
+        # claude refuses --resume for a session running in the background;
+        # `claude attach <short id>` opens it
+        launch = T._ai_tmux_unwrap(pair(resume_id=A)[0])[0][2]
+        self.assertLess(launch.index(f"--resume {A}"), launch.index("attach aaaaaaaa"))
+        codex = T._ai_launch_pair("codex", "/p", [], continue_now=True, resume_id=A)[0]
+        self.assertNotIn("attach", codex[2])
 
     def test_restart_resumes_that_session_only(self):
         stored = T._ai_tmux_unwrap(pair(resume_id=A)[1])[0]
-        self.assertEqual(T._ai_tries_of(stored[2]), [f"--resume {A}"])
+        self.assertEqual(T._ai_tries_of(stored[2]), [f"--resume {A}", "attach aaaaaaaa"])
         self.assertNotIn("--continue", stored[2])
         self.assertEqual(T._ai_cli_path_of(stored), ("claude", "/home/max/proj"))
 
@@ -157,10 +165,11 @@ class TestSessionList(unittest.TestCase):
         p = self.session(A, [{"type": "mode", "mode": "normal"}])
         self.assertIsNone(T._claude_session_title(p))
 
-    def app(self, rows, tmux=()):
+    def app(self, rows, tmux=(), active=()):
         app = types.SimpleNamespace(
             _session_rows=lambda: rows, _agent_hook_key=T._agent_hook_key,
             _ai_tmux_sessions=lambda: list(tmux),
+            _claude_active_sessions=lambda: list(active),
             _claude_session_title=T._claude_session_title,
             _claude_session_last=T._claude_session_last)
         app._ai_session_ids_in_use = lambda: T._ai_session_ids_in_use(app)
@@ -194,6 +203,13 @@ class TestSessionList(unittest.TestCase):
         self.assertEqual(T._ai_newest_free_session(app, "claude", self.folder)[0], B)
         self.assertIsNone(T._ai_newest_free_session(app, "codex", self.folder))
         self.assertIsNone(T._ai_newest_free_session(app, "claude", "/no/such/folder"))
+
+    def test_running_sessions_are_left_out(self):
+        # open in another terminal, or running in the background
+        self.session(A, [self.user("in the background")], age=1)
+        self.session(B, [self.user("free")], age=50)
+        app = self.app([], active=[{"sessionId": A, "kind": "background", "id": "aaaaaaaa"}])
+        self.assertEqual([s[0] for s in T._claude_free_sessions(app, self.folder)], [B])
 
     def test_folder_with_no_sessions(self):
         self.assertEqual(T._claude_free_sessions(self.app([]), "/no/such/folder"), [])

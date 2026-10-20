@@ -13409,10 +13409,27 @@ if (data !== null) {{
                         break
         return prompt, reply
 
+    @staticmethod
+    def _claude_active_sessions():
+        """Every claude session running now, in a terminal or in the
+        background (`claude agents --json`), as dicts; [] when it cannot
+        tell (no claude, an older one)."""
+        try:
+            out = subprocess.run(["claude", "agents", "--json"],
+                                 stdin=subprocess.DEVNULL, capture_output=True,
+                                 text=True, timeout=5).stdout
+            data = json.loads(out or "[]")
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return []
+        return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
+
     def _ai_session_ids_in_use(self):
-        """Session ids an AI tab already holds: in its command, or written
-        by its claude hooks, also for an agent left running in tmux."""
+        """Session ids already open: held by an AI tab (its command, or its
+        claude hooks, also for an agent left running in tmux), or running
+        anywhere else, a background session included."""
         ids, keys = set(), set()
+        ids.update(d.get("sessionId") for d in self._claude_active_sessions()
+                   if d.get("sessionId"))
         rx = re.compile(_UUID_RE)
         for row in self._session_rows():
             if not _is_ai_icon(getattr(row, "icon_name", None)):
@@ -13793,16 +13810,22 @@ if (data !== null) {{
                     bypass=bypass)
         if resume_id:
             first = cls._ai_tries_with_id(cli, [], resume_id)[0]
-            flag = " ".join(shlex.quote(t) for t in shlex.split(first))
+            ways = [first]
+            if cls._ai_is_claude(cli):
+                # a session running in the background refuses --resume;
+                # `claude attach <short id>` opens it (and ignores, with a
+                # warning, the hooks flag every try gets)
+                ways.append("attach " + resume_id[:8])
             plain = cls._ai_argv(cli, cwd, [], bypass=bypass)
             head, _sep, tail = plain[2].rpartition("; exec ")
-            note = shlex.quote(f"\n[tabit] {os.path.basename(cli)} found no "
-                               f"session {resume_id} in {cwd}\n")
+            tries = " || ".join(tail.replace(shlex.quote(cli), "%s %s" % (
+                shlex.quote(cli), " ".join(shlex.quote(t) for t in shlex.split(w))), 1)
+                for w in ways)
+            note = shlex.quote(f"\n[tabit] {os.path.basename(cli)} could not "
+                               f"open session {resume_id} in {cwd}: see above\n")
             launch = ["/bin/sh", "-c", "%s; %s || { printf %%b %s; "
-                      'exec "${SHELL:-sh}"; }' % (
-                          head, tail.replace(shlex.quote(cli), "%s %s" % (
-                              shlex.quote(cli), flag), 1), note)]
-            stored = cls._ai_argv(cli, cwd, [first] if resume_later else [],
+                      'exec "${SHELL:-sh}"; }' % (head, tries, note)]
+            stored = cls._ai_argv(cli, cwd, ways if resume_later else [],
                                   bypass=bypass)
         if not tmux:
             return launch, stored, ICON_AI
