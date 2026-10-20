@@ -13339,12 +13339,75 @@ if (data !== null) {{
                 if found:
                     return found[-1].strip()
         for d in lines(b"\n".join(ln for ln in head.split(b"\n")
-                                   if b'"type":"user"' in ln)):
-            text = (d.get("message") or {}).get("content")
-            if (isinstance(text, str) and text.strip()
-                    and not text.startswith(("<", "[Request interrupted"))):
-                return text.strip()
+                                   if b'"type":"user"' in ln
+                                   and b'"isMeta":true' not in ln)):
+            text = Tabit._claude_prompt_text(d.get("message"))
+            if text:
+                return text
         return None
+
+    @staticmethod
+    def _claude_prompt_text(message):
+        """The text of a prompt the user typed, or None for a tool result,
+        a command, a hook message or an interrupt line."""
+        content = (message or {}).get("content")
+        if isinstance(content, list):
+            if any(isinstance(b, dict) and b.get("type") == "tool_result"
+                   for b in content):
+                return None
+            content = " ".join(b.get("text", "") for b in content
+                               if isinstance(b, dict) and b.get("type") == "text")
+        if (isinstance(content, str) and content.strip()
+                and not content.startswith(("<", "[Request interrupted"))):
+            return content.strip()
+        return None
+
+    @classmethod
+    def _claude_session_last(cls, path, limit=4 << 20, step=256 << 10):
+        """(last prompt, last reply text) of a session. Read from the end
+        back, a step at a time and no further than limit: tool output and
+        request copies can fill the last few hundred KB."""
+        prompt = reply = None
+        try:
+            f = open(path, "rb")
+        except OSError:
+            return None, None
+        with f:
+            pos = f.seek(0, os.SEEK_END)
+            end, carry = pos, b""
+            while pos > 0 and end - pos < limit and (prompt is None
+                                                      or reply is None):
+                start = max(0, pos - step)
+                f.seek(start)
+                lines = (f.read(pos - start) + carry).split(b"\n")
+                pos = start
+                # the first line may be cut: finish it with the next step
+                carry = lines.pop(0) if start > 0 else b""
+                for line in reversed(lines):
+                    # hook messages, sub-agents, the summary after a compaction
+                    if (b'"isMeta":true' in line or b'"isSidechain":true' in line
+                            or b'"isCompactSummary":true' in line):
+                        continue
+                    if prompt is None and b'"type":"user"' in line:
+                        try:
+                            prompt = cls._claude_prompt_text(
+                                json.loads(line).get("message"))
+                        except ValueError:
+                            pass
+                    elif reply is None and b'"type":"assistant"' in line:
+                        try:
+                            blocks = (json.loads(line).get("message") or {}
+                                      ).get("content") or []
+                        except ValueError:
+                            continue
+                        texts = [b.get("text", "") for b in blocks
+                                 if isinstance(b, dict) and b.get("type") == "text"
+                                 and b.get("text", "").strip()]
+                        if texts:
+                            reply = texts[-1].strip()
+                    if prompt is not None and reply is not None:
+                        break
+        return prompt, reply
 
     def _ai_session_ids_in_use(self):
         """Session ids an AI tab already holds: in its command, or written
@@ -13369,8 +13432,8 @@ if (data !== null) {{
         return ids
 
     def _claude_free_sessions(self, path, limit=30):
-        """(id, title, mtime) of the claude sessions of a folder that no AI
-        tab holds, newest first."""
+        """(id, title, mtime, last prompt, last reply) of the claude
+        sessions of a folder that no AI tab holds, newest first."""
         path = os.path.expanduser(path or "")
         dirs = []
         for p in (path, os.path.realpath(path)):
@@ -13399,7 +13462,9 @@ if (data !== null) {{
                 continue
             title = self._claude_session_title(full)
             if title:
-                out.append((sid, " ".join(title.split())[:60], mtime))
+                prompt, reply = self._claude_session_last(full)
+                out.append((sid, " ".join(title.split())[:60], mtime,
+                            prompt, reply))
             if len(out) >= limit:
                 break
         return out
@@ -14219,7 +14284,7 @@ if (data !== null) {{
                 row.add(Gtk.Label(label="No other sessions in this folder",
                                   margin=10))
                 pick_list.add(row)
-            for sess_id, title, mtime in found:
+            for sess_id, title, mtime, last_q, last_a in found:
                 row = Gtk.ListBoxRow()
                 row._sid = sess_id
                 vb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
@@ -14232,6 +14297,15 @@ if (data !== null) {{
                 sub.get_style_context().add_class("dim-label")
                 vb.pack_start(t, False, False, 0)
                 vb.pack_start(sub, False, False, 0)
+                if last_q:
+                    q = Gtk.Label(label="You: " + " ".join(last_q.split())[:160],
+                                  xalign=0)
+                    q.set_ellipsize(Pango.EllipsizeMode.END)
+                    vb.pack_start(q, False, False, 0)
+                if last_a:
+                    # Claude's last reply, on hover: the list stays short
+                    a = last_a if len(last_a) <= 400 else last_a[:400] + "…"
+                    row.set_tooltip_text("Claude: " + a)
                 row.add(vb)
                 pick_list.add(row)
             pick_list.show_all()

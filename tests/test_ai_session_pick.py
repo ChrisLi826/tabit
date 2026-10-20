@@ -114,6 +114,41 @@ class TestSessionList(unittest.TestCase):
                              self.user("Write the README")])
         self.assertEqual(T._claude_session_title(p), "Write the README")
 
+    @staticmethod
+    def said(text):
+        return {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "hm"}, {"type": "text", "text": text}]}}
+
+    @staticmethod
+    def tool_result():
+        return {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t", "content": "ok"}]}}
+
+    def test_last_prompt_and_reply(self):
+        p = self.session(A, [
+            self.user("First question"), self.said("First answer"),
+            self.user("Second question"),
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash"}]}},
+            self.tool_result(), self.said("Second answer"),
+            dict(self.user("Stop hook feedback: write in Chinese"), isMeta=True),
+            dict(self.user("This session is being continued from a previous conversation"),
+                 isCompactSummary=True),
+            self.user("[Request interrupted by user]"),
+            {"type": "last-prompt", "lastPrompt": "x"}])
+        self.assertEqual(T._claude_session_last(p), ("Second question", "Second answer"))
+
+    def test_last_prompt_far_back(self):
+        # tool output after the prompt fills more than one read step
+        filler = [{"type": "attachment", "blob": "x" * 5000}] * 40
+        p = self.session(A, [self.user("The real question"), self.said("Reply")] + filler)
+        self.assertEqual(T._claude_session_last(p, step=4096),
+                         ("The real question", "Reply"))
+
+    def test_read_stops_at_the_limit(self):
+        filler = [{"type": "attachment", "blob": "x" * 5000}] * 40
+        p = self.session(A, [self.user("Too far back")] + filler)
+        self.assertEqual(T._claude_session_last(p, limit=8192, step=4096), (None, None))
+
     def test_headless_run_is_left_out(self):
         p = self.session(A, [dict(self.user("Curate the notes"), entrypoint="sdk-cli")])
         self.assertIsNone(T._claude_session_title(p))
@@ -126,7 +161,8 @@ class TestSessionList(unittest.TestCase):
         app = types.SimpleNamespace(
             _session_rows=lambda: rows, _agent_hook_key=T._agent_hook_key,
             _ai_tmux_sessions=lambda: list(tmux),
-            _claude_session_title=T._claude_session_title)
+            _claude_session_title=T._claude_session_title,
+            _claude_session_last=T._claude_session_last)
         app._ai_session_ids_in_use = lambda: T._ai_session_ids_in_use(app)
         return app
 
@@ -144,6 +180,7 @@ class TestSessionList(unittest.TestCase):
         got = T._claude_free_sessions(app, self.folder)
         self.assertEqual([s[0] for s in got], [free, C])
         self.assertEqual(got[0][1], "free and newest")
+        self.assertEqual(got[0][3], "free and newest")     # its last prompt
 
     def test_folder_with_no_sessions(self):
         self.assertEqual(T._claude_free_sessions(self.app([]), "/no/such/folder"), [])
