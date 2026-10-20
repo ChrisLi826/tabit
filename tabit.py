@@ -395,10 +395,10 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.0.4"
+APP_VERSION = "v2.0.5"
 # Taiwan main dish of the major version + a fresh snack or drink, picked at
 # release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
-APP_CODENAME = "Danzai Noodles + Sun Cake"
+APP_CODENAME = "Danzai Noodles + Taro Balls"
 _VERSION_CODENAME_SEP = " · "
 
 
@@ -609,7 +609,7 @@ DEFAULT_AI_TRY = ["--continue", "resume --last", "--resume latest"]
 # in ~/.config/tabit/ai_clis.json.
 DEFAULT_AI_RESUME_ID = "--resume {id}"
 AI_RESUME_ID_ARGS = {"codex": "resume {id}", "agy": "--conversation {id}"}
-# +AI "Create new session": start with an id tabit chose, so "Resume when
+# +AI new session (Resume session unticked): start with an id tabit chose, so "Resume when
 # tabit reopens" can resume this tab's own session and not just the newest
 # one in the folder. Only for CLIs that take an id for a new session, and
 # only once `--help` shows the flag: the `grok` on PATH may be a different
@@ -887,6 +887,10 @@ REMOTE_PAGE = "remote.html"
 # instead of guessing from the screen
 AGENT_HOOK_DIR = os.path.join(GLib.get_user_runtime_dir(), "tabit-agent")
 CLAUDE_HOOKS_FILE = os.path.expanduser("~/.local/share/tabit/claude-hooks.json")
+# Claude keeps each folder's sessions here, one <id>.jsonl per session
+CLAUDE_PROJECTS_DIR = os.path.join(
+    os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"),
+    "projects")
 # the page's icons: tab favicon (SVG, and a PNG for Safari), iPhone home
 # screen, and the installed app (Chrome, Edge, Android)
 REMOTE_ICONS = {"/icon.svg": ("tabit.svg", None), "/favicon.png": ("tabit.svg", 32),
@@ -13301,6 +13305,188 @@ if (data !== null) {{
         return AI_RESUME_ID_ARGS.get(cli) or AI_RESUME_ID_ARGS.get(
             os.path.basename(cli.rstrip("/")), DEFAULT_AI_RESUME_ID)
 
+    @staticmethod
+    def _claude_session_title(path):
+        """A session's title: its /rename name, else the title claude gave
+        it, else its first prompt; None for a session with neither, or one
+        run headless (claude -p, the SDK), which nobody resumes in a tab.
+        Reads only the head and the tail: a transcript can be many MB."""
+        try:
+            size = os.path.getsize(path)
+            with open(path, "rb") as f:
+                head = f.read(128 << 10)
+                f.seek(max(0, size - (128 << 10)))
+                tail = f.read()
+        except OSError:
+            return None
+        if b'"entrypoint":"sdk-' in head:
+            return None
+
+        def lines(blob):
+            for line in blob.split(b"\n"):
+                try:
+                    yield json.loads(line)
+                except ValueError:
+                    continue
+
+        for kind, key in (("custom-title", "customTitle"),
+                          ("ai-title", "aiTitle")):
+            needle = b'"type":"%s"' % kind.encode()
+            for blob in (tail, head):
+                found = [d.get(key) for d in lines(b"\n".join(
+                    ln for ln in blob.split(b"\n") if needle in ln))]
+                found = [t for t in found if isinstance(t, str) and t.strip()]
+                if found:
+                    return found[-1].strip()
+        for d in lines(b"\n".join(ln for ln in head.split(b"\n")
+                                   if b'"type":"user"' in ln
+                                   and b'"isMeta":true' not in ln)):
+            text = Tabit._claude_prompt_text(d.get("message"))
+            if text:
+                return text
+        return None
+
+    @staticmethod
+    def _claude_prompt_text(message):
+        """The text of a prompt the user typed, or None for a tool result,
+        a command, a hook message or an interrupt line."""
+        content = (message or {}).get("content")
+        if isinstance(content, list):
+            if any(isinstance(b, dict) and b.get("type") == "tool_result"
+                   for b in content):
+                return None
+            content = " ".join(b.get("text", "") for b in content
+                               if isinstance(b, dict) and b.get("type") == "text")
+        if (isinstance(content, str) and content.strip()
+                and not content.startswith(("<", "[Request interrupted"))):
+            return content.strip()
+        return None
+
+    @classmethod
+    def _claude_session_last(cls, path, limit=4 << 20, step=256 << 10):
+        """(last prompt, last reply text) of a session. Read from the end
+        back, a step at a time and no further than limit: tool output and
+        request copies can fill the last few hundred KB."""
+        prompt = reply = None
+        try:
+            f = open(path, "rb")
+        except OSError:
+            return None, None
+        with f:
+            pos = f.seek(0, os.SEEK_END)
+            end, carry = pos, b""
+            while pos > 0 and end - pos < limit and (prompt is None
+                                                      or reply is None):
+                start = max(0, pos - step)
+                f.seek(start)
+                lines = (f.read(pos - start) + carry).split(b"\n")
+                pos = start
+                # the first line may be cut: finish it with the next step
+                carry = lines.pop(0) if start > 0 else b""
+                for line in reversed(lines):
+                    # hook messages, sub-agents, the summary after a compaction
+                    if (b'"isMeta":true' in line or b'"isSidechain":true' in line
+                            or b'"isCompactSummary":true' in line):
+                        continue
+                    if prompt is None and b'"type":"user"' in line:
+                        try:
+                            prompt = cls._claude_prompt_text(
+                                json.loads(line).get("message"))
+                        except ValueError:
+                            pass
+                    elif reply is None and b'"type":"assistant"' in line:
+                        try:
+                            blocks = (json.loads(line).get("message") or {}
+                                      ).get("content") or []
+                        except ValueError:
+                            continue
+                        texts = [b.get("text", "") for b in blocks
+                                 if isinstance(b, dict) and b.get("type") == "text"
+                                 and b.get("text", "").strip()]
+                        if texts:
+                            reply = texts[-1].strip()
+                    if prompt is not None and reply is not None:
+                        break
+        return prompt, reply
+
+    def _ai_session_ids_in_use(self):
+        """Session ids an AI tab already holds: in its command, or written
+        by its claude hooks, also for an agent left running in tmux."""
+        ids, keys = set(), set()
+        rx = re.compile(_UUID_RE)
+        for row in self._session_rows():
+            if not _is_ai_icon(getattr(row, "icon_name", None)):
+                continue
+            ids.update(rx.findall(" ".join(getattr(row, "argv", None) or [])))
+            key = self._agent_hook_key(row)
+            if key:
+                keys.add(key)
+        keys.update(name for name, _cli, _p, _a in self._ai_tmux_sessions())
+        for key in keys:
+            try:
+                with open(os.path.join(AGENT_HOOK_DIR, key)) as f:
+                    tx = (f.read().split("\n") + ["", ""])[1]
+            except OSError:
+                continue
+            ids.update(rx.findall(os.path.basename(tx)))
+        return ids
+
+    def _claude_free_sessions(self, path, limit=30):
+        """(id, title, mtime, last prompt, last reply) of the claude
+        sessions of a folder that no AI tab holds, newest first."""
+        path = os.path.expanduser(path or "")
+        dirs = []
+        for p in (path, os.path.realpath(path)):
+            d = os.path.join(CLAUDE_PROJECTS_DIR,
+                             re.sub(r"[^A-Za-z0-9]", "-", p))
+            if d not in dirs:
+                dirs.append(d)
+        files = []
+        for d in dirs:
+            try:
+                names = os.listdir(d)
+            except OSError:
+                continue
+            for name in names:
+                sid = name[:-len(".jsonl")]
+                if name.endswith(".jsonl") and re.fullmatch(_UUID_RE, sid):
+                    full = os.path.join(d, name)
+                    try:
+                        files.append((os.path.getmtime(full), sid, full))
+                    except OSError:
+                        pass
+        used = self._ai_session_ids_in_use()
+        out = []
+        for mtime, sid, full in sorted(files, reverse=True):
+            if sid in used:
+                continue
+            title = self._claude_session_title(full)
+            if title:
+                prompt, reply = self._claude_session_last(full)
+                out.append((sid, " ".join(title.split())[:60], mtime,
+                            prompt, reply))
+            if len(out) >= limit:
+                break
+        return out
+
+    def _ai_newest_free_session(self, tool, folder):
+        """The session "Resume session" with no id continues: claude's
+        newest in the folder that no AI tab holds, or None. Other CLIs
+        keep their own continue tries."""
+        if not self._ai_is_claude(tool):
+            return None
+        found = self._claude_free_sessions(
+            os.path.expanduser(folder or GLib.get_home_dir()), limit=1)
+        return found[0] if found else None
+
+    @staticmethod
+    def _ago(t):
+        secs = max(0, time.time() - t)
+        for unit, size in (("d", 86400), ("h", 3600), ("min", 60)):
+            if secs >= size:
+                return f"{int(secs // size)} {unit} ago"
+        return "just now"
+
     @classmethod
     def _ai_tries_with_id(cls, cli, tries, session_id):
         """Put "resume <id>" in front of the normal tries, if an id was given."""
@@ -13558,7 +13744,8 @@ if (data !== null) {{
 
     @classmethod
     def _ai_launch_pair(cls, cli, cwd, tries, bypass=False, tmux=False,
-                        continue_now=True, resume_later=True, new_sid=None):
+                        continue_now=True, resume_later=True, new_sid=None,
+                        resume_id=None):
         """(launch argv, stored argv, icon) for a new +AI tab.
 
         The two questions are separate: continue_now picks what runs now
@@ -13568,7 +13755,14 @@ if (data !== null) {{
 
         new_sid: for a new session, the id to start it with, when the CLI
         takes one. The stored argv then resumes that id and nothing else.
+
+        resume_id: one exact session to continue now. No --continue behind
+        it, which would open another of the folder's sessions without a
+        word: an id that is not there leaves claude's error on screen and a
+        shell. Its tmux session is its own, named after the id, so a folder
+        with many sessions does not hand back the one already running.
         """
+        resume_id = (resume_id or "").strip() if continue_now else ""
         tries = list(tries or [])
         launch = cls._ai_argv(cli, cwd, tries if continue_now else [],
                               bypass=bypass)
@@ -13597,9 +13791,24 @@ if (data !== null) {{
                 stored = cls._ai_argv(
                     cli, cwd, cls._ai_tries_with_id(cli, [], new_sid),
                     bypass=bypass)
+        if resume_id:
+            first = cls._ai_tries_with_id(cli, [], resume_id)[0]
+            flag = " ".join(shlex.quote(t) for t in shlex.split(first))
+            plain = cls._ai_argv(cli, cwd, [], bypass=bypass)
+            head, _sep, tail = plain[2].rpartition("; exec ")
+            note = shlex.quote(f"\n[tabit] {os.path.basename(cli)} found no "
+                               f"session {resume_id} in {cwd}\n")
+            launch = ["/bin/sh", "-c", "%s; %s || { printf %%b %s; "
+                      'exec "${SHELL:-sh}"; }' % (
+                          head, tail.replace(shlex.quote(cli), "%s %s" % (
+                              shlex.quote(cli), flag), 1), note)]
+            stored = cls._ai_argv(cli, cwd, [first] if resume_later else [],
+                                  bypass=bypass)
         if not tmux:
             return launch, stored, ICON_AI
         name = cls._ai_tmux_session(cli, cwd, unique=not continue_now)
+        if resume_id:
+            name += "-" + (re.sub(r"[^A-Za-z0-9]", "", resume_id)[:8] or "id")
         return (cls._ai_tmux_argv(launch, name),
                 cls._ai_tmux_argv(stored, name), ICON_AI_TMUX)
 
@@ -14020,11 +14229,12 @@ if (data !== null) {{
         path_box.pack_start(path, True, True, 0)
         path_box.pack_start(browse, False, False, 0)
 
-        new_chk = Gtk.CheckButton(label="Create new session")
-        new_chk.set_active(True)
-        new_chk.set_tooltip_text(
-            "Ticked: start a new session.\nUnticked: pick up the last "
-            "session in this folder (or the Session ID below).")
+        resume_chk = Gtk.CheckButton(label="Resume session")
+        resume_chk.set_active(False)
+        resume_chk.set_tooltip_text(
+            "Unticked: start a new session.\nTicked: continue one: the "
+            "Session ID below, or else the newest session in this folder "
+            "that no AI tab holds.")
         # What the tab does the next time tabit opens it. Settings →
         # "New +AI tabs: start fresh after tabit reopens" is the default.
         later_chk = Gtk.CheckButton(
@@ -14033,9 +14243,8 @@ if (data !== null) {{
             not self._load_settings().get("ai_fresh_on_restore", False))
         later_chk.set_tooltip_text(
             "Ticked: after tabit restarts, this tab continues its session.\n"
-            "With “Create new session”, Claude resumes this tab's own "
-            "session; otherwise it continues the newest one in this "
-            "folder.\n"
+            "Claude resumes this tab's own session: the new one, or the one "
+            "it resumed.\n"
             "Unticked: it starts a new one each time.\n"
             "In tmux, a still-running agent is always reattached; this only "
             "matters once the tmux session is gone (reboot, killed).")
@@ -14046,7 +14255,78 @@ if (data !== null) {{
         sid.set_placeholder_text("Session ID (optional)")
         sid.set_tooltip_text(
             "Resume one specific session instead of the most recent one.\n"
-            "Tried first; the normal continue/resume tries stay as fallback.")
+            "With an id, only that session: if this folder has no such "
+            "session, the tab says so instead of opening another one.")
+        # Claude: pick one of the folder's sessions no AI tab holds
+        pick = Gtk.MenuButton()
+        pick.set_image(Gtk.Image.new_from_icon_name(
+            "pan-down-symbolic", Gtk.IconSize.BUTTON))
+        pick.set_tooltip_text("Sessions of this folder that no AI tab holds")
+        pick_pop = Gtk.Popover()
+        pick.set_popover(pick_pop)
+        pick_list = Gtk.ListBox()
+        pick_sw = Gtk.ScrolledWindow()
+        pick_sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        pick_sw.set_propagate_natural_height(True)
+        pick_sw.set_max_content_height(360)
+        pick_sw.set_size_request(440, -1)   # wide enough for a title
+        pick_sw.add(pick_list)
+        pick_pop.add(pick_sw)
+        pick_sw.show_all()      # a popover is not reached by show_all()
+        sid_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        sid_box.pack_start(sid, True, True, 0)
+        sid_box.pack_start(pick, False, False, 0)
+        sid_lbl = Gtk.Label(label="Session ID", xalign=0)
+        # shown only when a session is continued, not for a new one
+        for w in (sid_lbl, sid_box):
+            w.set_no_show_all(True)
+
+        def fill_picker(*_a):
+            if not pick.get_active():
+                return
+            for child in pick_list.get_children():
+                child.destroy()
+            folder = os.path.expanduser(
+                (path.get_text() or "").strip() or GLib.get_home_dir())
+            found = self._claude_free_sessions(folder)
+            if not found:
+                row = Gtk.ListBoxRow(selectable=False, activatable=False)
+                row.add(Gtk.Label(label="No other sessions in this folder",
+                                  margin=10))
+                pick_list.add(row)
+            for sess_id, title, mtime, last_q, last_a in found:
+                row = Gtk.ListBoxRow()
+                row._sid = sess_id
+                vb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                             margin=6, spacing=2)
+                t = Gtk.Label(xalign=0)
+                t.set_markup(f"<b>{GLib.markup_escape_text(title)}</b>")
+                t.set_ellipsize(Pango.EllipsizeMode.END)
+                sub = Gtk.Label(label=f"{self._ago(mtime)} · {sess_id[:8]}",
+                                xalign=0)
+                sub.get_style_context().add_class("dim-label")
+                vb.pack_start(t, False, False, 0)
+                vb.pack_start(sub, False, False, 0)
+                if last_q:
+                    q = Gtk.Label(label="You: " + " ".join(last_q.split())[:160],
+                                  xalign=0)
+                    q.set_ellipsize(Pango.EllipsizeMode.END)
+                    vb.pack_start(q, False, False, 0)
+                if last_a:
+                    # Claude's last reply, on hover: the list stays short
+                    a = last_a if len(last_a) <= 400 else last_a[:400] + "…"
+                    row.set_tooltip_text("Claude: " + a)
+                row.add(vb)
+                pick_list.add(row)
+            pick_list.show_all()
+
+        def on_pick(_lb, row):
+            if getattr(row, "_sid", None):
+                sid.set_text(row._sid)
+                pick_pop.popdown()
+
+        pick.connect("toggled", fill_picker)
+        pick_list.connect("row-activated", on_pick)
 
         try_hint = Gtk.Label(xalign=0)
         try_hint.get_style_context().add_class("session-sub")
@@ -14058,21 +14338,60 @@ if (data !== null) {{
                     return e.get("try") or []
             return list(DEFAULT_AI_TRY)
 
+        newest_free = self._ai_newest_free_session
+
         def update_try_hint(*_a):
-            on = not new_chk.get_active()  # continue now
-            sid.set_sensitive(on)
+            on = resume_chk.get_active()  # continue now
+            # show(), not show_all(): show_all() skips a no_show_all widget
+            for w in (sid_lbl, sid_box, sid):
+                w.set_visible(on)
             tool = (cli.get_active_text() or "").strip()
-            tries = self._ai_tries_with_id(
-                tool, cli_tries(tool), sid.get_text() if on else "")
-            chain = (" → ".join(tries) + " → plain") if tries \
-                else "plain start only"
-            now = f"Now: {chain}" if on else "Now: new session"
-            later = ("After restart: continue" if later_chk.get_active()
-                     else "After restart: new session")
+            pick.set_visible(on and self._ai_is_claude(tool))
+            given = sid.get_text().strip() if on else ""
+            if given:
+                first = self._ai_tries_with_id(tool, [], given)[0]
+                now = f"Now: {first} only"
+                later = ("After restart: this session" if later_chk.get_active()
+                         else "After restart: new session")
+            elif on and self._ai_is_claude(tool):
+                found = newest_free(tool, (path.get_text() or "").strip())
+                if found:
+                    now = (f"Now: the newest free session, “{found[1][:40]}” "
+                           f"({self._ago(found[2])}, {found[0][:8]})")
+                    later = ("After restart: this session"
+                             if later_chk.get_active()
+                             else "After restart: new session")
+                else:
+                    now = "Now: no session to resume here, so a new one"
+                    later = ("After restart: continue" if later_chk.get_active()
+                             else "After restart: new session")
+            else:
+                tries = cli_tries(tool)
+                chain = (" → ".join(tries) + " → plain") if tries \
+                    else "plain start only"
+                now = f"Now: {chain}" if on else "Now: new session"
+                later = ("After restart: continue" if later_chk.get_active()
+                         else "After restart: new session")
             try_hint.set_text(f"{now}\n{later}")
 
+        # the hint names the session it would resume: follow the folder,
+        # once typing pauses (it reads session files)
+        hint_wait = {"id": 0}
+
+        def on_path_changed(*_a):
+            if hint_wait["id"]:
+                GLib.source_remove(hint_wait["id"])
+
+            def later_hint():
+                hint_wait["id"] = 0
+                update_try_hint()
+                return False
+            hint_wait["id"] = GLib.timeout_add(400, later_hint)
+
+        path.connect("changed", on_path_changed)
+
         cli.connect("changed", update_try_hint)
-        new_chk.connect("toggled", update_try_hint)
+        resume_chk.connect("toggled", update_try_hint)
         later_chk.connect("toggled", update_try_hint)
         sid.connect("changed", update_try_hint)
         update_try_hint()
@@ -14181,9 +14500,9 @@ if (data !== null) {{
 
         refresh_live()
 
-        grid.attach(new_chk, 1, 2, 1, 1)
-        grid.attach(Gtk.Label(label="Session ID", xalign=0), 0, 3, 1, 1)
-        grid.attach(sid, 1, 3, 1, 1)
+        grid.attach(resume_chk, 1, 2, 1, 1)
+        grid.attach(sid_lbl, 0, 3, 1, 1)
+        grid.attach(sid_box, 1, 3, 1, 1)
         grid.attach(later_chk, 1, 4, 1, 1)
         grid.attach(tmux_chk, 1, 5, 1, 1)
         grid.attach(bypass_chk, 1, 6, 1, 1)
@@ -14200,12 +14519,20 @@ if (data !== null) {{
                 cwd = (path.get_text() or "").strip() or GLib.get_home_dir()
                 cwd = os.path.expanduser(cwd)
                 if tool:
-                    now = not new_chk.get_active()
-                    # a Session ID only belongs to "continue now"
-                    tries = self._ai_tries_with_id(
-                        tool, cli_tries(tool), sid.get_text() if now else "")
+                    now = resume_chk.get_active()
+                    # a Session ID only belongs to "continue now"; with none,
+                    # claude continues the newest session no tab holds, and
+                    # a folder with none starts a new one
+                    resume_id = sid.get_text().strip() if now else ""
+                    if now and not resume_id and self._ai_is_claude(tool):
+                        found = newest_free(tool, cwd)
+                        if found:
+                            resume_id = found[0]
+                        else:
+                            now = False
                     launch, argv, icon = self._ai_launch_pair(
-                        tool, cwd, tries,
+                        tool, cwd, cli_tries(tool),
+                        resume_id=resume_id or None,
                         bypass=bypass_chk.get_active()
                         and self._ai_is_claude(tool),
                         tmux=tmux_chk.get_active(),
@@ -14229,6 +14556,7 @@ if (data !== null) {{
         dialog.connect("response", _on_ai_response)
         dialog.show_all()
         update_bypass_visible()
+        update_try_hint()   # the Session ID row follows Resume session
 
     # --- keyboard -----------------------------------------------------------
 
