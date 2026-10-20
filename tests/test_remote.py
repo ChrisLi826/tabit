@@ -890,3 +890,41 @@ class TestRemoteSetupLinks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTailscaleAccounts(unittest.TestCase):
+    """Settings > Remote: the account Remote lets in, and the others known."""
+
+    LIST = ("ID    Tailnet            Account\n"
+            "65be  zhli826@gmail.com  zhli826@gmail.com*\n"
+            "a1b2  work.example.com   chris@work.example.com\n")
+
+    def test_current_and_others(self):
+        self.assertEqual(tabit.Tabit._tailscale_accounts(self.LIST),
+                         ("zhli826@gmail.com", ["chris@work.example.com"]))
+
+    def test_logged_out(self):
+        text = "ID    Tailnet            Account\n65be  zhli826@gmail.com  zhli826@gmail.com\n"
+        self.assertEqual(tabit.Tabit._tailscale_accounts(text),
+                         (None, ["zhli826@gmail.com"]))
+
+    def test_nothing(self):
+        self.assertEqual(tabit.Tabit._tailscale_accounts(""), (None, []))
+
+    def test_switch_falls_back_to_sudo(self):
+        app = unittest.mock.Mock()
+        app._sudo.return_value = "ok"
+        denied = unittest.mock.Mock(returncode=1, stdout="", stderr="Access denied: prefs write access denied")
+        with unittest.mock.patch.object(tabit.subprocess, "run", return_value=denied):
+            out = tabit.Tabit._tailscale_account_cmd(app, ["tailscale", "switch", "x"])
+        self.assertEqual(out, "ok")
+        app._sudo.assert_called_once_with(["tailscale", "switch", "x"], 30)
+
+    def test_restart_only_when_remote_is_wanted(self):
+        app = unittest.mock.Mock(_remote_want=False)
+        tabit.Tabit._remote_restart(app)
+        app._remote_start.assert_not_called()
+        app = unittest.mock.Mock(_remote_want=True)
+        tabit.Tabit._remote_restart(app)
+        app._remote_stop.assert_called_once_with(unpublish=False)
+        app._remote_start.assert_called_once()

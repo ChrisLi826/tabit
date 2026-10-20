@@ -395,10 +395,10 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.0.5"
+APP_VERSION = "v2.0.6"
 # Taiwan main dish of the major version + a fresh snack or drink, picked at
 # release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
-APP_CODENAME = "Danzai Noodles + Taro Balls"
+APP_CODENAME = "Danzai Noodles + Hot Grass Jelly"
 _VERSION_CODENAME_SEP = " · "
 
 
@@ -12264,6 +12264,51 @@ if (data !== null) {{
                                 ["failed"])[-1])
         return r.stdout
 
+    @staticmethod
+    def _tailscale_accounts(text=None):
+        """(account in use or None, the other accounts known here), from
+        `tailscale switch --list`: ID, Tailnet, Account, a * on the one in
+        use."""
+        if text is None:
+            try:
+                text = subprocess.run(
+                    ["tailscale", "switch", "--list"], stdin=subprocess.DEVNULL,
+                    capture_output=True, text=True, timeout=5).stdout
+            except (OSError, subprocess.SubprocessError):
+                return None, []
+        current, others = None, []
+        for line in text.splitlines()[1:]:
+            bits = line.split()
+            if len(bits) < 3:
+                continue
+            acct = bits[-1]
+            if acct.endswith("*"):
+                current = acct.rstrip("*")
+            else:
+                others.append(acct)
+        return current, others
+
+    def _tailscale_account_cmd(self, argv, timeout=30):
+        """Run `tailscale switch/logout ...`: as the operator, else with
+        sudo. Output text, or raise."""
+        r = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
+                           text=True, timeout=timeout)
+        out = (r.stdout + r.stderr).strip()
+        if r.returncode == 0:
+            return out
+        if re.search(r"denied|operator|root|permission", out, re.I):
+            return self._sudo(argv, timeout)
+        raise RuntimeError((out.splitlines() or ["failed"])[-1])
+
+    def _remote_restart(self):
+        """GTK thread: Remote reads the account it lets in at start, so a
+        new account needs a fresh start."""
+        if getattr(self, "_remote_want", False):
+            self._remote_stop(unpublish=False)
+            self._remote_fresh()
+            self._remote_start()
+        return False
+
     def _tailscale_prepare(self, srv):
         """Worker thread: get Tailscale ready, asking first. None when it is;
         else why not ("retry:" in front when a minute may fix it).
@@ -13409,10 +13454,27 @@ if (data !== null) {{
                         break
         return prompt, reply
 
+    @staticmethod
+    def _claude_active_sessions():
+        """Every claude session running now, in a terminal or in the
+        background (`claude agents --json`), as dicts; [] when it cannot
+        tell (no claude, an older one)."""
+        try:
+            out = subprocess.run(["claude", "agents", "--json"],
+                                 stdin=subprocess.DEVNULL, capture_output=True,
+                                 text=True, timeout=5).stdout
+            data = json.loads(out or "[]")
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return []
+        return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
+
     def _ai_session_ids_in_use(self):
-        """Session ids an AI tab already holds: in its command, or written
-        by its claude hooks, also for an agent left running in tmux."""
+        """Session ids already open: held by an AI tab (its command, or its
+        claude hooks, also for an agent left running in tmux), or running
+        anywhere else, a background session included."""
         ids, keys = set(), set()
+        ids.update(d.get("sessionId") for d in self._claude_active_sessions()
+                   if d.get("sessionId"))
         rx = re.compile(_UUID_RE)
         for row in self._session_rows():
             if not _is_ai_icon(getattr(row, "icon_name", None)):
@@ -13793,16 +13855,22 @@ if (data !== null) {{
                     bypass=bypass)
         if resume_id:
             first = cls._ai_tries_with_id(cli, [], resume_id)[0]
-            flag = " ".join(shlex.quote(t) for t in shlex.split(first))
+            ways = [first]
+            if cls._ai_is_claude(cli):
+                # a session running in the background refuses --resume;
+                # `claude attach <short id>` opens it (and ignores, with a
+                # warning, the hooks flag every try gets)
+                ways.append("attach " + resume_id[:8])
             plain = cls._ai_argv(cli, cwd, [], bypass=bypass)
             head, _sep, tail = plain[2].rpartition("; exec ")
-            note = shlex.quote(f"\n[tabit] {os.path.basename(cli)} found no "
-                               f"session {resume_id} in {cwd}\n")
+            tries = " || ".join(tail.replace(shlex.quote(cli), "%s %s" % (
+                shlex.quote(cli), " ".join(shlex.quote(t) for t in shlex.split(w))), 1)
+                for w in ways)
+            note = shlex.quote(f"\n[tabit] {os.path.basename(cli)} could not "
+                               f"open session {resume_id} in {cwd}: see above\n")
             launch = ["/bin/sh", "-c", "%s; %s || { printf %%b %s; "
-                      'exec "${SHELL:-sh}"; }' % (
-                          head, tail.replace(shlex.quote(cli), "%s %s" % (
-                              shlex.quote(cli), flag), 1), note)]
-            stored = cls._ai_argv(cli, cwd, [first] if resume_later else [],
+                      'exec "${SHELL:-sh}"; }' % (head, tries, note)]
+            stored = cls._ai_argv(cli, cwd, ways if resume_later else [],
                                   bypass=bypass)
         if not tmux:
             return launch, stored, ICON_AI
@@ -16234,6 +16302,130 @@ if (data !== null) {{
             remote_link.pack_start(link_lbl, False, False, 0)
             remote_link.pack_start(self._copy_name_button(link_url, "Copy the link"),
                                    False, False, 0)
+        # which Tailscale account Remote lets in, and a way to change it
+        ts_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                         margin_start=22)
+        ts_lbl = Gtk.Label(label="Tailscale account: …", xalign=0)
+        ts_lbl.set_line_wrap(True)
+        ts_lbl.set_max_width_chars(40)
+        ts_switch = Gtk.MenuButton(label="Switch account")
+        ts_switch.set_tooltip_text("Use another Tailscale account on this "
+                                   "computer. Remote then lets in that one.")
+        ts_menu = Gtk.Menu()
+        ts_switch.set_popup(ts_menu)
+        ts_logout = Gtk.Button(label="Log out")
+        ts_logout.set_tooltip_text("Log this computer out of Tailscale.")
+        ts_row.pack_start(ts_lbl, True, True, 0)
+        ts_row.pack_start(ts_switch, False, False, 0)
+        ts_row.pack_start(ts_logout, False, False, 0)
+        for w in (ts_switch, ts_logout):
+            w.set_sensitive(False)          # until the account is known
+
+        def ts_show(current, others, note=""):
+            ts_lbl.set_text((f"Tailscale account: {current}" if current else
+                             "Tailscale: not logged in here")
+                            + (f"\n{note}" if note else ""))
+            for child in ts_menu.get_children():
+                ts_menu.remove(child)
+            for acct in others:
+                item = Gtk.MenuItem(label=acct)
+                item.connect("activate", lambda _i, a=acct: ts_run(
+                    ["tailscale", "switch", a], f"switching to {a}…"))
+                ts_menu.append(item)
+            if others:
+                ts_menu.append(Gtk.SeparatorMenuItem())
+            more = Gtk.MenuItem(label="Log in with another account…")
+            more.connect("activate", lambda _i: ts_login())
+            ts_menu.append(more)
+            ts_menu.show_all()
+            ts_switch.set_sensitive(bool(shutil.which("tailscale")))
+            ts_logout.set_sensitive(bool(current))
+            return False
+
+        def ts_refresh(note=""):
+            def work():
+                current, others = self._tailscale_accounts()
+                GLib.idle_add(ts_show, current, others, note)
+            threading.Thread(target=work, daemon=True).start()
+
+        def ts_run(argv, doing):
+            ts_lbl.set_text(f"Tailscale: {doing}")
+
+            def job():
+                try:
+                    self._tailscale_account_cmd(argv)
+                    note = ""
+                except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+                    note = f"failed: {e}"
+                GLib.idle_add(self._remote_restart)
+                ts_refresh(note)
+            self._remote_ts(job)
+
+        def ts_login():
+            # a new account next to the ones known here: its login page
+            # opens in the browser, and Remote follows once it is done
+            ts_lbl.set_text("Tailscale: log in with the other account in "
+                            "the browser page that opens…")
+
+            def job():
+                argv = ["tailscale", "login"]
+                env = None
+                user = os.environ.get("USER") or GLib.get_user_name()
+                try:
+                    prefs = json.loads(subprocess.run(
+                        ["tailscale", "debug", "prefs"], stdin=subprocess.DEVNULL,
+                        capture_output=True, text=True, timeout=10).stdout or "{}")
+                except (OSError, subprocess.SubprocessError, ValueError):
+                    prefs = {}
+                if prefs.get("OperatorUser") != user:
+                    askpass = self._sudo_askpass_path()
+                    env = dict(os.environ, **({"SUDO_ASKPASS": askpass} if askpass else {}))
+                    argv = ["sudo", "-A"] + argv
+                note = ""
+                try:
+                    p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, env=env,
+                                         stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT, text=True)
+                    timer = threading.Timer(600, p.terminate)   # a login left open
+                    timer.start()
+                    opened = False
+                    for line in p.stdout:
+                        url = next((w for w in line.split()
+                                    if w.startswith("https://login.tailscale.com/")), "")
+                        if url and not opened:
+                            opened = True
+                            GLib.idle_add(lambda u=url: (self._open_uri(u), False)[1])
+                    code = p.wait()
+                    timer.cancel()
+                    if code != 0:
+                        note = "the login did not finish"
+                except OSError as e:
+                    note = f"failed: {e}"
+                if not note:
+                    GLib.idle_add(self._remote_restart)
+                ts_refresh(note)
+            self._remote_ts(job)
+
+        def ts_do_logout(_b):
+            d = Gtk.MessageDialog(
+                transient_for=dialog, modal=True,
+                message_type=Gtk.MessageType.QUESTION,
+                buttons=Gtk.ButtonsType.NONE,
+                text="Log this computer out of Tailscale?")
+            d.format_secondary_text(
+                "Remote stops working until it logs in again. With Remote "
+                "on, tabit then asks to log in, with any account.")
+            d.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                          "Log out", Gtk.ResponseType.OK)
+            d.set_default_response(Gtk.ResponseType.CANCEL)
+            resp = d.run()
+            d.destroy()
+            if resp == Gtk.ResponseType.OK:
+                ts_run(["tailscale", "logout"], "logging out…")
+
+        ts_logout.connect("clicked", ts_do_logout)
+        ts_refresh()
+
         remote_note.set_text(
             ("" if link_url else
              (getattr(self, "_remote_detail", "") or
@@ -16286,7 +16478,8 @@ if (data !== null) {{
             # tg_help sits outside the grid on purpose: the grid greys
             # out when Telegram is off, which is when somebody needs it.
             ("Telegram", (tg_on, tg_grid, tg_help)),
-        ) + (("Remote", (remote_on, remote_send, remote_files, remote_link, remote_note)),) + (
+        ) + (("Remote", (remote_on, remote_send, remote_files, ts_row,
+                          remote_link, remote_note)),) + (
             ("About", (ver_box,)),
         )
         for name, widgets in pages:
