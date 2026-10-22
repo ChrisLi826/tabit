@@ -6813,6 +6813,9 @@ if (data !== null) {{
         row._agent_hook_mtime = mtime
         # where a sub-agent's question goes back to; empty for the main one
         row._agent_hook_back = back
+        # the session the hooks speak for: claude changes it on /clear,
+        # /resume and a plan's "clear context"
+        row._agent_hook_tx = tx
         if state == "idle" or not tx:
             return state
         # Esc or No since this event: read only what the transcript gained
@@ -6949,6 +6952,8 @@ if (data !== null) {{
         # a claude tab with hooks says what it does; the screen is the
         # fallback for every other tab
         hook_raw = self._agent_hook_raw(row)
+        if hook_raw is not None:
+            self._ai_follow_session(row)
         term = getattr(row, "term", None)
         text = "" if hook_raw == "idle" else self._term_tail_text(
             term, max_lines=self._AGENT_TAIL_LINES)
@@ -13902,6 +13907,35 @@ if (data !== null) {{
             cli_val = cli_quoted.strip("'\"")
         return cli_val, path_val
 
+    def _ai_follow_session(self, row):
+        """Keep the session a tab comes back to after a restart the one its
+        claude is in now. /clear, /resume and a plan's "clear context" give
+        claude another session id; a tab that kept the old one went back to
+        an older conversation. Only a tab that resumes an id already, or
+        was asked to resume, follows: "start fresh" tabs stay fresh."""
+        sid = re.findall(_UUID_RE, os.path.basename(
+            getattr(row, "_agent_hook_tx", "") or ""))
+        argv = getattr(row, "argv", None) or []
+        if not sid or not argv:
+            return
+        held = re.findall(_UUID_RE, " ".join(argv))
+        if sid[-1] in held or not (held or getattr(row, "ai_hunt", False)):
+            return
+        new = self._ai_argv_with_session(argv, sid[-1])
+        if new != argv:
+            row.argv = new
+            self._save_sessions_soon()
+
+    def _ai_session_open_elsewhere(self, sid):
+        """The `claude agents` entry of a session already open in a terminal
+        (not in the background: attach opens that one safely), or None. Two
+        claudes writing one session fork its history, and a later resume
+        may follow the older branch."""
+        for d in self._claude_active_sessions():
+            if d.get("sessionId") == sid and d.get("kind") != "background":
+                return d
+        return None
+
     @classmethod
     def _ai_argv_with_session(cls, argv, sid):
         """The same tab, now resuming session `sid` and nothing else.
@@ -14598,6 +14632,27 @@ if (data !== null) {{
                             resume_id = found[0]
                         else:
                             now = False
+                    elsewhere = (self._ai_session_open_elsewhere(resume_id)
+                                 if resume_id and self._ai_is_claude(tool) else None)
+                    if elsewhere:
+                        warn = Gtk.MessageDialog(
+                            transient_for=dlg, modal=True,
+                            message_type=Gtk.MessageType.WARNING,
+                            buttons=Gtk.ButtonsType.NONE,
+                            text="This session is already open")
+                        warn.format_secondary_text(
+                            f"Claude runs it in {elsewhere.get('cwd', '?')} "
+                            f"(process {elsewhere.get('pid', '?')}). Two "
+                            "Claudes writing one session fork its history, "
+                            "and a later resume can land on the older part. "
+                            "Close the other one first.")
+                        warn.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                                         "Open anyway", Gtk.ResponseType.OK)
+                        warn.set_default_response(Gtk.ResponseType.CANCEL)
+                        go = warn.run() == Gtk.ResponseType.OK
+                        warn.destroy()
+                        if not go:
+                            return          # the +AI dialog stays open
                     launch, argv, icon = self._ai_launch_pair(
                         tool, cwd, cli_tries(tool),
                         resume_id=resume_id or None,

@@ -343,6 +343,7 @@ class TestHookBeatsScreen(unittest.TestCase):
             _set_agent_status=lambda r, s: got.append(s))
         app._agent_hook_still_busy = lambda *a: T._agent_hook_still_busy(app, *a)
         app._agent_hook_screen_says = lambda *a: T._agent_hook_screen_says(app, *a)
+        app._ai_follow_session = lambda r: None
         T._update_agent_status(app, row)
         return got[-1], bool(read)
 
