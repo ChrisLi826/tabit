@@ -16897,9 +16897,29 @@ def _request_existing_tabit_raise():
         return False
 
 
+# Set by a running claude for the commands it starts. A tabit started from
+# a claude terminal passed them on to every tab, and a claude in a tab then
+# took itself for a child session and saved no transcript: its session could
+# not be resumed or listed. Settings such as CLAUDE_CONFIG_DIR stay.
+CLAUDE_SESSION_ENV = (
+    "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_PID", "CLAUDE_EFFORT",
+    "CLAUDE_PLUGIN_DATA", "AI_AGENT", "CODEX_COMPANION_SESSION_ID")
+
+
+def _drop_claude_session_env(env=None):
+    env = os.environ if env is None else env
+    for name in CLAUDE_SESSION_ENV:
+        env.pop(name, None)
+    return env
+
+
 def main():
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     GLib.set_prgname("tabit")
+    _drop_claude_session_env()
     _ensure_user_path()
     _ensure_tmux_path()
     _ensure_screen_sh()

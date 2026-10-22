@@ -527,3 +527,16 @@ class TestTmuxScrolled(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestClaudeSessionEnv(unittest.TestCase):
+    """A tabit started from a claude terminal must not pass its markers on."""
+
+    def test_markers_go_settings_stay(self):
+        env = {"CLAUDE_CODE_CHILD_SESSION": "1", "CLAUDECODE": "1",
+               "CLAUDE_CODE_SESSION_ID": "x", "AI_AGENT": "claude-code",
+               "CLAUDE_CONFIG_DIR": "/home/u/.claude", "CLAUDE_CODE_USE_BEDROCK": "1",
+               "HOME": "/home/u"}
+        tabit._drop_claude_session_env(env)
+        self.assertEqual(env, {"CLAUDE_CONFIG_DIR": "/home/u/.claude",
+                               "CLAUDE_CODE_USE_BEDROCK": "1", "HOME": "/home/u"})
