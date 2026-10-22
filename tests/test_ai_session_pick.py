@@ -221,3 +221,70 @@ class TestSessionList(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFollowSession(unittest.TestCase):
+    """A tab comes back to the session its claude is in now, not an old one."""
+
+    def setUp(self):
+        self.saved = []
+        self.app = types.SimpleNamespace(
+            _ai_argv_with_session=T._ai_argv_with_session,
+            _save_sessions_soon=lambda: self.saved.append(1))
+
+    def row(self, argv, tx_sid, hunt=False):
+        return types.SimpleNamespace(
+            argv=argv, ai_hunt=hunt,
+            _agent_hook_tx=f"/home/max/.claude/projects/-p/{tx_sid}.jsonl" if tx_sid else "")
+
+    def follow(self, row):
+        T._ai_follow_session(self.app, row)
+        return row.argv
+
+    def test_after_clear_the_new_id_is_kept(self):
+        _l, stored, _i = T._ai_launch_pair("claude", "/p", [], continue_now=False,
+                                           resume_later=True, new_sid=A, tmux=True)
+        row = self.row(stored, B)
+        argv = self.follow(row)
+        self.assertIn(f"--resume {B}", T._ai_tmux_unwrap(argv)[0][2])
+        self.assertNotIn(A, " ".join(argv))
+        self.assertEqual(T._ai_tmux_unwrap(argv)[1], T._ai_tmux_unwrap(stored)[1])  # same tmux
+        self.assertEqual(self.saved, [1])
+
+    def test_same_id_changes_nothing(self):
+        _l, stored, _i = pair(resume_id=A)
+        self.assertEqual(self.follow(self.row(stored, A)), stored)
+        self.assertEqual(self.saved, [])
+
+    def test_a_start_fresh_tab_stays_fresh(self):
+        plain = T._ai_argv("claude", "/p", [])
+        self.assertEqual(self.follow(self.row(plain, B)), plain)
+
+    def test_a_tab_that_should_resume_starts_following(self):
+        plain = T._ai_argv("claude", "/p", [])
+        self.assertIn(f"--resume {B}", self.follow(self.row(plain, B, hunt=True))[2])
+
+    def test_bypass_is_kept(self):
+        stored = T._ai_argv("claude", "/p", [f"--resume {A}"], bypass=True)
+        self.assertIn("--dangerously-skip-permissions", self.follow(self.row(stored, B))[2])
+
+    def test_no_hook_state_changes_nothing(self):
+        stored = T._ai_argv("claude", "/p", [f"--resume {A}"])
+        self.assertEqual(self.follow(self.row(stored, None)), stored)
+
+
+class TestOpenElsewhere(unittest.TestCase):
+    """+AI warns before opening a session another terminal has open."""
+
+    def check(self, active):
+        app = types.SimpleNamespace(_claude_active_sessions=lambda: active)
+        return T._ai_session_open_elsewhere(app, A)
+
+    def test_open_in_a_terminal(self):
+        self.assertEqual(self.check([{"sessionId": A, "kind": "interactive", "pid": 7}])["pid"], 7)
+
+    def test_background_is_attached_not_warned(self):
+        self.assertIsNone(self.check([{"sessionId": A, "kind": "background"}]))
+
+    def test_not_open(self):
+        self.assertIsNone(self.check([{"sessionId": B, "kind": "interactive"}]))
