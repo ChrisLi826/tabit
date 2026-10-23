@@ -524,6 +524,17 @@ class TestTmuxScrolled(unittest.TestCase):
     def test_plain_tab_is_never_scrolled(self):
         self.assertFalse(T._agent_hook_scrolled(types.SimpleNamespace(argv=["claude"])))
 
+    def test_unscroll_brings_it_back_to_the_bottom(self):
+        # in copy mode tmux takes typed text as its own commands
+        subprocess.run(["tmux", "copy-mode", "-t", "=ai-t-1:"], check=True)
+        T._tmux_unscroll(self.row)
+        self.assertFalse(T._agent_hook_scrolled(self.row))
+
+    def test_unscroll_at_the_bottom_or_plain_does_nothing(self):
+        T._tmux_unscroll(self.row)
+        T._tmux_unscroll(types.SimpleNamespace(argv=["claude"]))
+        self.assertFalse(T._agent_hook_scrolled(self.row))
+
 
 if __name__ == "__main__":
     unittest.main()

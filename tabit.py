@@ -6860,6 +6860,20 @@ if (data !== null) {{
             return False
         return out.strip() == "1"
 
+    @classmethod
+    def _tmux_unscroll(cls, row):
+        """Bring a scrolled-up tmux tab back to the bottom before typing
+        into it from afar. In copy mode tmux takes keys as its own
+        commands, so the text never reaches the program."""
+        if not cls._agent_hook_scrolled(row):
+            return
+        session = cls._ai_tmux_unwrap(row.argv)[1]
+        try:
+            subprocess.run(["tmux", "send-keys", "-X", "-t", _tmux_exact(session), "cancel"],
+                           capture_output=True, timeout=1)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
     def _agent_hook_screen_says(self, row, what, seen):
         """seen, the screen's word on a sub-agent's question, unless the
         tab is scrolled up and shows old lines. tmux is asked once per hook
@@ -7503,6 +7517,7 @@ if (data !== null) {{
         submitted a line at a time. The Enter is separate, and there is
         exactly one -- two makes some programs run it twice.
         """
+        self._tmux_unscroll(row)
         row.term.paste_text(self._tg_safe_text(text))
         row.term.feed_child(b"\r")
 
@@ -12070,6 +12085,7 @@ if (data !== null) {{
                 if isinstance(text, str) else ""
             if not text or len(text) > 2000:
                 return 400, {"error": "text must be 1..2000 characters"}
+            self._tmux_unscroll(row)
             row.term.feed_child(text.encode("utf-8"))
         else:
             name = body.get("key")
@@ -12078,6 +12094,7 @@ if (data !== null) {{
                 return 400, {"error": "unknown key"}
             if name in ("esc", "ctrl-c"):
                 self._agent_note_interrupt(row)
+            self._tmux_unscroll(row)
             if not (name in self._REMOTE_ARROWS
                     and self._press_key(row.term, self._REMOTE_ARROWS[name])):
                 row.term.feed_child(key)

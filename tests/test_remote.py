@@ -583,6 +583,20 @@ class TestRemoteArrows(unittest.TestCase):
         _, app, _ = self._press("enter", True)
         app._agent_note_interrupt.assert_not_called()
 
+    def test_a_scrolled_tmux_tab_comes_back_down_first(self):
+        # a tmux tab scrolled up eats keys as copy-mode commands
+        for name in ("enter", "up"):
+            _, app, row = self._press(name, True)
+            app._tmux_unscroll.assert_called_once_with(row)
+        app = unittest.mock.Mock(_remote_send_on=True, _TG_CONTROL=tabit.Tabit._TG_CONTROL)
+        app._remote_tab_trouble.return_value = None
+        row = app._tg_row_by_id.return_value
+        tabit.Tabit._remote_act(app, "t", "type", {"text": "hi"})
+        app._tmux_unscroll.assert_called_once_with(row)
+        app = unittest.mock.Mock(_tg_safe_text=lambda t: t)
+        tabit.Tabit._tg_inject(app, row, "task")
+        app._tmux_unscroll.assert_called_once_with(row)
+
 
 class TestRemoteCursor(unittest.TestCase):
 
