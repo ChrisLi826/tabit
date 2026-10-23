@@ -593,7 +593,8 @@ async function loadScreen() {
     lastTop = pre.scrollTop;          // our own move: not the user scrolling up
     $("histinfo").textContent = back ? `+${back} lines above` : "";
     $("latest").disabled = !back;
-    moreAbove = body.ansi !== undefined && !body.nohist && back < BACK_MAX;   // a plain tab has none
+    // nohist: a plain tab whose scrollback ends here
+    moreAbove = body.ansi !== undefined && !body.nohist && back < BACK_MAX;
   } catch (e) { dmsg(`screen: ${e.message || e}`, true); }
   finally { if (gen === screenGen) screenBusy = 0; }
 }
