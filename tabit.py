@@ -395,7 +395,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.0.6.1"
+APP_VERSION = "v2.0.6.2"
 # Taiwan main dish of the major version + a fresh snack or drink, picked at
 # release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
 APP_CODENAME = "Danzai Noodles + Hot Grass Jelly"
@@ -1984,7 +1984,8 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 back = min(max(int((q.get("back") or ["0"])[0]), 0), 3000)
             except ValueError:
                 back = 0
-            res = self.app._remote_call(lambda: self.app._remote_screen(parts[2], color))
+            res = self.app._remote_call(
+                lambda: self.app._remote_screen(parts[2], color, back))
             if isinstance(res, tuple):
                 code, out, name = res
                 pane = name and self.app._tmux_pane_ansi(name, back)    # this thread
@@ -11841,8 +11842,9 @@ if (data !== null) {{
         self._remote_ack(row)
         return 200, {"ok": True}
 
-    def _remote_screen(self, rid, color=False):
+    def _remote_screen(self, rid, color=False, back=0):
         """The last screenful of an AI tab, for a phone to read (GTK thread).
+        back: that many lines more above it, from the tab's scrollback.
 
         Returns (code, body, tmux session or None). With color and a tmux
         session, the handler thread swaps in the coloured pane: tmux is run
@@ -11857,6 +11859,14 @@ if (data !== null) {{
         term = getattr(row, "term", None)
         tmux = self._row_tmux_session(row) if color else None
         coloured = self._term_tail_ansi(term, 60) if color and not tmux else None
+        if coloured and back > 0:
+            # older lines without colours: reading them with colours cost
+            # about a second per 3000 lines on the GTK thread, while the
+            # page asks again every few seconds
+            above, nohist = self._term_history_text(term, 60, back)
+            coloured = (above + coloured[0], above + coloured[1])
+        else:
+            nohist = self._term_history_ends(term, 60)
         if coloured:
             lines, ansi = coloured
         else:
@@ -11866,12 +11876,45 @@ if (data !== null) {{
                "lines": lines}
         out.update(self._remote_cursor(term, lines))
         if coloured:
-            # the colours tabit shows; no history to load above it
+            # the colours tabit shows, and as much of the scrollback above
+            # as asked for, until it runs out
             ansi += [""] * (len(lines) - len(ansi))     # the cursor's blank line
             out.pop("lines")
-            out.update(ansi="".join(a + "\n" for a in ansi), nohist=True,
+            out.update(ansi="".join(a + "\n" for a in ansi), nohist=nohist,
                        cols=max(1, int(term.get_column_count())))
         return 200, out, tmux
+
+    @staticmethod
+    def _term_history_text(term, below, back):
+        """(lines, at the top): up to `back` rows of a plain tab's
+        scrollback above its last `below` lines, as text, and whether they
+        reach the top of the scrollback."""
+        try:
+            _col, crow = (int(v) for v in term.get_cursor_position())
+            first = int(term.get_vadjustment().get_lower())
+            end_col = max(0, int(term.get_column_count()) - 1)
+            end = crow - below          # the row above the coloured part
+            start = max(first, end - back + 1)
+            if end < start:
+                return [], True
+            text, _attrs = term.get_text_range(start, 0, end, end_col, None)
+        except Exception:
+            return [], True
+        lines = (text or "").split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()                 # the last row's own line end
+        return lines, start <= first
+
+    @staticmethod
+    def _term_history_ends(term, wanted):
+        """True when the last `wanted` lines already reach the top of the
+        tab's scrollback: there is nothing more to load above."""
+        try:
+            _col, crow = (int(v) for v in term.get_cursor_position())
+            first = int(term.get_vadjustment().get_lower())
+        except Exception:
+            return True
+        return crow - wanted + 1 <= first
 
     @staticmethod
     def _term_tail_ansi(term, max_lines=60):

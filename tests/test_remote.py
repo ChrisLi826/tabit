@@ -7,6 +7,7 @@ import socket
 import sys
 import tempfile
 import threading
+import types
 import unittest
 import unittest.mock
 
@@ -40,7 +41,7 @@ class FakeApp:
     def _remote_call(self, fn, timeout=3):
         return fn()
 
-    def _remote_screen(self, rid, color=False):
+    def _remote_screen(self, rid, color=False, back=0):
         return 200, {"id": rid, "lines": ["hello"], "color": color}, ("sess" if color else None)
 
     @staticmethod
@@ -928,3 +929,54 @@ class TestTailscaleAccounts(unittest.TestCase):
         tabit.Tabit._remote_restart(app)
         app._remote_stop.assert_called_once_with(unpublish=False)
         app._remote_start.assert_called_once()
+
+
+class TestPlainTabHistory(unittest.TestCase):
+    """Remote scrolls up a plain tab too: its scrollback above the screen."""
+
+    @classmethod
+    def setUpClass(cls):
+        from gi.repository import Gtk, Vte
+        cls.term = Vte.Terminal()
+        cls.term.set_scrollback_lines(10000)
+        cls.term.set_size(100, 30)
+        cls.win = Gtk.Window()
+        cls.win.add(cls.term)
+        cls.win.show_all()
+        cls.term.feed("".join(f"\x1b[31mline {i:05d}\x1b[0m text\r\n"
+                              for i in range(1000)).encode())
+        for _ in range(50):
+            while Gtk.events_pending():
+                Gtk.main_iteration()
+
+    def screen(self, back):
+        row = types.SimpleNamespace(kind="term", term=self.term, title_text="t",
+                                    agent_status="idle")
+        T = tabit.Tabit
+        app = types.SimpleNamespace(
+            _remote_send_on=True, _tg_row_by_id=lambda r: row,
+            _row_tmux_session=lambda r: None, _term_tail_ansi=T._term_tail_ansi,
+            _term_tail_text=T._term_tail_text, _remote_cursor=T._remote_cursor,
+            _term_history_text=T._term_history_text,
+            _term_history_ends=T._term_history_ends)
+        code, out, _ = T._remote_screen(app, "t", True, back)
+        self.assertEqual(code, 200)
+        nums = [int(x) for x in re.findall(r"line (\d+)", re.sub(r"\x1b\[[0-9;]*m", "", out["ansi"]))]
+        return nums, out
+
+    def test_more_lines_on_request(self):
+        nums, out = self.screen(0)
+        self.assertEqual(nums[-1], 999)
+        self.assertFalse(out["nohist"])
+        more, _ = self.screen(200)
+        self.assertEqual(len(more), len(nums) + 200)
+        self.assertEqual(more, list(range(more[0], 1000)))      # no gap, no repeat
+
+    def test_top_of_the_scrollback(self):
+        nums, out = self.screen(3000)
+        self.assertEqual(nums[0], 0)
+        self.assertTrue(out["nohist"])
+
+    def test_the_screen_keeps_its_colours(self):
+        _nums, out = self.screen(200)
+        self.assertIn("38;2;", out["ansi"].split("\n")[-5])
