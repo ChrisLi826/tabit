@@ -85,7 +85,7 @@
   .keys #latest { padding: 0; display: grid; place-items: center; }
   /* ⌨ mode: no text box or Send. A phone keeps the key buttons: its
      keyboard has no Esc, arrows or Ctrl */
-  #detail.kbd .send { display: none; }
+  #detail.kbd .send, #detail.kbd #grow { display: none; }
   #split { display: none; }
   .keys { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 5px; margin: 8px 0; }
   .keys button { min-width: 0; padding: 9px 0; font-size: 13px; }
@@ -100,9 +100,15 @@
     #detail.kbd .keys button:not(#kbdbtn):not(#latest) { display: none; }
     #detail.kbd .keys #latest { grid-row: 1; }
   }
-  .send { display: flex; gap: 6px; }
-  .send textarea { flex: 1; min-height: 44px; max-height: 30vh; background: var(--panel); color: var(--fg);
-                   border: 1px solid var(--line); border-radius: 8px; padding: 8px; font: inherit; resize: vertical; }
+  .send { display: flex; gap: 6px; align-items: flex-end; }
+  .send button { height: 44px; }   /* stay put at the bottom when the box grows */
+  .send textarea { flex: 1; min-height: 44px; max-height: 60vh; background: var(--panel); color: var(--fg);
+                   border: 1px solid var(--line); border-radius: 8px; padding: 8px; font: inherit; resize: none; }
+  /* drag the bar above the message box to change its height */
+  #grow { display: flex; justify-content: center; align-items: center; height: 14px;
+          cursor: row-resize; touch-action: none; }
+  #grow::before { content: ""; width: 40px; height: 4px; border-radius: 2px; background: var(--line); }
+  #grow:hover::before, #grow.drag::before { background: var(--dim); }
   .send button { background: var(--blue); color: #111; border: 0; font-weight: 600; }
   #attach { padding: 0 10px; font-size: 18px; background: var(--panel); color: var(--fg);
             border: 1px solid var(--line); font-weight: 400; }
@@ -227,6 +233,7 @@
     <!-- keyboard mode: an input that is focused but not seen, so the phone's
          keyboard opens; what is typed goes to the terminal at once -->
     <input id="kbd" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="keyboard">
+    <div id="grow" title="drag: message box height · double-click: reset"></div>
     <div class="send">
       <button id="attach" type="button" title="add a photo or a file">📎</button>
       <input id="filein" type="file" multiple hidden>
@@ -1179,6 +1186,32 @@ $("split").addEventListener("dblclick", () => {
   setListW(0);
   try { localStorage.removeItem("tabit.listw"); } catch {}
   if (lastCols) sizeScreen(lastCols);
+});
+// drag the bar above the message box to set its height (kept in this browser)
+function setTextH(h) { $("text").style.height = h ? `${h}px` : ""; }
+try { setTextH(+localStorage.getItem("tabit.texth") || 0); } catch {}
+$("grow").addEventListener("pointerdown", (ev) => {
+  const g = $("grow"), y0 = ev.clientY, h0 = $("text").offsetHeight;
+  g.setPointerCapture(ev.pointerId);
+  g.classList.add("drag");
+  ev.preventDefault();
+  let h = 0;
+  const move = (e) => {
+    h = Math.round(Math.max(44, Math.min(window.innerHeight * 0.6, h0 + y0 - e.clientY)));
+    setTextH(h);
+  };
+  const up = () => {
+    g.removeEventListener("pointermove", move);
+    g.classList.remove("drag");
+    try { if (h) localStorage.setItem("tabit.texth", String(h)); } catch {}
+  };
+  g.addEventListener("pointermove", move);
+  g.addEventListener("pointerup", up, { once: true });
+  g.addEventListener("pointercancel", up, { once: true });
+});
+$("grow").addEventListener("dblclick", () => {
+  setTextH(0);
+  try { localStorage.removeItem("tabit.texth"); } catch {}
 });
 for (const b of document.querySelectorAll(".keys button[data-key]")) b.onclick = () => {
   flushTyped();
