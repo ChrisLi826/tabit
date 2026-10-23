@@ -73,7 +73,11 @@
             overscroll-behavior: contain;   /* its top or end does not pass the swipe on */ }
   /* a short screen sits at the bottom, by the keys, like a terminal */
   #screen .term { margin-top: auto; white-space: inherit; }
-  #screen.ansi { white-space: pre; word-break: normal; background: #16161e; }
+  #screen.ansi { white-space: pre; word-break: normal; background: #16161e;
+                 /* a terminal's cells: no squeezing of CJK punctuation pairs
+                    such as ）。, no kerning or ligatures */
+                 text-spacing-trim: space-all; font-kerning: none;
+                 font-variant-ligatures: none; }
   #screen.ansi.fit { overflow-x: hidden; }
   .hist { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; font-size: 12px; color: var(--dim); }
   .hist button { padding: 4px 10px; font-size: 13px; }
@@ -475,7 +479,7 @@ function color256(n) {
 }
 
 // cells a character takes in a terminal: 2 for CJK and emoji, else 1
-const WIDE = /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6\u{1F300}-\u{1FAFF}\u{20000}-\u{3FFFD}]/u;
+const WIDE = /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6\u{1F300}-\u{1FAFF}\u{20000}-\u{3FFFD}]|\p{Emoji_Presentation}/u;   // ✅ ❌ too: two cells
 // Mark the cursor cell with \uE000 ... \uE001 (ansiToHtml turns them into
 // a span). cx, cy: cell and row among the last `rows` lines: for tmux the
 // visible pane, for a plain tab the cursor's line and those under it (cy 0).
@@ -501,6 +505,52 @@ function withCursor(ansi, rows, cur) {
   if (!done) out += " ".repeat(Math.max(0, cx - cell)) + "\uE000 \uE001";
   lines[at] = out;
   return lines.slice(0, Math.max(last, at) + 1).join("\n");
+}
+
+// A terminal gives a CJK character or an emoji two cells and every other
+// character one, but the browser draws them in whatever fallback font it
+// has: CJK narrower than two cells on one system, box lines wider than one
+// on another, and a table falls apart. Each such character is measured once
+// and gets the letter-spacing that makes it exactly its cells wide.
+const cellPad = new Map();
+let cellCtx = null, cellFont = "", cellOne = 0;
+function cellSpacing(ch) {
+  const font = getComputedStyle($("screen")).fontFamily;
+  if (font !== cellFont) {
+    cellFont = font; cellPad.clear();
+    cellCtx = cellCtx || document.createElement("canvas").getContext("2d");
+    cellCtx.font = `100px ${font}`;
+    cellOne = cellCtx.measureText("0").width;
+  }
+  let pad = cellPad.get(ch);
+  if (pad === undefined) {
+    // a mark (an accent) takes no cell of its own; a character with the
+    // emoji selector (⚠️) is drawn as a wider emoji but keeps the cells of
+    // the character alone, as the terminal and claude lay it out
+    const base = ch.replace("\ufe0f", "");
+    const want = (/^\p{M}/u.test(base) ? 0 : WIDE.test(base) ? 2 : 1) * cellOne;
+    pad = (want - cellCtx.measureText(ch).width) / 100;     // in em
+    if (Math.abs(pad) < 0.005) pad = 0;
+    cellPad.set(ch, pad);
+  }
+  return pad;
+}
+// esc() with the non-ASCII characters held to their cells
+function escCells(s) {
+  if (!/[^\x00-\x7f]/.test(s)) return esc(s);
+  let out = "", run = "", runPad = 0;
+  const flush = () => {
+    if (run) out += runPad ? `<span style="letter-spacing:${runPad.toFixed(3)}em">${esc(run)}</span>` : esc(run);
+    run = "";
+  };
+  // the emoji selector stays with its character: they are drawn as one
+  for (const ch of s.match(/[^]\ufe0f?/gu) || []) {
+    const pad = ch.charCodeAt(0) < 128 ? 0 : cellSpacing(ch);
+    if (pad !== runPad) { flush(); runPad = pad; }
+    run += ch;
+  }
+  flush();
+  return out;
 }
 
 function ansiToHtml(text) {
@@ -537,7 +587,7 @@ function ansiToHtml(text) {
       const css = style();
       // the cursor cell (marked by withCursor) is its own span, outside any link
       const run = part.split(/\uE000([^]*?)\uE001/)
-        .map((x, i) => (i % 2 ? `<span class="cur">${esc(x)}</span>` : linkify(esc(x)))).join("");
+        .map((x, i) => (i % 2 ? `<span class="cur">${escCells(x)}</span>` : linkify(escCells(x)))).join("");
       html += css ? `<span style="${css}">${run}</span>` : run;
     }
   }
