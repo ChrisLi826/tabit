@@ -11282,6 +11282,20 @@ if (data !== null) {{
         return ["prod"]
 
     @staticmethod
+    def _ssh_tool_device_types():
+        """--device-type names from ssh_tool (connect.py --list-device-types)."""
+        try:
+            out = subprocess.check_output(
+                ["python3", SSH_TOOL_CONNECT_PY, "--list-device-types"],
+                cwd=SSH_TOOL_DIR, text=True, timeout=8, stderr=subprocess.DEVNULL)
+            types = [ln.strip() for ln in out.splitlines() if ln.strip()]
+            if types:
+                return types
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return ["auto", "ap", "gateway", "camera"]
+
+    @staticmethod
     def _load_connect_last():
         try:
             with open(CONNECT_LAST_FILE) as f:
@@ -11354,7 +11368,7 @@ if (data !== null) {{
 
         # 7. Device Type (auto / ap / gateway / camera)
         dtype_combo = Gtk.ComboBoxText()
-        dtypes = ["auto", "ap", "gateway", "camera"]
+        dtypes = self._ssh_tool_device_types()
         cur_dtype = last.get("device_type", "auto")
         active_dtype_idx = 0
         for i, dt in enumerate(dtypes):
