@@ -16551,7 +16551,10 @@ if (data !== null) {{
                 f"Claude login · {name}",
                 ["/bin/sh", "-c", f"{shlex.quote(run)} auth login; "
                  'exec "${SHELL:-sh}"'], ICON_COMMAND)
-            acct_msg.set_text(f"Log in to “{name}” in the new tab, then ↻.")
+            # Settings is modal: the tab takes typing once it closes
+            acct_msg.set_text(f"A tab to log in to “{name}” is open. Close "
+                              "Settings, finish there (a browser page, maybe "
+                              "a code to paste), then reopen Settings to see it.")
 
         def acct_remove(name):
             ask = Gtk.MessageDialog(
