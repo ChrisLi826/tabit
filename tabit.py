@@ -13339,7 +13339,7 @@ if (data !== null) {{
             argv = self._ai_tmux_argv(inner, name)
             self._add_session(
                 label or cli, argv, ICON_AI_TMUX,
-                sub=self._ai_sub(spath) if spath else (sub or "tmux"),
+                sub=self._ai_sub(spath, cli) if spath else (sub or "tmux"),
                 cwd=spath)
             return
         if cat == "connect":
@@ -14159,29 +14159,30 @@ if (data !== null) {{
 
     def _ai_sub(self, path, cli=None):
         """Sidebar subtitle for an AI tab: short path, no [tmux] tag, and
-        @account first when it runs a Claude account."""
+        the Claude account first while there is more than one login."""
         if not path:
             return ""
-        acct = Tabit._claude_account_of(cli) if cli else None
-        short = self._short_path(os.path.expanduser(path))
-        if acct and Tabit._claude_logged_in_count() > 1:
-            return f"@{acct} · {short}"
-        return short
+        return Tabit._ai_account_tag(cli) + self._short_path(os.path.expanduser(path))
+
+    @classmethod
+    def _ai_account_tag(cls, cli):
+        """"@<account> · " for a Claude tab (@Default for claude itself)
+        while two or more logins are here; "" otherwise."""
+        if not cli or not cls._ai_is_claude(cli) or cls._claude_logged_in_count() <= 1:
+            return ""
+        return f"@{cls._claude_account_of(cli) or 'Default'} · "
 
     @classmethod
     def _ai_account_sub(cls, argv, sub):
-        """A saved tab's subtitle, with @account first when its command runs
-        a Claude account: also on a tab saved before it said so."""
+        """A saved Claude tab's subtitle with its account first, or without
+        it, as the logins here are now: also on a tab saved before."""
         got = cls._ai_cli_path_of(argv)
-        acct = cls._claude_account_of(got[0]) if got else None
-        if not acct:
+        if not got or not cls._ai_is_claude(got[0]):
             return sub
-        tag = f"@{acct} · "
-        if cls._claude_logged_in_count() <= 1:      # nothing to tell apart
-            return sub[len(tag):] if (sub or "").startswith(tag) else sub
-        if (sub or "").startswith(tag):
-            return sub
-        return f"{tag}{sub}" if sub else f"@{acct}"
+        own = f"@{cls._claude_account_of(got[0]) or 'Default'} · "
+        bare = sub[len(own):] if (sub or "").startswith(own) else sub
+        tag = cls._ai_account_tag(got[0])  # "" with one login: nothing to tell apart
+        return f"{tag}{bare}" if tag and bare else (tag[:-3] if tag else bare)
 
     @staticmethod
     def _claude_logged_in_count():
@@ -15005,7 +15006,7 @@ if (data !== null) {{
             argv = self._ai_tmux_argv(inner, name)
             self._add_session(
                 cli_name, argv, ICON_AI_TMUX,
-                sub=self._ai_sub(spath),
+                sub=self._ai_sub(spath, cli_name),
                 cwd=spath if spath and os.path.isdir(spath) else None)
             dialog.response(Gtk.ResponseType.CANCEL)
 

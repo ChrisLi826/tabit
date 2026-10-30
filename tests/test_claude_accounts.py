@@ -155,8 +155,8 @@ class TestTheAccountStaysWithTheTab(AccountDirs):
 
 
 class TestTheTabSaysItsAccount(AccountDirs):
-    """With two or more accounts logged in, an account tab's second line
-    starts with @account; a default tab never does."""
+    """With two or more Claude logins here, every Claude tab's second line
+    starts with its account, @Default included; with one, none does."""
 
     def logged_in(self, cli):
         cfg = os.path.join(os.path.dirname(os.path.dirname(cli)), "config")
@@ -168,13 +168,15 @@ class TestTheTabSaysItsAccount(AccountDirs):
         self.logged_in(cli)
         app = mock.Mock(_short_path=T._short_path)
         self.assertEqual(T._ai_sub(app, "/tmp/proj", cli), "@work · /tmp/proj")
-        self.assertEqual(T._ai_sub(app, "/tmp/proj", "claude"), "/tmp/proj")
+        self.assertEqual(T._ai_sub(app, "/tmp/proj", "claude"), "@Default · /tmp/proj")
+        self.assertEqual(T._ai_sub(app, "/tmp/proj", "codex"), "/tmp/proj")
         self.assertEqual(T._ai_sub(app, "/tmp/proj"), "/tmp/proj")
 
-    def test_one_account_logged_in_says_nothing(self):
+    def test_one_login_says_nothing(self):
         cli = T._claude_account_add("work")         # not logged in yet
         app = mock.Mock(_short_path=T._short_path)
         self.assertEqual(T._ai_sub(app, "/tmp/proj", cli), "/tmp/proj")
+        self.assertEqual(T._ai_sub(app, "/tmp/proj", "claude"), "/tmp/proj")
         self.logged_in(cli)
         os.remove(os.path.join(self.home, ".credentials.json"))   # default out
         self.assertEqual(T._ai_sub(app, "/tmp/proj", cli), "/tmp/proj")
@@ -186,13 +188,17 @@ class TestTheTabSaysItsAccount(AccountDirs):
         self.assertEqual(T._ai_account_sub(argv, "/tmp/proj"), "@work · /tmp/proj")
         self.assertEqual(T._ai_account_sub(argv, "@work · /tmp/proj"), "@work · /tmp/proj")
         plain = T._ai_launch_pair("claude", "/tmp/proj", [], tmux=True)[1]
-        self.assertEqual(T._ai_account_sub(plain, "/tmp/proj"), "/tmp/proj")
+        self.assertEqual(T._ai_account_sub(plain, "/tmp/proj"), "@Default · /tmp/proj")
+        codex = T._ai_launch_pair("codex", "/tmp/proj", [], tmux=True)[1]
+        self.assertEqual(T._ai_account_sub(codex, "/tmp/proj"), "/tmp/proj")
         self.assertEqual(T._ai_account_sub(["bash"], None), None)
 
     def test_and_loses_it_when_only_one_is_left(self):
         cli = T._claude_account_add("work")
         argv = T._ai_launch_pair(cli, "/tmp/proj", [], tmux=True)[1]
         self.assertEqual(T._ai_account_sub(argv, "@work · /tmp/proj"), "/tmp/proj")
+        plain = T._ai_launch_pair("claude", "/tmp/proj", [], tmux=True)[1]
+        self.assertEqual(T._ai_account_sub(plain, "@Default · /tmp/proj"), "/tmp/proj")
 
 
 class TestRemoteNewTab(AccountDirs):
