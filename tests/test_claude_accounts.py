@@ -154,5 +154,44 @@ class TestTheAccountStaysWithTheTab(AccountDirs):
         self.assertEqual(got, [{"sessionId": A}])
 
 
+class TestRemoteNewTab(AccountDirs):
+    """The phone's New tab picks an account the way +AI does."""
+
+    def app(self):
+        app = mock.Mock()
+        app._load_ai_clis.return_value = [{"cli": "claude", "try": []}]
+        app._load_settings.return_value = {}
+        app._ai_takes_new_id.return_value = False
+        app._ai_is_claude = T._ai_is_claude
+        app._ai_launch_pair = T._ai_launch_pair
+        app._claude_accounts = T._claude_accounts
+        app._ai_sub = lambda p: p
+        return app
+
+    def test_an_account_opens_its_own_claude(self):
+        cli = T._claude_account_add("work")
+        app = self.app()
+        code, _ = T._remote_new(app, {"kind": "ai", "cli": "claude",
+                                      "cwd": self.tmp, "account": "work"})
+        self.assertEqual(code, 200)
+        title, argv = app._add_session.call_args[0][:2]
+        self.assertEqual(title, "claude · work")
+        self.assertEqual(T._ai_cli_path_of(argv)[0], cli)
+
+    def test_no_account_is_the_default_one(self):
+        T._claude_account_add("work")
+        app = self.app()
+        T._remote_new(app, {"kind": "ai", "cli": "claude", "cwd": self.tmp})
+        title, argv = app._add_session.call_args[0][:2]
+        self.assertEqual((title, T._ai_cli_path_of(argv)[0]), ("claude", "claude"))
+
+    def test_an_unknown_account_is_refused(self):
+        app = self.app()
+        code, body = T._remote_new(app, {"kind": "ai", "cli": "claude",
+                                         "cwd": self.tmp, "account": "gone"})
+        self.assertEqual(code, 400)
+        app._add_session.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

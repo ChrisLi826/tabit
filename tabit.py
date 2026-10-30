@@ -11641,6 +11641,8 @@ if (data !== null) {{
                 "colors": list(GROUP_COLORS),
                 "clis": [e["cli"] for e in self._load_ai_clis()]
                 if self._remote_send_on else [],
+                "accounts": [n for n, _c in self._claude_accounts()]
+                if self._remote_send_on else [],
                 "groups": list(groups.values()), "tabs": tabs}
 
     # Keys a phone can press: enough to answer a prompt or drive a shell.
@@ -11784,13 +11786,21 @@ if (data !== null) {{
             entry = next((e for e in self._load_ai_clis() if e["cli"] == tool), None)
             if entry is None:
                 return 400, {"error": "pick an AI from tabit's list"}
+            # a Claude account runs as its own claude, as in +AI
+            account = body.get("account") if self._ai_is_claude(tool) else None
+            run = tool
+            if account:
+                run = dict(self._claude_accounts()).get(account)
+                if run is None:
+                    return 400, {"error": f"no Claude account “{account}”"}
             launch, argv, icon = self._ai_launch_pair(
-                tool, cwd, list(entry.get("try") or []),
+                run, cwd, list(entry.get("try") or []),
                 bypass=bool(self._load_settings().get("ai_claude_bypass"))
                 and self._ai_is_claude(tool),
                 tmux=True, continue_now=False, resume_later=True,
-                new_sid=(str(uuid.uuid4()) if self._ai_takes_new_id(tool) else None))
-            row = self._add_session(tool, argv, icon, sub=self._ai_sub(cwd),
+                new_sid=(str(uuid.uuid4()) if self._ai_takes_new_id(run) else None))
+            row = self._add_session(f"{tool} · {account}" if account else tool,
+                                    argv, icon, sub=self._ai_sub(cwd),
                                     cwd=cwd, launch_argv=launch)
             if row is not None:
                 row.ai_hunt = True
