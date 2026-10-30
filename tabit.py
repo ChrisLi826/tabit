@@ -14164,7 +14164,9 @@ if (data !== null) {{
             return ""
         acct = Tabit._claude_account_of(cli) if cli else None
         short = self._short_path(os.path.expanduser(path))
-        return f"@{acct} · {short}" if acct else short
+        if acct and Tabit._claude_logged_in_count() > 1:
+            return f"@{acct} · {short}"
+        return short
 
     @classmethod
     def _ai_account_sub(cls, argv, sub):
@@ -14172,9 +14174,23 @@ if (data !== null) {{
         a Claude account: also on a tab saved before it said so."""
         got = cls._ai_cli_path_of(argv)
         acct = cls._claude_account_of(got[0]) if got else None
-        if not acct or (sub or "").startswith(f"@{acct} · "):
+        if not acct:
             return sub
-        return f"@{acct} · {sub}" if sub else f"@{acct}"
+        tag = f"@{acct} · "
+        if cls._claude_logged_in_count() <= 1:      # nothing to tell apart
+            return sub[len(tag):] if (sub or "").startswith(tag) else sub
+        if (sub or "").startswith(tag):
+            return sub
+        return f"{tag}{sub}" if sub else f"@{acct}"
+
+    @staticmethod
+    def _claude_logged_in_count():
+        """How many Claude logins this computer holds: the default one and
+        each account with a login file (Linux keeps it in the config dir)."""
+        dirs = [CLAUDE_DEFAULT_DIR] + [
+            os.path.join(CLAUDE_ACCOUNTS_DIR, name, "config")
+            for name, _cli in Tabit._claude_accounts()]
+        return sum(os.path.isfile(os.path.join(d, ".credentials.json")) for d in dirs)
 
     @staticmethod
     def _short_path(path):
