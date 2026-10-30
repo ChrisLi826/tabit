@@ -154,6 +154,26 @@ class TestTheAccountStaysWithTheTab(AccountDirs):
         self.assertEqual(got, [{"sessionId": A}])
 
 
+class TestTheTabSaysItsAccount(AccountDirs):
+    """An account tab's second line starts with @account, a default one not."""
+
+    def test_new_tab_line(self):
+        cli = T._claude_account_add("work")
+        app = mock.Mock(_short_path=T._short_path)
+        self.assertEqual(T._ai_sub(app, "/tmp/proj", cli), "@work · /tmp/proj")
+        self.assertEqual(T._ai_sub(app, "/tmp/proj", "claude"), "/tmp/proj")
+        self.assertEqual(T._ai_sub(app, "/tmp/proj"), "/tmp/proj")
+
+    def test_a_saved_tab_gets_it_on_reopen(self):
+        cli = T._claude_account_add("work")
+        argv = T._ai_launch_pair(cli, "/tmp/proj", [], tmux=True)[1]
+        self.assertEqual(T._ai_account_sub(argv, "/tmp/proj"), "@work · /tmp/proj")
+        self.assertEqual(T._ai_account_sub(argv, "@work · /tmp/proj"), "@work · /tmp/proj")
+        plain = T._ai_launch_pair("claude", "/tmp/proj", [], tmux=True)[1]
+        self.assertEqual(T._ai_account_sub(plain, "/tmp/proj"), "/tmp/proj")
+        self.assertEqual(T._ai_account_sub(["bash"], None), None)
+
+
 class TestRemoteNewTab(AccountDirs):
     """The phone's New tab picks an account the way +AI does."""
 
@@ -165,7 +185,7 @@ class TestRemoteNewTab(AccountDirs):
         app._ai_is_claude = T._ai_is_claude
         app._ai_launch_pair = T._ai_launch_pair
         app._claude_accounts = T._claude_accounts
-        app._ai_sub = lambda p: p
+        app._ai_sub = lambda p, cli=None: p
         return app
 
     def test_an_account_opens_its_own_claude(self):

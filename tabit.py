@@ -2576,8 +2576,11 @@ class Tabit(Gtk.Window):
                     if sess is not None:
                         # a wrapper saved by an older tabit: exact targets
                         argv = self._ai_tmux_argv(inner, sess)
+                    sub = s.get("sub")
+                    if _is_ai_icon(s.get("icon")):
+                        sub = self._ai_account_sub(argv, sub)
                     r = self._add_session(s["label"], argv, s["icon"],
-                                          s.get("sub"), s.get("cwd"),
+                                          sub, s.get("cwd"),
                                           s.get("track_cwd", False))
                 if r is not None and s.get("tg"):
                     r.tg_id = s["tg"]
@@ -10843,7 +10846,7 @@ if (data !== null) {{
                     row.ai_hunt = resume_chk.get_active()
                     self._set_row_icon(
                         row, ICON_AI_TMUX if want_tmux else ICON_AI)
-                    shown_path = self._ai_sub(path_val)
+                    shown_path = self._ai_sub(path_val, cli_val)
                     if shown_path:
                         row.sub_text = shown_path
                         row.subtitle.set_text(shown_path)
@@ -11814,7 +11817,7 @@ if (data !== null) {{
                 tmux=True, continue_now=False, resume_later=True,
                 new_sid=(str(uuid.uuid4()) if self._ai_takes_new_id(run) else None))
             row = self._add_session(f"{tool} · {account}" if account else tool,
-                                    argv, icon, sub=self._ai_sub(cwd),
+                                    argv, icon, sub=self._ai_sub(cwd, run),
                                     cwd=cwd, launch_argv=launch)
             if row is not None:
                 row.ai_hunt = True
@@ -14154,11 +14157,24 @@ if (data !== null) {{
             got = rest.strip().strip("'\"")
         return got or None
 
-    def _ai_sub(self, path):
-        """Sidebar subtitle for an AI tab: short path, no [tmux] tag."""
+    def _ai_sub(self, path, cli=None):
+        """Sidebar subtitle for an AI tab: short path, no [tmux] tag, and
+        @account first when it runs a Claude account."""
         if not path:
             return ""
-        return self._short_path(os.path.expanduser(path))
+        acct = Tabit._claude_account_of(cli) if cli else None
+        short = self._short_path(os.path.expanduser(path))
+        return f"@{acct} · {short}" if acct else short
+
+    @classmethod
+    def _ai_account_sub(cls, argv, sub):
+        """A saved tab's subtitle, with @account first when its command runs
+        a Claude account: also on a tab saved before it said so."""
+        got = cls._ai_cli_path_of(argv)
+        acct = cls._claude_account_of(got[0]) if got else None
+        if not acct or (sub or "").startswith(f"@{acct} · "):
+            return sub
+        return f"@{acct} · {sub}" if sub else f"@{acct}"
 
     @staticmethod
     def _short_path(path):
@@ -15103,7 +15119,7 @@ if (data !== null) {{
                                  if self._ai_takes_new_id(run) else None))
                     title = f"{tool} · {account}" if account else tool
                     r = self._add_session(title, argv, icon,
-                                          sub=self._ai_sub(cwd), cwd=cwd,
+                                          sub=self._ai_sub(cwd, run), cwd=cwd,
                                           launch_argv=launch)
                     if r is not None and later_chk.get_active():
                         # Look for its session even while the stored
