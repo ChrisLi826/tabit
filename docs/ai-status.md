@@ -23,9 +23,28 @@ The hooks add to your own Claude settings and replace none of them. Claude
 reads them once, when it starts: after an update that changes them, a
 Claude that was already running keeps the old ones until it starts again.
 
-Every other tab is read from its screen: codex, grok and other CLIs, and
-a Claude tab opened before this release. Open a new Claude tab to give it
-the hooks.
+A **Grok** tab reports through hooks as well. Tabit writes
+`~/.grok/hooks/tabit-status.json`, and Grok loads it when that Grok
+starts. A prompt or a tool is working, a permission prompt is blocked,
+and the end of a turn is done. A turn that ends while a background task
+is still running is **background** (`↻`). Events from a child agent do
+not change the tab. A cancel for an older turn cannot mark the new turn
+idle. Esc does not stop a Grok turn; Grok reports a real cancel itself.
+
+The hook only writes the status file. It always exits immediately, so it
+does not keep Grok working and it does not change the answer. A Grok you
+start yourself, outside tabit, loads the same file. Outside tmux it writes
+nothing; inside your own tmux it writes a status file named after that tmux
+session, which no tab reads.
+
+Grok reads the file once, at startup, and only in a folder you have
+trusted. A Grok that is already running keeps the screen reading until
+it starts again. A folder that is not trusted runs no user hooks, and
+that tab stays on the screen reading.
+
+Every other tab is read from its screen: codex and other CLIs, a Claude
+tab opened before this release, and a Grok that was already running.
+Open a new Claude tab, or start that Grok again, to give it the hooks.
 
 ## The popup
 

@@ -131,11 +131,17 @@
   #sheet h3 { margin: 0 0 10px; font-size: 16px; }
   #sheet [hidden] { display: none !important; }
   #sheet label { display: block; font-size: 12px; color: var(--dim); margin: 10px 0 4px; }
+  #sheet .labline { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  #sheet .labline label { margin-bottom: 4px; }
+  #sheet label.check { display: flex; align-items: center; gap: 6px; }
+  #sheet label.check input { width: auto; margin: 0; }
   #sheet input, #sheet select { width: 100%; background: var(--bg); color: var(--fg); border: 1px solid var(--line);
                                 border-radius: 8px; padding: 9px; font: inherit; }
   #sheet .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
   #sheet .row button { flex: 1; padding: 10px; }
   #sheet .seg button.sel { background: var(--blue); color: #111; }
+  #sheet details { margin-top: 8px; }
+  #sheet summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   #sheet .chips { display: flex; flex-wrap: wrap; gap: 8px; }
   #sheet .chip.pill { width: auto; height: auto; border-radius: 17px; padding: 6px 12px 6px 8px;
                       display: inline-flex; align-items: center; gap: 6px; background: var(--bg);
@@ -147,7 +153,24 @@
   #sheet .chip.sel { border-color: var(--fg); }
   #sheet .danger { background: var(--red); color: #111; border: 0; font-weight: 600; }
   #sheet .go { background: var(--blue); color: #111; border: 0; font-weight: 600; }
-  summary .gmenu { margin-left: 6px; padding: 2px 10px; }
+  summary .gmenu, .tab .tmenu { margin-left: 6px; padding: 2px 10px; flex: none; }
+  #sheet .pathline { display: flex; gap: 8px; align-items: center; }
+  #sheet .pathline input { flex: 1; min-width: 0; }
+  #sheet .pathline button { flex: none; padding: 9px 12px; }
+  /* ⚙ Settings */
+  #sheet .acct { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 14px; }
+  #sheet .acct span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  #sheet .acct button { flex: none; padding: 7px 12px; }
+  #sheet .box { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 8px 0; }
+  #sheet .btnlink { display: block; text-align: center; padding: 10px; border-radius: 8px; margin: 8px 0;
+                    background: var(--blue); color: #111; text-decoration: none; font-weight: 600; }
+  #sheet .dim, #sheet .smsg { color: var(--dim); font-size: 13px; margin: 6px 0; }
+  #sheet .err { color: var(--red); font-size: 13px; margin: 6px 0; }
+  #sheet .slog { font: 11px/1.3 ui-monospace, Menlo, monospace; white-space: pre-wrap; max-height: 9em;
+                 overflow: auto; background: var(--bg); padding: 6px; border-radius: 6px; margin: 6px 0; }
+  #sheet .dirs { display: flex; flex-direction: column; gap: 4px; margin-top: 8px;
+                 max-height: 28vh; overflow: auto; overscroll-behavior: contain; }
+  #sheet .dirs button { text-align: left; padding: 8px 10px; }
   #screen a.path { color: inherit; text-decoration: underline dotted; text-underline-offset: 2px; }
   #viewer { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column;
             padding: env(safe-area-inset-top) 12px calc(10px + env(safe-area-inset-bottom)); z-index: 6; }
@@ -199,6 +222,7 @@
   <h1>tabit</h1>
   <button id="newbtn" type="button" title="new tab" hidden>＋</button>
   <button id="notify" type="button" title="tell me when an AI tab is done" hidden>🔔</button>
+  <button id="setbtn" type="button" title="settings: AI defaults, Claude accounts, update, restart" hidden>⚙</button>
   <button id="refresh" type="button">Refresh</button>
 </header>
 <div id="state">Loading…</div>
@@ -211,7 +235,6 @@
     <span class="name" id="dname"></span>
     <span id="dbadge"></span>
     <button id="fitbtn" type="button" title="fit the width / original size">⇔</button>
-    <button id="tabmenubtn" type="button" title="group, move, close">⋯</button>
   </div>
   <div class="hist">
     <span id="histinfo"></span>
@@ -316,10 +339,12 @@ function tabRow(t, showGroup) {
   const st = t.type === "ai" ? (t.ai_status || "unknown") : "";
   const sub = [showGroup && t.groupName, t.sub].filter(Boolean).join(" · ");
   const open = t.type !== "note" || t.path ? " open" : "";
+  const menu = lastSnap && lastSnap.send
+    ? `<button class="tmenu" type="button" data-id="${esc(t.id)}" title="rename, group, move, close">⋯</button>` : "";
   return `<div class="tab${t.exited ? " exited" : ""}${open}" data-id="${esc(t.id)}">
     <span class="kind">${KIND[t.type] || "·"}</span>
     <div class="t"><div class="title">${esc(t.title || "(untitled)")}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
-    ${st ? `<span class="badge s-${esc(st)}">${esc(st)}</span>` : ""}</div>`;
+    ${st ? `<span class="badge s-${esc(st)}">${esc(st)}</span>` : ""}${menu}</div>`;
 }
 
 function render(snap) {
@@ -348,10 +373,15 @@ function render(snap) {
   if (loose.length) html += `<details data-color="" open><summary>No group<span class="n">${loose.length}</span>${snap.send ? `<button class="gmenu" data-color="">⋯</button>` : ""}</summary>${loose.map((t) => tabRow(t, false)).join("")}</details>`;
   $("out").innerHTML = html;
   $("newbtn").hidden = !snap.send;
+  $("setbtn").hidden = !snap.send;
   for (const b of $("out").querySelectorAll(".gmenu")) b.onclick = (ev) => {
     ev.preventDefault(); ev.stopPropagation();      // not a fold of the group here
-    if (!b.dataset.color) looseMenu();
-    else groupMenu(snap.groups.find((g) => g.color === b.dataset.color));
+    if (!b.dataset.color) looseAsk();
+    else groupAsk(snap.groups.find((g) => g.color === b.dataset.color));
+  };
+  for (const b of $("out").querySelectorAll(".tmenu")) b.onclick = (ev) => {
+    ev.preventDefault(); ev.stopPropagation();      // the row opens the tab
+    tabMenu(b.dataset.id);
   };
   for (const el of $("out").querySelectorAll(".tab.open")) {
     const t = byId[el.dataset.id];
@@ -368,6 +398,7 @@ function show(snap, how) {
   if (!snap || !Array.isArray(snap.tabs)) { failed((snap && snap.error) || "bad answer from tabit"); return; }
   if (how === "polled" && live) return;     // a late poll must not undo a newer push
   lastSnap = snap;                // render (and the open tab's view) read it
+  forgetMissing(snap);            // a tab closed on the desktop drops its unsent text
   notifyChanges(snap);
   render(snap);
   checked(how);
@@ -468,7 +499,6 @@ function updateDetail() {
   const why = !lastSnap.send ? "Typing from the phone is off (tabit Settings > Remote)."
     : t.can_send ? "" : "This tab has exited.";
   if (why && kbdOn) setKbd(false, false);
-  $("tabmenubtn").hidden = !lastSnap.send;
   // Latest only scrolls the screen: it works with typing off too
   for (const b of $("controls").querySelectorAll("button:not(#latest), textarea")) b.disabled = !!why;
   if (why) dmsg(why);
@@ -605,13 +635,37 @@ let fit = true, fontPx = 11, lastCols = 0;
 try { fit = localStorage.getItem("tabit.fit") !== "0"; } catch {}
 try { fontPx = Math.max(6, Math.min(28, +localStorage.getItem("tabit.font") || 11)); } catch {}
 
+// one cell of the screen's real font. 0.6em was a guess: on a phone it
+// was wide of the truth, so a short line sat on the left and the right
+// of the screen stayed empty.
+let fitCtx = null;
+function cellPx(px) {
+  fitCtx = fitCtx || document.createElement("canvas").getContext("2d");
+  fitCtx.font = `${px}px ${getComputedStyle($("screen")).fontFamily}`;
+  const w = fitCtx.measureText("0000000000").width / 10;
+  return w > 0.5 ? w : px * 0.6;
+}
+function phoneQuery() {
+  const pre = $("screen");
+  if (pre.clientWidth < 40 || pre.clientHeight < 40) return "";
+  // fit aims at a readable 14px and lets the pane width follow.
+  // A− / A+ is a size the user picked: keep it and widen the pane instead.
+  const target = fit ? 14 : fontPx;
+  const cols = Math.floor((pre.clientWidth - 18) / cellPx(target));
+  const rows = Math.floor(pre.clientHeight / (target * 1.35));
+  if (cols < 24 || rows < 12) return "";
+  return `&cols=${Math.min(cols, 120)}&rows=${Math.min(rows, 80)}`;
+}
 function sizeScreen(cols) {
   const pre = $("screen");
   lastCols = cols;
   pre.classList.toggle("fit", fit && !!cols);
-  // a monospace cell is about 0.6 em wide: pick the size that fits the pane
-  pre.style.fontSize = fit && cols ? `${Math.max(5, Math.min(14, (pre.clientWidth - 18) / (cols * 0.6)))}px`
-                                   : `${fontPx}px`;
+  if (!(fit && cols) || pre.clientWidth < 40) {
+    pre.style.fontSize = `${fontPx}px`;
+    return;
+  }
+  const px = (pre.clientWidth - 18) / cols / (cellPx(100) / 100);
+  pre.style.fontSize = `${Math.max(6, Math.min(22, px))}px`;
 }
 
 let screenGen = 0, screenBusy = 0;
@@ -622,7 +676,7 @@ async function loadScreen() {
   const id = current, gen = ++screenGen;
   screenBusy = Date.now();
   try {
-    const res = await fetch(`api/tabs/${encodeURIComponent(id)}/screen?color=1&back=${back}`, { cache: "no-store" });
+    const res = await fetch(`api/tabs/${encodeURIComponent(id)}/screen?color=1&back=${back}${phoneQuery()}`, { cache: "no-store" });
     const body = await res.json();
     if (id !== current || gen !== screenGen) return;
     if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
@@ -672,9 +726,43 @@ const markCur = () => {
   for (const el of $("out").querySelectorAll(".tab")) el.classList.toggle("cur", el.dataset.id === current);
 };
 
+// Each tab keeps the message that has not been sent. The box shows the
+// open tab's text. Leaving puts it away; coming back brings it out.
+// draft-keep:start
+const drafts = new Map();
+function rememberDraft(id, text) {
+  if (!id) return;
+  if (text) drafts.set(id, text);
+  else drafts.delete(id);
+}
+function draftOf(id) {
+  return (id && drafts.get(id)) || "";
+}
+// A send that failed goes back in front of anything typed since.
+function restoreFailed(id, sent, extra) {
+  const back = sent + (extra ? "\n" + extra : "");
+  rememberDraft(id, back);
+  return back;
+}
+function forgetMissing(snap) {
+  const live = new Set((snap.tabs || []).map((t) => t.id));
+  for (const id of [...drafts.keys()]) if (id !== current && !live.has(id)) drafts.delete(id);
+}
+// A phone can empty the box when the keyboard closes, and that does not
+// send input. Clearing the box does send input, which drops the draft
+// first, so an empty box keeps whatever is already stored.
+function textToKeep(id, shown) {
+  if (shown) return shown;
+  return draftOf(id);
+}
+// draft-keep:end
+
 function openTab(id) {
   flushTyped();                   // letters typed into the last tab go there, not here
   if ($("viewer").classList.contains("on")) $("vback").click();   // a laptop: the list opened another tab
+  const stale = $("text").value;  // what this box shows now; a blur may already have wiped it
+  const leaving = id !== current;
+  if (leaving) rememberDraft(current, textToKeep(current, stale));   // stays with the tab it was typed in
   current = id;
   lastScreen = null;
   back = 0;
@@ -686,6 +774,7 @@ function openTab(id) {
   // each tab keeps its own ⌨ mode (on while the tab can take typing)
   if (kbdWanted(id) && !$("kbdbtn").disabled) setKbd(true, false);   // also takes the focus back
   else if (kbdOn) setKbd(false, false);
+  if (leaving) showBox(id, stale);   // after the box is shown: a hidden write does not stick
   // opening the tab: tabit counts its "ready" as read
   if (lastSnap && lastSnap.send) inOrder(() => fetch(`api/tabs/${encodeURIComponent(id)}/ack`, {
     method: "POST", headers: { "Content-Type": "application/json", "X-Tabit": "1" }, body: "{}" }).catch(() => {}));
@@ -694,6 +783,7 @@ function openTab(id) {
 }
 
 function closeTab() {
+  rememberDraft(current, textToKeep(current, $("text").value));   // Back keeps the unsent message
   setKbd(false, false);           // leaving the tab: its ⌨ mode is kept for later
   current = null;
   clearInterval(screenTimer);
@@ -759,60 +849,510 @@ const colorChips = (cur) => {
     + free.map((c) => `<button class="chip${sel(c)}" data-c="${esc(c)}" title="${esc(c)}" style="background:var(--${esc(c)})"></button>`).join("");
 };
 
-$("newbtn").onclick = () => {
+$("newbtn").onclick = () => newTab("");
+
+// --- ⚙ Settings: AI defaults, Claude accounts, update, restart --------
+// Only with typing from the phone on; Remote's own switches stay at the
+// computer, so the phone can neither open more to itself nor lock itself out.
+const SET_LABELS = {
+  ai_use_tmux: "New AI tabs run in tmux",
+  ai_claude_bypass: "Claude starts in bypass (--dangerously-skip-permissions)",
+  ai_fresh_on_restore: "New AI tabs start fresh after tabit reopens",
+};
+let setTimer = 0;
+async function admin(op, body) {
+  const res = await fetch(`api/admin/${op}`, {
+    method: "POST", headers: { "Content-Type": "application/json", "X-Tabit": "1" },
+    body: JSON.stringify(body || {}),
+  });
+  const out = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(out.error || `HTTP ${res.status}`);
+  return out;
+}
+function settingsMsg(text, err) {
+  const m = $("smsg");
+  if (m) { m.textContent = text || ""; m.className = err ? "err" : "smsg"; }
+}
+function openSettings() {
+  sheet(`<h3>Settings</h3><div id="sbody" class="dim">Loading…</div><div id="smsg" class="smsg"></div>
+    <div class="row"><button id="sclose">Close</button></div>`);
+  $("sclose").onclick = () => { clearTimeout(setTimer); unsheet(); };
+  drawSettings();
+}
+async function drawSettings() {
+  clearTimeout(setTimer);
+  if (!$("sbody")) return;                   // closed, or another sheet now
+  let st;
+  try {
+    const res = await fetch("api/admin/state", { cache: "no-store" });
+    // a tabit older than this page answers 404 in plain text
+    if (res.status === 404) {
+      $("sbody").textContent = "";
+      settingsMsg("The tabit running now is older than this page. Restart tabit at the computer first.", true);
+      return;
+    }
+    st = await res.json();
+    if (!res.ok) throw new Error(st.error || `HTTP ${res.status}`);
+  } catch (e) { settingsMsg(e.message || String(e), true); setTimer = setTimeout(drawSettings, 3000); return; }
+  if (!$("sbody")) return;
+  const lg = st.login, up = st.update;
+  const busy = (lg && (lg.state === "starting" || lg.state === "waiting")) || (up && up.state === "running");
+  const again = () => { if (busy) setTimer = setTimeout(drawSettings, 2000); };
+  // a code half typed in survives the refresh: only the line under it moves
+  const code = $("scode");
+  if (code && lg && lg.state === "waiting" && (code.value || document.activeElement === code)) {
+    $("slmsg").textContent = lg.msg || "";
+    again();
+    return;
+  }
+  const acctRow = (a) => `<div class="acct"><span>${esc(a.name || "Default")} — ${a.loggedIn
+    ? esc(a.email || "logged in") + (a.plan ? ` · ${esc(a.plan)}` : "") : "not logged in"}</span>${a.loggedIn
+    ? "" : `<button class="slogin" data-n="${esc(a.name)}">Log in</button>`}</div>`;
+  let login = "";
+  if (lg && (lg.state === "starting" || lg.state === "waiting")) {
+    login = `<div class="box"><b>Log in to ${esc(lg.account || "Default")}</b>${lg.url
+      ? `<a class="btnlink" href="${esc(lg.url)}" target="_blank" rel="noopener">1. Open the login page</a>
+        <label for="scode">2. Paste the code it shows</label>
+        <input id="scode" autocapitalize="off" autocorrect="off" spellcheck="false">
+        <div class="row"><button id="scodego" class="go">Send code</button></div>`
+      : `<div class="dim">Starting…</div>`}<div id="slmsg" class="dim">${esc(lg.msg || "")}</div></div>`;
+  } else if (lg && lg.state === "done") {
+    login = `<div class="dim">✓ ${esc(lg.account || "Default")} logged in.</div>`;
+  } else if (lg && lg.state === "failed") {
+    login = `<div class="err">Login stopped: ${esc(lg.msg || "")}</div>`;
+  }
+  let upd = `<div class="row"><button id="supcheck">Check for updates</button></div><div id="supinfo"></div>`;
+  if (up && up.state === "running") {
+    upd = `<div class="dim">Updating to ${esc(up.latest)}… tabit restarts by itself when done.</div>
+      <pre class="slog">${esc((up.log || []).slice(-8).join("\n"))}</pre>`;
+  } else if (up && up.state === "done") {
+    upd = `<div class="dim">✓ Installed ${esc(up.latest)}. Restarting…</div>`;
+  } else if (up && up.state === "failed") {
+    upd = `<div class="err">Update failed: ${esc(up.error)}</div>${upd}`;
+  }
+  $("sbody").className = "";
+  $("sbody").innerHTML = `
+    <label>AI defaults (new tabs)</label>
+    ${Object.keys(SET_LABELS).map((k) => `<label class="check"><input type="checkbox" data-k="${k}"${
+      st.settings[k] ? " checked" : ""}> ${esc(SET_LABELS[k])}</label>`).join("")}
+    <label>Claude accounts</label>
+    ${st.accounts.map(acctRow).join("")}
+    ${login}
+    <div class="pathline"><input id="snewacct" placeholder="new account name, e.g. work" autocapitalize="off"
+      autocorrect="off" spellcheck="false"><button id="saddacct">Add</button></div>
+    <label>tabit ${esc(st.version)}</label>
+    ${upd}
+    <div class="row"><button id="srestart">Restart tabit</button></div>`;
+  const run = async (fn) => {
+    try { await fn(); settingsMsg(""); } catch (e) { settingsMsg(e.message || String(e), true); }
+    drawSettings();
+  };
+  for (const c of $("sbody").querySelectorAll("input[data-k]")) c.onchange = async () => {
+    try { await admin("set", { [c.dataset.k]: c.checked }); settingsMsg("saved"); }
+    catch (e) { c.checked = !c.checked; settingsMsg(e.message || String(e), true); }
+  };
+  for (const b of $("sbody").querySelectorAll(".slogin")) b.onclick = () => run(() => admin("login-start", { name: b.dataset.n }));
+  $("saddacct").onclick = () => run(() => admin("account-add", { name: $("snewacct").value.trim() }));
+  if ($("scodego")) $("scodego").onclick = () => run(() => admin("login-code", { code: $("scode").value.trim() }));
+  if ($("supcheck")) $("supcheck").onclick = async () => {
+    $("supinfo").innerHTML = `<div class="dim">Checking…</div>`;
+    try {
+      const r = await admin("update-check");
+      $("supinfo").innerHTML = r.newer
+        ? `<div class="dim">New: <b>${esc(r.latest)}</b></div><div class="row"><button id="supgo" class="go">Update now</button></div>`
+        : `<div class="dim">✓ ${esc(r.current)} is the newest.</div>`;
+      if ($("supgo")) $("supgo").onclick = () => {
+        if (confirm(`Update to ${r.latest}?\n\ntabit restarts by itself when done: tabs outside tmux close.`)) run(() => admin("update"));
+      };
+    } catch (e) { $("supinfo").innerHTML = ""; settingsMsg(e.message || String(e), true); }
+  };
+  $("srestart").onclick = async () => {
+    if (!confirm("Restart tabit?\n\nTabs outside tmux close and their programs stop. tmux tabs keep running.")) return;
+    try { await admin("restart"); settingsMsg("restarting… this page comes back by itself"); }
+    catch (e) { settingsMsg(e.message || String(e), true); }
+  };
+  again();
+}
+$("setbtn").onclick = openSettings;
+
+function newTab(group) {
   let kind = "shell";
+  let serialReady = false, connectReady = false;
+  nameTag = "";
+  nameBare = null;
+  const connectBtn = lastSnap.connect ? `<button data-k="connect">Connect</button>` : "";
   sheet(`<h3>New tab</h3>
-    <div class="row seg"><button data-k="shell" class="sel">Terminal</button><button data-k="ai">AI</button><button data-k="command">Command</button></div>
+    <div class="row seg"><button data-k="shell" class="sel">Terminal</button><button data-k="ai">AI</button><button data-k="serial">Serial</button>${connectBtn}</div>
+    <label for="nname">Name</label>
+    <input id="nname" maxlength="80" placeholder="optional" autocapitalize="off" autocorrect="off">
     <label for="ncli" class="forai" hidden>AI</label>
     <select id="ncli" class="forai" hidden>${lastSnap.clis.map((c) => `<option>${esc(c)}</option>`).join("")}</select>
-    <label for="ncmd" class="forcmd" hidden>Command</label>
-    <input id="ncmd" class="forcmd" hidden placeholder="ssh root@192.168.1.1" autocapitalize="off" autocorrect="off">
-    <label for="ncwd">Folder</label>
-    <input id="ncwd" value="~" autocapitalize="off" autocorrect="off">
-    <label>Group</label><div class="chips" id="ngrp">${colorChips("")}</div>
+    <label for="nacct" class="foracct" hidden>Account</label>
+    <select id="nacct" class="foracct" hidden><option value="">Default</option>${(lastSnap.accounts || []).map((a) => `<option>${esc(a)}</option>`).join("")}</select>
+    <label id="nser-target-lab" class="forser" for="ndevpath" hidden>Device</label>
+    <select id="ndev" class="forser" hidden></select>
+    <input id="ndevpath" class="forser" hidden placeholder="/dev/ttyUSB0" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <input id="nhost" class="forser" hidden placeholder="user@host" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <label id="nser-rate-lab" class="forser" for="nbaud" hidden>Baud</label>
+    <input id="nbaud" class="forser" hidden value="115200" inputmode="numeric" autocapitalize="off" autocorrect="off">
+    <input id="nport" class="forser" hidden placeholder="port (optional)" inputmode="numeric" autocapitalize="off" autocorrect="off">
+    <label for="ntool" class="forser" hidden>Tool</label>
+    <select id="ntool" class="forser" hidden><option>screen</option><option>kermit</option><option>picocom</option><option>ssh</option><option>telnet</option></select>
+    <label for="nsn" class="forconn" hidden>Serial Number</label>
+    <input id="nsn" class="forconn" hidden placeholder="e.g. 2340X421DCGQ" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <label for="nenv" class="forconn" hidden>Environment</label>
+    <select id="nenv" class="forconn" hidden><option>prod</option></select>
+    <label for="nemail" class="forconn" hidden>Email</label>
+    <input id="nemail" class="forconn" hidden placeholder="Email" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <label for="npwd" class="forconn" hidden>Password</label>
+    <input id="npwd" class="forconn" hidden type="password" placeholder="Password" autocomplete="off">
+    <label for="ndtype" class="forconn" hidden>Device Type</label>
+    <select id="ndtype" class="forconn" hidden><option>auto</option><option>ap</option><option>gateway</option><option>camera</option></select>
+    <label class="check forconn" hidden><input id="ntmux" type="checkbox" checked> Use tmux</label>
+    <details class="forconn" hidden>
+      <summary>More</summary>
+      <label for="nticket">Passcode</label>
+      <input id="nticket" type="password" placeholder="Passcode (optional)" autocomplete="off">
+      <label for="norg">Organization</label>
+      <input id="norg" placeholder="Org name or ID (optional)" autocapitalize="off" autocorrect="off">
+      <label for="nnet">Network</label>
+      <input id="nnet" placeholder="Network name or ID (optional)" autocapitalize="off" autocorrect="off">
+      <label for="ngw">Gateway Pass</label>
+      <input id="ngw" type="password" placeholder="Gateway root password" autocomplete="off">
+      <label for="nmagic">Magic Words</label>
+      <input id="nmagic" placeholder="word1,word2" autocapitalize="off" autocorrect="off">
+      <label for="nagent">EHR Agent</label>
+      <input id="nagent" placeholder="agent SN, MAC, IP or auto" autocapitalize="off" autocorrect="off">
+      <label class="check"><input id="nnocache" type="checkbox"> Bypass cache</label>
+      <label class="check"><input id="nreconnect" type="checkbox"> Force reconnect</label>
+    </details>
+    <div class="forfolder">
+      <div class="labline">
+        <label for="ncwd">Folder</label>
+        <label class="check" for="nhid"><input id="nhid" type="checkbox"> Show hidden</label>
+      </div>
+      <div class="pathline">
+        <button id="nup" type="button" title="parent folder">↑</button>
+        <input id="ncwd" value="~" autocapitalize="off" autocorrect="off" spellcheck="false">
+        <button id="njump" type="button">Go</button>
+      </div>
+      <div id="ndirs" class="dirs"></div>
+    </div>
+    <label>Group</label><div class="chips" id="ngrp">${colorChips(group || "")}</div>
     <div class="row"><button id="ncancel">Cancel</button><button id="ngo" class="go">Open</button></div>`);
-  let group = "";
   const card = $("sheetcard");
+  function serialFields() {
+    const tool = ($("ntool") && $("ntool").value) || "screen";
+    const net = tool === "ssh" || tool === "telnet";
+    const hasDev = $("ndev") && $("ndev").options.length > 0;
+    if ($("ndev")) $("ndev").hidden = net || !hasDev;
+    if ($("ndevpath")) $("ndevpath").hidden = net;
+    if ($("nhost")) $("nhost").hidden = !net;
+    if ($("nbaud")) $("nbaud").hidden = net;
+    if ($("nport")) $("nport").hidden = !net;
+    const tl = $("nser-target-lab");
+    const rl = $("nser-rate-lab");
+    if (tl) { tl.textContent = net ? "Host" : "Device"; tl.htmlFor = net ? "nhost" : "ndevpath"; }
+    if (rl) { rl.textContent = net ? "Port" : "Baud"; rl.htmlFor = net ? "nport" : "nbaud"; }
+  }
+  function armOpen() {
+    const go = $("ngo");
+    if (!go) return;
+    go.disabled = (kind === "serial" && !serialReady) || (kind === "connect" && !connectReady);
+  }
+  // a Claude account (Settings > AI in tabit), only for claude
+  function showAcct() {
+    const on = kind === "ai" && (lastSnap.accounts || []).length > 0
+      && /(^|\/)claude$/.test($("ncli").value);
+    for (const x of card.querySelectorAll(".foracct")) x.hidden = !on;
+  }
+  function showKind() {
+    for (const x of card.querySelectorAll(".forai")) x.hidden = kind !== "ai";
+    showAcct();
+    for (const x of card.querySelectorAll(".forser")) x.hidden = kind !== "serial";
+    for (const x of card.querySelectorAll(".forconn")) x.hidden = kind !== "connect";
+    for (const x of card.querySelectorAll(".forfolder")) x.hidden = kind === "serial" || kind === "connect";
+    if (kind === "serial") serialFields();
+    if (kind === "ai") applyAiName($("ncli").value);
+    else clearAiName();
+    armOpen();
+  }
   for (const b of card.querySelectorAll(".seg button")) b.onclick = () => {
     kind = b.dataset.k;
     for (const x of card.querySelectorAll(".seg button")) x.classList.toggle("sel", x === b);
-    for (const x of card.querySelectorAll(".forai")) x.hidden = kind !== "ai";
-    for (const x of card.querySelectorAll(".forcmd")) x.hidden = kind !== "command";
+    showKind();
   };
+  $("ntool").addEventListener("change", serialFields);
+  $("ndev").addEventListener("change", () => { if ($("ndevpath")) $("ndevpath").value = $("ndev").value; });
+  $("ncli").addEventListener("change", () => applyAiName($("ncli").value));
+  $("ncli").addEventListener("change", showAcct);
+  $("nname").addEventListener("input", () => {
+    const rest = nameWithoutTag($("nname").value, nameTag);
+    if (rest !== null) nameBare = rest;
+    else { nameBare = null; nameTag = ""; }
+  });
   for (const b of card.querySelectorAll("#ngrp .chip")) b.onclick = () => {
     group = b.dataset.c;
     for (const x of card.querySelectorAll("#ngrp .chip")) x.classList.toggle("sel", x === b);
   };
+  $("nup").onclick = () => { if ($("nup").dataset.parent) loadDirs($("nup").dataset.parent); };
+  $("njump").onclick = () => loadDirs($("ncwd").value.trim() || "~");
+  $("ncwd").addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") { ev.preventDefault(); loadDirs($("ncwd").value.trim() || "~"); }
+  });
+  $("ncwd").addEventListener("input", applyTypedFolder);
+  $("nhid").addEventListener("change", () => {
+    const raw = ($("ncwd") && $("ncwd").value) || "~";
+    loadDirs(typedFolder(raw).dir || "~", true);
+  });
   $("ncancel").onclick = unsheet;
   $("ngo").onclick = async () => {
-    const body = { kind, cwd: $("ncwd").value.trim() };
+    const body = { kind };
+    const name = $("nname").value.trim();
+    if (name) body.name = name;
+    if (kind === "shell" || kind === "ai") body.cwd = $("ncwd").value.trim();
     if (kind === "ai") body.cli = $("ncli").value;
-    if (kind === "command") body.command = $("ncmd").value.trim();
+    if (kind === "ai" && !$("nacct").hidden && $("nacct").value) body.account = $("nacct").value;
+    if (kind === "serial") {
+      const tool = $("ntool").value;
+      const net = tool === "ssh" || tool === "telnet";
+      body.tool = tool;
+      body.target = (net ? $("nhost").value : $("ndevpath").value).trim();
+      body.rate = (net ? $("nport").value : $("nbaud").value).trim();
+    }
+    if (kind === "connect") {
+      body.sn = $("nsn").value.trim();
+      body.env = $("nenv").value;
+      body.email = $("nemail").value.trim();
+      const pwd = $("npwd").value;
+      if (pwd) body.password = pwd;
+      body.device_type = $("ndtype").value;
+      body.use_tmux = $("ntmux").checked;
+      const ticket = $("nticket").value;
+      if (ticket) body.ticket = ticket;
+      body.org = $("norg").value.trim();
+      body.network = $("nnet").value.trim();
+      const gw = $("ngw").value;
+      if (gw) body.gateway_pass = gw;
+      body.magic_words = $("nmagic").value.trim();
+      body.agent = $("nagent").value.trim();
+      body.no_cache = $("nnocache").checked;
+      body.reconnect = $("nreconnect").checked;
+    }
     if (group) body.group = group;
     const out = await manage("api/new", body);
     if (out && out.id) { unsheet(); openTab(out.id); }
   };
-};
+  function fillSerial(opt) {
+    if (!$("ndev") || !$("ntool")) return;
+    const devs = opt.devices || [];
+    $("ndev").innerHTML = devs.map((d) => `<option>${esc(d)}</option>`).join("");
+    if ($("ndevpath") && !$("ndevpath").value && devs.length) $("ndevpath").value = devs[0];
+    const cur = $("ntool").value;
+    const tools = opt.tools || [];
+    if (tools.length) {
+      $("ntool").innerHTML = tools.map((t) => `<option>${esc(t)}</option>`).join("");
+      if (tools.includes(cur)) $("ntool").value = cur;
+    }
+    if ($("nbaud") && !$("nbaud").value) $("nbaud").value = opt.baud || "115200";
+    if (kind === "serial") serialFields();
+  }
+  function fillConnect(form) {
+    if (!$("nsn") || !form) return;
+    if (!$("nsn").value) $("nsn").value = form.sn || "";
+    const envs = form.envs && form.envs.length ? form.envs : ["prod"];
+    $("nenv").innerHTML = envs.map((e) => `<option>${esc(e)}</option>`).join("");
+    if (envs.includes(form.env)) $("nenv").value = form.env;
+    if (!$("nemail").value) $("nemail").value = form.email || "";
+    $("npwd").placeholder = form.saved_password ? "saved" : "Password";
+    const types = form.types && form.types.length ? form.types : ["auto", "ap", "gateway", "camera"];
+    $("ndtype").innerHTML = types.map((t) => `<option>${esc(t)}</option>`).join("");
+    if (types.includes(form.device_type)) $("ndtype").value = form.device_type;
+    $("ntmux").checked = form.use_tmux !== false;
+    $("nticket").placeholder = form.saved_ticket ? "saved" : "Passcode (optional)";
+    if (!$("norg").value) $("norg").value = form.org || "";
+    if (!$("nnet").value) $("nnet").value = form.network || "";
+    $("ngw").placeholder = form.saved_gateway_pass ? "saved" : "Gateway root password";
+    if (!$("nmagic").value) $("nmagic").value = form.magic_words || "";
+    $("nnocache").checked = !!form.no_cache;
+  }
+  loadDirs("~");
+  fetch("api/new-options", { cache: "no-store" }).then((res) => res.ok ? res.json() : null).then((opt) => {
+    if (!$("ntool")) return;
+    if (opt) {
+      fillSerial(opt);
+      if (opt.connect_form) fillConnect(opt.connect_form);
+      connectReady = !lastSnap.connect || !!opt.connect_form;
+    }
+    serialReady = true;
+    armOpen();
+  }).catch(() => { serialReady = true; armOpen(); });
+}
 
-function tabMenu() {
-  const t = tabById(current);
+// Picking an AI fills the name with [Grok]. Words typed after that tag
+// stay when the AI changes: [Grok] Fox becomes [Claude] Fox.
+// Leaving AI takes that tag off. Coming back puts it on again, unless
+// the name was edited by hand.
+// ai-name:start
+function aiTag(cli) {
+  const s = String(cli || "").trim();
+  if (!s) return "";
+  return "[" + s.charAt(0).toUpperCase() + s.slice(1) + "]";
+}
+function nextAiName(current, prevTag, nextTag) {
+  if (!nextTag) return current || "";
+  if (!current) return nextTag;
+  if (prevTag && current.startsWith(prevTag)) return nextTag + current.slice(prevTag.length);
+  return current;
+}
+// null: this name is not the tag we wrote, so leave it alone.
+function nameWithoutTag(current, tag) {
+  const text = String(current || "");
+  if (!tag || !text.startsWith(tag)) return null;
+  const rest = text.slice(tag.length);
+  return rest.startsWith(" ") ? rest.slice(1) : rest;
+}
+// null: the person changed the name after we cleared the tag.
+function nameBackOn(current, bare, tag) {
+  if (bare === null || current !== bare || !tag) return null;
+  return bare ? tag + " " + bare : tag;
+}
+// ai-name:end
+
+let nameTag = "";
+let nameBare = null;
+function applyAiName(cli) {
+  const box = $("nname");
+  if (!box) return;
+  const tag = aiTag(cli);
+  const back = nameBackOn(box.value, nameBare, tag);
+  const next = back !== null ? back : nextAiName(box.value, nameTag, tag);
+  if (next !== box.value) box.value = next;
+  const rest = nameWithoutTag(box.value, tag);
+  if (rest !== null) { nameTag = tag; nameBare = rest; }
+  else { nameTag = ""; nameBare = null; }
+}
+function clearAiName() {
+  const box = $("nname");
+  if (!box) return;
+  const rest = nameWithoutTag(box.value, nameTag);
+  if (rest === null) { nameTag = ""; nameBare = null; return; }
+  box.value = rest;
+  nameBare = rest;
+  nameTag = "";
+}
+
+// What the folder box is pointing at. "~/show" is still home, narrowed to
+// names that start with "show". A slash on the end opens that folder.
+// folder-type:start
+function typedFolder(raw) {
+  const text = (raw || "").trim();
+  if (!text || text === "~") return { dir: "~", prefix: "" };
+  if (text.endsWith("/")) {
+    const dir = text.length === 1 ? "/" : text.slice(0, -1);
+    return { dir: dir || "/", prefix: "" };
+  }
+  const cut = text.lastIndexOf("/");
+  if (cut < 0) return { dir: "~", prefix: text };
+  if (cut === 0) return { dir: "/", prefix: text.slice(1) };
+  return { dir: text.slice(0, cut), prefix: text.slice(cut + 1) };
+}
+// folder-type:end
+
+let shownDirs = [], shownMore = false, shownKey = "", shownRaw = "", shownReal = "";
+let dirGen = 0, dirTimer = null;
+
+function sameShown(dir) {
+  return dir === shownKey || dir === shownRaw || dir === shownReal;
+}
+
+function showHiddenDirs() {
+  const box = $("nhid");
+  return !!(box && box.checked);
+}
+
+function paintDirs(prefix) {
+  const box = $("ndirs");
+  if (!box) return;
+  const hidden = showHiddenDirs();
+  const rows = shownDirs.filter((d) => {
+    if (!hidden && d.name.startsWith(".")) return false;
+    return !prefix || d.name.startsWith(prefix);
+  });
+  const html = rows.map((d) =>
+    `<button type="button" data-path="${esc(d.path)}">${esc(d.name)}</button>`).join("");
+  box.innerHTML = html || `<div class="newg">${prefix ? "No match" : "No folders here"}</div>`;
+  if (shownMore) box.insertAdjacentHTML("beforeend", `<div class="newg">and more</div>`);
+  for (const b of box.querySelectorAll("button")) b.onclick = () => loadDirs(b.dataset.path);
+}
+
+function applyTypedFolder() {
+  const box = $("ncwd");
+  if (!box) return;
+  const { dir, prefix } = typedFolder(box.value);
+  clearTimeout(dirTimer);
+  if (sameShown(dir)) { dirGen++; paintDirs(prefix); return; }
+  dirTimer = setTimeout(() => loadDirs(dir, true), 150);
+}
+
+async function loadDirs(path, keep) {
+  const box = $("ndirs");
+  if (!box) return;
+  clearTimeout(dirTimer);
+  const gen = ++dirGen;
+  const asked = path || "~";
+  if (!keep) box.textContent = "…";
+  try {
+    const hid = showHiddenDirs() ? "&hidden=1" : "";
+    const res = await fetch("api/dirs?path=" + encodeURIComponent(asked) + hid);
+    const out = await res.json();
+    if (gen !== dirGen || !$("ndirs")) return;
+    if (!res.ok) throw new Error(out.error || `HTTP ${res.status}`);
+    shownKey = out.show || out.path;
+    shownRaw = asked;
+    shownReal = out.path || "";
+    shownDirs = out.dirs || [];
+    shownMore = !!out.more;
+    if (!keep && $("ncwd")) $("ncwd").value = shownKey;
+    if ($("nup")) {
+      $("nup").disabled = !out.parent;
+      $("nup").dataset.parent = out.parent || "";
+    }
+    const prefix = keep && $("ncwd") ? typedFolder($("ncwd").value).prefix : "";
+    paintDirs(prefix);
+  } catch (e) {
+    if (gen !== dirGen || !$("ndirs")) return;
+    box.textContent = e.message || String(e);
+  }
+}
+
+function tabMenu(id) {
+  const t = tabById(id || current);
   if (!t) return;
   sheet(`<h3>${esc(t.title || "(untitled)")}</h3>
     <label for="tname">Name</label><input id="tname" value="${esc(t.title || "")}" maxlength="80">
     <div class="row"><button id="tsave" class="go">Rename</button></div>
     <label>Group</label><div class="chips" id="tgrp">${colorChips(t.group)}</div>
     <div class="row"><button id="tup">↑ Move up</button><button id="tdown">↓ Move down</button></div>
+    ${"account" in t && (lastSnap.accounts || []).length ? `<label for="tacct">Account (goes on with this conversation)</label>
+    <div class="pathline"><select id="tacct"><option value="">Default</option>${lastSnap.accounts.map((a) =>
+      `<option${a === t.account ? " selected" : ""}>${esc(a)}</option>`).join("")}</select>
+    <button id="tacctgo">Switch</button></div>` : ""}
     <div class="row"><button id="tclose" class="danger">Close tab</button></div>
     <div class="row"><button id="tdone">Done</button></div>`);
   for (const b of $("sheetcard").querySelectorAll("#tgrp .chip")) b.onclick = async () => {
     await manage(`api/tabs/${encodeURIComponent(t.id)}/group`, { color: b.dataset.c || null });
-    tabMenu();
+    tabMenu(t.id);
   };
   $("tsave").onclick = async () => {
     if (await manage(`api/tabs/${encodeURIComponent(t.id)}/rename`, { name: $("tname").value })) {
-      $("dname").textContent = $("tname").value.trim();
+      if (t.id === current) $("dname").textContent = $("tname").value.trim();
       unsheet();
     }
+  };
+  if ($("tacctgo")) $("tacctgo").onclick = async () => {
+    if ($("tacct").value === (t.account || "")) return unsheet();
+    if (await manage(`api/tabs/${encodeURIComponent(t.id)}/account`, { account: $("tacct").value })) unsheet();
   };
   $("tup").onclick = () => manage(`api/tabs/${encodeURIComponent(t.id)}/move`, { delta: -1 });
   $("tdown").onclick = () => manage(`api/tabs/${encodeURIComponent(t.id)}/move`, { delta: 1 });
@@ -820,10 +1360,25 @@ function tabMenu() {
   $("tclose").onclick = async () => {
     const warn = t.type === "ai" ? "\n\nThe agent and its tmux session stop, as with × in tabit." : "";
     if (!confirm(`Close "${t.title}"?${warn}`)) return;
-    if (await manage(`api/tabs/${encodeURIComponent(t.id)}/close`, {})) { unsheet(); closeTab(); }
+    if (await manage(`api/tabs/${encodeURIComponent(t.id)}/close`, {})) {
+      unsheet();
+      if (t.id === current) closeTab();
+      rememberDraft(t.id, "");    // closed: its unsent message goes too
+    }
   };
 }
-$("tabmenubtn").onclick = tabMenu;
+
+// a group's ⋯: open a tab here, or change the group
+function groupAsk(g) {
+  if (!g) return;
+  sheet(`<h3><span class="dot" style="display:inline-block;background:var(--${esc(g.color)})"></span> ${esc(g.name)}</h3>
+    <div class="row"><button id="gnew" class="go">New tab here</button></div>
+    <div class="row"><button id="gset">Group settings</button></div>
+    <div class="row"><button id="gdone">Cancel</button></div>`);
+  $("gnew").onclick = () => newTab(g.color);
+  $("gset").onclick = () => groupMenu(g);
+  $("gdone").onclick = unsheet;
+}
 
 // the colours no group has; cur (a group's own) shows as picked
 const freeChips = (cur) => {
@@ -858,7 +1413,17 @@ function groupMenu(g) {
   };
 }
 
-// "No group": its tabs become a new group, with a name and a free colour
+// "No group": a new tab with no group, or turn these tabs into a group
+function looseAsk() {
+  sheet(`<h3>No group</h3>
+    <div class="row"><button id="lnew" class="go">New tab here</button></div>
+    <div class="row"><button id="lset">Make a group</button></div>
+    <div class="row"><button id="ldone">Cancel</button></div>`);
+  $("lnew").onclick = () => newTab("");
+  $("lset").onclick = looseMenu;
+  $("ldone").onclick = unsheet;
+}
+
 function looseMenu() {
   sheet(`<h3>No group</h3>
     <label for="lname">Name</label><input id="lname" maxlength="40" placeholder="New group">
@@ -896,7 +1461,7 @@ function setKbd(on, remember = true) {
   $("detail").classList.toggle("kbd", on);
   $("kbdbtn").classList.toggle("on", on);
   if (on) { $("kbd").value = ""; $("kbd").focus(); dmsg("keyboard: typing goes straight in"); }
-  else { $("kbd").blur(); flushTyped(); }
+  else { $("kbd").blur(); flushTyped(); if (current) showBox(current, ""); }
   restartScreenTimer();
   fitKbd();
 }
@@ -1020,7 +1585,9 @@ document.addEventListener("keydown", (ev) => {
 // The file goes to tabit's uploads folder; its path lands in the text box
 // for the agent to read.
 async function upload(file, name) {
-  if (!current || $("attach").disabled) return;
+  const id = current;
+  if (!id || $("attach").disabled) return;
+  const straight = kbdOn;          // ⌨ mode types the path in; the box keeps a draft
   dmsg(`uploading ${name} (${Math.round(file.size / 1024)} KB)…`);
   try {
     const res = await fetch(`api/upload?name=${encodeURIComponent(name)}`, {
@@ -1029,12 +1596,16 @@ async function upload(file, name) {
     });
     const body = await res.json();
     if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
-    if (kbdOn) { queueTyped(body.path + " "); $("kbd").focus(); }   // ⌨ mode: straight in
-    else {
+    const add = (prev) => (prev && !/\s$/.test(prev) ? prev + " " : prev) + body.path + " ";
+    if (straight && current === id) { queueTyped(body.path + " "); $("kbd").focus(); }
+    else if (current === id) {
       const t = $("text");
-      t.value = (t.value && !/\s$/.test(t.value) ? t.value + " " : t.value) + body.path + " ";
+      repair = null;
+      t.value = add(t.value);
+      rememberDraft(id, t.value);
       t.focus();
     }
+    else rememberDraft(id, add(draftOf(id)));   // left this tab: the path stays with it
     dmsg(`attached ${body.path.split("/").pop()}`);
   } catch (e) { dmsg(`upload: ${e.message || e}`, true); }
 }
@@ -1225,18 +1796,58 @@ const TOUCH = matchMedia("(pointer: coarse)").matches;
 $("text").title = TOUCH
   ? "Send sends; Enter is a new line; 📎 attaches a file"
   : "Enter sends, Shift+Enter is a new line; drop or paste a file to attach";
+// Putting a draft into the box. For a few beats after a tab change, a
+// phone may put the old text back, or show nothing, because the write
+// happened while the box was hidden or the keyboard was closing. A later
+// write fills the draft again. Typing something else stops that.
+let repair = null;
+function showBox(id, stale) {
+  repair = { id, stale, until: Date.now() + 400 };
+  const write = () => {
+    if (!repair || current !== id || Date.now() > repair.until) return;
+    const want = draftOf(id), box = $("text"), seen = box.value;
+    if (seen === want) return;
+    if (seen && seen !== stale) { repair = null; return; }   // typed since the switch
+    box.value = want;
+  };
+  write();
+  requestAnimationFrame(write);
+  setTimeout(write, 120);
+  setTimeout(write, 360);
+}
+function onBoxInput() {
+  if (!current) return;
+  const seen = $("text").value;
+  if (repair && Date.now() < repair.until && current === repair.id
+      && (seen === "" || seen === repair.stale)) {
+    const want = draftOf(current);
+    if ($("text").value !== want) $("text").value = want;
+    return;
+  }
+  repair = null;
+  rememberDraft(current, seen);
+}
+$("text").addEventListener("input", onBoxInput);
+$("text").addEventListener("compositionend", onBoxInput);
 $("text").addEventListener("keydown", (ev) => {
   if (TOUCH || ev.key !== "Enter" || ev.shiftKey || ev.isComposing || ev.keyCode === 229) return;
   ev.preventDefault();
   $("sendbtn").click();
 });
 $("sendbtn").onclick = async () => {
-  const box = $("text"), text = box.value;
-  if (!text.trim()) return;
+  const box = $("text"), text = box.value, id = current;
+  if (!id || !text.trim()) return;
   // empty at once: a second Send has nothing to send twice, and a new
   // draft typed while this one is on its way is never wiped
+  repair = null;
   box.value = "";
-  if (!(await act("send", { text }))) box.value = text + (box.value ? "\n" + box.value : "");
+  rememberDraft(id, "");
+  if (await act("send", { text })) return;
+  // failed: the text goes back to the tab it was sent from, in front of
+  // anything typed since, even if another tab is open now
+  const extra = current === id ? box.value : draftOf(id);
+  const back = restoreFailed(id, text, extra);
+  if (current === id) { repair = null; box.value = back; }
 };
 
 $("refresh").onclick = refresh;

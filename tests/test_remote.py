@@ -4,6 +4,7 @@ import json
 import os
 import re
 import socket
+import urllib.parse
 import sys
 import tempfile
 import threading
@@ -41,7 +42,9 @@ class FakeApp:
     def _remote_call(self, fn, timeout=3):
         return fn()
 
-    def _remote_screen(self, rid, color=False, back=0):
+    _remote_wanted_room = staticmethod(tabit.Tabit._remote_wanted_room)
+
+    def _remote_screen(self, rid, color=False, back=0, want=None):
         return 200, {"id": rid, "lines": ["hello"], "color": color}, ("sess" if color else None)
 
     @staticmethod
@@ -179,6 +182,63 @@ class TestRemoteServer(_ServerCase):
                 h = {k: v for k, v in {**ok, **change}.items() if v is not None}
                 self.assertEqual(http_post(path, self.sock, json.dumps(body), h)[0], 403, (path, change))
         self.assertEqual(self.app.acts, [])
+
+    def test_dirs_lists_folders_on_this_machine(self):
+        d = tempfile.mkdtemp(dir=self.dir.name)
+        os.mkdir(os.path.join(d, "Sub"))
+        os.mkdir(os.path.join(d, ".secret"))
+        with open(os.path.join(d, "note.txt"), "w") as f:
+            f.write("x")
+        head, body = http_get("/api/dirs?path=" + urllib.parse.quote(d), self.sock)
+        self.assertIn("200", head.splitlines()[0])
+        got = json.loads(body)
+        self.assertEqual(got["path"], os.path.realpath(d))
+        self.assertEqual([x["name"] for x in got["dirs"]], ["Sub"])
+        head, body = http_get("/api/dirs?path=" + urllib.parse.quote(d) + "&hidden=1", self.sock)
+        self.assertEqual([x["name"] for x in json.loads(body)["dirs"]], [".secret", "Sub"])
+        self.assertEqual(got["parent"], os.path.dirname(os.path.realpath(d)))
+        head, _ = http_get("/api/dirs?path=" + urllib.parse.quote(
+            os.path.join(d, "note.txt")), self.sock)
+        self.assertIn("400", head.splitlines()[0])
+        self.app._remote_send_on = False
+        head, _ = http_get("/api/dirs?path=" + urllib.parse.quote(d), self.sock)
+        self.assertIn("403", head.splitlines()[0])
+
+    def test_new_options_lists_tools_and_hides_secrets(self):
+        path = os.path.join(self.dir.name, "last.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({
+                "sn": "ABC", "password": "sekret-token-xyz", "email": "a@b.c",
+                "ticket": "tick-token", "gateway_pass": "gw-token",
+                "use_tmux": True, "env": "lab",
+            }, f)
+        old_file, old_has = tabit.CONNECT_LAST_FILE, tabit.HAS_SSH_TOOL
+        old_envs = tabit.Tabit._ssh_tool_envs
+        tabit.CONNECT_LAST_FILE = path
+        tabit.HAS_SSH_TOOL = True
+        tabit.Tabit._ssh_tool_envs = staticmethod(lambda: ["prod", "lab"])
+        try:
+            head, body = http_get("/api/new-options", self.sock)
+            self.assertIn("200", head.splitlines()[0])
+            got = json.loads(body)
+            self.assertEqual(got["baud"], "115200")
+            self.assertEqual(got["tools"][0], "screen")
+            self.assertTrue(got["connect"])
+            self.assertNotIn(b"sekret-token-xyz", body)
+            self.assertNotIn(b"tick-token", body)
+            self.assertNotIn(b"gw-token", body)
+            self.assertEqual(got["connect_form"]["sn"], "ABC")
+            self.assertEqual(got["connect_form"]["email"], "a@b.c")
+            self.assertTrue(got["connect_form"]["saved_password"])
+            self.assertEqual(got["connect_form"]["envs"], ["prod", "lab"])
+            self.app._remote_send_on = False
+            head, _ = http_get("/api/new-options", self.sock)
+            self.assertIn("403", head.splitlines()[0])
+        finally:
+            tabit.CONNECT_LAST_FILE = old_file
+            tabit.HAS_SSH_TOOL = old_has
+            tabit.Tabit._ssh_tool_envs = old_envs
+            self.app._remote_send_on = True
 
     def test_icons(self):
         # the real lookup and rendering, from this repo's SVGs
@@ -943,6 +1003,109 @@ class TestTailscaleAccounts(unittest.TestCase):
         tabit.Tabit._remote_restart(app)
         app._remote_stop.assert_called_once_with(unpublish=False)
         app._remote_start.assert_called_once()
+
+
+class _RoomTerm:
+    def __init__(self, cols, rows):
+        self.cols, self.rows = cols, rows
+        self.sizes = []
+
+    def get_column_count(self):
+        return self.cols
+
+    def get_row_count(self):
+        return self.rows
+
+    def set_size(self, cols, rows):
+        self.sizes.append((cols, rows))
+        self.cols, self.rows = cols, rows
+
+
+class _RoomPage:
+    def __init__(self, parent=None):
+        self.parent = parent
+
+    def get_parent(self):
+        return self.parent
+
+
+class _RoomRow:
+    def __init__(self, cols, rows, parent=None):
+        self.term = _RoomTerm(cols, rows)
+        self.page = _RoomPage(parent)
+
+
+class _RoomApp:
+    """The room methods only. No window."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self._left_frame = object()
+        self._right_frame = object()
+
+    def _session_rows(self):
+        return self.rows
+
+
+for _name in ("_remote_drop_phone_room", "_remote_restore_one",
+              "_remote_restore_phone_rooms", "_remote_arm_restore",
+              "_remote_grow_agent"):
+    setattr(_RoomApp, _name, getattr(tabit.Tabit, _name))
+for _name in ("_remote_agent_room", "_remote_room_to_save"):
+    setattr(_RoomApp, _name, staticmethod(getattr(tabit.Tabit, _name)))
+
+
+class TestRemoteAgentRoom(unittest.TestCase):
+    """The phone picks a size that fills its screen. A desktop pane stays."""
+
+    def test_wanted_room_is_checked(self):
+        self.assertEqual(tabit.Tabit._remote_wanted_room("64", "36"), (64, 36))
+        self.assertIsNone(tabit.Tabit._remote_wanted_room(None, None))
+        self.assertIsNone(tabit.Tabit._remote_wanted_room("10", "10"))
+        self.assertIsNone(tabit.Tabit._remote_wanted_room("nope", "1"))
+
+    def test_the_default_and_the_narrow_mistake_take_the_phone_size(self):
+        want = (64, 36)
+        self.assertEqual(
+            tabit.Tabit._remote_agent_room(80, 24, False, want, False), want)
+        self.assertEqual(
+            tabit.Tabit._remote_agent_room(42, 40, False, want, False), want)
+
+    def test_a_desktop_size_is_not_squeezed(self):
+        want = (64, 36)
+        self.assertIsNone(tabit.Tabit._remote_agent_room(80, 24, True, want, False))
+        self.assertIsNone(tabit.Tabit._remote_agent_room(151, 44, False, want, False))
+        self.assertIsNone(tabit.Tabit._remote_agent_room(80, 40, False, want, False))
+        self.assertIsNone(tabit.Tabit._remote_agent_room(64, 36, False, want, True))
+        self.assertEqual(
+            tabit.Tabit._remote_agent_room(64, 36, False, (70, 30), True), (70, 30))
+
+    def test_the_narrow_mistake_is_not_what_we_restore(self):
+        self.assertEqual(tabit.Tabit._remote_room_to_save(42, 40), (80, 24))
+        self.assertEqual(tabit.Tabit._remote_room_to_save(151, 44), (151, 44))
+
+    def test_leaving_a_tab_puts_its_size_back(self):
+        first = _RoomRow(80, 24)
+        claude = _RoomRow(42, 40)
+        app = _RoomApp([first, claude])
+        app._remote_grow_agent(first, first.term, (60, 30))
+        self.assertEqual(first.term.sizes, [(60, 30)])
+        self.assertEqual(first._remote_saved_room, (80, 24))
+        app._remote_grow_agent(claude, claude.term, (60, 30))
+        self.assertEqual((first.term.cols, first.term.rows), (80, 24))
+        self.assertIsNone(first._remote_saved_room)
+        self.assertEqual(claude.term.sizes, [(60, 30)])
+        self.assertEqual(claude._remote_saved_room, (80, 24))
+
+    def test_the_desktop_pane_is_not_given_the_phone_size(self):
+        frame = object()
+        row = _RoomRow(80, 24, frame)
+        row.term.get_allocation = lambda: types.SimpleNamespace(width=10, height=10)
+        app = _RoomApp([row])
+        app._left_frame = frame
+        app._remote_grow_agent(row, row.term, (60, 30))
+        self.assertEqual(row.term.sizes, [])
+        self.assertIsNone(getattr(row, "_remote_phone_room", None))
 
 
 class TestPlainTabHistory(unittest.TestCase):

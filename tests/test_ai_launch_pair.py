@@ -263,6 +263,53 @@ class TestTakesNewId(unittest.TestCase):
         self.assertFalse(self._ask("claude", "--session-id", exists=False))
 
 
+class TestGrokStartsMinimal(unittest.TestCase):
+    """Tabit starts Grok in minimal mode, including a tab saved earlier."""
+
+    def test_a_new_grok_gets_one_minimal_flag(self):
+        argv = Tabit._ai_argv("grok", "/tmp/x", ["--continue"])
+        self.assertEqual(argv[2].count("--minimal"), 2)  # the try and the exec
+        self.assertNotIn("--minimal", Tabit._ai_argv("claude", "/tmp/x", ["--continue"])[2])
+
+    def test_rebuilding_does_not_add_a_second_flag(self):
+        argv = Tabit._ai_argv("grok", "/tmp/x", ["--continue"])
+        tries = Tabit._ai_tries_of(argv[2])
+        self.assertEqual(tries, ["--continue"])
+        self.assertEqual(Tabit._ai_argv("grok", "/tmp/x", tries), argv)
+
+    def test_an_old_command_gains_the_flag_once(self):
+        old = ["/bin/sh", "-c",
+               "cd /tmp || exit 1; grok --continue || exec grok"]
+        new = Tabit._ai_ensure_grok_minimal(old)
+        self.assertIn("grok --continue --minimal", new[2])
+        self.assertIn("exec grok --minimal", new[2])
+        self.assertEqual(Tabit._ai_ensure_grok_minimal(new), new)
+
+    def test_fullscreen_is_left_as_it_was(self):
+        cmd = "cd /tmp || exit 1; exec grok --fullscreen"
+        self.assertEqual(Tabit._ai_cmd_grok_minimal(cmd), cmd)
+
+    def test_a_folder_named_grok_is_left_alone(self):
+        # only the program is a grok: a folder in the cd is not
+        for cmd in ("cd /home/chris/grok-x || exit 1; exec claude",
+                    "cd /home/u/grok || exit 1; exec claude",
+                    "cd '/x/my grok' || exit 1; exec claude",
+                    "cd /grokking || exit 1; exec claude"):
+            self.assertEqual(Tabit._ai_cmd_grok_minimal(cmd), cmd)
+        self.assertEqual(
+            Tabit._ai_cmd_grok_minimal("cd /home/u/grok || exit 1; grok --continue || exec grok"),
+            "cd /home/u/grok || exit 1; grok --continue --minimal || exec grok --minimal")
+
+    def test_an_old_tmux_tab_keeps_its_session_name(self):
+        old = Tabit._ai_tmux_argv(
+            ["/bin/sh", "-c", "cd /tmp/x || exit 1; grok --resume abc || exec grok"],
+            "ai-grok-x-123456")
+        fixed = Tabit._ai_ensure_grok_minimal(old)
+        inner, sess = Tabit._ai_tmux_unwrap(fixed)
+        self.assertEqual(sess, "ai-grok-x-123456")
+        self.assertEqual(inner[2].count("--minimal"), 2)
+        self.assertEqual(Tabit._ai_ensure_grok_minimal(fixed), fixed)
+
 
 class _Row:
     icon_name = ICON_AI_TMUX
