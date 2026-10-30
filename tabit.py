@@ -21,11 +21,14 @@ import glob
 import html as html_module
 import json
 import os
+import pty
+import select
 import stat
 import random
 import re
 import shlex
 import signal
+import struct
 import queue
 import subprocess
 import sys
@@ -34,6 +37,7 @@ import shutil
 import socketserver
 import http.server
 import tarfile
+import termios
 import threading
 import time
 import urllib.parse
@@ -227,6 +231,7 @@ CONNECT_TMUX_ICON_SVG = b"""<?xml version="1.0" encoding="UTF-8"?>
 # "screen" runs the bundled screen.sh script (written out at startup).
 SERIAL_BACKENDS = ("screen", "kermit", "picocom", "ssh", "telnet")
 SERIAL_NET_BACKENDS = ("ssh", "telnet")  # target a host, not a /dev device
+CONNECT_DEVICE_TYPES = ("auto", "ap", "gateway", "camera")
 
 # Bundled screen.sh: a `screen` wrapper for /dev/ttyUSB* with logfile,
 # multi-attach and log retention. Kept verbatim so tabit needs nothing in
@@ -395,10 +400,10 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.0.6.5"
+APP_VERSION = "v2.1.0"
 # Taiwan main dish of the major version + a fresh snack or drink, picked at
 # release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
-APP_CODENAME = "Danzai Noodles + Hot Grass Jelly"
+APP_CODENAME = "Three Cup Chicken + Wheel Cake"
 _VERSION_CODENAME_SEP = " · "
 
 
@@ -637,6 +642,41 @@ AI_TMUX_OPTS = (
     ("prefix", "C-a"),
 )
 USER_TMUX_CONF = os.path.expanduser("~/.tmux.conf")
+
+
+def _tty_shim_path():
+    """Filter that drops tmux's terminal-id question. Next to this file."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tty_shim.py")
+    return path if os.path.isfile(path) else ""
+
+
+def _guard_tmux_client(argv):
+    """Run a tmux client behind the filter.
+
+    Only an attaching client asks the terminal who it is. has-session and
+    set-option do not, so they stay as they are. A missing filter changes
+    nothing: the tab starts the way it did before.
+    """
+    shim = _tty_shim_path()
+    if not shim or not argv:
+        return argv
+    if os.path.basename(argv[0]) == "tmux":
+        return [sys.executable, shim, *argv]
+    if (len(argv) == 3 and argv[0] == "/bin/sh" and argv[1] == "-c"
+            and isinstance(argv[2], str)):
+        needle = "exec tmux attach-session "
+        script = argv[2]
+        # the attach is the last command; a quoted program text can contain
+        # the same words, so take the rightmost one
+        at = script.rfind(needle)
+        if at == -1:
+            return argv
+        if shim in script:
+            return argv
+        wrapped = (f"exec {shlex.quote(sys.executable)} {shlex.quote(shim)} "
+                   f"tmux attach-session ")
+        return ["/bin/sh", "-c", script[:at] + wrapped + script[at + len(needle):]]
+    return argv
 
 
 def _tmux_apply_user_conf():
@@ -882,15 +922,37 @@ CONNECT_LAST_FILE = os.path.join(CONFIG_DIR, "connect_last.json")
 # Serve publishes it to this user's own devices only (tailnet, HTTPS).
 REMOTE_SOCK = os.path.join(GLib.get_user_runtime_dir(), "tabit-remote.sock")
 REMOTE_PAGE = "remote.html"
-# Claude AI tabs report their status through Claude Code hooks: each event
+# Claude and Grok AI tabs report their status through hooks: each event
 # writes the state to a file named after the tab, and tabit reads it there
-# instead of guessing from the screen
+# instead of guessing from the screen. Grok has no per-launch settings
+# flag, so its file lives where Grok loads user hooks.
 AGENT_HOOK_DIR = os.path.join(GLib.get_user_runtime_dir(), "tabit-agent")
 CLAUDE_HOOKS_FILE = os.path.expanduser("~/.local/share/tabit/claude-hooks.json")
+GROK_HOOK_SCRIPT = os.path.expanduser("~/.local/share/tabit/grok_status_hook.py")
+GROK_HOOKS_FILE = os.path.expanduser("~/.grok/hooks/tabit-status.json")
 # Claude keeps each folder's sessions here, one <id>.jsonl per session
 CLAUDE_PROJECTS_DIR = os.path.join(
     os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"),
     "projects")
+CLAUDE_DEFAULT_DIR = os.path.dirname(CLAUDE_PROJECTS_DIR)
+CLAUDE_DEFAULT_JSON = (os.path.join(CLAUDE_DEFAULT_DIR, ".claude.json")
+                       if os.environ.get("CLAUDE_CONFIG_DIR")
+                       else os.path.expanduser("~/.claude.json"))
+# Extra Claude accounts, one folder each: <name>/config is that account's
+# CLAUDE_CONFIG_DIR and <name>/bin/claude runs claude with it. The account
+# rides in the CLI path, so a tab keeps it through restarts and tmux.
+CLAUDE_ACCOUNTS_DIR = os.path.expanduser("~/.local/share/tabit/claude-accounts")
+# What every account shares with the default one: settings, instructions,
+# add-ons, and the sessions themselves, so one list shows them all and a
+# session can go on under another account. The login, .claude.json and the
+# running-session records stay per account.
+CLAUDE_SHARED = ("settings.json", "settings.local.json", "CLAUDE.md", "agents",
+                 "commands", "skills", "plugins", "hooks", "output-styles",
+                 "keybindings.json", ".mcp.json", "projects", "file-history",
+                 "plans", "todos", "history.jsonl")
+# first-run answers a new account takes over; never the login
+CLAUDE_SEED_KEYS = ("hasCompletedOnboarding", "lastOnboardingVersion", "theme",
+                    "bypassPermissionsModeAccepted")
 # the page's icons: tab favicon (SVG, and a PNG for Safari), iPhone home
 # screen, and the installed app (Chrome, Edge, Android)
 REMOTE_ICONS = {"/icon.svg": ("tabit.svg", None), "/favicon.png": ("tabit.svg", 32),
@@ -915,7 +977,7 @@ REMOTE_PUSH_EVERY = 10       # /api/events checks for a change this often (s)
 REMOTE_MAX_STREAMS = 8
 # Files the page may open (Settings > Remote > Allow opening files): under
 # home or /tmp, a known document/image type, small, and never a secret.
-REMOTE_FILE_MAX = 2 * 1024 * 1024
+REMOTE_FILE_MAX = 8 * 1024 * 1024
 # Uploads from the page (for an agent to read by path): one folder, per day.
 REMOTE_UPLOAD_DIR = os.path.expanduser("~/.local/share/tabit/uploads")
 REMOTE_UPLOAD_MAX = 25 * 1024 * 1024
@@ -1869,6 +1931,66 @@ def _ensure_claude_hooks():
         print(f"[tabit] cannot write {CLAUDE_HOOKS_FILE}: {e}", file=sys.stderr)
 
 
+def _grok_hook_command(hook_dir, script):
+    """One shell command for every Grok status event. Exit 0 if it cannot
+    run: a Stop hook that exits 2 keeps the agent working."""
+    return "python3 %s %s || exit 0" % (shlex.quote(script), shlex.quote(hook_dir))
+
+
+def _grok_hooks_settings(hook_dir, script):
+    """Hooks Grok loads from ~/.grok/hooks. They write the same state file
+    Claude's hooks write. SessionStart's matcher is new|load: Grok does
+    not use Claude's startup|resume|clear. Stop stays fast and exits 0."""
+    cmd = _grok_hook_command(hook_dir, script)
+
+    def ev(timeout, matcher=None):
+        hook = {"type": "command", "command": cmd, "timeout": timeout}
+        entry = {"hooks": [hook]}
+        if matcher is not None:
+            entry["matcher"] = matcher
+        return [entry]
+
+    return {"hooks": {
+        "SessionStart": ev(5, "new|load"),
+        "UserPromptSubmit": ev(5),
+        "PreToolUse": ev(5),
+        "PostToolUse": ev(5),
+        "PostToolUseFailure": ev(5),
+        "Stop": ev(10),
+        "StopFailure": ev(5),
+        "StopCancelled": ev(5),
+        "Notification": ev(5, "idle_prompt") + ev(5, "permission_prompt"),
+    }}
+
+
+def _ensure_grok_hooks():
+    """Write the hooks file Grok reads the next time it starts. A Grok
+    that is already running keeps the copy it loaded. Only rewrite when
+    the text changed, so a running Grok is not told the file moved."""
+    want = _grok_hooks_settings(AGENT_HOOK_DIR, GROK_HOOK_SCRIPT)
+    try:
+        os.makedirs(AGENT_HOOK_DIR, mode=0o700, exist_ok=True)
+        with open(GROK_HOOKS_FILE) as f:
+            if json.load(f) == want:
+                return
+    except (OSError, ValueError):
+        pass
+    try:
+        _write_json(GROK_HOOKS_FILE, want)
+    except OSError as e:
+        print(f"[tabit] cannot write {GROK_HOOKS_FILE}: {e}", file=sys.stderr)
+
+
+def _hook_esc_ends_turn(row):
+    """Esc ends a Claude turn and runs no hook. It does not end a Grok
+    turn: Grok reports that cancel itself. A row whose command we cannot
+    parse keeps the Claude rule."""
+    argv = getattr(row, "argv", None) or []
+    found = Tabit._ai_cli_path_of(argv)
+    cli = found[0] if found else (str(argv[0]) if argv else "")
+    return os.path.basename(cli.rstrip("/")) != "grok"
+
+
 class _RemoteServer(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
 
@@ -1933,11 +2055,14 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             return
         parts = self.path.split("?", 1)[0].strip("/").split("/")
         manage = None                       # (op, target) for tabs and groups
+        admin = None                        # the Settings sheet: /api/admin/<op>
         if parts == ["api", "new"]:
             manage = ("new", None)
+        elif len(parts) == 3 and parts[:2] == ["api", "admin"] and parts[2] != "state":
+            admin = parts[2]
         elif len(parts) == 3 and parts[:2] == ["api", "groups"]:
             manage = ("groupop", parts[2])
-        elif len(parts) == 4 and parts[:2] == ["api", "tabs"] and parts[3] in ("close", "group", "move", "rename"):
+        elif len(parts) == 4 and parts[:2] == ["api", "tabs"] and parts[3] in ("close", "group", "move", "rename", "account"):
             manage = (parts[3], parts[2])
         elif len(parts) == 4 and parts[:2] == ["api", "tabs"] and parts[3] == "ack":
             # a state change, so behind the same checks as typing
@@ -1954,6 +2079,9 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 raise ValueError
         except ValueError:
             self._json(400, {"error": "body must be a JSON object"})
+            return
+        if admin:
+            self._json(*self.app._remote_admin(admin, body))
             return
         if manage:
             op, target = manage
@@ -1984,8 +2112,13 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 back = min(max(int((q.get("back") or ["0"])[0]), 0), 3000)
             except ValueError:
                 back = 0
+            # fitting a pane to the phone changes it: only where the phone
+            # may type, like everything else that changes a tab
+            want = self.app._remote_wanted_room(
+                (q.get("cols") or [None])[0], (q.get("rows") or [None])[0]) \
+                if self.app._remote_send_on else None
             res = self.app._remote_call(
-                lambda: self.app._remote_screen(parts[2], color, back))
+                lambda: self.app._remote_screen(parts[2], color, back, want))
             if isinstance(res, tuple):
                 code, out, name = res
                 pane = name and self.app._tmux_pane_ansi(name, back)    # this thread
@@ -2016,8 +2149,14 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 self._send(200, *icon)
         elif path == "/api/events":
             self._events()
+        elif path == "/api/admin/state":
+            self._json(*self.app._remote_admin("state", {}))
         elif path == "/api/file":
             self._file()
+        elif path == "/api/dirs":
+            self._dirs()
+        elif path == "/api/new-options":
+            self._new_options()
         else:
             self._send(404, "text/plain", b"not found")
 
@@ -2105,6 +2244,66 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             return f"{ext or 'that'} files are not opened from the phone"
         return None
 
+    def _dirs(self):
+        """GET /api/dirs?path=: folders on this machine, for the new-tab picker.
+
+        Names only, never file contents. The same switch as opening a tab.
+        """
+        if not getattr(self.app, "_remote_send_on", False):
+            self._json(403, {"error": "managing tabs from the phone is off (Settings > Remote)"})
+            return
+        q = urllib.parse.parse_qs(self.path.partition("?")[2])
+        raw = ((q.get("path") or ["~"])[0] or "~").strip() or "~"
+        show_hidden = (q.get("hidden") or [""])[0] == "1"
+        real = os.path.realpath(os.path.expanduser(raw))
+        if not os.path.isdir(real):
+            self._json(400, {"error": f"no such folder: {raw}"})
+            return
+        try:
+            names = sorted(os.listdir(real), key=str.lower)
+        except OSError as e:
+            self._json(403, {"error": e.strerror or "cannot read it"})
+            return
+        dirs, more = [], False
+        for name in names:
+            if name in (".", "..") or (name.startswith(".") and not show_hidden):
+                continue
+            full = os.path.join(real, name)
+            try:
+                if not os.path.isdir(full):
+                    continue
+            except OSError:
+                continue
+            if len(dirs) >= 400:
+                more = True
+                break
+            dirs.append({"name": name, "path": full})
+        parent = os.path.dirname(real)
+        home = os.path.realpath(os.path.expanduser("~"))
+        if real == home:
+            show = "~"
+        elif real.startswith(home + os.sep):
+            show = "~" + real[len(home):]
+        else:
+            show = real
+        self._json(200, {
+            "path": real,
+            "show": show,
+            "parent": None if parent == real else parent,
+            "dirs": dirs,
+            "more": more,
+        })
+
+    def _new_options(self):
+        """GET /api/new-options: serial devices and connect defaults.
+
+        Passwords, passcodes and gateway passwords stay on this machine.
+        """
+        if not getattr(self.app, "_remote_send_on", False):
+            self._json(403, {"error": "managing tabs from the phone is off (Settings > Remote)"})
+            return
+        self._json(200, Tabit._remote_new_options())
+
     def _file(self):
         """GET /api/file?path=<abs or ~/...>[&render=1]: one file, read-only.
 
@@ -2131,7 +2330,8 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 if not stat.S_ISREG(st.st_mode):
                     return self._file_err(403, "only plain files")
                 if st.st_size > REMOTE_FILE_MAX:
-                    return self._file_err(413, "bigger than 2 MB")
+                    return self._file_err(
+                        413, "bigger than %d MB" % (REMOTE_FILE_MAX // (1024 * 1024)))
                 data = f.read(REMOTE_FILE_MAX + 1)
         except OSError as e:
             return self._file_err(404, e.strerror or "cannot read it")
@@ -2398,6 +2598,8 @@ class Tabit(Gtk.Window):
         self._remote_url = ""
         self._remote_send_on = False
         self._remote_files_on = False
+        self._remote_update = None          # the phone's update job
+        self._remote_login = None           # the phone's claude login
         self._remote_label = Gtk.Label(xalign=0)
         self._remote_label.set_margin_top(4)
         self._remote_label.set_ellipsize(Pango.EllipsizeMode.END)
@@ -2512,8 +2714,10 @@ class Tabit(Gtk.Window):
         st = self._load_settings()
         ai_migrate = (st.get("ai_fresh_on_restore", False)
                       and not st.get("ai_resume_per_tab", False))
-        # claude AI tabs load this file; without it they would not start
+        # claude AI tabs load this file; without it they would not start.
+        # grok loads its file from ~/.grok/hooks the next time it starts
         _ensure_claude_hooks()
+        _ensure_grok_hooks()
         # Keep collapsed_groups from settings; do not expand while replaying sessions.
         self._restoring_sessions = True
         last_row = None
@@ -2543,8 +2747,11 @@ class Tabit(Gtk.Window):
                     if sess is not None:
                         # a wrapper saved by an older tabit: exact targets
                         argv = self._ai_tmux_argv(inner, sess)
+                    sub = s.get("sub")
+                    if _is_ai_icon(s.get("icon")):
+                        sub = self._ai_account_sub(argv, sub)
                     r = self._add_session(s["label"], argv, s["icon"],
-                                          s.get("sub"), s.get("cwd"),
+                                          sub, s.get("cwd"),
                                           s.get("track_cwd", False))
                 if r is not None and s.get("tg"):
                     r.tg_id = s["tg"]
@@ -3099,9 +3306,21 @@ class Tabit(Gtk.Window):
                 return False
 
             GLib.timeout_add(800, _kick)
-        envv = None
-        run = launch_argv or argv
         if _is_ai_icon(icon_name):
+            # a tab saved earlier starts Grok in minimal too
+            argv = self._ai_ensure_grok_minimal(argv)
+            row.argv = argv
+            if launch_argv:
+                launch_argv = self._ai_ensure_grok_minimal(launch_argv)
+        run = launch_argv or argv
+        self._spawn_term(row, run, workdir)
+        return row
+
+    def _spawn_term(self, row, run, workdir):
+        """Start `run` in the row's terminal, with what an AI tab needs:
+        its claude hooks, and a hook key of its own when not in tmux."""
+        envv = None
+        if _is_ai_icon(getattr(row, "icon_name", None)):
             if CLAUDE_HOOKS_FILE in " ".join(run):
                 _ensure_claude_hooks()
             if self._ai_tmux_unwrap(run)[1] is None:
@@ -3117,10 +3336,11 @@ class Tabit(Gtk.Window):
             # and a TMUX from it would stay
             flags = GLib.SpawnFlags(
                 int(flags) | getattr(Vte, "SPAWN_NO_PARENT_ENVV", 0))
-        term.spawn_async(Vte.PtyFlags.DEFAULT, workdir, run,
+        # copy: the saved command stays free of the filter path
+        run = _guard_tmux_client(list(run))
+        row.term.spawn_async(Vte.PtyFlags.DEFAULT, workdir, run,
                          envv, flags, None, None,
                          -1, None, self._on_term_spawned, row)
-        return row
 
     # --- quick command bar ------------------------------------------------
 
@@ -5858,6 +6078,9 @@ if (data !== null) {{
         # tmux session here — leave it so the user sees "exited" and can
         # decide; intentional single-tab close (_close_session) kills it.
         # keep the tab and its scrollback; only the x really closes it
+        if getattr(row, "_respawn", None):
+            self._ai_respawn(row)          # an account switch: start the new one
+            return
         row.dead = True
         # Gone at once (its folder or program missing after a restore, a
         # serial device unplugged): it never ran, so keep it in sessions.json
@@ -6796,8 +7019,8 @@ if (data !== null) {{
 
     @classmethod
     def _agent_hook_raw(cls, row):
-        """working / blocked / idle / background (done, sub-agents still
-        running) from the tab's claude hooks, or None when it has none
+        """working / blocked / idle / background (done, work still
+        running) from the tab's hooks, or None when it has none
         (another CLI, a tab built before the hooks)."""
         key = cls._agent_hook_key(row)
         if not key:
@@ -6964,8 +7187,8 @@ if (data !== null) {{
             self._set_agent_status(row, "exited")
             return
 
-        # a claude tab with hooks says what it does; the screen is the
-        # fallback for every other tab
+        # a tab whose hooks wrote a state; the screen is the fallback
+        # for every other tab
         hook_raw = self._agent_hook_raw(row)
         if hook_raw is not None:
             self._ai_follow_session(row)
@@ -6995,8 +7218,10 @@ if (data !== null) {{
             # claude asks, but another tool of the turn ended after the
             # question and its hook wrote working
             hook_raw = "blocked"
-        if hook_raw == "working" and not self._agent_hook_still_busy(
-                row, text, now):
+        # Esc ends a Claude turn and runs no hook. Grok reports a cancel
+        # on its own, and Esc there does not stop the turn.
+        if (hook_raw == "working" and _hook_esc_ends_turn(row)
+                and not self._agent_hook_still_busy(row, text, now)):
             hook_raw = "idle"
         # Selected means the user is watching, which a tab in a window
         # behind something else is not. The FSM holds a selected tab at
@@ -10730,7 +10955,7 @@ if (data !== null) {{
         hbox.pack_start(ok, False, False, 0)
         vbox.pack_start(hbox, True, True, 0)
 
-        resume_chk = tmux_chk = None
+        resume_chk = tmux_chk = acct_combo = None
         if is_ai:
             resume_chk = Gtk.CheckButton(label="Resume when tabit reopens")
             resume_chk.set_active(has_resume)
@@ -10747,6 +10972,20 @@ if (data !== null) {{
                 "Unticking leaves an existing tmux session running; close it "
                 "from + tmux.")
             vbox.pack_start(tmux_chk, False, False, 0)
+            # a Claude tab: go on with the same conversation under another login
+            got_cli = self._ai_cli_path_of(getattr(row, "argv", None) or [])
+            accounts = self._claude_accounts()
+            if got_cli and self._ai_is_claude(got_cli[0]) and accounts:
+                acct_combo = Gtk.ComboBoxText()
+                acct_combo.append("", "Account: Default")
+                for acct_name, _c in accounts:
+                    acct_combo.append(acct_name, f"Account: {acct_name}")
+                acct_combo.set_active_id(self._claude_account_of(got_cli[0]) or "")
+                acct_combo.set_tooltip_text(
+                    "Another account goes on with this conversation in this "
+                    "tab, now: claude restarts and resumes the same session.\n"
+                    "Not while Claude is working or asking something.")
+                vbox.pack_start(acct_combo, False, False, 0)
 
         # Group assignment inside Rename Popover
         cur_c = getattr(row, "group_color", None)
@@ -10810,13 +11049,21 @@ if (data !== null) {{
                     row.ai_hunt = resume_chk.get_active()
                     self._set_row_icon(
                         row, ICON_AI_TMUX if want_tmux else ICON_AI)
-                    shown_path = self._ai_sub(path_val)
+                    shown_path = self._ai_sub(path_val, cli_val)
                     if shown_path:
                         row.sub_text = shown_path
                         row.subtitle.set_text(shown_path)
                         row.subtitle.set_no_show_all(False)
                         row.subtitle.show()
 
+            if acct_combo is not None:
+                want = acct_combo.get_active_id() or ""
+                now_cli = (self._ai_cli_path_of(row.argv) or ("",))[0]
+                if want != (self._claude_account_of(now_cli) or ""):
+                    why = self._ai_switch_account(row, want)
+                    if why:
+                        self._note_msg(Gtk.MessageType.WARNING,
+                                       "Account not switched", why)
             if name:
                 self._set_tab_name(row, name)
             self._save_sessions()
@@ -11012,6 +11259,207 @@ if (data !== null) {{
                 argv += ["-y", KERMRC]
             return argv + ["-c", "-E"]
         return ["picocom", "-b", rate, dev]
+
+    @staticmethod
+    def _serial_spec(tool, target, rate):
+        """Label, argv and icon for one serial tab. A string is the error."""
+        if not isinstance(tool, str) or tool not in SERIAL_BACKENDS:
+            return "pick a serial tool"
+        if not isinstance(target, str):
+            target = ""
+        if not isinstance(rate, str):
+            rate = ""
+        target, rate = target.strip(), rate.strip()
+        if (len(target) > 500 or len(rate) > 40 or "\n" in target
+                or "\n" in rate or "\x00" in target or "\x00" in rate):
+            return "that value is too long"
+        if tool in SERIAL_NET_BACKENDS:
+            if not target:
+                return "give a host"
+            label = (target.split() or [target])[0]
+            sub = f"{tool}:{rate}" if rate else tool
+            return {"label": label,
+                    "argv": Tabit._serial_argv(tool, target, "", rate),
+                    "icon": "network-transmit-receive-symbolic", "sub": sub}
+        if not target:
+            return "give a device path"
+        baud = rate or DEFAULT_BAUD
+        label = os.path.basename(target) or target
+        sub = f"{tool}:{baud}" if tool != "screen" else baud
+        return {"label": label, "argv": Tabit._serial_argv(tool, target, baud),
+                "icon": "network-wired-symbolic", "sub": sub}
+
+    @staticmethod
+    def _connect_text(value, limit):
+        if not isinstance(value, str):
+            raise ValueError("long")
+        if "\n" in value or "\x00" in value or len(value.strip()) > limit:
+            raise ValueError("long")
+        return value.strip()
+
+    @staticmethod
+    def _connect_phone_values(body, last):
+        """Connect fields from the phone. A blank secret keeps the saved one.
+
+        The page never receives the password, passcode or gateway password,
+        so an empty box means "use what is already saved", not "clear it".
+        """
+        last = last if isinstance(last, dict) else {}
+
+        def text(key, limit, default=""):
+            if key not in body or body.get(key) in (None, ""):
+                return default
+            return Tabit._connect_text(body.get(key), limit)
+
+        def secret(key, limit):
+            sent = text(key, limit, "")
+            if sent:
+                return sent
+            old = last.get(key)
+            return old.strip() if isinstance(old, str) else ""
+
+        def flag(key, default):
+            if key not in body:
+                return default
+            if not isinstance(body[key], bool):
+                raise ValueError(key)
+            return body[key]
+
+        sn = text("sn", 80, "")
+        if not sn:
+            raise ValueError("sn")
+        dtype = text("device_type", 20, "auto") or "auto"
+        if dtype not in Tabit._ssh_tool_device_types():
+            raise ValueError("device_type")
+        return {
+            "sn": sn,
+            "env": text("env", 40, "") or "prod",
+            "email": text("email", 200, ""),
+            "password": secret("password", 500),
+            "ticket": secret("ticket", 200),
+            "org": text("org", 200, ""),
+            "network": text("network", 200, ""),
+            "device_type": dtype,
+            "no_cache": flag("no_cache", False),
+            "use_tmux": flag("use_tmux", True),
+            "reconnect": flag("reconnect", False),
+            "gateway_pass": secret("gateway_pass", 500),
+            "magic_words": text("magic_words", 500, ""),
+            "agent": text("agent", 120, ""),
+        }
+
+    @staticmethod
+    def _connect_phone_error(key):
+        return {
+            "sn": "give a serial number",
+            "device_type": "unknown device type",
+            "long": "a connect field is too long",
+            "use_tmux": "use_tmux must be true or false",
+            "no_cache": "no_cache must be true or false",
+            "reconnect": "reconnect must be true or false",
+        }.get(key, "check the connect fields")
+
+    @staticmethod
+    def _connect_remember(fields):
+        """What the next Connect dialog shows. Not the agent, not reconnect."""
+        return {k: fields[k] for k in (
+            "sn", "env", "email", "password", "ticket", "org", "network",
+            "device_type", "no_cache", "use_tmux", "gateway_pass", "magic_words")}
+
+    @staticmethod
+    def _connect_launch(fields):
+        """argv, label, icon and tmux session for one Connect tab.
+
+        `reconnect` is not part of argv. The stored command is replayed on
+        every restart, and a kill in it would reconnect the device each time.
+        """
+        sn = fields["sn"]
+        env = fields["env"]
+        agent = fields.get("agent") or ""
+        raw = ["python3", SSH_TOOL_CONNECT_PY, "--sn", sn,
+               "--email", fields["email"], "--password", fields["password"]]
+        if env and env != "prod":
+            raw.extend(["--env", env])
+        if fields.get("ticket"):
+            raw.extend(["--ticket", fields["ticket"]])
+        if fields.get("org"):
+            raw.extend(["--org", fields["org"]])
+        if fields.get("network"):
+            raw.extend(["--network", fields["network"]])
+        if fields.get("device_type") and fields["device_type"] != "auto":
+            raw.extend(["--device-type", fields["device_type"]])
+        if fields.get("no_cache"):
+            raw.append("--no-cache")
+        if fields.get("gateway_pass"):
+            raw.extend(["--gateway-pass", fields["gateway_pass"]])
+        if fields.get("magic_words"):
+            raw.extend(["--magic-words", fields["magic_words"]])
+        if agent:
+            raw.extend(["--agent", agent])
+        label = f"{sn} → {agent} (connect)" if agent else f"{sn} (connect)"
+        if fields.get("use_tmux"):
+            session = f"conn-{sn.lower()}"
+            if agent:
+                session += f"-{agent.lower().replace(':', '').replace('.', '-')}"
+            cmd_str = " ".join(shlex.quote(arg) for arg in raw)
+            return {"argv": Tabit._connect_tmux_argv(session, cmd_str),
+                    "label": label, "icon": ICON_CONNECT_TMUX,
+                    "sub": f"cloud ({env}) [tmux]", "session": session, "raw": raw}
+        return {"argv": raw, "label": label, "icon": ICON_CONNECT,
+                "sub": f"cloud ({env})", "session": None, "raw": raw}
+
+    def _start_connect(self, fields):
+        """Remember the form and open the Connect tab. Returns the row."""
+        self._save_connect_last(self._connect_remember(fields))
+        spec = self._connect_launch(fields)
+        if fields["use_tmux"]:
+            _tmux_apply_user_conf()
+            if fields["reconnect"] and spec["session"]:
+                # One-off: drop the stale session now. Not stored in argv.
+                _tmux_kill_session(spec["session"])
+        return self._add_session(label=spec["label"], argv=spec["argv"],
+                                 icon_name=spec["icon"], sub=spec["sub"],
+                                 cwd=SSH_TOOL_DIR)
+
+    @staticmethod
+    def _connect_public(last, envs, types=CONNECT_DEVICE_TYPES):
+        """Connect defaults for the phone. Secret values stay here."""
+        last = last if isinstance(last, dict) else {}
+
+        def s(key):
+            v = last.get(key)
+            return v.strip() if isinstance(v, str) else ""
+
+        dtype = s("device_type") or "auto"
+        if dtype not in types:
+            dtype = "auto"
+        return {
+            "envs": list(envs),
+            "types": list(types),
+            "sn": s("sn"),
+            "env": s("env") or "prod",
+            "email": s("email"),
+            "org": s("org"),
+            "network": s("network"),
+            "device_type": dtype,
+            "magic_words": s("magic_words"),
+            "no_cache": bool(last.get("no_cache", False)),
+            "use_tmux": bool(last.get("use_tmux", True)),
+            "saved_password": bool(s("password")),
+            "saved_ticket": bool(s("ticket")),
+            "saved_gateway_pass": bool(s("gateway_pass")),
+        }
+
+    @staticmethod
+    def _remote_new_options():
+        devices = sorted(set(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")))
+        out = {"devices": devices, "baud": DEFAULT_BAUD,
+               "tools": list(SERIAL_BACKENDS), "connect": bool(HAS_SSH_TOOL)}
+        if out["connect"]:
+            out["connect_form"] = Tabit._connect_public(
+                Tabit._load_connect_last(), Tabit._ssh_tool_envs(),
+                Tabit._ssh_tool_device_types())
+        return out
 
     @staticmethod
     def _dialog_enter_is_ok(dialog, response=Gtk.ResponseType.OK):
@@ -11211,7 +11659,7 @@ if (data !== null) {{
                 net = tool in SERIAL_NET_BACKENDS
                 if net:
                     dev = (host.get_text() or "").strip()
-                    prt = (port.get_text() or "").strip()
+                    rate = (port.get_text() or "").strip()
                     if not dev:
                         self._note_msg(
                             Gtk.MessageType.WARNING,
@@ -11219,14 +11667,9 @@ if (data !== null) {{
                             "Host is required for ssh/telnet serial sessions.",
                             parent=dlg)
                         return
-                    label = (dev.split() or [dev])[0]
-                    sub = f"{tool}:{prt}" if prt else tool
-                    self._add_session(
-                        label, self._serial_argv(tool, dev, "", prt),
-                        "network-transmit-receive-symbolic", sub=sub)
                 else:
                     dev = (combo.get_active_text() or combo.get_child().get_text() or "").strip()
-                    bd = (baud.get_text() or "").strip() or DEFAULT_BAUD
+                    rate = (baud.get_text() or "").strip()
                     if not dev:
                         self._note_msg(
                             Gtk.MessageType.WARNING,
@@ -11235,11 +11678,13 @@ if (data !== null) {{
                             "Plug in a device or type a device path.",
                             parent=dlg)
                         return
-                    label = os.path.basename(dev)
-                    sub = f"{tool}:{bd}" if tool != "screen" else bd
-                    self._add_session(
-                        label, self._serial_argv(tool, dev, bd),
-                        "network-wired-symbolic", sub=sub)
+                spec = self._serial_spec(tool, dev, rate)
+                if isinstance(spec, str):
+                    self._note_msg(Gtk.MessageType.WARNING, "Cannot open serial",
+                                   spec, parent=dlg)
+                    return
+                self._add_session(spec["label"], spec["argv"], spec["icon"],
+                                  sub=spec["sub"])
             self._open_dialogs.discard(dlg)
             dlg.destroy()
 
@@ -11280,6 +11725,20 @@ if (data !== null) {{
         except (OSError, subprocess.SubprocessError):
             pass
         return ["prod"]
+
+    @staticmethod
+    def _ssh_tool_device_types():
+        """--device-type names from ssh_tool (connect.py --list-device-types)."""
+        try:
+            out = subprocess.check_output(
+                ["python3", SSH_TOOL_CONNECT_PY, "--list-device-types"],
+                cwd=SSH_TOOL_DIR, text=True, timeout=8, stderr=subprocess.DEVNULL)
+            types = [ln.strip() for ln in out.splitlines() if ln.strip()]
+            if types:
+                return types
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return list(CONNECT_DEVICE_TYPES)
 
     @staticmethod
     def _load_connect_last():
@@ -11354,7 +11813,7 @@ if (data !== null) {{
 
         # 7. Device Type (auto / ap / gateway / camera)
         dtype_combo = Gtk.ComboBoxText()
-        dtypes = ["auto", "ap", "gateway", "camera"]
+        dtypes = self._ssh_tool_device_types()
         cur_dtype = last.get("device_type", "auto")
         active_dtype_idx = 0
         for i, dt in enumerate(dtypes):
@@ -11491,74 +11950,25 @@ if (data !== null) {{
                 magic_words_val = magic_words_entry.get_text().strip()
                 agent_val = agent_entry.get_text().strip()
 
-                # Save last used credentials/parameters
-                self._save_connect_last({
+                # "reconnect" is a one-off, so it is not remembered. "agent"
+                # is not remembered either: a stale value would hop into an
+                # agent the next time you only want the controller.
+                self._start_connect({
                     "sn": sn,
                     "env": env_val,
-                    "email": email_entry.get_text().strip(),
-                    "password": pwd_entry.get_text().strip(),
+                    "email": email_val,
+                    "password": pwd_val,
                     "ticket": ticket_val,
                     "org": org_val,
                     "network": net_val,
                     "device_type": dtype_val,
                     "no_cache": nocache_val,
                     "use_tmux": use_tmux_val,
-                    # "reconnect" is deliberately not remembered: it is a
-                    # one-off action, so every dialog starts unticked.
+                    "reconnect": reconnect_val,
                     "gateway_pass": gw_pass_val,
                     "magic_words": magic_words_val,
+                    "agent": agent_val,
                 })
-
-                # Build raw command args
-                raw_cmd = ["python3", SSH_TOOL_CONNECT_PY, "--sn", sn, "--email", email_val, "--password", pwd_val]
-                if env_val and env_val != "prod":
-                    raw_cmd.extend(["--env", env_val])
-                if ticket_val:
-                    raw_cmd.extend(["--ticket", ticket_val])
-                if org_val:
-                    raw_cmd.extend(["--org", org_val])
-                if net_val:
-                    raw_cmd.extend(["--network", net_val])
-                if dtype_val != "auto":
-                    raw_cmd.extend(["--device-type", dtype_val])
-                if nocache_val:
-                    raw_cmd.append("--no-cache")
-                if gw_pass_val:
-                    raw_cmd.extend(["--gateway-pass", gw_pass_val])
-                if magic_words_val:
-                    raw_cmd.extend(["--magic-words", magic_words_val])
-                if agent_val:
-                    raw_cmd.extend(["--agent", agent_val])
-
-                if use_tmux_val:
-                    _tmux_apply_user_conf()
-                    session_name = f"conn-{sn.lower()}"
-                    if agent_val:
-                        # Own session per agent, so it does not attach to
-                        # (or reconnect-kill) the controller's session.
-                        session_name += f"-{agent_val.lower().replace(':', '').replace('.', '-')}"
-                    cmd_str = " ".join(shlex.quote(arg) for arg in raw_cmd)
-                    if reconnect_val:
-                        # One-off action: drop the stale session now. The kill
-                        # never goes into argv — argv is stored in
-                        # sessions.json and replayed on every restart, which
-                        # would reconnect the device each time instead of
-                        # attaching to the session already running.
-                        _tmux_kill_session(session_name)
-                    cmd = self._connect_tmux_argv(session_name, cmd_str)
-                    # Keep Connect identity in the sidebar (M2 chrome)
-                    icon_name = ICON_CONNECT_TMUX
-                    sub = f"cloud ({env_val}) [tmux]"
-                else:
-                    cmd = raw_cmd
-                    icon_name = ICON_CONNECT
-                    sub = f"cloud ({env_val})"
-
-                label = f"{sn} (connect)"
-                if agent_val:
-                    label = f"{sn} → {agent_val} (connect)"
-                self._add_session(label=label, argv=cmd, icon_name=icon_name,
-                                  sub=sub, cwd=SSH_TOOL_DIR)
 
             self._open_dialogs.discard(dlg)
             dlg.destroy()
@@ -11590,6 +12000,9 @@ if (data !== null) {{
                 tab["ai_status"] = ("exited" if tab["exited"] else
                                     getattr(row, "agent_status", None)
                                     or "unknown")
+                got = self._ai_cli_path_of(getattr(row, "argv", None))
+                if got and self._ai_is_claude(got[0]):
+                    tab["account"] = self._claude_account_of(got[0]) or ""
             if getattr(row, "kind", None) == "term":
                 tab["can_send"] = self._remote_tab_trouble(row) is None
             if (tab["type"] == "note" and self._remote_files_on
@@ -11605,8 +12018,11 @@ if (data !== null) {{
                 groups[color]["tabs"].append(tab["id"])
         return {"time": int(time.time()), "version": APP_VERSION,
                 "send": self._remote_send_on, "files": self._remote_files_on,
+                "connect": bool(HAS_SSH_TOOL),
                 "colors": list(GROUP_COLORS),
                 "clis": [e["cli"] for e in self._load_ai_clis()]
+                if self._remote_send_on else [],
+                "accounts": [n for n, _c in self._claude_accounts()]
                 if self._remote_send_on else [],
                 "groups": list(groups.values()), "tabs": tabs}
 
@@ -11726,50 +12142,99 @@ if (data !== null) {{
                 self._set_group_collapsed(g, True)
             self._save_sessions_soon()
             return 200, {"ok": True}
+        if op == "account":
+            name = body.get("account")
+            if not isinstance(name, str):
+                return 400, {"error": "account must be a name, or \"\" for Default"}
+            why = self._ai_switch_account(row, name)
+            return (409, {"error": why}) if why else (200, {"ok": True})
         return 404, {"error": "unknown action"}
 
     def _remote_new(self, body):
         kind = body.get("kind")
-        cwd = os.path.expanduser((body.get("cwd") or "").strip() or "~")
-        if not os.path.isdir(cwd):
-            return 400, {"error": f"no such folder: {cwd}"}
-        if kind == "shell":
-            row = self._add_session("shell", [os.environ.get("SHELL", "/bin/bash")],
-                                    "utilities-terminal-symbolic", cwd=cwd,
-                                    track_cwd=True)
-        elif kind == "command":
-            cmd = (body.get("command") or "").strip()
-            if not cmd or len(cmd) > 2000:
-                return 400, {"error": "give a command (up to 2000 characters)"}
-            parts = cmd.split(maxsplit=1)
-            row = self._add_session(parts[0], ["/bin/sh", "-c", cmd], ICON_COMMAND,
-                                    sub=parts[1] if len(parts) > 1 else None, cwd=cwd)
-        elif kind == "ai":
-            # what "+ AI" does with its defaults: a fresh session, resumed
-            # after a restart, inside tmux; bypass as Settings says
-            tool = body.get("cli")
-            entry = next((e for e in self._load_ai_clis() if e["cli"] == tool), None)
-            if entry is None:
-                return 400, {"error": "pick an AI from tabit's list"}
-            launch, argv, icon = self._ai_launch_pair(
-                tool, cwd, list(entry.get("try") or []),
-                bypass=bool(self._load_settings().get("ai_claude_bypass"))
-                and self._ai_is_claude(tool),
-                tmux=True, continue_now=False, resume_later=True,
-                new_sid=(str(uuid.uuid4()) if self._ai_takes_new_id(tool) else None))
-            row = self._add_session(tool, argv, icon, sub=self._ai_sub(cwd),
-                                    cwd=cwd, launch_argv=launch)
-            if row is not None:
-                row.ai_hunt = True
+        name = body.get("name")
+        if isinstance(name, str) and name.strip():
+            name = name.strip()
+            if len(name) > 80:
+                return 400, {"error": "name of 1 to 80 characters"}
         else:
-            return 400, {"error": "kind must be shell, ai or command"}
+            name = None
+        row = None
+        where = ""
+        if kind in ("shell", "command", "ai"):
+            cwd = os.path.expanduser((body.get("cwd") or "").strip() or "~")
+            if not os.path.isdir(cwd):
+                return 400, {"error": f"no such folder: {cwd}"}
+            where = cwd
+            if kind == "shell":
+                row = self._add_session("shell", [os.environ.get("SHELL", "/bin/bash")],
+                                        "utilities-terminal-symbolic", cwd=cwd,
+                                        track_cwd=True)
+            elif kind == "command":
+                # still accepted so a page cached before this change works
+                cmd = (body.get("command") or "").strip()
+                if not cmd or len(cmd) > 2000:
+                    return 400, {"error": "give a command (up to 2000 characters)"}
+                parts = cmd.split(maxsplit=1)
+                row = self._add_session(parts[0], ["/bin/sh", "-c", cmd], ICON_COMMAND,
+                                        sub=parts[1] if len(parts) > 1 else None, cwd=cwd)
+            else:
+                # what "+ AI" does with its defaults: a fresh session, resumed
+                # after a restart, inside tmux; bypass as Settings says
+                tool = body.get("cli")
+                entry = next((e for e in self._load_ai_clis() if e["cli"] == tool), None)
+                if entry is None:
+                    return 400, {"error": "pick an AI from tabit's list"}
+                # a Claude account runs as its own claude, as in +AI
+                account = body.get("account") if self._ai_is_claude(tool) else None
+                run = tool
+                if account:
+                    run = dict(self._claude_accounts()).get(account)
+                    if run is None:
+                        return 400, {"error": f"no Claude account “{account}”"}
+                launch, argv, icon = self._ai_launch_pair(
+                    run, cwd, list(entry.get("try") or []),
+                    bypass=bool(self._load_settings().get("ai_claude_bypass"))
+                    and self._ai_is_claude(tool),
+                    tmux=True, continue_now=False, resume_later=True,
+                    new_sid=(str(uuid.uuid4()) if self._ai_takes_new_id(run) else None))
+                row = self._add_session(f"{tool} · {account}" if account else tool,
+                                        argv, icon, sub=self._ai_sub(cwd, run),
+                                        cwd=cwd, launch_argv=launch)
+                if row is not None:
+                    row.ai_hunt = True
+        elif kind == "serial":
+            spec = self._serial_spec(
+                body.get("tool") if isinstance(body.get("tool"), str) else "screen",
+                body.get("target") if isinstance(body.get("target"), str) else "",
+                body.get("rate") if isinstance(body.get("rate"), str) else "")
+            if isinstance(spec, str):
+                return 400, {"error": spec}
+            row = self._add_session(spec["label"], spec["argv"], spec["icon"],
+                                    sub=spec["sub"])
+            where = spec["label"]
+        elif kind == "connect":
+            if not HAS_SSH_TOOL:
+                return 400, {"error": "connect is not on this machine"}
+            try:
+                fields = self._connect_phone_values(body, self._load_connect_last())
+            except ValueError as exc:
+                return 400, {"error": self._connect_phone_error(str(exc))}
+            if not self._ssh_tool_has_pexpect():
+                return 400, {"error": "connect needs pexpect"}
+            row = self._start_connect(fields)
+            where = fields["sn"]
+        else:
+            return 400, {"error": "kind must be shell, ai, serial or connect"}
         if row is None:
             return 500, {"error": "tabit could not open it"}
         color = body.get("group")
         if color in GROUP_COLORS:
             self._remote_set_group(row, color)
+        if name:
+            self._set_tab_name(row, name)
         self._save_sessions_soon()
-        print(f"[remote] new {kind} tab in {cwd}", file=sys.stderr)
+        print(f"[remote] new {kind} tab in {where}", file=sys.stderr)
         return 200, {"id": self._tg_row_id(row)}
 
     def _remote_set_group(self, row, color):
@@ -11857,7 +12322,137 @@ if (data !== null) {{
         self._remote_ack(row)
         return 200, {"ok": True}
 
-    def _remote_screen(self, rid, color=False, back=0):
+    @staticmethod
+    def _remote_wanted_room(cols, rows):
+        """(cols, rows) the phone asked for, or None when it did not."""
+        try:
+            cols, rows = int(cols), int(rows)
+        except (TypeError, ValueError):
+            return None
+        if 24 <= cols <= 120 and 12 <= rows <= 80:
+            return (cols, rows)
+        return None
+
+    @staticmethod
+    def _remote_room_to_save(cols, rows):
+        """Size to put back when the phone leaves this tab.
+
+        42×40 was a phone size that drew a narrow column and a blank
+        strip on the right. A background tab had VTE's 80×24 before that.
+        """
+        if (cols, rows) == (42, 40):
+            return (80, 24)
+        return (cols, rows)
+
+    @staticmethod
+    def _remote_agent_room(cols, rows, on_desktop, want, phone_owned):
+        """(cols, rows) to apply, or None to leave the pane alone.
+
+        The phone measures how many cells fit its screen at the text size
+        it is using. Only a pane still at VTE's 80×24, the old 42×40, or
+        a size this phone already applied, takes that. A desktop-sized
+        pane is not squeezed, and the pane on the desktop stays the window.
+        """
+        if on_desktop or want is None or cols < 2 or rows < 2:
+            return None
+        if not (phone_owned or (cols, rows) in ((80, 24), (42, 40))):
+            return None
+        if abs(cols - want[0]) <= 1 and abs(rows - want[1]) <= 1:
+            return None
+        return want
+
+    def _remote_drop_phone_room(self, row):
+        src = getattr(row, "_remote_phone_src", None)
+        if src:
+            GLib.source_remove(src)
+            row._remote_phone_src = None
+        row._remote_phone_gen = getattr(row, "_remote_phone_gen", 0) + 1
+        row._remote_saved_room = None
+        row._remote_phone_room = None
+
+    def _remote_restore_one(self, row):
+        """Put back the size this tab had before the phone resized it."""
+        saved = getattr(row, "_remote_saved_room", None)
+        if not saved:
+            return
+        page = getattr(row, "page", None)
+        frames = (getattr(self, "_left_frame", None), getattr(self, "_right_frame", None))
+        if page is not None and page.get_parent() in frames:
+            self._remote_drop_phone_room(row)
+            return
+        term = getattr(row, "term", None)
+        if term is not None:
+            try:
+                term.set_size(*saved)
+            except Exception:
+                pass
+        self._remote_drop_phone_room(row)
+
+    def _remote_restore_phone_rooms(self, keep):
+        for row in self._session_rows():
+            if row is keep or not getattr(row, "_remote_saved_room", None):
+                continue
+            self._remote_restore_one(row)
+
+    def _remote_arm_restore(self, row):
+        """If the phone stops asking, give the tab its old size back."""
+        old = getattr(row, "_remote_phone_src", None)
+        if old:
+            GLib.source_remove(old)
+        row._remote_phone_gen = getattr(row, "_remote_phone_gen", 0) + 1
+        gen = row._remote_phone_gen
+
+        def fire(r=row, g=gen):
+            r._remote_phone_src = None
+            if getattr(r, "_remote_phone_gen", None) != g:
+                return False
+            self._remote_restore_one(r)
+            return False
+
+        row._remote_phone_src = GLib.timeout_add(45000, fire)
+
+    def _remote_grow_agent(self, row, term, want):
+        self._remote_restore_phone_rooms(row)
+        page = getattr(row, "page", None)
+        frames = (getattr(self, "_left_frame", None), getattr(self, "_right_frame", None))
+        on_desktop = page is not None and page.get_parent() in frames
+        try:
+            cols = int(term.get_column_count())
+            rows = int(term.get_row_count())
+        except Exception:
+            return
+        if on_desktop:
+            # the widget may already be larger than the pty (the size never
+            # got applied). Catch up. Don't invent a phone size over a
+            # window the user is looking at.
+            self._remote_drop_phone_room(row)
+            try:
+                alloc = term.get_allocation()
+                cw, ch = term.get_char_width(), term.get_char_height()
+                if alloc.width > 40 and alloc.height > 40 and cw > 0 and ch > 0:
+                    want_c = max(2, (alloc.width - 2) // int(cw))
+                    want_r = max(1, (alloc.height - 2) // int(ch))
+                    if want_r > rows + 2 or want_c > cols + 2:
+                        term.set_size(want_c, want_r)
+            except Exception:
+                pass
+            return
+        room = self._remote_agent_room(
+            cols, rows, False, want,
+            getattr(row, "_remote_phone_room", None) is not None)
+        if room:
+            if not getattr(row, "_remote_saved_room", None):
+                row._remote_saved_room = self._remote_room_to_save(cols, rows)
+            try:
+                term.set_size(*room)
+            except Exception:
+                return
+            row._remote_phone_room = room
+        # still on this tab: don't put the old size back while it polls
+        if want is not None and getattr(row, "_remote_phone_room", None) is not None:
+            self._remote_arm_restore(row)
+
+    def _remote_screen(self, rid, color=False, back=0, want=None):
         """The last screenful of an AI tab, for a phone to read (GTK thread).
         back: that many lines more above it, from the tab's scrollback.
 
@@ -11873,6 +12468,12 @@ if (data !== null) {{
             return 404, {"error": "no such terminal tab"}, None
         term = getattr(row, "term", None)
         tmux = self._row_tmux_session(row) if color else None
+        # a fullscreen agent left at VTE's 80×24 default has room for only
+        # a few lines on a phone. When the phone says how many cells fit
+        # its screen, give the pane that size. A fixed 42 columns filled
+        # the height and left a blank strip down the right.
+        if tmux and term is not None and _is_ai_icon(getattr(row, "icon_name", None)):
+            self._remote_grow_agent(row, term, want)
         coloured = self._term_tail_ansi(term, 60) if color and not tmux else None
         if coloured and back > 0:
             # older lines without colours: reading them with colours cost
@@ -12036,15 +12637,20 @@ if (data !== null) {{
         try:
             size = subprocess.run(
                 ["tmux", "display-message", "-p", "-t", _tmux_exact(name),
-                 "#{pane_width} #{pane_height} #{cursor_x} #{cursor_y} #{cursor_flag}"],
+                 "#{pane_width} #{pane_height} #{cursor_x} #{cursor_y} #{cursor_flag}"
+                 " #{alternate_on}"],
                 capture_output=True, text=True, timeout=2).stdout.split()
+            # A program on the alternate screen (Claude's fullscreen TUI)
+            # keeps its old lines itself: tmux has none to give
+            full = size[5:6] == ["1"]
             cmd = ["tmux", "capture-pane", "-p", "-e", "-t", _tmux_exact(name)]
-            if back > 0:
+            if back > 0 and not full:
                 cmd += ["-S", str(-back)]
             ansi = subprocess.run(cmd, capture_output=True, timeout=3).stdout
             # keep the newest part if it is huge
             return {"ansi": ansi[-600000:].decode("utf-8", "replace"),
-                    "cols": int(size[0]), "rows": int(size[1]), "back": back,
+                    "cols": int(size[0]), "rows": int(size[1]),
+                    "back": 0 if full else back, "nohist": full,
                     # where the cursor is in the visible pane; None when the
                     # program hides it (agents draw their own)
                     "cursor": ([int(size[2]), int(size[3])]
@@ -12101,6 +12707,209 @@ if (data !== null) {{
         self._remote_ack(row)               # answering it is reading it
         print(f"[remote] {action} -> tab {rid} "
               f"({getattr(row, 'title_text', '')})", file=sys.stderr)
+        return 200, {"ok": True}
+
+    # --- Remote: the phone's Settings sheet -------------------------------
+
+    # What the phone may change: the AI defaults. Remote's own switches stay
+    # at the computer, so a phone can neither open more to itself nor lock
+    # itself out.
+    _REMOTE_SETTINGS = ("ai_use_tmux", "ai_claude_bypass", "ai_fresh_on_restore")
+
+    def _remote_admin(self, op, body):
+        """Server thread: one Settings-sheet request. The slow parts (claude
+        auth status, GitHub, the update) stay off the GTK thread; only
+        what touches the window goes through _remote_call."""
+        if not self._remote_send_on:
+            return 403, {"error": "typing from the phone is off (Settings > Remote)"}
+        if op == "state":
+            return 200, self._remote_admin_state()
+        if op == "set":
+            if not body or any(k not in self._REMOTE_SETTINGS or not isinstance(v, bool)
+                               for k, v in body.items()):
+                return 400, {"error": "only the AI defaults, true or false"}
+            self._save_settings(dict(body))
+            return 200, {"ok": True}
+        if op == "account-add":
+            try:
+                run = self._claude_account_add((body.get("name") or "").strip())
+            except (ValueError, OSError) as e:
+                return 400, {"error": str(e)}
+            self._remote_login_start(body["name"].strip(), run)
+            return 200, {"ok": True}
+        if op == "login-start":
+            name = body.get("name") or ""
+            run = "claude" if not name else dict(self._claude_accounts()).get(name)
+            if run is None:
+                return 400, {"error": f"no Claude account “{name}”"}
+            self._remote_login_start(name, run)
+            return 200, {"ok": True}
+        if op == "login-code":
+            return self._remote_admin_login_code(body.get("code"))
+        if op == "update-check":
+            try:
+                tag, label, newer = self._remote_latest()
+            except Exception as e:
+                return 502, {"error": f"could not ask GitHub: {e}"}
+            return 200, {"current": _get_version_display(), "latest": label,
+                         "newer": newer}
+        if op == "update":
+            return self._remote_admin_update()
+        if op == "restart":
+            return self._remote_admin_restart()
+        return 404, {"error": "not found"}
+
+    def _remote_admin_state(self):
+        s = self._load_settings()
+        accounts = []
+        for name, run in [("", "claude")] + self._claude_accounts():
+            st = self._claude_auth_status(run)
+            accounts.append({"name": name, "loggedIn": bool(st.get("loggedIn")),
+                             "email": st.get("email") or "",
+                             "plan": st.get("subscriptionType") or ""})
+        login = self._remote_login or {}
+        return {"version": _get_version_display(),
+                "settings": {k: bool(s.get(k)) for k in self._REMOTE_SETTINGS},
+                "accounts": accounts,
+                "login": {k: login.get(k) for k in ("account", "state", "url", "msg")}
+                if login else None,
+                "update": dict(self._remote_update) if self._remote_update else None}
+
+    def _remote_unsaved_notes(self):
+        """GTK thread: the name of a note with unsaved changes, or None.
+        Closing asks about it in a dialog nobody at the phone can answer."""
+        for row in self._session_rows():
+            if getattr(row, "kind", None) == "note" and row.buffer.get_modified():
+                return os.path.basename(row.file_path or "untitled")
+        return None
+
+    def _remote_admin_restart(self):
+        note = self._remote_call(self._remote_unsaved_notes)
+        if note:
+            return 409, {"error": f"“{note}” has unsaved changes: save it at "
+                                  "the computer first"}
+        # answer first: closing stops this server
+        GLib.timeout_add(500, lambda: self._restart_self() and False)
+        return 200, {"ok": True}
+
+    def _remote_latest(self):
+        """(tag, label, newer) of the newest release on GitHub."""
+        cur = _get_current_version()
+        tag, _body, _url, name = self._fetch_latest_release_info(cur)
+
+        def parse_v(v):
+            return [int(x) for x in v.lstrip("v").split("-")[0].split(".") if x.isdigit()]
+        return tag, _release_display_name(tag, name), bool(tag) and parse_v(tag) > parse_v(cur)
+
+    @staticmethod
+    def _sudo_ok():
+        """sudo without a password: install.sh needs it, and from the phone
+        nobody is there to type one."""
+        try:
+            return subprocess.run(["sudo", "-n", "true"], stdin=subprocess.DEVNULL,
+                                  capture_output=True, timeout=10).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    def _remote_admin_update(self):
+        job = self._remote_update
+        if job and job.get("state") == "running":
+            return 409, {"error": "an update is running already"}
+        try:
+            tag, label, newer = self._remote_latest()
+        except Exception as e:
+            return 502, {"error": f"could not ask GitHub: {e}"}
+        if not newer:
+            return 409, {"error": f"{_get_version_display()} is the newest"}
+        if not self._sudo_ok():
+            return 409, {"error": "installing needs your password: update at the computer"}
+        note = self._remote_call(self._remote_unsaved_notes)
+        if note:
+            return 409, {"error": f"“{note}” has unsaved changes: save it at "
+                                  "the computer first"}
+        job = {"state": "running", "latest": label, "log": [], "error": ""}
+        self._remote_update = job
+
+        def log(msg):
+            job["log"] = (job["log"] + [msg])[-40:]
+
+        def work():
+            try:
+                self._update_install(tag, log, askpass=False)
+            except Exception as e:
+                job.update(state="failed", error=str(e))
+                return
+            job["state"] = "done"
+            GLib.timeout_add(1000, lambda: self._restart_self() and False)
+        threading.Thread(target=work, daemon=True).start()
+        return 200, {"ok": True}
+
+    # how long a login from the phone waits for its code
+    _REMOTE_LOGIN_S = 900
+
+    def _remote_login_start(self, name, run):
+        """Run `claude auth login` for an account under a pty of tabit's own:
+        the page gets the link, and the code comes back through it. A pipe
+        will not do: claude takes the code only from a terminal."""
+        old = self._remote_login
+        if old and old.get("proc") and old["proc"].poll() is None:
+            old["proc"].kill()
+        mfd, sfd = pty.openpty()
+        # wide, so the link comes out on one line
+        fcntl.ioctl(sfd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 2000, 0, 0))
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
+        env.update(BROWSER="true", TERM="xterm-256color")   # no browser on the desk
+        proc = subprocess.Popen([run, "auth", "login"], stdin=sfd, stdout=sfd,
+                                stderr=sfd, env=env, start_new_session=True)
+        os.close(sfd)
+        job = {"account": name, "state": "starting", "url": "", "msg": "",
+               "proc": proc, "fd": mfd}
+        self._remote_login = job
+        threading.Thread(target=Tabit._remote_login_read, args=(job,),
+                         daemon=True).start()
+
+    @staticmethod
+    def _remote_login_read(job):
+        out, end = "", time.time() + Tabit._REMOTE_LOGIN_S
+        fd, proc = job["fd"], job["proc"]
+        while time.time() < end:
+            if not select.select([fd], [], [], 0.5)[0]:
+                if proc.poll() is not None:
+                    break
+                continue
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break                       # the program has closed the pty
+            if not chunk:
+                break
+            text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\r", "",
+                          chunk.decode("utf-8", "replace"))
+            out += text
+            m = re.search(r"https://\S+", out)
+            if m and not job["url"]:
+                job.update(url=m.group(0), state="waiting")
+            for line in text.splitlines():
+                if line.strip() and "http" not in line and "Paste code" not in line:
+                    job["msg"] = line.strip()[:200]
+        if proc.poll() is None:
+            proc.kill()
+        rc = proc.wait()
+        os.close(fd)
+        job["state"] = "done" if rc == 0 else "failed"
+        if rc != 0 and not job["msg"]:
+            job["msg"] = "the login stopped"
+
+    def _remote_admin_login_code(self, code):
+        job = self._remote_login
+        if not job or job.get("state") != "waiting":
+            return 409, {"error": "no login is waiting for a code"}
+        if not isinstance(code, str) or not code.strip() or len(code) > 500 \
+                or not code.strip().isprintable():
+            return 400, {"error": "paste the code from the login page"}
+        job["msg"] = "checking the code…"
+        os.write(job["fd"], code.strip().encode() + b"\r")
         return 200, {"ok": True}
 
     def _remote_call(self, fn, timeout=3):
@@ -13076,7 +13885,7 @@ if (data !== null) {{
             argv = self._ai_tmux_argv(inner, name)
             self._add_session(
                 label or cli, argv, ICON_AI_TMUX,
-                sub=self._ai_sub(spath) if spath else (sub or "tmux"),
+                sub=self._ai_sub(spath, cli) if spath else (sub or "tmux"),
                 cwd=spath)
             return
         if cat == "connect":
@@ -13374,11 +14183,11 @@ if (data !== null) {{
         return {}
 
     @staticmethod
-    def _save_ai_last(cli, path, use_tmux=False):
+    def _save_ai_last(cli, path, use_tmux=False, account=None):
         os.makedirs(CONFIG_DIR, exist_ok=True)
         with open(AI_LAST_FILE, "w") as f:
-            json.dump({"cli": cli, "path": path,
-                       "use_tmux": bool(use_tmux)}, f, indent=2)
+            json.dump({"cli": cli, "path": path, "use_tmux": bool(use_tmux),
+                       "account": account}, f, indent=2)
 
     @staticmethod
     def _normalize_ai_entry(item):
@@ -13519,19 +14328,181 @@ if (data !== null) {{
                         break
         return prompt, reply
 
-    @staticmethod
-    def _claude_active_sessions():
+    @classmethod
+    def _claude_active_sessions(cls):
         """Every claude session running now, in a terminal or in the
-        background (`claude agents --json`), as dicts; [] when it cannot
-        tell (no claude, an older one)."""
+        background (`claude agents --json`), as dicts, under every account
+        (each keeps its own list); [] when it cannot tell (no claude, an
+        older one)."""
+        found = []
+        for cli in ["claude"] + [c for _n, c in cls._claude_accounts()]:
+            try:
+                out = subprocess.run([cli, "agents", "--json"],
+                                     stdin=subprocess.DEVNULL, capture_output=True,
+                                     text=True, timeout=5).stdout
+                data = json.loads(out or "[]")
+            except (OSError, subprocess.SubprocessError, ValueError):
+                continue
+            if isinstance(data, list):
+                found += [d for d in data if isinstance(d, dict)]
+        return found
+
+    @staticmethod
+    def _claude_accounts():
+        """(name, cli) of each extra Claude account, by name."""
         try:
-            out = subprocess.run(["claude", "agents", "--json"],
-                                 stdin=subprocess.DEVNULL, capture_output=True,
-                                 text=True, timeout=5).stdout
-            data = json.loads(out or "[]")
-        except (OSError, subprocess.SubprocessError, ValueError):
+            names = sorted(os.listdir(CLAUDE_ACCOUNTS_DIR))
+        except OSError:
             return []
-        return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
+        out = []
+        for name in names:
+            cli = os.path.join(CLAUDE_ACCOUNTS_DIR, name, "bin", "claude")
+            if os.access(cli, os.X_OK):
+                out.append((name, cli))
+        return out
+
+    @staticmethod
+    def _claude_account_of(cli):
+        """The account a CLI path runs, or None for claude itself."""
+        cli = os.path.expanduser(cli or "")
+        home = os.path.dirname(os.path.dirname(cli))
+        if (os.path.basename(cli) == "claude"
+                and os.path.dirname(home) == CLAUDE_ACCOUNTS_DIR):
+            return os.path.basename(home)
+        return None
+
+    @staticmethod
+    def _claude_account_add(name):
+        """Make account `name`; its CLI path. ValueError for a bad or taken
+        name. Logged out until it logs in once."""
+        if (not re.fullmatch(r"[A-Za-z0-9_-]{1,24}", name or "")
+                or name.lower() == "default"):
+            raise ValueError("use 1-24 letters, digits, - or _")
+        home = os.path.join(CLAUDE_ACCOUNTS_DIR, name)
+        if os.path.lexists(home):
+            raise ValueError(f"“{name}” is there already")
+        cfg = os.path.join(home, "config")
+        os.makedirs(cfg, mode=0o700)
+        os.makedirs(os.path.join(home, "bin"))
+        try:
+            with open(CLAUDE_DEFAULT_JSON) as f:
+                known = json.load(f)
+        except (OSError, ValueError):
+            known = {}
+        seed = {k: known[k] for k in CLAUDE_SEED_KEYS
+                if isinstance(known, dict) and k in known}
+        with open(os.path.join(cfg, ".claude.json"), "w") as f:
+            json.dump(seed, f, indent=2)
+        q = shlex.quote
+        # Linked on every start, so what the default account gains later
+        # (a first agents/ folder) reaches this one too. A file the account
+        # made itself stays its own.
+        script = (
+            "#!/bin/sh\n"
+            f"# tabit: Claude account \"{name}\". Remove it in Settings > AI.\n"
+            f"c={q(cfg)}\n"
+            f"h={q(CLAUDE_DEFAULT_DIR)}\n"
+            f"for n in {' '.join(q(n) for n in CLAUDE_SHARED)}; do\n"
+            '  [ -e "$h/$n" ] && [ ! -e "$c/$n" ] && [ ! -L "$c/$n" ] && ln -s "$h/$n" "$c/$n"\n'
+            "done\n"
+            'export CLAUDE_CONFIG_DIR="$c"\n'
+            'exec claude "$@"\n')
+        cli = os.path.join(home, "bin", "claude")
+        with open(cli, "w") as f:
+            f.write(script)
+        os.chmod(cli, 0o755)
+        return cli
+
+    def _ai_session_of(self, row):
+        """The claude session a tab is in: its hooks' transcript, else the
+        id its command resumes; None before the first message."""
+        got = re.findall(_UUID_RE, os.path.basename(getattr(row, "_agent_hook_tx", "") or ""))
+        if got:
+            return got[-1]
+        got = re.findall(_UUID_RE, " ".join(getattr(row, "argv", None) or []))
+        return got[-1] if got else None
+
+    def _ai_switch_account(self, row, name):
+        """GTK thread: go on with this Claude tab's conversation under
+        account `name` ("" = Default), in the same tab. None when it is under
+        way, else why not. The old claude stops; the new one resumes the
+        same session, which every account shares."""
+        argv = getattr(row, "argv", None) or []
+        got = self._ai_cli_path_of(argv)
+        if (getattr(row, "kind", None) != "term" or not got
+                or not self._ai_is_claude(got[0])):
+            return "only a Claude tab has an account"
+        if getattr(row, "dead", False):
+            return "that tab has exited"
+        old = self._claude_account_of(got[0]) or ""
+        if (name or "") == old:
+            return f"it is on {old or 'Default'} already"
+        new_cli = "claude" if not name else dict(self._claude_accounts()).get(name)
+        if new_cli is None:
+            return f"no Claude account “{name}”"
+        status = getattr(row, "agent_status", None)
+        if status == "working":
+            return "Claude is working: switch when it stops"
+        if status == "blocked":
+            return "Claude is asking something: answer it first"
+        sid = self._ai_session_of(row)
+        if not sid:
+            return "no conversation yet: send one message first"
+        old_tmux = getattr(row, "_live_tmux", None)   # what runs, not what argv says
+        launch, stored, _icon = self._ai_launch_pair(
+            new_cli, got[1], [], resume_id=sid,
+            tmux=self._ai_tmux_unwrap(argv)[1] is not None,
+            continue_now=True, resume_later=True, bypass=self._ai_has_bypass(argv))
+        row._respawn = (launch, got[1], got[0], new_cli)
+        row.argv = stored                   # before the old one stops
+        row.ai_hunt = False
+        if old_tmux:
+            _tmux_kill_session(old_tmux)    # its attach ends, and the tab with it
+        elif getattr(row, "pid", None):
+            try:
+                os.killpg(row.pid, signal.SIGHUP)   # the shell and claude both
+            except OSError:
+                os.kill(row.pid, signal.SIGHUP)
+        self._save_sessions_soon()
+        return None
+
+    def _ai_respawn(self, row):
+        """The old claude of an account switch has ended: start the new one
+        in the same terminal."""
+        launch, path, old_cli, new_cli = row._respawn
+        row._respawn = None
+        old_title = f"{os.path.basename(old_cli)} · {self._claude_account_of(old_cli)}" \
+            if self._claude_account_of(old_cli) else os.path.basename(old_cli)
+        if getattr(row, "title_text", None) == old_title:
+            acct = self._claude_account_of(new_cli)
+            self._set_tab_name(row, f"claude · {acct}" if acct else "claude")
+        row.sub_text = self._ai_sub(path, new_cli)
+        row.subtitle.set_text(row.sub_text)
+        row._agent_hook_tx = ""
+        row._agent_hook_mtime = 0
+        row.term.feed(b"\r\n\x1b[2m[tabit] switching account\x1b[0m\r\n")
+        self._set_agent_status(row, "unknown")
+        self._spawn_term(row, launch, path if os.path.isdir(path) else GLib.get_home_dir())
+        self._save_sessions_soon()
+
+    @staticmethod
+    def _claude_account_remove(name):
+        """Delete account `name`: its login and its own files. The shared
+        ones are links, and rmtree removes a link, never what it points at."""
+        home = os.path.join(CLAUDE_ACCOUNTS_DIR, name)
+        if name and os.path.dirname(home) == CLAUDE_ACCOUNTS_DIR:
+            shutil.rmtree(home, ignore_errors=True)
+
+    @staticmethod
+    def _claude_auth_status(cli):
+        """`claude auth status` of one account as a dict, {} if unknown."""
+        try:
+            out = subprocess.run([cli, "auth", "status"], stdin=subprocess.DEVNULL,
+                                 capture_output=True, text=True, timeout=10).stdout
+            data = json.loads(out or "{}")
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def _ai_session_ids_in_use(self):
         """Session ids already open: held by an AI tab (its command, or its
@@ -13693,6 +14664,56 @@ if (data !== null) {{
             return ["--settings", CLAUDE_HOOKS_FILE]
         return []
 
+    @classmethod
+    def _ai_screen_tokens(cls, cli):
+        """Grok starts in minimal mode.
+
+        That mode writes the talk into the terminal's own history, which is
+        what a phone reads when it scrolls up. Fullscreen keeps the old
+        lines inside Grok, so the phone only ever sees the last page.
+        """
+        if os.path.basename(cli.rstrip("/")) == "grok":
+            return ["--minimal"]
+        return []
+
+    @staticmethod
+    def _ai_cmd_grok_minimal(cmd):
+        """Put --minimal on every grok in a command tabit already stored.
+
+        A tab saved before this default has `grok --continue || exec grok`.
+        Leave a command that already says --minimal or --fullscreen alone.
+        """
+        # only where a command starts, after the cd: a folder named grok
+        # (or grok-x, or /grokking) is not the program
+        head, sep, rest = cmd.partition(" || exit 1; ")
+        if not sep:
+            head, rest = "", cmd
+        word = re.compile(
+            r"(?:^|(?<=\|\| )|(?<=exec ))(?P<bin>(?:[\w./-]+/)?grok)(?=\s|$)"
+            r"(?P<args>(?:\s+(?!&&|\|\|)[^\s;|&]+)*)")
+
+        def add(match):
+            args = match.group("args")
+            if re.search(r"(?:^|\s)--(?:minimal|fullscreen)(?:\s|$)", args):
+                return match.group(0)
+            return match.group("bin") + args + " --minimal"
+
+        return head + sep + word.sub(add, rest)
+
+    @classmethod
+    def _ai_ensure_grok_minimal(cls, argv):
+        """Same command, with Grok's minimal flag, or argv when nothing changed."""
+        if not argv or len(argv) != 3 or argv[0] != "/bin/sh":
+            return argv
+        inner, sess = cls._ai_tmux_unwrap(argv)
+        if len(inner) != 3 or inner[0] != "/bin/sh":
+            return argv
+        new_cmd = cls._ai_cmd_grok_minimal(inner[2])
+        if new_cmd == inner[2]:
+            return argv
+        new_inner = ["/bin/sh", "-c", new_cmd]
+        return cls._ai_tmux_argv(new_inner, sess) if sess else new_inner
+
     @staticmethod
     def _ai_strip_bypass_tokens(tokens):
         out = []
@@ -13733,7 +14754,8 @@ if (data !== null) {{
         c = shlex.quote(cli)
         d = shlex.quote(path)
         tail = " ".join(shlex.quote(t) for t in (
-            cls._ai_bypass_tokens(cli, bypass) + cls._ai_hook_tokens(cli)))
+            cls._ai_bypass_tokens(cli, bypass) + cls._ai_hook_tokens(cli)
+            + cls._ai_screen_tokens(cli)))
         tail = f" {tail}" if tail else ""
         parts = [f"cd {d} || exit 1"]
         cmds = []
@@ -13804,11 +14826,41 @@ if (data !== null) {{
             got = rest.strip().strip("'\"")
         return got or None
 
-    def _ai_sub(self, path):
-        """Sidebar subtitle for an AI tab: short path, no [tmux] tag."""
+    def _ai_sub(self, path, cli=None):
+        """Sidebar subtitle for an AI tab: short path, no [tmux] tag, and
+        the Claude account first while there is more than one login."""
         if not path:
             return ""
-        return self._short_path(os.path.expanduser(path))
+        return Tabit._ai_account_tag(cli) + self._short_path(os.path.expanduser(path))
+
+    @classmethod
+    def _ai_account_tag(cls, cli):
+        """"@<account> · " for a Claude tab (@Default for claude itself)
+        while two or more logins are here; "" otherwise."""
+        if not cli or not cls._ai_is_claude(cli) or cls._claude_logged_in_count() <= 1:
+            return ""
+        return f"@{cls._claude_account_of(cli) or 'Default'} · "
+
+    @classmethod
+    def _ai_account_sub(cls, argv, sub):
+        """A saved Claude tab's subtitle with its account first, or without
+        it, as the logins here are now: also on a tab saved before."""
+        got = cls._ai_cli_path_of(argv)
+        if not got or not cls._ai_is_claude(got[0]):
+            return sub
+        own = f"@{cls._claude_account_of(got[0]) or 'Default'} · "
+        bare = sub[len(own):] if (sub or "").startswith(own) else sub
+        tag = cls._ai_account_tag(got[0])  # "" with one login: nothing to tell apart
+        return f"{tag}{bare}" if tag and bare else (tag[:-3] if tag else bare)
+
+    @staticmethod
+    def _claude_logged_in_count():
+        """How many Claude logins this computer holds: the default one and
+        each account with a login file (Linux keeps it in the config dir)."""
+        dirs = [CLAUDE_DEFAULT_DIR] + [
+            os.path.join(CLAUDE_ACCOUNTS_DIR, name, "config")
+            for name, _cli in Tabit._claude_accounts()]
+        return sum(os.path.isfile(os.path.join(d, ".credentials.json")) for d in dirs)
 
     @staticmethod
     def _short_path(path):
@@ -13827,7 +14879,12 @@ if (data !== null) {{
         adds a suffix so a new agent starts and the old session is left alone.
         """
         base = os.path.basename(os.path.normpath(path)) or "home"
-        slug = re.sub(r"[^A-Za-z0-9_-]", "-", f"{cli}-{base}")[:32].strip("-")
+        # an account's CLI is a path: name it by the program and the account
+        label = os.path.basename(cli.rstrip("/")) or cli
+        acct = Tabit._claude_account_of(cli)
+        if acct:
+            label = f"{label}-{acct}"
+        slug = re.sub(r"[^A-Za-z0-9_-]", "-", f"{label}-{base}")[:32].strip("-")
         # tmux rejects "." and ":" in names; the digest keeps two folders with
         # the same basename apart. sha1, not hash(): Python randomises string
         # hashing per process, so the "stable" name differed on every start
@@ -14071,6 +15128,9 @@ if (data !== null) {{
                 continue
             if len(toks) > 1:
                 rest = Tabit._ai_strip_bypass_tokens(toks[1:])
+                # tabit adds this itself; keeping it here would add a second
+                if os.path.basename(toks[0].rstrip("/")) == "grok":
+                    rest = [t for t in rest if t != "--minimal"]
                 if rest:
                     out.append(" ".join(rest))
         return out
@@ -14360,6 +15420,20 @@ if (data !== null) {{
         cli_box.pack_start(cli, True, True, 0)
         cli_box.pack_start(manage, False, False, 0)
 
+        # which Claude login the tab uses (Settings > AI adds more)
+        accounts = dict(self._claude_accounts())
+        acct = Gtk.ComboBoxText()
+        acct.append("", "Default")
+        for name in accounts:
+            acct.append(name, name)
+        if not acct.set_active_id(last.get("account") or ""):
+            acct.set_active_id("")
+        acct.set_tooltip_text("The Claude account this tab logs in with. "
+                              "Add one in Settings > AI.")
+        acct_lbl = Gtk.Label(label="Account", xalign=0)
+        for w in (acct_lbl, acct):
+            w.set_no_show_all(True)
+
         path_default = last.get("path") or GLib.get_home_dir()
         if self._load_settings().get("shell_inherit_cwd", False):
             cwd = self._focused_cwd()
@@ -14584,6 +15658,8 @@ if (data !== null) {{
             else:
                 bypass_chk.set_no_show_all(True)
                 bypass_chk.hide()
+            for w in (acct_lbl, acct):
+                w.set_visible(bool(accounts) and self._ai_is_claude(tool))
 
         cli.connect("changed", update_bypass_visible)
 
@@ -14602,7 +15678,7 @@ if (data !== null) {{
             argv = self._ai_tmux_argv(inner, name)
             self._add_session(
                 cli_name, argv, ICON_AI_TMUX,
-                sub=self._ai_sub(spath),
+                sub=self._ai_sub(spath, cli_name),
                 cwd=spath if spath and os.path.isdir(spath) else None)
             dialog.response(Gtk.ResponseType.CANCEL)
 
@@ -14672,6 +15748,9 @@ if (data !== null) {{
         grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
                     0, 8, 2, 1)
         grid.attach(live_box, 0, 9, 2, 1)
+        grid.insert_row(1)                  # Account, under CLI
+        grid.attach(acct_lbl, 0, 1, 1, 1)
+        grid.attach(acct, 1, 1, 1, 1)
         dialog.get_content_area().add(grid)
         self._dialog_enter_is_ok(dialog)
 
@@ -14680,6 +15759,10 @@ if (data !== null) {{
                 tool = (cli.get_active_text() or "").strip()
                 cwd = (path.get_text() or "").strip() or GLib.get_home_dir()
                 cwd = os.path.expanduser(cwd)
+                # an account is its own claude: the path of its wrapper
+                account = (acct.get_active_id() or None) if (
+                    accounts and self._ai_is_claude(tool)) else None
+                run = accounts.get(account, tool)
                 if tool:
                     now = resume_chk.get_active()
                     # a Session ID only belongs to "continue now"; with none,
@@ -14714,7 +15797,7 @@ if (data !== null) {{
                         if not go:
                             return          # the +AI dialog stays open
                     launch, argv, icon = self._ai_launch_pair(
-                        tool, cwd, cli_tries(tool),
+                        run, cwd, cli_tries(tool),
                         resume_id=resume_id or None,
                         bypass=bypass_chk.get_active()
                         and self._ai_is_claude(tool),
@@ -14722,9 +15805,10 @@ if (data !== null) {{
                         continue_now=now,
                         resume_later=later_chk.get_active(),
                         new_sid=(str(uuid.uuid4())
-                                 if self._ai_takes_new_id(tool) else None))
-                    r = self._add_session(tool, argv, icon,
-                                          sub=self._ai_sub(cwd), cwd=cwd,
+                                 if self._ai_takes_new_id(run) else None))
+                    title = f"{tool} · {account}" if account else tool
+                    r = self._add_session(title, argv, icon,
+                                          sub=self._ai_sub(cwd, run), cwd=cwd,
                                           launch_argv=launch)
                     if r is not None and later_chk.get_active():
                         # Look for its session even while the stored
@@ -14732,7 +15816,8 @@ if (data !== null) {{
                         r.ai_hunt = True
                         self._save_sessions_soon()  # _add_session saved before the flag
                     self._save_ai_last(tool, cwd,
-                                       use_tmux=tmux_chk.get_active())
+                                       use_tmux=tmux_chk.get_active(),
+                                       account=account)
             self._open_dialogs.discard(dlg)
             dlg.destroy()
 
@@ -15749,6 +16834,80 @@ if (data !== null) {{
         raise RuntimeError(
             f"Downloaded {tag} but could not find install.sh in the archive")
 
+    def _update_install(self, target_ver, log, step=None, installing=None,
+                        askpass=True):
+        """Get the new source and run its install.sh; raise on failure.
+
+        log(msg) gets every line, step(text, short) the download stage and
+        installing() the install stage. askpass=False (from the phone): no
+        password window on a desk nobody is at; the caller has checked that
+        sudo needs none.
+        """
+        # Step 1: the checkout, or the release tarball when there is
+        # none (~/.local/bin install) or it is work in progress
+        tabit_dir = _update_source_dir(
+            _get_tabit_repo_dir(), target_ver or "", log,
+            step or (lambda _t, _s: None), self._fetch_release_source)
+
+        # Step 2: install.sh (sudo via GUI askpass when needed)
+        if installing:
+            installing()
+        log("\n>>> ./install.sh")
+        env = os.environ.copy()
+        env["DEBIAN_FRONTEND"] = "noninteractive"
+        if askpass:
+            log("    (if apt needs root, a password window will open)")
+            helper = self._sudo_askpass_path(tabit_dir)
+            if helper:
+                env["SUDO_ASKPASS"] = helper
+                # Some sudo builds also honor this for -A
+                env["SUDO_ASKPASS_REQUIRE"] = "force"
+                log(f"    SUDO_ASKPASS={helper}")
+            else:
+                log("    [warn] sudo_askpass.py not found; "
+                    "sudo may fail without a TTY")
+        else:
+            env.pop("SUDO_ASKPASS", None)
+
+        p2 = subprocess.Popen(
+            ["./install.sh"],
+            cwd=tabit_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+            # Leave stdin closed so sudo cannot hang on a dead TTY;
+            # password comes only via SUDO_ASKPASS.
+            stdin=subprocess.DEVNULL,
+        )
+        for line in p2.stdout:
+            line_str = line.strip()
+            if line_str:
+                log(line_str)
+        p2.wait()
+        if p2.returncode != 0:
+            raise RuntimeError(
+                "install.sh failed with exit code "
+                + str(p2.returncode)
+                + " (password cancelled or apt error?)")
+
+    def _restart_self(self):
+        """Close the way the window does (ask about unsaved notes, save
+        sessions, stop Remote/Cloud), then start tabit again. Returns only
+        when it did not restart."""
+        if self._on_delete_event():
+            return False                    # a note's save question said Cancel
+        try:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        except OSError as e:
+            # still running: undo the half quit, or a closed tab
+            # keeps its tmux session and Remote stays off
+            self._shutting_down = False
+            self._remote_sync()
+            self._note_msg(Gtk.MessageType.ERROR,
+                           "Could not restart tabit", str(e))
+        return False
+
     def _perform_update(self, parent=None, target_ver=None):
 
         win = parent or self
@@ -15819,60 +16978,16 @@ if (data !== null) {{
                     GLib.idle_add(lambda: progress.set_fraction(0.35))
                     GLib.idle_add(lambda: progress.set_text("35% - " + short))
 
-                # Step 1: the checkout, or the release tarball when there is
-                # none (~/.local/bin install) or it is work in progress
-                tabit_dir = _update_source_dir(
-                    _get_tabit_repo_dir(), target_ver or "",
-                    lambda m: GLib.idle_add(append_log, m), step,
-                    self._fetch_release_source)
+                def installing():
+                    GLib.idle_add(lambda: status_lbl.set_markup(
+                        "<b>Step 2/2:</b> Installing… "
+                        "(a password dialog may appear for apt)"))
+                    GLib.idle_add(lambda: progress.set_fraction(0.75))
+                    GLib.idle_add(lambda: progress.set_text("75% - ./install.sh"))
 
-                # Step 2: install.sh (sudo via GUI askpass when needed)
-                GLib.idle_add(lambda: status_lbl.set_markup(
-                    "<b>Step 2/2:</b> Installing… "
-                    "(a password dialog may appear for apt)"))
-                GLib.idle_add(lambda: progress.set_fraction(0.75))
-                GLib.idle_add(lambda: progress.set_text("75% - ./install.sh"))
-                GLib.idle_add(append_log, "\n>>> ./install.sh")
-                GLib.idle_add(
-                    append_log,
-                    "    (if apt needs root, a password window will open)")
-
-                env = os.environ.copy()
-                env["DEBIAN_FRONTEND"] = "noninteractive"
-                askpass = self._sudo_askpass_path(tabit_dir)
-                if askpass:
-                    env["SUDO_ASKPASS"] = askpass
-                    # Some sudo builds also honor this for -A
-                    env["SUDO_ASKPASS_REQUIRE"] = "force"
-                    GLib.idle_add(
-                        append_log, f"    SUDO_ASKPASS={askpass}")
-                else:
-                    GLib.idle_add(
-                        append_log,
-                        "    [warn] sudo_askpass.py not found; "
-                        "sudo may fail without a TTY")
-
-                p2 = subprocess.Popen(
-                    ["./install.sh"],
-                    cwd=tabit_dir,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    env=env,
-                    # Leave stdin closed so sudo cannot hang on a dead TTY;
-                    # password comes only via SUDO_ASKPASS.
-                    stdin=subprocess.DEVNULL,
-                )
-                for line in p2.stdout:
-                    line_str = line.strip()
-                    if line_str:
-                        GLib.idle_add(append_log, line_str)
-                p2.wait()
-                if p2.returncode != 0:
-                    raise RuntimeError(
-                        "install.sh failed with exit code "
-                        + str(p2.returncode)
-                        + " (password cancelled or apt error?)")
+                self._update_install(
+                    target_ver, lambda m: GLib.idle_add(append_log, m),
+                    step=step, installing=installing)
 
                 def on_success():
                     status_lbl.set_markup(
@@ -15905,19 +17020,7 @@ if (data !== null) {{
             self._open_dialogs.discard(dlg)
             dlg.destroy()
             if resp == Gtk.ResponseType.OK:
-                # Restart tabit process, after what closing the window does:
-                # ask about unsaved notes, save sessions, stop Remote/Cloud
-                if self._on_delete_event():
-                    return                  # a note's save question said Cancel
-                try:
-                    os.execv(sys.executable, [sys.executable] + sys.argv)
-                except OSError as e:
-                    # still running: undo the half quit, or a closed tab
-                    # keeps its tmux session and Remote stays off
-                    self._shutting_down = False
-                    self._remote_sync()
-                    self._note_msg(Gtk.MessageType.ERROR,
-                                   "Could not restart tabit", str(e))
+                self._restart_self()
 
         dialog.connect("response", _on_update_progress_resp)
         dialog.show_all()
@@ -16363,6 +17466,116 @@ if (data !== null) {{
             "Pre-ticks the +AI bypass checkbox so new Claude tabs start "
             "in bypass instead of auto. Uncheck in +AI for one session.")
 
+        # Claude accounts: each logs in on its own, +AI picks one per tab.
+        # They share settings, CLAUDE.md, skills and the session list.
+        acct_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4,
+                           margin_top=8)
+        acct_rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        acct_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        acct_title = Gtk.Label(label="Claude accounts", xalign=0)
+        acct_title.set_tooltip_text(
+            "Each account logs in on its own, and +AI picks one per tab. "
+            "They share settings, CLAUDE.md, skills, agents and the session "
+            "list, so a session can go on under another account.")
+        acct_again = Gtk.Button.new_from_icon_name("view-refresh-symbolic",
+                                                   Gtk.IconSize.MENU)
+        acct_again.set_relief(Gtk.ReliefStyle.NONE)
+        acct_again.set_tooltip_text("Check the logins again")
+        acct_head.pack_start(acct_title, True, True, 0)
+        acct_head.pack_start(acct_again, False, False, 0)
+        acct_new = Gtk.Entry(placeholder_text="new account name, e.g. work")
+        acct_add = Gtk.Button(label="Add")
+        acct_msg = Gtk.Label(xalign=0)
+        acct_msg.get_style_context().add_class("session-sub")
+        acct_msg.set_line_wrap(True)
+        acct_add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        acct_add_row.pack_start(acct_new, True, True, 0)
+        acct_add_row.pack_start(acct_add, False, False, 0)
+        for w in (acct_head, acct_rows, acct_add_row, acct_msg):
+            acct_box.pack_start(w, False, False, 0)
+
+        def acct_login(run, name):
+            # in a tab: the browser page opens from there, and a code, if
+            # Claude asks for one, is typed there
+            self._add_session(
+                f"Claude login · {name}",
+                ["/bin/sh", "-c", f"{shlex.quote(run)} auth login; "
+                 'exec "${SHELL:-sh}"'], ICON_COMMAND)
+            # Settings is modal: the tab takes typing once it closes
+            acct_msg.set_text(f"A tab to log in to “{name}” is open. Close "
+                              "Settings, finish there (a browser page, maybe "
+                              "a code to paste), then reopen Settings to see it.")
+
+        def acct_remove(name):
+            ask = Gtk.MessageDialog(
+                transient_for=dialog, modal=True,
+                message_type=Gtk.MessageType.QUESTION,
+                buttons=Gtk.ButtonsType.NONE,
+                text=f"Remove Claude account “{name}”?")
+            ask.format_secondary_text(
+                "This computer forgets its login. Tabs that use it stop "
+                "working after they close. Sessions and settings stay: they "
+                "are shared.")
+            ask.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                            "Remove", Gtk.ResponseType.OK)
+            ask.set_default_response(Gtk.ResponseType.CANCEL)
+            go = ask.run() == Gtk.ResponseType.OK
+            ask.destroy()
+            if go:
+                self._claude_account_remove(name)
+                acct_refresh()
+
+        def acct_fill(found):
+            for c in acct_rows.get_children():
+                acct_rows.remove(c)
+            for name, run, st in found:
+                who = (f"{st.get('email') or 'logged in'}"
+                       f"{' · ' + st['subscriptionType'] if st.get('subscriptionType') else ''}"
+                       if st.get("loggedIn") else "not logged in")
+                r = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                            margin_start=12)
+                lbl = Gtk.Label(label=f"{name or 'Default'} — {who}", xalign=0)
+                lbl.set_ellipsize(Pango.EllipsizeMode.END)
+                r.pack_start(lbl, True, True, 0)
+                if not st.get("loggedIn"):
+                    b = Gtk.Button(label="Log in")
+                    b.connect("clicked", lambda _b, c=run, n=name or "Default":
+                              acct_login(c, n))
+                    r.pack_start(b, False, False, 0)
+                if name:
+                    b = Gtk.Button.new_from_icon_name("user-trash-symbolic",
+                                                      Gtk.IconSize.MENU)
+                    b.set_relief(Gtk.ReliefStyle.NONE)
+                    b.set_tooltip_text("Remove this account")
+                    b.connect("clicked", lambda _b, n=name: acct_remove(n))
+                    r.pack_start(b, False, False, 0)
+                acct_rows.pack_start(r, False, False, 0)
+            acct_rows.show_all()
+            return False
+
+        def acct_refresh(*_a):
+            def work():
+                found = [(name, run, self._claude_auth_status(run))
+                         for name, run in [("", "claude")] + self._claude_accounts()]
+                GLib.idle_add(acct_fill, found)
+            threading.Thread(target=work, daemon=True).start()
+
+        def acct_on_add(*_a):
+            name = acct_new.get_text().strip()
+            try:
+                run = self._claude_account_add(name)
+            except (ValueError, OSError) as e:
+                acct_msg.set_text(f"Not added: {e}")
+                return
+            acct_new.set_text("")
+            acct_refresh()
+            acct_login(run, name)
+
+        acct_again.connect("clicked", acct_refresh)
+        acct_add.connect("clicked", acct_on_add)
+        acct_new.connect("activate", acct_on_add)
+        acct_refresh()
+
         remote_on = Gtk.CheckButton(
             label="Show tabit on my Tailscale devices")
         remote_on.set_active(bool(s.get("remote_enabled")))
@@ -16389,7 +17602,7 @@ if (data !== null) {{
         remote_files.set_tooltip_text(
             "Tap a path in an AI screen, or a note tab, to read the file on "
             "the phone: Markdown laid out, HTML without scripts, images, "
-            "text. Only under home and /tmp, at most 2 MB, never key or "
+            "text. Only under home and /tmp, at most 8 MB, never key or "
             "password folders and files (.ssh, .gnupg, *.key, .env ...).")
         remote_on.connect("toggled",
                           lambda b: remote_files.set_sensitive(b.get_active()))
@@ -16589,7 +17802,7 @@ if (data !== null) {{
                             term_size_box, term_spacing_box, demo_frame,
                             side_box)),
             ("Sessions", (wrap, inherit)),
-            ("AI", (ai_fresh, ai_tmux, ai_notify, urg_box, ai_bypass)),
+            ("AI", (ai_fresh, ai_tmux, ai_notify, urg_box, ai_bypass, acct_box)),
             # tg_help sits outside the grid on purpose: the grid greys
             # out when Telegram is off, which is when somebody needs it.
             ("Telegram", (tg_on, tg_grid, tg_help)),

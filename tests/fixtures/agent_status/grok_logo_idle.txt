@@ -1,0 +1,8 @@
+# expect_raw: idle
+# agent: grok
+# ---
+         ⠀⢀⡾⠋⠁⠀⢁⢴⡎⠀
+         ⠀⠈⠙⠻⢿⣿⣿⣿⣿⣿
+minimal · /help
+❯
+Grok 4.7 (high) · always-approve · ctrl+o transcript

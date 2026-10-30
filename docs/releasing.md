@@ -26,7 +26,7 @@ That same string appears in:
 |---|---|
 | Origin | Must be **Taiwan-origin** food |
 | Form | `Main Dish + Snack`, joined by ` + ` |
-| Main dish | A well-known **savoury main dish**. It belongs to the major version (1st digit): every `v2.x.y` release keeps the same one, and a new major version picks a new one |
+| Main dish | A well-known **savoury main dish**. It belongs to the major and minor version (1st and 2nd digit): every `v2.1.x` release keeps the same one, and a new `v2.2.0` or `v3.0.0` picks a new one |
 | Snack or drink | A Taiwan **snack, dessert or drink**. Every release picks a new one |
 | Choosing | Let the name hint at the release: tie it to what the release adds or changes (a feature that ties tabs together, a fix that clears things up), or to the season it ships in (shaved ice in summer, ginger tea in winter). The same goes for a new main dish |
 | Language | **English** display name in the public label; optional Chinese only in private notes if needed — never a browsable public catalog |
@@ -42,7 +42,7 @@ That same string appears in:
 
 ## Checklist when cutting a release
 
-1. Keep the major version's main dish, and pick a fresh snack or drink per the rules above (`python3 scripts/release-codename.py list` shows names already used).
+1. Keep the main dish while the 1st and 2nd digit stay; pick a new one when either changes. Pick a fresh snack or drink per the rules above (`python3 scripts/release-codename.py list` shows names already used).
 2. Bump `APP_VERSION` and set `APP_CODENAME` in `tabit.py` to that English name.
 3. Record history (no candidate pool):  
    `python3 scripts/release-codename.py record vX.Y.Z --name "English Name"`

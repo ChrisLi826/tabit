@@ -37,10 +37,12 @@ mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications" \
          "$HOME/.local/share/icons/hicolor/scalable/apps" \
          "$HOME/.local/share/tabit"
 install -m 755 tabit.py "$HOME/.local/bin/tabit"
+install -m 755 tty_shim.py "$HOME/.local/bin/tty_shim.py"
 install -m 644 tabit.svg "$HOME/.local/share/icons/hicolor/scalable/apps/tabit.svg"
 # agent status: pure detector + herdr manifests (no herdr binary)
 install -m 644 agent_detect.py "$HOME/.local/share/tabit/agent_detect.py"
 install -m 644 agent_status.py "$HOME/.local/share/tabit/agent_status.py"
+install -m 644 grok_status_hook.py "$HOME/.local/share/tabit/grok_status_hook.py"
 install -m 644 tabit_chrome.toml "$HOME/.local/share/tabit/tabit_chrome.toml"
 # Settings > Remote: the status page tabit serves over Tailscale
 install -m 644 remote.html "$HOME/.local/share/tabit/remote.html"

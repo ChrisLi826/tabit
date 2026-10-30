@@ -306,7 +306,7 @@ class TestHookBeatsScreen(unittest.TestCase):
                  + FOOT.format(""))
 
     def run_update(self, state, screen, esc_age=None, event_age=10.0, pty_age=None,
-                   scrolled=False, back="", busy_age=None):
+                   scrolled=False, back="", busy_age=None, argv=None):
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
         old = tabit.AGENT_HOOK_DIR
@@ -320,7 +320,8 @@ class TestHookBeatsScreen(unittest.TestCase):
         import agent_status as as_
         got = []
         row = types.SimpleNamespace(
-            icon_name=tabit.ICON_AI, _agent_key="k1", argv=["claude"], dead=False,
+            icon_name=tabit.ICON_AI, _agent_key="k1",
+            argv=["claude"] if argv is None else argv, dead=False,
             term=object(), agent_status="idle", _agent_episode=as_.Episode(
                 last_pty=0.0 if pty_age is None else time.time() - pty_age),
             _agent_display=as_.Display(ui="idle"), get_parent=lambda: object(),
@@ -396,6 +397,13 @@ class TestHookBeatsScreen(unittest.TestCase):
 
     def test_esc_then_quiet_is_idle(self):
         self.assertEqual(self.run_update("working", self.QUIET, esc_age=5)[0], "idle")
+
+    def test_esc_does_not_end_a_grok_turn(self):
+        # Grok reports a cancel with StopCancelled. Esc does not stop it.
+        argv = T._ai_argv("grok", "/tmp/x", [])
+        self.assertEqual(
+            self.run_update("working", self.QUIET, esc_age=5, argv=argv)[0],
+            "working")
 
     def test_esc_just_now_is_still_working(self):
         self.assertEqual(self.run_update("working", self.QUIET, esc_age=1)[0], "working")

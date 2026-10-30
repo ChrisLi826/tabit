@@ -18,7 +18,9 @@ working = [
   "running tool",
   "\\bgenerating…|\\bgenerating\\.\\.\\.",
   "\\bcompacting…|\\bcompacting\\.\\.\\.",
-  "[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]",
+  # A spinner sits at the start of a status line. The same cells are pixels
+  # in Grok's logo, so a bare match marks an idle logo as working.
+  "(?:^|\\n)\\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏](?=\\s)",
   "[◐◓◑◒]",
   # live counters: "… (50s · ↓ 2.2k tokens)", "(1m 5s · …)" past a
   # minute, not "Baked for 3m 40s"
