@@ -891,6 +891,25 @@ CLAUDE_HOOKS_FILE = os.path.expanduser("~/.local/share/tabit/claude-hooks.json")
 CLAUDE_PROJECTS_DIR = os.path.join(
     os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"),
     "projects")
+CLAUDE_DEFAULT_DIR = os.path.dirname(CLAUDE_PROJECTS_DIR)
+CLAUDE_DEFAULT_JSON = (os.path.join(CLAUDE_DEFAULT_DIR, ".claude.json")
+                       if os.environ.get("CLAUDE_CONFIG_DIR")
+                       else os.path.expanduser("~/.claude.json"))
+# Extra Claude accounts, one folder each: <name>/config is that account's
+# CLAUDE_CONFIG_DIR and <name>/bin/claude runs claude with it. The account
+# rides in the CLI path, so a tab keeps it through restarts and tmux.
+CLAUDE_ACCOUNTS_DIR = os.path.expanduser("~/.local/share/tabit/claude-accounts")
+# What every account shares with the default one: settings, instructions,
+# add-ons, and the sessions themselves, so one list shows them all and a
+# session can go on under another account. The login, .claude.json and the
+# running-session records stay per account.
+CLAUDE_SHARED = ("settings.json", "settings.local.json", "CLAUDE.md", "agents",
+                 "commands", "skills", "plugins", "hooks", "output-styles",
+                 "keybindings.json", ".mcp.json", "projects", "file-history",
+                 "plans", "todos", "history.jsonl")
+# first-run answers a new account takes over; never the login
+CLAUDE_SEED_KEYS = ("hasCompletedOnboarding", "lastOnboardingVersion", "theme",
+                    "bypassPermissionsModeAccepted")
 # the page's icons: tab favicon (SVG, and a PNG for Safari), iPhone home
 # screen, and the installed app (Chrome, Edge, Android)
 REMOTE_ICONS = {"/icon.svg": ("tabit.svg", None), "/favicon.png": ("tabit.svg", 32),
@@ -13388,11 +13407,11 @@ if (data !== null) {{
         return {}
 
     @staticmethod
-    def _save_ai_last(cli, path, use_tmux=False):
+    def _save_ai_last(cli, path, use_tmux=False, account=None):
         os.makedirs(CONFIG_DIR, exist_ok=True)
         with open(AI_LAST_FILE, "w") as f:
-            json.dump({"cli": cli, "path": path,
-                       "use_tmux": bool(use_tmux)}, f, indent=2)
+            json.dump({"cli": cli, "path": path, "use_tmux": bool(use_tmux),
+                       "account": account}, f, indent=2)
 
     @staticmethod
     def _normalize_ai_entry(item):
@@ -13533,19 +13552,109 @@ if (data !== null) {{
                         break
         return prompt, reply
 
-    @staticmethod
-    def _claude_active_sessions():
+    @classmethod
+    def _claude_active_sessions(cls):
         """Every claude session running now, in a terminal or in the
-        background (`claude agents --json`), as dicts; [] when it cannot
-        tell (no claude, an older one)."""
+        background (`claude agents --json`), as dicts, under every account
+        (each keeps its own list); [] when it cannot tell (no claude, an
+        older one)."""
+        found = []
+        for cli in ["claude"] + [c for _n, c in cls._claude_accounts()]:
+            try:
+                out = subprocess.run([cli, "agents", "--json"],
+                                     stdin=subprocess.DEVNULL, capture_output=True,
+                                     text=True, timeout=5).stdout
+                data = json.loads(out or "[]")
+            except (OSError, subprocess.SubprocessError, ValueError):
+                continue
+            if isinstance(data, list):
+                found += [d for d in data if isinstance(d, dict)]
+        return found
+
+    @staticmethod
+    def _claude_accounts():
+        """(name, cli) of each extra Claude account, by name."""
         try:
-            out = subprocess.run(["claude", "agents", "--json"],
-                                 stdin=subprocess.DEVNULL, capture_output=True,
-                                 text=True, timeout=5).stdout
-            data = json.loads(out or "[]")
-        except (OSError, subprocess.SubprocessError, ValueError):
+            names = sorted(os.listdir(CLAUDE_ACCOUNTS_DIR))
+        except OSError:
             return []
-        return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
+        out = []
+        for name in names:
+            cli = os.path.join(CLAUDE_ACCOUNTS_DIR, name, "bin", "claude")
+            if os.access(cli, os.X_OK):
+                out.append((name, cli))
+        return out
+
+    @staticmethod
+    def _claude_account_of(cli):
+        """The account a CLI path runs, or None for claude itself."""
+        cli = os.path.expanduser(cli or "")
+        home = os.path.dirname(os.path.dirname(cli))
+        if (os.path.basename(cli) == "claude"
+                and os.path.dirname(home) == CLAUDE_ACCOUNTS_DIR):
+            return os.path.basename(home)
+        return None
+
+    @staticmethod
+    def _claude_account_add(name):
+        """Make account `name`; its CLI path. ValueError for a bad or taken
+        name. Logged out until it logs in once."""
+        if (not re.fullmatch(r"[A-Za-z0-9_-]{1,24}", name or "")
+                or name.lower() == "default"):
+            raise ValueError("use 1-24 letters, digits, - or _")
+        home = os.path.join(CLAUDE_ACCOUNTS_DIR, name)
+        if os.path.lexists(home):
+            raise ValueError(f"“{name}” is there already")
+        cfg = os.path.join(home, "config")
+        os.makedirs(cfg, mode=0o700)
+        os.makedirs(os.path.join(home, "bin"))
+        try:
+            with open(CLAUDE_DEFAULT_JSON) as f:
+                known = json.load(f)
+        except (OSError, ValueError):
+            known = {}
+        seed = {k: known[k] for k in CLAUDE_SEED_KEYS
+                if isinstance(known, dict) and k in known}
+        with open(os.path.join(cfg, ".claude.json"), "w") as f:
+            json.dump(seed, f, indent=2)
+        q = shlex.quote
+        # Linked on every start, so what the default account gains later
+        # (a first agents/ folder) reaches this one too. A file the account
+        # made itself stays its own.
+        script = (
+            "#!/bin/sh\n"
+            f"# tabit: Claude account \"{name}\". Remove it in Settings > AI.\n"
+            f"c={q(cfg)}\n"
+            f"h={q(CLAUDE_DEFAULT_DIR)}\n"
+            f"for n in {' '.join(q(n) for n in CLAUDE_SHARED)}; do\n"
+            '  [ -e "$h/$n" ] && [ ! -e "$c/$n" ] && [ ! -L "$c/$n" ] && ln -s "$h/$n" "$c/$n"\n'
+            "done\n"
+            'export CLAUDE_CONFIG_DIR="$c"\n'
+            'exec claude "$@"\n')
+        cli = os.path.join(home, "bin", "claude")
+        with open(cli, "w") as f:
+            f.write(script)
+        os.chmod(cli, 0o755)
+        return cli
+
+    @staticmethod
+    def _claude_account_remove(name):
+        """Delete account `name`: its login and its own files. The shared
+        ones are links, and rmtree removes a link, never what it points at."""
+        home = os.path.join(CLAUDE_ACCOUNTS_DIR, name)
+        if name and os.path.dirname(home) == CLAUDE_ACCOUNTS_DIR:
+            shutil.rmtree(home, ignore_errors=True)
+
+    @staticmethod
+    def _claude_auth_status(cli):
+        """`claude auth status` of one account as a dict, {} if unknown."""
+        try:
+            out = subprocess.run([cli, "auth", "status"], stdin=subprocess.DEVNULL,
+                                 capture_output=True, text=True, timeout=10).stdout
+            data = json.loads(out or "{}")
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def _ai_session_ids_in_use(self):
         """Session ids already open: held by an AI tab (its command, or its
@@ -13841,7 +13950,12 @@ if (data !== null) {{
         adds a suffix so a new agent starts and the old session is left alone.
         """
         base = os.path.basename(os.path.normpath(path)) or "home"
-        slug = re.sub(r"[^A-Za-z0-9_-]", "-", f"{cli}-{base}")[:32].strip("-")
+        # an account's CLI is a path: name it by the program and the account
+        label = os.path.basename(cli.rstrip("/")) or cli
+        acct = Tabit._claude_account_of(cli)
+        if acct:
+            label = f"{label}-{acct}"
+        slug = re.sub(r"[^A-Za-z0-9_-]", "-", f"{label}-{base}")[:32].strip("-")
         # tmux rejects "." and ":" in names; the digest keeps two folders with
         # the same basename apart. sha1, not hash(): Python randomises string
         # hashing per process, so the "stable" name differed on every start
@@ -14374,6 +14488,20 @@ if (data !== null) {{
         cli_box.pack_start(cli, True, True, 0)
         cli_box.pack_start(manage, False, False, 0)
 
+        # which Claude login the tab uses (Settings > AI adds more)
+        accounts = dict(self._claude_accounts())
+        acct = Gtk.ComboBoxText()
+        acct.append("", "Default")
+        for name in accounts:
+            acct.append(name, name)
+        if not acct.set_active_id(last.get("account") or ""):
+            acct.set_active_id("")
+        acct.set_tooltip_text("The Claude account this tab logs in with. "
+                              "Add one in Settings > AI.")
+        acct_lbl = Gtk.Label(label="Account", xalign=0)
+        for w in (acct_lbl, acct):
+            w.set_no_show_all(True)
+
         path_default = last.get("path") or GLib.get_home_dir()
         if self._load_settings().get("shell_inherit_cwd", False):
             cwd = self._focused_cwd()
@@ -14598,6 +14726,8 @@ if (data !== null) {{
             else:
                 bypass_chk.set_no_show_all(True)
                 bypass_chk.hide()
+            for w in (acct_lbl, acct):
+                w.set_visible(bool(accounts) and self._ai_is_claude(tool))
 
         cli.connect("changed", update_bypass_visible)
 
@@ -14686,6 +14816,9 @@ if (data !== null) {{
         grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
                     0, 8, 2, 1)
         grid.attach(live_box, 0, 9, 2, 1)
+        grid.insert_row(1)                  # Account, under CLI
+        grid.attach(acct_lbl, 0, 1, 1, 1)
+        grid.attach(acct, 1, 1, 1, 1)
         dialog.get_content_area().add(grid)
         self._dialog_enter_is_ok(dialog)
 
@@ -14694,6 +14827,10 @@ if (data !== null) {{
                 tool = (cli.get_active_text() or "").strip()
                 cwd = (path.get_text() or "").strip() or GLib.get_home_dir()
                 cwd = os.path.expanduser(cwd)
+                # an account is its own claude: the path of its wrapper
+                account = (acct.get_active_id() or None) if (
+                    accounts and self._ai_is_claude(tool)) else None
+                run = accounts.get(account, tool)
                 if tool:
                     now = resume_chk.get_active()
                     # a Session ID only belongs to "continue now"; with none,
@@ -14728,7 +14865,7 @@ if (data !== null) {{
                         if not go:
                             return          # the +AI dialog stays open
                     launch, argv, icon = self._ai_launch_pair(
-                        tool, cwd, cli_tries(tool),
+                        run, cwd, cli_tries(tool),
                         resume_id=resume_id or None,
                         bypass=bypass_chk.get_active()
                         and self._ai_is_claude(tool),
@@ -14736,8 +14873,9 @@ if (data !== null) {{
                         continue_now=now,
                         resume_later=later_chk.get_active(),
                         new_sid=(str(uuid.uuid4())
-                                 if self._ai_takes_new_id(tool) else None))
-                    r = self._add_session(tool, argv, icon,
+                                 if self._ai_takes_new_id(run) else None))
+                    title = f"{tool} · {account}" if account else tool
+                    r = self._add_session(title, argv, icon,
                                           sub=self._ai_sub(cwd), cwd=cwd,
                                           launch_argv=launch)
                     if r is not None and later_chk.get_active():
@@ -14746,7 +14884,8 @@ if (data !== null) {{
                         r.ai_hunt = True
                         self._save_sessions_soon()  # _add_session saved before the flag
                     self._save_ai_last(tool, cwd,
-                                       use_tmux=tmux_chk.get_active())
+                                       use_tmux=tmux_chk.get_active(),
+                                       account=account)
             self._open_dialogs.discard(dlg)
             dlg.destroy()
 
@@ -16377,6 +16516,113 @@ if (data !== null) {{
             "Pre-ticks the +AI bypass checkbox so new Claude tabs start "
             "in bypass instead of auto. Uncheck in +AI for one session.")
 
+        # Claude accounts: each logs in on its own, +AI picks one per tab.
+        # They share settings, CLAUDE.md, skills and the session list.
+        acct_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4,
+                           margin_top=8)
+        acct_rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        acct_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        acct_title = Gtk.Label(label="Claude accounts", xalign=0)
+        acct_title.set_tooltip_text(
+            "Each account logs in on its own, and +AI picks one per tab. "
+            "They share settings, CLAUDE.md, skills, agents and the session "
+            "list, so a session can go on under another account.")
+        acct_again = Gtk.Button.new_from_icon_name("view-refresh-symbolic",
+                                                   Gtk.IconSize.MENU)
+        acct_again.set_relief(Gtk.ReliefStyle.NONE)
+        acct_again.set_tooltip_text("Check the logins again")
+        acct_head.pack_start(acct_title, True, True, 0)
+        acct_head.pack_start(acct_again, False, False, 0)
+        acct_new = Gtk.Entry(placeholder_text="new account name, e.g. work")
+        acct_add = Gtk.Button(label="Add")
+        acct_msg = Gtk.Label(xalign=0)
+        acct_msg.get_style_context().add_class("session-sub")
+        acct_msg.set_line_wrap(True)
+        acct_add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        acct_add_row.pack_start(acct_new, True, True, 0)
+        acct_add_row.pack_start(acct_add, False, False, 0)
+        for w in (acct_head, acct_rows, acct_add_row, acct_msg):
+            acct_box.pack_start(w, False, False, 0)
+
+        def acct_login(run, name):
+            # in a tab: the browser page opens from there, and a code, if
+            # Claude asks for one, is typed there
+            self._add_session(
+                f"Claude login · {name}",
+                ["/bin/sh", "-c", f"{shlex.quote(run)} auth login; "
+                 'exec "${SHELL:-sh}"'], ICON_COMMAND)
+            acct_msg.set_text(f"Log in to “{name}” in the new tab, then ↻.")
+
+        def acct_remove(name):
+            ask = Gtk.MessageDialog(
+                transient_for=dialog, modal=True,
+                message_type=Gtk.MessageType.QUESTION,
+                buttons=Gtk.ButtonsType.NONE,
+                text=f"Remove Claude account “{name}”?")
+            ask.format_secondary_text(
+                "This computer forgets its login. Tabs that use it stop "
+                "working after they close. Sessions and settings stay: they "
+                "are shared.")
+            ask.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                            "Remove", Gtk.ResponseType.OK)
+            ask.set_default_response(Gtk.ResponseType.CANCEL)
+            go = ask.run() == Gtk.ResponseType.OK
+            ask.destroy()
+            if go:
+                self._claude_account_remove(name)
+                acct_refresh()
+
+        def acct_fill(found):
+            for c in acct_rows.get_children():
+                acct_rows.remove(c)
+            for name, run, st in found:
+                who = (f"{st.get('email') or 'logged in'}"
+                       f"{' · ' + st['subscriptionType'] if st.get('subscriptionType') else ''}"
+                       if st.get("loggedIn") else "not logged in")
+                r = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                            margin_start=12)
+                lbl = Gtk.Label(label=f"{name or 'Default'} — {who}", xalign=0)
+                lbl.set_ellipsize(Pango.EllipsizeMode.END)
+                r.pack_start(lbl, True, True, 0)
+                if not st.get("loggedIn"):
+                    b = Gtk.Button(label="Log in")
+                    b.connect("clicked", lambda _b, c=run, n=name or "Default":
+                              acct_login(c, n))
+                    r.pack_start(b, False, False, 0)
+                if name:
+                    b = Gtk.Button.new_from_icon_name("user-trash-symbolic",
+                                                      Gtk.IconSize.MENU)
+                    b.set_relief(Gtk.ReliefStyle.NONE)
+                    b.set_tooltip_text("Remove this account")
+                    b.connect("clicked", lambda _b, n=name: acct_remove(n))
+                    r.pack_start(b, False, False, 0)
+                acct_rows.pack_start(r, False, False, 0)
+            acct_rows.show_all()
+            return False
+
+        def acct_refresh(*_a):
+            def work():
+                found = [(name, run, self._claude_auth_status(run))
+                         for name, run in [("", "claude")] + self._claude_accounts()]
+                GLib.idle_add(acct_fill, found)
+            threading.Thread(target=work, daemon=True).start()
+
+        def acct_on_add(*_a):
+            name = acct_new.get_text().strip()
+            try:
+                run = self._claude_account_add(name)
+            except (ValueError, OSError) as e:
+                acct_msg.set_text(f"Not added: {e}")
+                return
+            acct_new.set_text("")
+            acct_refresh()
+            acct_login(run, name)
+
+        acct_again.connect("clicked", acct_refresh)
+        acct_add.connect("clicked", acct_on_add)
+        acct_new.connect("activate", acct_on_add)
+        acct_refresh()
+
         remote_on = Gtk.CheckButton(
             label="Show tabit on my Tailscale devices")
         remote_on.set_active(bool(s.get("remote_enabled")))
@@ -16603,7 +16849,7 @@ if (data !== null) {{
                             term_size_box, term_spacing_box, demo_frame,
                             side_box)),
             ("Sessions", (wrap, inherit)),
-            ("AI", (ai_fresh, ai_tmux, ai_notify, urg_box, ai_bypass)),
+            ("AI", (ai_fresh, ai_tmux, ai_notify, urg_box, ai_bypass, acct_box)),
             # tg_help sits outside the grid on purpose: the grid greys
             # out when Telegram is off, which is when somebody needs it.
             ("Telegram", (tg_on, tg_grid, tg_help)),
