@@ -1963,7 +1963,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             admin = parts[2]
         elif len(parts) == 3 and parts[:2] == ["api", "groups"]:
             manage = ("groupop", parts[2])
-        elif len(parts) == 4 and parts[:2] == ["api", "tabs"] and parts[3] in ("close", "group", "move", "rename"):
+        elif len(parts) == 4 and parts[:2] == ["api", "tabs"] and parts[3] in ("close", "group", "move", "rename", "account"):
             manage = (parts[3], parts[2])
         elif len(parts) == 4 and parts[:2] == ["api", "tabs"] and parts[3] == "ack":
             # a state change, so behind the same checks as typing
@@ -3135,9 +3135,15 @@ class Tabit(Gtk.Window):
                 return False
 
             GLib.timeout_add(800, _kick)
-        envv = None
         run = launch_argv or argv
-        if _is_ai_icon(icon_name):
+        self._spawn_term(row, run, workdir)
+        return row
+
+    def _spawn_term(self, row, run, workdir):
+        """Start `run` in the row's terminal, with what an AI tab needs:
+        its claude hooks, and a hook key of its own when not in tmux."""
+        envv = None
+        if _is_ai_icon(getattr(row, "icon_name", None)):
             if CLAUDE_HOOKS_FILE in " ".join(run):
                 _ensure_claude_hooks()
             if self._ai_tmux_unwrap(run)[1] is None:
@@ -3153,10 +3159,9 @@ class Tabit(Gtk.Window):
             # and a TMUX from it would stay
             flags = GLib.SpawnFlags(
                 int(flags) | getattr(Vte, "SPAWN_NO_PARENT_ENVV", 0))
-        term.spawn_async(Vte.PtyFlags.DEFAULT, workdir, run,
+        row.term.spawn_async(Vte.PtyFlags.DEFAULT, workdir, run,
                          envv, flags, None, None,
                          -1, None, self._on_term_spawned, row)
-        return row
 
     # --- quick command bar ------------------------------------------------
 
@@ -5894,6 +5899,9 @@ if (data !== null) {{
         # tmux session here — leave it so the user sees "exited" and can
         # decide; intentional single-tab close (_close_session) kills it.
         # keep the tab and its scrollback; only the x really closes it
+        if getattr(row, "_respawn", None):
+            self._ai_respawn(row)          # an account switch: start the new one
+            return
         row.dead = True
         # Gone at once (its folder or program missing after a restore, a
         # serial device unplugged): it never ran, so keep it in sessions.json
@@ -10766,7 +10774,7 @@ if (data !== null) {{
         hbox.pack_start(ok, False, False, 0)
         vbox.pack_start(hbox, True, True, 0)
 
-        resume_chk = tmux_chk = None
+        resume_chk = tmux_chk = acct_combo = None
         if is_ai:
             resume_chk = Gtk.CheckButton(label="Resume when tabit reopens")
             resume_chk.set_active(has_resume)
@@ -10783,6 +10791,20 @@ if (data !== null) {{
                 "Unticking leaves an existing tmux session running; close it "
                 "from + tmux.")
             vbox.pack_start(tmux_chk, False, False, 0)
+            # a Claude tab: go on with the same conversation under another login
+            got_cli = self._ai_cli_path_of(getattr(row, "argv", None) or [])
+            accounts = self._claude_accounts()
+            if got_cli and self._ai_is_claude(got_cli[0]) and accounts:
+                acct_combo = Gtk.ComboBoxText()
+                acct_combo.append("", "Account: Default")
+                for acct_name, _c in accounts:
+                    acct_combo.append(acct_name, f"Account: {acct_name}")
+                acct_combo.set_active_id(self._claude_account_of(got_cli[0]) or "")
+                acct_combo.set_tooltip_text(
+                    "Another account goes on with this conversation in this "
+                    "tab, now: claude restarts and resumes the same session.\n"
+                    "Not while Claude is working or asking something.")
+                vbox.pack_start(acct_combo, False, False, 0)
 
         # Group assignment inside Rename Popover
         cur_c = getattr(row, "group_color", None)
@@ -10853,6 +10875,14 @@ if (data !== null) {{
                         row.subtitle.set_no_show_all(False)
                         row.subtitle.show()
 
+            if acct_combo is not None:
+                want = acct_combo.get_active_id() or ""
+                now_cli = (self._ai_cli_path_of(row.argv) or ("",))[0]
+                if want != (self._claude_account_of(now_cli) or ""):
+                    why = self._ai_switch_account(row, want)
+                    if why:
+                        self._note_msg(Gtk.MessageType.WARNING,
+                                       "Account not switched", why)
             if name:
                 self._set_tab_name(row, name)
             self._save_sessions()
@@ -11640,6 +11670,9 @@ if (data !== null) {{
                 tab["ai_status"] = ("exited" if tab["exited"] else
                                     getattr(row, "agent_status", None)
                                     or "unknown")
+                got = self._ai_cli_path_of(getattr(row, "argv", None))
+                if got and self._ai_is_claude(got[0]):
+                    tab["account"] = self._claude_account_of(got[0]) or ""
             if getattr(row, "kind", None) == "term":
                 tab["can_send"] = self._remote_tab_trouble(row) is None
             if (tab["type"] == "note" and self._remote_files_on
@@ -11778,6 +11811,12 @@ if (data !== null) {{
                 self._set_group_collapsed(g, True)
             self._save_sessions_soon()
             return 200, {"ok": True}
+        if op == "account":
+            name = body.get("account")
+            if not isinstance(name, str):
+                return 400, {"error": "account must be a name, or \"\" for Default"}
+            why = self._ai_switch_account(row, name)
+            return (409, {"error": why}) if why else (200, {"ok": True})
         return 404, {"error": "unknown action"}
 
     def _remote_new(self, body):
@@ -13866,6 +13905,78 @@ if (data !== null) {{
             f.write(script)
         os.chmod(cli, 0o755)
         return cli
+
+    def _ai_session_of(self, row):
+        """The claude session a tab is in: its hooks' transcript, else the
+        id its command resumes; None before the first message."""
+        got = re.findall(_UUID_RE, os.path.basename(getattr(row, "_agent_hook_tx", "") or ""))
+        if got:
+            return got[-1]
+        got = re.findall(_UUID_RE, " ".join(getattr(row, "argv", None) or []))
+        return got[-1] if got else None
+
+    def _ai_switch_account(self, row, name):
+        """GTK thread: go on with this Claude tab's conversation under
+        account `name` ("" = Default), in the same tab. None when it is under
+        way, else why not. The old claude stops; the new one resumes the
+        same session, which every account shares."""
+        argv = getattr(row, "argv", None) or []
+        got = self._ai_cli_path_of(argv)
+        if (getattr(row, "kind", None) != "term" or not got
+                or not self._ai_is_claude(got[0])):
+            return "only a Claude tab has an account"
+        if getattr(row, "dead", False):
+            return "that tab has exited"
+        old = self._claude_account_of(got[0]) or ""
+        if (name or "") == old:
+            return f"it is on {old or 'Default'} already"
+        new_cli = "claude" if not name else dict(self._claude_accounts()).get(name)
+        if new_cli is None:
+            return f"no Claude account “{name}”"
+        status = getattr(row, "agent_status", None)
+        if status == "working":
+            return "Claude is working: switch when it stops"
+        if status == "blocked":
+            return "Claude is asking something: answer it first"
+        sid = self._ai_session_of(row)
+        if not sid:
+            return "no conversation yet: send one message first"
+        old_tmux = getattr(row, "_live_tmux", None)   # what runs, not what argv says
+        launch, stored, _icon = self._ai_launch_pair(
+            new_cli, got[1], [], resume_id=sid,
+            tmux=self._ai_tmux_unwrap(argv)[1] is not None,
+            continue_now=True, resume_later=True, bypass=self._ai_has_bypass(argv))
+        row._respawn = (launch, got[1], got[0], new_cli)
+        row.argv = stored                   # before the old one stops
+        row.ai_hunt = False
+        if old_tmux:
+            _tmux_kill_session(old_tmux)    # its attach ends, and the tab with it
+        elif getattr(row, "pid", None):
+            try:
+                os.killpg(row.pid, signal.SIGHUP)   # the shell and claude both
+            except OSError:
+                os.kill(row.pid, signal.SIGHUP)
+        self._save_sessions_soon()
+        return None
+
+    def _ai_respawn(self, row):
+        """The old claude of an account switch has ended: start the new one
+        in the same terminal."""
+        launch, path, old_cli, new_cli = row._respawn
+        row._respawn = None
+        old_title = f"{os.path.basename(old_cli)} · {self._claude_account_of(old_cli)}" \
+            if self._claude_account_of(old_cli) else os.path.basename(old_cli)
+        if getattr(row, "title_text", None) == old_title:
+            acct = self._claude_account_of(new_cli)
+            self._set_tab_name(row, f"claude · {acct}" if acct else "claude")
+        row.sub_text = self._ai_sub(path, new_cli)
+        row.subtitle.set_text(row.sub_text)
+        row._agent_hook_tx = ""
+        row._agent_hook_mtime = 0
+        row.term.feed(b"\r\n\x1b[2m[tabit] switching account\x1b[0m\r\n")
+        self._set_agent_status(row, "unknown")
+        self._spawn_term(row, launch, path if os.path.isdir(path) else GLib.get_home_dir())
+        self._save_sessions_soon()
 
     @staticmethod
     def _claude_account_remove(name):

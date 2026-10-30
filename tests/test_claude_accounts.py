@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -199,6 +200,89 @@ class TestTheTabSaysItsAccount(AccountDirs):
         self.assertEqual(T._ai_account_sub(argv, "@work · /tmp/proj"), "/tmp/proj")
         plain = T._ai_launch_pair("claude", "/tmp/proj", [], tmux=True)[1]
         self.assertEqual(T._ai_account_sub(plain, "@Default · /tmp/proj"), "/tmp/proj")
+
+
+class TestSwitchAccount(AccountDirs):
+    """The same tab goes on with its conversation under another account."""
+
+    def setUp(self):
+        super().setUp()
+        self.cli = T._claude_account_add("work")
+        self.app = mock.Mock(_claude_accounts=T._claude_accounts)
+        for name in ("_ai_switch_account", "_ai_session_of", "_ai_respawn",
+                     "_remote_manage_op"):
+            setattr(self.app, name, getattr(T, name).__get__(self.app))
+        for name in ("_ai_cli_path_of", "_ai_is_claude", "_claude_account_of",
+                     "_ai_tmux_unwrap", "_ai_launch_pair", "_ai_has_bypass"):
+            setattr(self.app, name, getattr(T, name))
+
+    def row(self, cli="claude", tmux=True, **kw):
+        stored = T._ai_launch_pair(cli, self.tmp, [], tmux=tmux, resume_id=A)[1]
+        r = types.SimpleNamespace(kind="term", argv=stored, agent_status="idle",
+                                  dead=False, pid=4321, title_text="claude",
+                                  _live_tmux=T._ai_tmux_unwrap(stored)[1])
+        for k, v in kw.items():
+            setattr(r, k, v)
+        return r
+
+    def test_a_tmux_tab_switches(self):
+        r = self.row()
+        old = r._live_tmux
+        with mock.patch.object(tabit, "_tmux_kill_session") as kill:
+            self.assertIsNone(self.app._ai_switch_account(r, "work"))
+        kill.assert_called_once_with(old)
+        self.assertEqual(T._ai_cli_path_of(r.argv)[0], self.cli)
+        self.assertIn(A, r.argv[2])
+        self.assertTrue(T._ai_tmux_unwrap(r.argv)[1].startswith("ai-claude-work-"))
+        launch = r._respawn[0]
+        self.assertIn(f"--resume {A}", T._ai_tmux_unwrap(launch)[0][2])
+
+    def test_a_plain_tab_switches_back_to_default(self):
+        cli = self.cli
+        r = self.row(cli=cli, tmux=False, _live_tmux=None)
+        with mock.patch.object(tabit.os, "killpg") as killpg:
+            self.assertIsNone(self.app._ai_switch_account(r, ""))
+        killpg.assert_called_once_with(4321, tabit.signal.SIGHUP)
+        self.assertEqual(T._ai_cli_path_of(r.argv)[0], "claude")
+        self.assertIsNone(T._ai_tmux_unwrap(r.argv)[1])
+
+    def test_when_it_will_not(self):
+        cases = [(self.row(), "", "already"),
+                 (self.row(agent_status="working"), "work", "working"),
+                 (self.row(agent_status="blocked"), "work", "answer"),
+                 (self.row(), "gone", "no Claude account"),
+                 (self.row(dead=True), "work", "exited"),
+                 (self.row(argv=T._ai_launch_pair("codex", self.tmp, [], tmux=True)[1]),
+                  "work", "only a Claude tab")]
+        r = self.row()
+        r.argv = T._ai_argv("claude", self.tmp, [])     # no id yet
+        cases.append((r, "work", "send one message"))
+        for row, name, why in cases:
+            with mock.patch.object(tabit, "_tmux_kill_session") as kill:
+                self.assertIn(why, self.app._ai_switch_account(row, name) or "")
+            kill.assert_not_called()
+
+    def test_the_old_one_ending_starts_the_new_one(self):
+        r = self.row()
+        with mock.patch.object(tabit, "_tmux_kill_session"):
+            self.app._ai_switch_account(r, "work")
+        launch = r._respawn[0]
+        r.term, r.subtitle = mock.Mock(), mock.Mock()
+        self.app._ai_sub = lambda p, cli=None: T._ai_sub(mock.Mock(_short_path=T._short_path), p, cli)
+        T._on_child_exited(self.app, r.term, 0, r)
+        self.assertFalse(getattr(r, "dead", False))
+        self.app._spawn_term.assert_called_once_with(r, launch, self.tmp)
+        self.app._set_tab_name.assert_called_once_with(r, "claude · work")
+        self.assertIsNone(r._respawn)
+
+    def test_from_the_phone(self):
+        r = self.row()
+        self.app._tg_row_by_id.return_value = r
+        with mock.patch.object(tabit, "_tmux_kill_session"):
+            self.assertEqual(self.app._remote_manage_op("account", "t", {"account": "work"})[0], 200)
+            code, body = self.app._remote_manage_op("account", "t", {"account": "work"})
+        self.assertEqual(code, 409)
+        self.assertIn("already", body["error"])
 
 
 class TestRemoteNewTab(AccountDirs):
