@@ -21,11 +21,14 @@ import glob
 import html as html_module
 import json
 import os
+import pty
+import select
 import stat
 import random
 import re
 import shlex
 import signal
+import struct
 import queue
 import subprocess
 import sys
@@ -34,6 +37,7 @@ import shutil
 import socketserver
 import http.server
 import tarfile
+import termios
 import threading
 import time
 import urllib.parse
@@ -1952,8 +1956,11 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             return
         parts = self.path.split("?", 1)[0].strip("/").split("/")
         manage = None                       # (op, target) for tabs and groups
+        admin = None                        # the Settings sheet: /api/admin/<op>
         if parts == ["api", "new"]:
             manage = ("new", None)
+        elif len(parts) == 3 and parts[:2] == ["api", "admin"] and parts[2] != "state":
+            admin = parts[2]
         elif len(parts) == 3 and parts[:2] == ["api", "groups"]:
             manage = ("groupop", parts[2])
         elif len(parts) == 4 and parts[:2] == ["api", "tabs"] and parts[3] in ("close", "group", "move", "rename"):
@@ -1973,6 +1980,9 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 raise ValueError
         except ValueError:
             self._json(400, {"error": "body must be a JSON object"})
+            return
+        if admin:
+            self._json(*self.app._remote_admin(admin, body))
             return
         if manage:
             op, target = manage
@@ -2035,6 +2045,8 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 self._send(200, *icon)
         elif path == "/api/events":
             self._events()
+        elif path == "/api/admin/state":
+            self._json(*self.app._remote_admin("state", {}))
         elif path == "/api/file":
             self._file()
         else:
@@ -2417,6 +2429,8 @@ class Tabit(Gtk.Window):
         self._remote_url = ""
         self._remote_send_on = False
         self._remote_files_on = False
+        self._remote_update = None          # the phone's update job
+        self._remote_login = None           # the phone's claude login
         self._remote_label = Gtk.Label(xalign=0)
         self._remote_label.set_margin_top(4)
         self._remote_label.set_ellipsize(Pango.EllipsizeMode.END)
@@ -12146,6 +12160,209 @@ if (data !== null) {{
               f"({getattr(row, 'title_text', '')})", file=sys.stderr)
         return 200, {"ok": True}
 
+    # --- Remote: the phone's Settings sheet -------------------------------
+
+    # What the phone may change: the AI defaults. Remote's own switches stay
+    # at the computer, so a phone can neither open more to itself nor lock
+    # itself out.
+    _REMOTE_SETTINGS = ("ai_use_tmux", "ai_claude_bypass", "ai_fresh_on_restore")
+
+    def _remote_admin(self, op, body):
+        """Server thread: one Settings-sheet request. The slow parts (claude
+        auth status, GitHub, the update) stay off the GTK thread; only
+        what touches the window goes through _remote_call."""
+        if not self._remote_send_on:
+            return 403, {"error": "typing from the phone is off (Settings > Remote)"}
+        if op == "state":
+            return 200, self._remote_admin_state()
+        if op == "set":
+            if not body or any(k not in self._REMOTE_SETTINGS or not isinstance(v, bool)
+                               for k, v in body.items()):
+                return 400, {"error": "only the AI defaults, true or false"}
+            self._save_settings(dict(body))
+            return 200, {"ok": True}
+        if op == "account-add":
+            try:
+                run = self._claude_account_add((body.get("name") or "").strip())
+            except (ValueError, OSError) as e:
+                return 400, {"error": str(e)}
+            self._remote_login_start(body["name"].strip(), run)
+            return 200, {"ok": True}
+        if op == "login-start":
+            name = body.get("name") or ""
+            run = "claude" if not name else dict(self._claude_accounts()).get(name)
+            if run is None:
+                return 400, {"error": f"no Claude account “{name}”"}
+            self._remote_login_start(name, run)
+            return 200, {"ok": True}
+        if op == "login-code":
+            return self._remote_admin_login_code(body.get("code"))
+        if op == "update-check":
+            try:
+                tag, label, newer = self._remote_latest()
+            except Exception as e:
+                return 502, {"error": f"could not ask GitHub: {e}"}
+            return 200, {"current": _get_version_display(), "latest": label,
+                         "newer": newer}
+        if op == "update":
+            return self._remote_admin_update()
+        if op == "restart":
+            return self._remote_admin_restart()
+        return 404, {"error": "not found"}
+
+    def _remote_admin_state(self):
+        s = self._load_settings()
+        accounts = []
+        for name, run in [("", "claude")] + self._claude_accounts():
+            st = self._claude_auth_status(run)
+            accounts.append({"name": name, "loggedIn": bool(st.get("loggedIn")),
+                             "email": st.get("email") or "",
+                             "plan": st.get("subscriptionType") or ""})
+        login = self._remote_login or {}
+        return {"version": _get_version_display(),
+                "settings": {k: bool(s.get(k)) for k in self._REMOTE_SETTINGS},
+                "accounts": accounts,
+                "login": {k: login.get(k) for k in ("account", "state", "url", "msg")}
+                if login else None,
+                "update": dict(self._remote_update) if self._remote_update else None}
+
+    def _remote_unsaved_notes(self):
+        """GTK thread: the name of a note with unsaved changes, or None.
+        Closing asks about it in a dialog nobody at the phone can answer."""
+        for row in self._session_rows():
+            if getattr(row, "kind", None) == "note" and row.buffer.get_modified():
+                return os.path.basename(row.file_path or "untitled")
+        return None
+
+    def _remote_admin_restart(self):
+        note = self._remote_call(self._remote_unsaved_notes)
+        if note:
+            return 409, {"error": f"“{note}” has unsaved changes: save it at "
+                                  "the computer first"}
+        # answer first: closing stops this server
+        GLib.timeout_add(500, lambda: self._restart_self() and False)
+        return 200, {"ok": True}
+
+    def _remote_latest(self):
+        """(tag, label, newer) of the newest release on GitHub."""
+        cur = _get_current_version()
+        tag, _body, _url, name = self._fetch_latest_release_info(cur)
+
+        def parse_v(v):
+            return [int(x) for x in v.lstrip("v").split("-")[0].split(".") if x.isdigit()]
+        return tag, _release_display_name(tag, name), bool(tag) and parse_v(tag) > parse_v(cur)
+
+    @staticmethod
+    def _sudo_ok():
+        """sudo without a password: install.sh needs it, and from the phone
+        nobody is there to type one."""
+        try:
+            return subprocess.run(["sudo", "-n", "true"], stdin=subprocess.DEVNULL,
+                                  capture_output=True, timeout=10).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    def _remote_admin_update(self):
+        job = self._remote_update
+        if job and job.get("state") == "running":
+            return 409, {"error": "an update is running already"}
+        try:
+            tag, label, newer = self._remote_latest()
+        except Exception as e:
+            return 502, {"error": f"could not ask GitHub: {e}"}
+        if not newer:
+            return 409, {"error": f"{_get_version_display()} is the newest"}
+        if not self._sudo_ok():
+            return 409, {"error": "installing needs your password: update at the computer"}
+        note = self._remote_call(self._remote_unsaved_notes)
+        if note:
+            return 409, {"error": f"“{note}” has unsaved changes: save it at "
+                                  "the computer first"}
+        job = {"state": "running", "latest": label, "log": [], "error": ""}
+        self._remote_update = job
+
+        def log(msg):
+            job["log"] = (job["log"] + [msg])[-40:]
+
+        def work():
+            try:
+                self._update_install(tag, log, askpass=False)
+            except Exception as e:
+                job.update(state="failed", error=str(e))
+                return
+            job["state"] = "done"
+            GLib.timeout_add(1000, lambda: self._restart_self() and False)
+        threading.Thread(target=work, daemon=True).start()
+        return 200, {"ok": True}
+
+    # how long a login from the phone waits for its code
+    _REMOTE_LOGIN_S = 900
+
+    def _remote_login_start(self, name, run):
+        """Run `claude auth login` for an account under a pty of tabit's own:
+        the page gets the link, and the code comes back through it. A pipe
+        will not do: claude takes the code only from a terminal."""
+        old = self._remote_login
+        if old and old.get("proc") and old["proc"].poll() is None:
+            old["proc"].kill()
+        mfd, sfd = pty.openpty()
+        # wide, so the link comes out on one line
+        fcntl.ioctl(sfd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 2000, 0, 0))
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
+        env.update(BROWSER="true", TERM="xterm-256color")   # no browser on the desk
+        proc = subprocess.Popen([run, "auth", "login"], stdin=sfd, stdout=sfd,
+                                stderr=sfd, env=env, start_new_session=True)
+        os.close(sfd)
+        job = {"account": name, "state": "starting", "url": "", "msg": "",
+               "proc": proc, "fd": mfd}
+        self._remote_login = job
+        threading.Thread(target=Tabit._remote_login_read, args=(job,),
+                         daemon=True).start()
+
+    @staticmethod
+    def _remote_login_read(job):
+        out, end = "", time.time() + Tabit._REMOTE_LOGIN_S
+        fd, proc = job["fd"], job["proc"]
+        while time.time() < end:
+            if not select.select([fd], [], [], 0.5)[0]:
+                if proc.poll() is not None:
+                    break
+                continue
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break                       # the program has closed the pty
+            if not chunk:
+                break
+            text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\r", "",
+                          chunk.decode("utf-8", "replace"))
+            out += text
+            m = re.search(r"https://\S+", out)
+            if m and not job["url"]:
+                job.update(url=m.group(0), state="waiting")
+            for line in text.splitlines():
+                if line.strip() and "http" not in line and "Paste code" not in line:
+                    job["msg"] = line.strip()[:200]
+        if proc.poll() is None:
+            proc.kill()
+        rc = proc.wait()
+        os.close(fd)
+        job["state"] = "done" if rc == 0 else "failed"
+        if rc != 0 and not job["msg"]:
+            job["msg"] = "the login stopped"
+
+    def _remote_admin_login_code(self, code):
+        job = self._remote_login
+        if not job or job.get("state") != "waiting":
+            return 409, {"error": "no login is waiting for a code"}
+        if not isinstance(code, str) or not code.strip() or len(code) > 500 \
+                or not code.strip().isprintable():
+            return 400, {"error": "paste the code from the login page"}
+        job["msg"] = "checking the code…"
+        os.write(job["fd"], code.strip().encode() + b"\r")
+        return 200, {"ok": True}
+
     def _remote_call(self, fn, timeout=3):
         """Run fn on the GTK thread for a server thread; None if busy.
 
@@ -15912,6 +16129,80 @@ if (data !== null) {{
         raise RuntimeError(
             f"Downloaded {tag} but could not find install.sh in the archive")
 
+    def _update_install(self, target_ver, log, step=None, installing=None,
+                        askpass=True):
+        """Get the new source and run its install.sh; raise on failure.
+
+        log(msg) gets every line, step(text, short) the download stage and
+        installing() the install stage. askpass=False (from the phone): no
+        password window on a desk nobody is at; the caller has checked that
+        sudo needs none.
+        """
+        # Step 1: the checkout, or the release tarball when there is
+        # none (~/.local/bin install) or it is work in progress
+        tabit_dir = _update_source_dir(
+            _get_tabit_repo_dir(), target_ver or "", log,
+            step or (lambda _t, _s: None), self._fetch_release_source)
+
+        # Step 2: install.sh (sudo via GUI askpass when needed)
+        if installing:
+            installing()
+        log("\n>>> ./install.sh")
+        env = os.environ.copy()
+        env["DEBIAN_FRONTEND"] = "noninteractive"
+        if askpass:
+            log("    (if apt needs root, a password window will open)")
+            helper = self._sudo_askpass_path(tabit_dir)
+            if helper:
+                env["SUDO_ASKPASS"] = helper
+                # Some sudo builds also honor this for -A
+                env["SUDO_ASKPASS_REQUIRE"] = "force"
+                log(f"    SUDO_ASKPASS={helper}")
+            else:
+                log("    [warn] sudo_askpass.py not found; "
+                    "sudo may fail without a TTY")
+        else:
+            env.pop("SUDO_ASKPASS", None)
+
+        p2 = subprocess.Popen(
+            ["./install.sh"],
+            cwd=tabit_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+            # Leave stdin closed so sudo cannot hang on a dead TTY;
+            # password comes only via SUDO_ASKPASS.
+            stdin=subprocess.DEVNULL,
+        )
+        for line in p2.stdout:
+            line_str = line.strip()
+            if line_str:
+                log(line_str)
+        p2.wait()
+        if p2.returncode != 0:
+            raise RuntimeError(
+                "install.sh failed with exit code "
+                + str(p2.returncode)
+                + " (password cancelled or apt error?)")
+
+    def _restart_self(self):
+        """Close the way the window does (ask about unsaved notes, save
+        sessions, stop Remote/Cloud), then start tabit again. Returns only
+        when it did not restart."""
+        if self._on_delete_event():
+            return False                    # a note's save question said Cancel
+        try:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        except OSError as e:
+            # still running: undo the half quit, or a closed tab
+            # keeps its tmux session and Remote stays off
+            self._shutting_down = False
+            self._remote_sync()
+            self._note_msg(Gtk.MessageType.ERROR,
+                           "Could not restart tabit", str(e))
+        return False
+
     def _perform_update(self, parent=None, target_ver=None):
 
         win = parent or self
@@ -15982,60 +16273,16 @@ if (data !== null) {{
                     GLib.idle_add(lambda: progress.set_fraction(0.35))
                     GLib.idle_add(lambda: progress.set_text("35% - " + short))
 
-                # Step 1: the checkout, or the release tarball when there is
-                # none (~/.local/bin install) or it is work in progress
-                tabit_dir = _update_source_dir(
-                    _get_tabit_repo_dir(), target_ver or "",
-                    lambda m: GLib.idle_add(append_log, m), step,
-                    self._fetch_release_source)
+                def installing():
+                    GLib.idle_add(lambda: status_lbl.set_markup(
+                        "<b>Step 2/2:</b> Installing… "
+                        "(a password dialog may appear for apt)"))
+                    GLib.idle_add(lambda: progress.set_fraction(0.75))
+                    GLib.idle_add(lambda: progress.set_text("75% - ./install.sh"))
 
-                # Step 2: install.sh (sudo via GUI askpass when needed)
-                GLib.idle_add(lambda: status_lbl.set_markup(
-                    "<b>Step 2/2:</b> Installing… "
-                    "(a password dialog may appear for apt)"))
-                GLib.idle_add(lambda: progress.set_fraction(0.75))
-                GLib.idle_add(lambda: progress.set_text("75% - ./install.sh"))
-                GLib.idle_add(append_log, "\n>>> ./install.sh")
-                GLib.idle_add(
-                    append_log,
-                    "    (if apt needs root, a password window will open)")
-
-                env = os.environ.copy()
-                env["DEBIAN_FRONTEND"] = "noninteractive"
-                askpass = self._sudo_askpass_path(tabit_dir)
-                if askpass:
-                    env["SUDO_ASKPASS"] = askpass
-                    # Some sudo builds also honor this for -A
-                    env["SUDO_ASKPASS_REQUIRE"] = "force"
-                    GLib.idle_add(
-                        append_log, f"    SUDO_ASKPASS={askpass}")
-                else:
-                    GLib.idle_add(
-                        append_log,
-                        "    [warn] sudo_askpass.py not found; "
-                        "sudo may fail without a TTY")
-
-                p2 = subprocess.Popen(
-                    ["./install.sh"],
-                    cwd=tabit_dir,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    env=env,
-                    # Leave stdin closed so sudo cannot hang on a dead TTY;
-                    # password comes only via SUDO_ASKPASS.
-                    stdin=subprocess.DEVNULL,
-                )
-                for line in p2.stdout:
-                    line_str = line.strip()
-                    if line_str:
-                        GLib.idle_add(append_log, line_str)
-                p2.wait()
-                if p2.returncode != 0:
-                    raise RuntimeError(
-                        "install.sh failed with exit code "
-                        + str(p2.returncode)
-                        + " (password cancelled or apt error?)")
+                self._update_install(
+                    target_ver, lambda m: GLib.idle_add(append_log, m),
+                    step=step, installing=installing)
 
                 def on_success():
                     status_lbl.set_markup(
@@ -16068,19 +16315,7 @@ if (data !== null) {{
             self._open_dialogs.discard(dlg)
             dlg.destroy()
             if resp == Gtk.ResponseType.OK:
-                # Restart tabit process, after what closing the window does:
-                # ask about unsaved notes, save sessions, stop Remote/Cloud
-                if self._on_delete_event():
-                    return                  # a note's save question said Cancel
-                try:
-                    os.execv(sys.executable, [sys.executable] + sys.argv)
-                except OSError as e:
-                    # still running: undo the half quit, or a closed tab
-                    # keeps its tmux session and Remote stays off
-                    self._shutting_down = False
-                    self._remote_sync()
-                    self._note_msg(Gtk.MessageType.ERROR,
-                                   "Could not restart tabit", str(e))
+                self._restart_self()
 
         dialog.connect("response", _on_update_progress_resp)
         dialog.show_all()
