@@ -8,7 +8,7 @@ from APP_VERSION / APP_CODENAME in tabit.py.
 
 Rules (also in docs/releasing.md):
   - Must be Taiwan-origin food, written "Main Dish + Snack"
-  - Main dish: a well-known savoury main dish, one per major version
+  - Main dish: a well-known savoury main dish, one per major.minor version
   - Snack: a snack, dessert or drink, new for every release
   - Pick names that hint at the release: its new features, or the season
   - Public label is English only; optional Chinese stays in private notes
