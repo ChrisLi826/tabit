@@ -46,6 +46,10 @@ install -m 644 grok_status_hook.py "$HOME/.local/share/tabit/grok_status_hook.py
 install -m 644 tabit_chrome.toml "$HOME/.local/share/tabit/tabit_chrome.toml"
 # Settings > Remote: the status page tabit serves over Tailscale
 install -m 644 remote.html "$HOME/.local/share/tabit/remote.html"
+# Tabit Chat: the chat page and the code behind it
+install -m 644 chat.html "$HOME/.local/share/tabit/chat.html"
+install -m 644 tabit_chat.py "$HOME/.local/share/tabit/tabit_chat.py"
+install -m 755 tabit-tabs "$HOME/.local/bin/tabit-tabs"
 install -m 644 tabit.svg tabit-app.svg "$HOME/.local/share/tabit/"
 install -m 755 sudo_askpass.py "$HOME/.local/share/tabit/sudo_askpass.py"
 rm -rf "$HOME/.local/share/tabit/agent-detection" "$HOME/.local/share/tabit/vendor"

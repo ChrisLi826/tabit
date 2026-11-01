@@ -220,6 +220,7 @@
 <body>
 <header>
   <h1>tabit</h1>
+  <a id="chatlink" href="chat" hidden><button type="button" title="Tabit Chat: talk to Claude as a chat">💬</button></a>
   <button id="newbtn" type="button" title="new tab" hidden>＋</button>
   <button id="notify" type="button" title="tell me when an AI tab is done" hidden>🔔</button>
   <button id="setbtn" type="button" title="settings: AI defaults, Claude accounts, update, restart" hidden>⚙</button>
@@ -373,6 +374,7 @@ function render(snap) {
   if (loose.length) html += `<details data-color="" open><summary>No group<span class="n">${loose.length}</span>${snap.send ? `<button class="gmenu" data-color="">⋯</button>` : ""}</summary>${loose.map((t) => tabRow(t, false)).join("")}</details>`;
   $("out").innerHTML = html;
   $("newbtn").hidden = !snap.send;
+  $("chatlink").hidden = !snap.send;
   $("setbtn").hidden = !snap.send;
   for (const b of $("out").querySelectorAll(".gmenu")) b.onclick = (ev) => {
     ev.preventDefault(); ev.stopPropagation();      // not a fold of the group here

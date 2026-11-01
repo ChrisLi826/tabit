@@ -204,6 +204,25 @@ class TestRemoteServer(_ServerCase):
         head, _ = http_get("/api/dirs?path=" + urllib.parse.quote(d), self.sock)
         self.assertIn("403", head.splitlines()[0])
 
+    def test_new_folder_makes_one_plain_folder(self):
+        ok = {"Tailscale-User-Login": "me@example.com", "X-Tabit": "1",
+              "Content-Type": "application/json", "Origin": "https://me.ts.net"}
+        d = tempfile.mkdtemp(dir=self.dir.name)
+
+        def make(name, parent=d, headers=ok):
+            return http_post("/api/dirs/new", self.sock,
+                             json.dumps({"parent": parent, "name": name}), headers)[0]
+        self.assertEqual(make("fresh"), 200)
+        self.assertTrue(os.path.isdir(os.path.join(d, "fresh")))
+        self.assertEqual(make("fresh"), 409)                    # already there
+        for bad in ("", " ", ".", "..", "a/b", "../x", "x\0y"):
+            self.assertEqual(make(bad), 400, repr(bad))
+        self.assertEqual(os.listdir(d), ["fresh"])              # nothing else got made
+        self.assertEqual(make("x", parent=os.path.join(d, "nope")), 400)
+        self.assertEqual(make("y", headers={k: v for k, v in ok.items() if k != "X-Tabit"}), 403)
+        self.app._remote_send_on = False
+        self.assertEqual(make("z"), 403)
+
     def test_new_options_lists_tools_and_hides_secrets(self):
         path = os.path.join(self.dir.name, "last.json")
         with open(path, "w", encoding="utf-8") as f:
