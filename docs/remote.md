@@ -12,6 +12,8 @@ tabs, manage them and read files. Back to the [README](../README.md).
   <img src="../assets/remote-laptop.png" alt="Remote in a laptop browser: tabs on the left, the open tab on the right" width="900">
 </p>
 
+Want it as a chat instead of a terminal? See [Tabit Chat](chat.md).
+
 ## How it reaches you
 
 tabit serves the page through **Tailscale Serve**, so it travels only inside

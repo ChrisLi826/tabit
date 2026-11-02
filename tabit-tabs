@@ -1,0 +1,73 @@
+#!/usr/bin/python3
+"""Tabit Chat's hands on the AI tabs: list them, read one, type into one.
+
+  tabit-tabs list
+  tabit-tabs read <tab id> [lines above]
+  tabit-tabs send <tab id> <text...>     (asks the user first, and waits)
+
+It talks to tabit's own socket. Tabit puts TABIT_SOCK, TABIT_OWNER and
+TABIT_CHAT_ID in the environment of every chat.
+"""
+import http.client
+import json
+import os
+import socket
+import sys
+from urllib.parse import quote
+
+
+class _Conn(http.client.HTTPConnection):
+    def __init__(self, path, timeout):
+        super().__init__("tabit", timeout=timeout)
+        self._path = path
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self._path)
+
+
+def call(method, path, body=None, timeout=30):
+    sock, owner = os.environ.get("TABIT_SOCK"), os.environ.get("TABIT_OWNER")
+    if not sock or not owner:
+        sys.exit("tabit-tabs: run this from a Tabit Chat (no TABIT_SOCK)")
+    conn = _Conn(sock, timeout)
+    headers = {"Tailscale-User-Login": owner, "X-Tabit": "1",
+               "Content-Type": "application/json"}
+    conn.request(method, path, json.dumps(body) if body is not None else None, headers)
+    res = conn.getresponse()
+    raw = res.read()
+    try:
+        out = json.loads(raw)
+    except ValueError:
+        out = {"error": raw.decode("utf-8", "replace")}
+    if res.status != 200:
+        sys.exit("tabit-tabs: " + str(out.get("error") or res.status))
+    return out
+
+
+def main(argv):
+    if argv[:1] == ["list"]:
+        for t in call("GET", "/api/status")["tabs"]:
+            if t["type"] == "ai":
+                print("%s\t%s\t%s\t%s%s" % (
+                    t["id"], t["ai_status"], t["title"], t["sub"],
+                    "" if t.get("can_send", True) else "\t(cannot type)"))
+    elif argv[:1] == ["read"] and len(argv) in (2, 3):
+        back = int(argv[2]) if len(argv) == 3 and argv[2].isdigit() else 0
+        out = call("GET", "/api/tabs/%s/screen?back=%d" % (quote(argv[1], safe=""), back))
+        print("title: %s\nstatus: %s\n" % (out.get("title"), out.get("ai_status")))
+        print("\n".join(out.get("lines") or []))
+    elif argv[:1] == ["send"] and len(argv) >= 3:
+        cid = os.environ.get("TABIT_CHAT_ID")
+        if not cid:
+            sys.exit("tabit-tabs: run this from a Tabit Chat (no TABIT_CHAT_ID)")
+        call("POST", "/api/chats/%s/tabs/%s/send" % (quote(cid, safe=""), quote(argv[1], safe="")),
+             {"text": " ".join(argv[2:])}, timeout=600)
+        print("sent")
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

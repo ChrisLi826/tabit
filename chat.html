@@ -1,0 +1,1057 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="chat">
+<meta name="theme-color" content="#0f111a">
+<base href="/">
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="chat.webmanifest">
+<title>tabit chat</title>
+<!--
+  Tabit Chat, served by tabit itself (Settings > Remote) through Tailscale
+  Serve. Each chat is one headless Claude on this computer: /api/chats.
+  Chats can be joined in a group: /api/chat-groups. Same origin, no cloud.
+-->
+<style>
+  :root {
+    --bg: #0f111a; --panel: #1a1d2b; --line: #262a3d; --fg: #e3e7fb; --dim: #8088aa; --glass: #0f111acc;
+    --red: #f7768e; --orange: #ff9e64; --yellow: #e0af68; --green: #9ece6a;
+    --teal: #73daca; --cyan: #7dcfff; --blue: #7aa2f7; --purple: #bb9af7; --pink: #ff79c6;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; margin: 0; background: var(--bg); -webkit-tap-highlight-color: transparent; }
+  * { box-sizing: border-box; }
+  body { color: var(--fg); font: 16px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif; -webkit-font-smoothing: antialiased;
+         display: flex; flex-direction: column; overflow: hidden; }
+  button, select, input, textarea { font: inherit; color: inherit; }
+  button { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+           padding: 8px 14px; cursor: pointer; transition: transform .12s, filter .12s; }
+  button:active { filter: brightness(1.25); transform: scale(.96); }
+  button.primary { background: linear-gradient(135deg, #7aa2f7, #9d7cf7); color: #0b0d17; border: 0; font-weight: 600; }
+  button.danger { background: var(--red); color: #111; border: 0; font-weight: 600; }
+  button:disabled { opacity: .45; }
+  input, select, textarea { background: var(--panel); border: 1px solid var(--line);
+                            border-radius: 12px; padding: 10px 13px; width: 100%; outline: none; }
+  input:focus, select:focus, textarea:focus { border-color: #7aa2f7aa; box-shadow: 0 0 0 3px #7aa2f722; }
+  a { color: var(--cyan); }
+  header { display: flex; align-items: center; gap: 8px; padding: calc(env(safe-area-inset-top) + 10px) 14px 10px;
+           background: var(--bg);
+           position: sticky; top: 0; isolation: isolate; transform: translateZ(0);   /* iOS home-screen apps draw a plain header's title blurry */
+           border-bottom: 1px solid var(--line); flex: none; z-index: 2; }
+  header h1 { text-rendering: geometricPrecision; -webkit-font-smoothing: subpixel-antialiased; }
+  header button { border-radius: 99px; min-width: 38px; height: 38px; padding: 0 12px; }
+  header #add { background: #7aa2f7; }                 /* one plain colour: no gradient up here */
+  #hav[hidden] { display: none; }                      /* .av sets display, which would show it on the list */
+  #ttl { flex: 1; min-width: 0; }
+  #ttl h1 { flex: none; }
+  #ttl .pill { background: none; padding: 0; font-size: 12.5px; margin-top: -1px; overflow: hidden; text-overflow: ellipsis; }
+  .av.sm { width: 40px; height: 40px; font-size: 32px; }
+  header h1 { font-size: 20px; font-weight: 700; letter-spacing: -.01em; margin: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pill { font-size: 12px; padding: 2px 9px; border-radius: 99px; background: var(--panel); color: var(--dim); white-space: nowrap; }
+  .pill.working { color: var(--yellow); } .pill.waiting { color: var(--orange); }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--dim); margin-right: 6px; }
+  .dot.working { background: var(--yellow); } .dot.waiting { background: var(--orange); }
+  main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .view { display: none; flex: 1; min-height: 0; flex-direction: column; }
+  .view.on { display: flex; }
+
+  /* the list */
+  #tabs { display: flex; gap: 4px; margin: 12px 14px 2px; padding: 4px; background: var(--panel); border-radius: 14px; flex: none; }
+  #tabs button { flex: 1; border: 0; background: none; color: var(--dim); border-radius: 10px; font-weight: 600; }
+  #tabs button.on { background: #2a2f47; color: var(--fg); box-shadow: 0 1px 4px #0006; }
+  #cards { flex: 1; overflow-y: auto; padding: 10px 14px calc(20px + env(safe-area-inset-bottom)); }
+  .card { display: flex; gap: 14px; align-items: center; border-radius: 16px; padding: 11px 8px; cursor: pointer; transition: background .12s; }
+  .card:active { background: #ffffff0f; }
+  .av { position: relative; flex: none; width: 54px; height: 54px; border-radius: 50%; display: grid; place-items: center;
+        font-size: 40px; line-height: 1; }
+  .av .dot { position: absolute; right: -1px; bottom: -1px; width: 13px; height: 13px; margin: 0; border: 2px solid var(--bg); background: var(--dim); }
+  .av .dot.working { background: var(--yellow); } .av .dot.waiting { background: var(--orange); }
+  .card .body { flex: 1; min-width: 0; }
+  .card .top { display: flex; align-items: baseline; gap: 6px; }
+  .card .t { font-weight: 650; font-size: 17px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card .ago { color: var(--dim); font-size: 12px; flex: none; }
+  .card .more { flex: none; width: 30px; height: 30px; margin: -4px -4px -4px 0; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--dim); font-size: 20px; line-height: 1; }
+  .card .more:active { background: #ffffff1a; color: #fff; }
+  .card .meta { display: flex; gap: 5px; margin-top: 5px; flex-wrap: wrap; }
+  .card .sub { color: var(--dim); font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card .sub.last { color: #aab1d6; margin-top: 1px; }
+  .card .sub.last.st-work { color: var(--yellow); }
+  .card .sub.last.st-wait { color: var(--orange); font-weight: 600; }
+  .badge { font-size: 11px; padding: 1px 8px; border-radius: 99px; background: #ffffff0d; color: var(--dim); }
+  .badge.m-bypass { color: var(--red); background: #f7768e1f; } .badge.m-ask, .badge.need { color: var(--orange); background: #ff9e641f; }
+  .empty { color: var(--dim); text-align: center; padding: 56px 28px; line-height: 1.6; }
+  .empty .big { font-size: 44px; margin-bottom: 8px; }
+
+  /* the conversation */
+  #msgs { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 14px 8px; display: flex; flex-direction: column; gap: 10px;
+          overscroll-behavior: contain; }
+  .b { max-width: 88%; padding: 10px 14px; border-radius: 20px; overflow-wrap: anywhere; animation: pop .18s ease-out; }
+  @keyframes pop { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  .b.me { align-self: flex-end; background: linear-gradient(135deg, #6f97f2, #8f78f0); color: #fff; border-bottom-right-radius: 6px;
+          white-space: pre-wrap; box-shadow: 0 2px 10px #6f97f233; }
+  .b.ai { align-self: flex-start; background: var(--panel); border-bottom-left-radius: 6px; max-width: 94%; }
+  .who { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
+  .b .ts { margin-top: 4px; font-size: 11px; opacity: .55; text-align: right; }
+  .b .rp { display: none; margin-top: 6px; padding: 3px 12px; font-size: 12px; border-radius: 12px; border: 0; background: #ffffff22; color: inherit; }
+  .b.sel .rp { display: block; } .b:hover .rp { display: block; }
+  .quote { border-left: 3px solid #ffffffb0; background: #00000026; border-radius: 8px; padding: 4px 8px; margin-bottom: 6px; font-size: 13px;
+           overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; opacity: .92; }
+  .quote[data-go] { cursor: pointer; }
+  .quote b { margin-right: 4px; }
+  .flash { animation: flash 1.6s ease-out; }
+  @keyframes flash { 0%, 40% { box-shadow: 0 0 0 3px #7aa2f7cc; } 100% { box-shadow: 0 0 0 3px transparent; } }
+  #replybar { display: none; align-items: center; gap: 8px; margin-bottom: 6px; padding: 6px 6px 6px 10px; border-left: 3px solid #7aa2f7; background: var(--panel); border-radius: 10px; font-size: 13px; }
+  #replybar .rq { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); }
+  #replybar .rq b { color: #cfd6f6; margin-right: 4px; }
+  #replybar button { padding: 2px 10px; border-radius: 99px; }
+  .to { font-size: 11px; opacity: .65; margin-top: 3px; }
+  .b p { margin: 0 0 .55em; } .b p:last-child { margin-bottom: 0; }
+  .b ul, .b ol { margin: 0 0 .55em; padding-left: 1.3em; }
+  .b h1, .b h2, .b h3 { font-size: 1.05em; margin: .5em 0 .3em; }
+  .b blockquote { margin: 0 0 .55em; padding-left: 10px; border-left: 3px solid var(--line); color: var(--dim); }
+  .b code { font: 13.5px/1.4 ui-monospace, "SF Mono", Menlo, monospace; background: #ffffff12; padding: 1px 6px; border-radius: 6px; }
+  .b pre { margin: 0 0 .55em; background: #0a0c14; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px;
+           overflow-x: auto; font: 13px/1.4 ui-monospace, "SF Mono", Menlo, monospace; }
+  .b pre code { background: none; padding: 0; }
+  .b a.path code { color: var(--cyan); }
+  .tool { align-self: flex-start; max-width: 94%; font-size: 13.5px; color: var(--dim); }
+  .tool summary { cursor: pointer; list-style: none; padding: 5px 12px; background: #ffffff0a; border: 1px solid var(--line); border-radius: 99px;
+                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tool summary::-webkit-details-marker { display: none; }
+  .tool[open] summary { white-space: normal; border-radius: 12px; }
+  .tool pre { margin: 6px 0 0; padding: 8px 10px; background: #101420; border: 1px solid var(--line); border-radius: 10px;
+              font: 12.5px/1.4 ui-monospace, Menlo, monospace; overflow-x: auto; max-height: 40vh; white-space: pre-wrap; color: var(--fg); }
+  .tool pre.err { border-color: var(--red); }
+  .ask { align-self: stretch; border: 1px solid #ff9e6466; border-radius: 18px; padding: 13px 14px; background: linear-gradient(160deg, #ff9e6419, #ff9e6406); }
+  .ask h3 { margin: 0 0 4px; font-size: 15px; color: var(--orange); }
+  .ask .what { font: 13px/1.4 ui-monospace, Menlo, monospace; overflow-wrap: anywhere; margin-bottom: 8px; }
+  .ask details { margin-bottom: 8px; color: var(--dim); font-size: 13px; }
+  .ask details pre { margin: 4px 0 0; max-height: 30vh; overflow: auto; white-space: pre-wrap; font: 12.5px/1.4 ui-monospace, Menlo, monospace; }
+  .ask .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .ask .row button { flex: 1; min-width: 90px; }
+  .ask .opts { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
+  .ask .opts button.on { background: var(--blue); color: #111; border: 0; }
+  .ask .q { font-weight: 600; margin-top: 6px; }
+  .ask.closed { border-color: var(--line); background: none; opacity: .7; }
+  .ask.closed h3 { color: var(--dim); }
+  .ask .verdict { color: var(--dim); font-size: 13px; }
+  .note { align-self: center; font-size: 12.5px; color: var(--dim); text-align: center; max-width: 90%; }
+  .note.err { color: var(--red); }
+  .dots span { display: inline-block; width: 7px; height: 7px; margin: 0 2px; border-radius: 50%; background: var(--dim); animation: bl 1.2s infinite; }
+  .dots span:nth-child(2) { animation-delay: .2s; } .dots span:nth-child(3) { animation-delay: .4s; }
+  @keyframes bl { 0%, 80%, 100% { opacity: .25 } 40% { opacity: 1 } }
+  #older { align-self: center; }
+  #jump { position: absolute; right: 18px; bottom: 90px; width: 40px; height: 40px; padding: 0; border-radius: 50%; display: none; box-shadow: 0 4px 14px #0008; }
+  #conn { font-size: 12px; text-align: center; color: var(--yellow); padding: 2px; display: none; flex: none; }
+
+  /* typing */
+  #composer { flex: none; padding: 6px 10px calc(8px + env(safe-area-inset-bottom)); background: linear-gradient(to top, var(--bg) 70%, #0f111a00); }
+  #chips { display: none; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+  #chips button.on { background: #7aa2f733; border-color: #7aa2f7; }
+  #chips button { padding: 3px 10px; font-size: 13px; border-radius: 99px; }
+  #row { display: flex; gap: 6px; align-items: flex-end; }
+  #text { scrollbar-width: none; flex: 1; min-height: 44px; max-height: 40vh; resize: none; font-size: 16px; border-radius: 22px; padding: 11px 16px; }
+  #text::-webkit-scrollbar { display: none; }
+  #row button { height: 44px; flex: none; border-radius: 22px; }
+  #attach { width: 44px; padding: 0; font-size: 18px; }
+  #send { width: 44px; padding: 0; font-size: 20px; }
+  #status { font-size: 12px; color: var(--dim); min-height: 16px; padding: 0 4px 3px; }
+  #status.err { color: var(--red); }
+
+  /* sheets */
+  #sheet { position: fixed; inset: 0; background: #0009; backdrop-filter: blur(4px); display: none; align-items: flex-end; justify-content: center; z-index: 5; }
+  #sheet.on, #sheet2.on { display: flex; }
+  #sheet2 { position: fixed; inset: 0; background: #000a; display: none; align-items: flex-end; justify-content: center; z-index: 6; }
+  #sheet .in, #sheet2 .in { background: var(--bg); border: 1px solid var(--line); border-radius: 24px 24px 0 0; width: 100%; max-width: 560px;
+               max-height: 92vh; overflow-y: auto; padding: 14px 16px calc(16px + env(safe-area-inset-bottom)); }
+  #sheet .in { background: var(--bg); border: 1px solid var(--line); border-radius: 24px 24px 0 0; width: 100%; max-width: 560px;
+               max-height: 92vh; overflow-y: auto; padding: 14px 16px calc(16px + env(safe-area-inset-bottom)); }
+  #sheet h2, #sheet2 h2 { margin: 0 0 10px; font-size: 18px; }
+  #sheet label, #sheet2 label { display: block; margin: 10px 0 4px; color: var(--dim); font-size: 13px; }
+  #sheet .acts, #sheet2 .acts { display: flex; gap: 8px; margin-top: 14px; }
+  #sheet .acts button, #sheet2 .acts button { flex: 1; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .chips button { padding: 4px 12px; font-size: 13px; border-radius: 14px; max-width: 100%; overflow-wrap: anywhere; text-align: left; }
+  .dirs { max-height: 44vh; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; margin-top: 8px; }
+  .dirs div { padding: 9px 12px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .dirs div:last-child { border: 0; }
+  .pick { display: flex; align-items: center; gap: 10px; padding: 8px 4px; }
+  .pick input { width: auto; }
+  #hav, #ttl { cursor: pointer; }
+  /* a group: its members' pictures overlap, the later one in front, like Grok */
+  .av.gav { display: block; }
+  .av.gav i { position: absolute; width: 60%; height: 60%; border-radius: 50%; font-style: normal; display: grid; place-items: center;
+              font-size: .62em; line-height: 1; background: #1c2030; box-shadow: 0 0 0 2px var(--bg); }
+  .av.gav .em { line-height: 1; }
+  .av.gav i.more { background: #2a2f47; color: var(--dim); font-size: .32em; font-weight: 700; }
+  .av.gav.n1 i { width: 100%; height: 100%; font-size: 1em; left: 0; top: 0; }
+  .av.gav.n2 i:nth-child(1) { left: 0; top: 0; } .av.gav.n2 i:nth-child(2) { left: 40%; top: 40%; }
+  .av.gav.n3 i:nth-child(1) { left: 0; top: 0; } .av.gav.n3 i:nth-child(2) { left: 40%; top: 0; } .av.gav.n3 i:nth-child(3) { left: 20%; top: 40%; }
+  .av.gav.n4 i { width: 56%; height: 56%; }
+  .av.gav.n4 i:nth-child(1) { left: 0; top: 0; } .av.gav.n4 i:nth-child(2) { left: 44%; top: 0; }
+  .av.gav.n4 i:nth-child(3) { left: 0; top: 44%; } .av.gav.n4 i:nth-child(4) { left: 44%; top: 44%; }
+  .pk { text-align: center; margin-bottom: 4px; }
+  .pk .av.big { margin: 0 auto 10px; }
+  .pk-animals, .pk-hues { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-bottom: 8px; }
+  .pk-animals button { width: 42px; height: 42px; padding: 0; font-size: 22px; border-radius: 12px; }
+  .pk-hues button { width: 34px; height: 34px; padding: 0; border-radius: 50%; border: 2px solid transparent; }
+  .pk-animals button.on { border-color: #7aa2f7; background: #7aa2f733; } .pk-hues button.on { border-color: #fff; }
+  .av.big { width: 80px; height: 80px; font-size: 56px; margin: 4px auto 8px; }
+  .prof { text-align: center; } .prof h2 { margin: 0 0 2px; }
+  .prof .meta { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; margin-top: 8px; }
+  .stats { display: flex; gap: 8px; margin: 14px 0 4px; }
+  .stats div { flex: 1; text-align: center; background: var(--panel); border-radius: 14px; padding: 8px 4px; font-size: 12px; color: var(--dim); }
+  .stats b { display: block; font-size: 18px; color: var(--fg); }
+  .lib h3 { margin: 12px 0 0; font-size: 15px; } .lh { margin: 12px 0 4px; font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
+  .file { display: flex; gap: 10px; align-items: center; background: var(--panel); border-radius: 14px; padding: 9px 12px; margin-bottom: 6px; color: var(--fg); text-decoration: none; }
+  .file > div { min-width: 0; } .file b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file .hint { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .prow { display: flex; align-items: center; gap: 8px; background: var(--panel); border-radius: 14px; padding: 11px 13px; margin-bottom: 6px; cursor: pointer; }
+  .hint { color: var(--dim); font-size: 12.5px; margin-top: 4px; }
+  .hint.warn { color: var(--red); }
+
+  html { scrollbar-color: #2f3549 transparent; } * { scrollbar-width: thin; scrollbar-color: #2f3549 transparent; }
+  #acct { align-self: center; max-width: 92%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 99px; font-size: 13px; padding: 5px 14px; color: var(--dim); background: #ffffff0a; margin-bottom: 4px; }
+  #acct[hidden] { display: none; }
+  #hero { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 0 6px; font-size: 17px; }
+  .mainbot { display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; padding: 6px 14px; border-radius: 18px; }
+  .mainbot.sel { background: #262b45; } .mainbot .sub { font-size: 13px; } .mainbot .st-wait { color: var(--orange); } .mainbot .st-work { color: var(--yellow); }
+  .av .star { position: absolute; right: -2px; top: -2px; width: 24px; height: 24px; border-radius: 50%; background: var(--orange); color: #fff; font-size: 13px; display: grid; place-items: center; border: 2px solid var(--bg); }
+  .av.huge .dot { right: 4px; bottom: 4px; width: 16px; height: 16px; }
+  .av.huge { width: 84px; height: 84px; font-size: 58px; }
+  #searchbar { flex: none; padding: 6px 14px calc(10px + env(safe-area-inset-bottom)); }
+  #q { border-radius: 99px; padding: 12px 18px; background: #1d2030; }
+  body:has(#list.on) header h1 { visibility: hidden; }
+  #sbhead a button, #remote button { font-size: 24px; line-height: 1; padding: 0 12px; }
+  #sbhead, #pick { display: none; }
+  /* a wide screen: the list stays on the left, the conversation on the right */
+  @media (min-width: 900px) {
+    body { display: grid; grid-template-columns: 340px 1fr; grid-template-rows: auto auto 1fr; }
+    main { display: contents; }
+    #list { grid-column: 1; grid-row: 1 / 4; display: flex; border-right: 1px solid var(--line); background: #0c0e17; min-height: 0; }
+    header { grid-column: 2; grid-row: 1; padding-top: 12px; }
+    #conn { grid-column: 2; grid-row: 2; }
+    #talk { grid-column: 2; grid-row: 3; }
+    #pick { grid-column: 2; grid-row: 1 / 4; display: grid; place-items: center; text-align: center; color: var(--dim); line-height: 1.7; }
+    #pick .big { font-size: 54px; }
+    #talk.on ~ #pick { display: none; }
+    body:has(#talk:not(.on)) header { visibility: hidden; }
+    #back, #add, #remote { display: none !important; }
+    #hero { padding: 4px 0 2px; } #hero .av.huge { width: 60px; height: 60px; font-size: 42px; } #hero .mainbot { font-size: 15px; }
+    body:has(#list.on) header h1 { visibility: visible; }
+    #sbhead { display: flex; align-items: center; gap: 8px; padding: 14px 14px 4px; }
+    #sbhead h1 { flex: 1; margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -.01em; }
+    #sbhead button { border-radius: 99px; min-width: 38px; height: 38px; padding: 0 12px; }
+    #sbhead a { text-decoration: none; }
+    #cards { padding: 8px 10px 20px; }
+    .card { border: 0; background: none; border-radius: 14px; padding: 10px 12px; margin-bottom: 2px; }
+    .card:hover { background: #ffffff0a; } .card.sel { background: #262b45; }
+    .card .meta, .card .sub.path { display: none; }
+    .card .av .dot { border-color: #0c0e17; } .card.sel .av .dot { border-color: #262b45; }
+    #msgs { padding: 24px max(28px, calc((100% - 820px) / 2)) 10px; gap: 14px; }
+    #composer { padding: 6px max(28px, calc((100% - 820px) / 2)) 18px; }
+    .b { font-size: 16px; } .b.ai { max-width: 100%; padding: 14px 18px; } .b.me { max-width: 75%; }
+    .tool { max-width: 100%; }
+    #jump { right: 40px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <button id="back" type="button" title="back" hidden>‹</button>
+  <span id="hav" class="av sm" hidden></span>
+  <div id="ttl"><h1 id="title">Chat</h1><div id="pill" class="pill" hidden></div></div>
+  <button id="notify" type="button" title="tell me when Claude is done" hidden>🔔</button>
+  <button id="more" type="button" hidden>⋯</button>
+  <button id="add" type="button" class="primary">＋</button>
+  <a id="remote" href="/" title="the terminal view"><button type="button">⌨</button></a>
+</header>
+<div id="conn">Reconnecting…</div>
+<main>
+  <section id="list" class="view on">
+    <div id="sbhead"><h1>Chat</h1><button id="sb-add" type="button" class="primary" title="new chat">＋</button><a href="/" title="the terminal view"><button type="button">⌨</button></a></div>
+    <div id="hero"></div>
+    <button id="acct" type="button" hidden title="the Claude login every chat uses"></button>
+    <div id="tabs"><button data-k="chats" class="on">Chats</button><button data-k="groups">Groups</button></div>
+    <div id="cards"></div>
+    <div id="searchbar"><input id="q" type="search" placeholder="Search chats" autocomplete="off"></div>
+  </section>
+  <section id="talk" class="view">
+    <div id="msgs"></div>
+    <button id="jump" type="button">↓</button>
+    <div id="composer">
+      <div id="replybar"><div class="rq"></div><button id="rcancel" type="button" title="cancel the reply">✕</button></div>
+      <div id="chips"></div>
+      <div id="status"></div>
+      <div id="row">
+        <button id="attach" type="button" title="attach a file or photo">📎</button>
+        <input id="file" type="file" hidden>
+        <textarea id="text" rows="1" placeholder="Message"></textarea>
+        <button id="stop" type="button" class="danger" hidden>Stop</button>
+        <button id="send" type="button" class="primary" title="send">↑</button>
+      </div>
+    </div>
+  </section>
+  <div id="pick"><div><div class="big">💬</div>Pick a chat on the left,<br>or start a new one.</div></div>
+</main>
+<div id="sheet"><div class="in" id="sheetin"></div></div>
+<div id="sheet2"><div class="in" id="sheet2in"></div></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const COLORS = ["--cyan", "--green", "--purple", "--pink", "--yellow", "--teal", "--orange", "--blue"];
+const colorOf = (s) => { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return `var(${COLORS[h % COLORS.length]})`; };
+
+// every chat gets an animal and a colour from its id; the main chat is the owl
+const ANIMALS = ["🦊", "🐼", "🐯", "🐸", "🐙", "🦄", "🐧", "🦁", "🐨", "🐰", "🐻", "🐵", "🐳", "🦋", "🐢", "🦔", "🐝", "🦦", "🐶", "🐱", "🐮", "🐷", "🦖"];
+const HUES = [0, 40, 90, 150, 200, 250, 300];     // how far the emoji's own colour is turned
+const emo = (f) => `<span class="em" style="filter:${f.f}">${esc(f.e)}</span>`;
+function face(r) {
+  let h = 0; for (const c of String(r.id || "")) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  const own = r.default ? { e: "🦉", hue: 0 } : { e: ANIMALS[(h >>> 8) % ANIMALS.length], hue: h % 360 };
+  return { e: r.emoji || own.e, f: `hue-rotate(${Number.isInteger(r.hue) ? r.hue : own.hue}deg)` };
+}
+// the picture of a chat or a group: a group shows its members together, like Grok
+function avOf(r) {
+  if (!r.members) { const f = face(r); return { cls: "", style: "", html: emo(f) }; }
+  const shown = r.members.length > 4 ? 3 : r.members.length;
+  const dots = r.members.slice(0, shown).map((m) => { const f = face(m); return `<i>${emo(f)}</i>`; });
+  if (r.members.length > 4) dots.push(`<i class="more">+${r.members.length - 3}</i>`);
+  return { cls: "gav n" + dots.length, style: "", html: dots.join("") };
+}
+// the animal and colour chooser; get() says what is shown on top. The dice rolls a
+// new animal and colour: a new chat starts with one rolled, and Start keeps it.
+function picker(host, r) {
+  const pick = { emoji: r.emoji || "", hue: Number.isInteger(r.hue) ? r.hue : null };
+  const roll = () => { pick.emoji = ANIMALS[Math.floor(Math.random() * ANIMALS.length)]; pick.hue = HUES[Math.floor(Math.random() * HUES.length)]; };
+  if (r.roll) roll();
+  host.innerHTML = `<div class="pk"><div class="av big" id="pk-prev"></div>
+    <div class="pk-animals">${ANIMALS.map((a) => `<button type="button" data-e="${a}">${a}</button>`).join("")}</div>
+    <div class="pk-hues"></div></div>`;
+  const paint = () => {
+    const f = face(Object.assign({}, r, pick));
+    const prev = host.querySelector("#pk-prev"); prev.innerHTML = emo(f);
+    host.querySelector(".pk-hues").innerHTML = `<button type="button" data-roll title="roll a new one">🎲</button>` +
+      HUES.map((h) => `<button type="button" data-h="${h}">${emo({ e: f.e, f: `hue-rotate(${h}deg)` })}</button>`).join("");
+    host.querySelectorAll("[data-e]").forEach((b) => b.classList.toggle("on", b.dataset.e === pick.emoji));
+    host.querySelectorAll("[data-h]").forEach((b) => b.classList.toggle("on", +b.dataset.h === pick.hue));
+  };
+  host.onclick = (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    if (b.dataset.roll !== undefined) roll();
+    if (b.dataset.e !== undefined) pick.emoji = b.dataset.e;
+    if (b.dataset.h !== undefined) pick.hue = +b.dataset.h;
+    paint();
+  };
+  paint();
+  return { get: () => ({ emoji: pick.emoji, hue: pick.hue }) };
+}
+// "Mirror a tab" chooser: the Claude tabs open in tabit; get() is null or {id, title}
+function tabPick(sel) {
+  sel.innerHTML = `<option value="">None: a Claude of its own</option>`;
+  api("api/status").then((st) => {
+    const ai = (st.tabs || []).filter((t) => t.type === "ai" && "account" in t && !t.exited);   // only a Claude tab has an account
+    sel.insertAdjacentHTML("beforeend", ai.map((t) => `<option value="${esc(t.id)}" data-t="${esc(t.title)}">${esc(t.title || t.id)}</option>`).join(""));
+  }).catch(() => {});
+  return () => { const o = sel.selectedOptions[0]; return o && o.value ? { id: o.value, title: o.dataset.t || "" } : null; };
+}
+const base = (k) => (k === "groups" ? "api/chat-groups" : "api/chats");
+async function api(path, body) {
+  const res = await fetch(path, body === undefined ? {} : {
+    method: "POST", headers: { "Content-Type": "application/json", "X-Tabit": "1" }, body: JSON.stringify(body) });
+  const out = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(out.error || `HTTP ${res.status}`);
+  return out;
+}
+
+// --- a little Markdown: what Claude writes, never raw HTML ------------------
+function inline(raw) {
+  let t = esc(raw);
+  t = t.replace(/`([^`]+)`/g, (_m, c) => /^(\/|~\/)[\w.\-\/~@+]+$/.test(c)
+    ? `<a class="path" target="_blank" rel="noopener" href="api/file?path=${encodeURIComponent(c)}&amp;render=1"><code>${c}</code></a>`
+    : `<code>${c}</code>`);
+  t = t.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+  t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  return t;
+}
+function md(text) {
+  const out = [];
+  const parts = String(text).split(/^```[^\n]*\n([\s\S]*?)^```[ \t]*$/m);
+  parts.forEach((part, i) => {
+    if (i % 2) { out.push(`<pre><code>${esc(part.replace(/\n$/, ""))}</code></pre>`); return; }
+    let list = null, para = [];
+    const endPara = () => { if (para.length) out.push(`<p>${para.join("<br>")}</p>`); para = []; };
+    const endList = () => { if (list) out.push(`</${list}>`); list = null; };
+    const lines = part.split("\n");
+    for (let n = 0; n < lines.length; n++) {
+      const line = lines[n];
+      let m;
+      if (!line.trim()) { endPara(); endList(); }
+      else if (line.trim().startsWith("|")) {              // a table: keep its columns
+        endPara(); endList();
+        const rows = [line];
+        while (n + 1 < lines.length && lines[n + 1].trim().startsWith("|")) rows.push(lines[++n]);
+        out.push(`<pre>${esc(rows.join("\n"))}</pre>`);
+      }
+      else if ((m = line.match(/^(#{1,6})\s+(.*)/))) { endPara(); endList(); out.push(`<h3>${inline(m[2])}</h3>`); }
+      else if ((m = line.match(/^\s*([-*]|\d+\.)\s+(.*)/))) {
+        endPara();
+        const kind = /\d/.test(m[1]) ? "ol" : "ul";
+        if (list !== kind) { endList(); out.push(`<${kind}>`); list = kind; }
+        out.push(`<li>${inline(m[2])}</li>`);
+      }
+      else if ((m = line.match(/^>\s?(.*)/))) { endPara(); endList(); out.push(`<blockquote>${inline(m[1])}</blockquote>`); }
+      else { endList(); para.push(inline(line)); }
+    }
+    endPara(); endList();
+  });
+  return out.join("");
+}
+
+// --- state ------------------------------------------------------------------
+let cfg = null;                 // {accounts, modes, models}
+let kind = "chats";             // list tab
+let cur = null;                 // {kind: "chats"|"groups", id, es, lastSeq, pending:Set, tools:Map, members, first}
+let listTimer = null;
+const timeAgo = (t) => { const s = Date.now() / 1000 - t; return s < 60 ? "now" : s < 3600 ? Math.floor(s / 60) + "m" : s < 86400 ? Math.floor(s / 3600) + "h" : Math.floor(s / 86400) + "d"; };
+const wide = matchMedia("(min-width: 900px)");
+const tilde = (p) => p.replace(/^\/home\/[^/]+/, "~");
+const MODE_NAME = { ask: "Ask each time", edits: "Accept edits", plan: "Plan first", bypass: "Bypass (no questions)" };
+const status = (msg, bad) => { const s = $("status"); s.textContent = msg || ""; s.className = bad ? "err" : ""; };
+
+// --- the list ---------------------------------------------------------------
+async function loadList() {
+  let data;
+  const keep = $("cards").scrollTop;
+  try { data = await api("api/chats"); }
+  catch (e) { $("cards").innerHTML = `<div class="empty">${esc(e.message)}<br><br><a href="/">Open the terminal view</a></div>`; return; }
+  cfg = data;
+  const main = data.chats.find((c) => c.default);
+  $("hero").innerHTML = main ? `<div class="mainbot${cur && cur.id === main.id ? " sel" : ""}" data-id="${esc(main.id)}">
+      <div class="av huge">${emo(face(main))}<span class="star">★</span><span class="dot ${esc(main.state)}"></span></div>
+      <div>${esc(main.title)}</div>${main.asks || main.state === "waiting" ? '<div class="sub st-wait">needs your OK</div>' : main.state === "working" ? '<div class="sub st-work">typing…</div>' : ""}</div>` : "";
+  const acc = (data.accounts || []).find((a) => a.name === data.account);
+  $("acct").hidden = (data.accounts || []).length < 2;
+  $("acct").textContent = "🔑 " + (acc ? acc.label : "Default");
+  const q = $("q").value.trim().toLowerCase();
+  const all = (kind === "chats" ? data.chats : data.groups).filter((r) => !r.default);
+  const rows = q ? all.filter((r) => `${r.title} ${r.last}`.toLowerCase().includes(q)) : all;
+  if (q && !rows.length) { $("cards").innerHTML = '<div class="empty">Nothing found.</div>'; return; }
+  if (!rows.length) {
+    $("cards").innerHTML = `<div class="empty"><div class="big">${kind === "chats" ? "💬" : "👥"}</div>${kind === "chats" ? "No chats yet.<br>Tap ＋ to start one." : "No groups yet. A group puts several chats in one room.<br>Tap ＋ (you need two chats first)."}</div>`;
+    return;
+  }
+  $("cards").innerHTML = rows.map((r) => {
+    const badges = (kind === "chats" && r.mode === "bypass" ? '<span class="badge m-bypass">bypass</span>' : "") +
+      (kind === "chats" && r.tab ? `<span class="badge">🔗 ${esc(r.tab.title || r.tab.id)}</span>` : "");
+    return `<div class="card${cur && cur.id === r.id ? " sel" : ""}" data-id="${esc(r.id)}">
+      <div class="av ${avOf(r).cls}" style="${avOf(r).style}">${avOf(r).html}<span class="dot ${esc(r.state)}"></span></div>
+      <div class="body">
+        <div class="top"><span class="t">${esc(r.title)}</span><span class="ago">${timeAgo(r.updated)}</span><button type="button" class="more" data-more title="Settings">⋯</button></div>
+        ${r.asks || r.state === "waiting" ? '<div class="sub last st-wait">needs your OK</div>' : r.state === "working" ? '<div class="sub last st-work">typing…</div>' : `<div class="sub last">${esc(r.last) || "&nbsp;"}</div>`}
+        ${badges ? `<div class="meta">${badges}</div>` : ""}
+      </div></div>`;
+  }).join("");
+  $("cards").scrollTop = keep;
+}
+// one Claude login for the whole of Tabit Chat; sessions are shared, so chats go on
+$("acct").onclick = () => {
+  sheet(`<h2>Claude login</h2><div class="hint">Every chat uses this login. They carry on where they were.</div>
+    <div class="plist">${cfg.accounts.map((a) => `<div class="prow" data-a="${esc(a.name)}"><span>${a.name === cfg.account ? "●" : "○"}</span><b>${esc(a.label)}</b></div>`).join("")}</div>
+    <div class="hint" id="a-err" style="color:var(--red)"></div><div class="acts"><button type="button" class="primary" id="a-close">Close</button></div>`);
+  $("a-close").onclick = closeSheet;
+  document.querySelectorAll("#sheetin .prow[data-a]").forEach((r) => {
+    r.onclick = async () => {
+      try { await api("api/chats/account", { account: r.dataset.a }); closeSheet(); await loadList(); }
+      catch (e) { $("a-err").textContent = e.message; }
+    };
+  });
+};
+$("hero").addEventListener("click", (e) => {
+  const c = e.target.closest(".mainbot");
+  if (c) location.hash = "#c/" + c.dataset.id;
+});
+$("cards").addEventListener("click", (e) => {
+  const c = e.target.closest(".card");
+  if (c && e.target.closest("[data-more]")) { settings({ kind, id: c.dataset.id }); return; }
+  if (c) location.hash = (kind === "chats" ? "#c/" : "#g/") + c.dataset.id;
+});
+$("tabs").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  kind = b.dataset.k;
+  document.querySelectorAll("#tabs button").forEach((x) => x.classList.toggle("on", x === b));
+  loadList();
+});
+
+// --- routing: #c/<id>, #g/<id>, or the list ---------------------------------
+function route() {
+  const m = location.hash.match(/^#([cg])\/(\w+)$/);
+  closeStream();
+  if (!m) { showList(); return; }
+  openTalk(m[1] === "c" ? "chats" : "groups", m[2]);
+}
+function showList() {
+  cur = null;
+  $("list").classList.add("on"); $("talk").classList.remove("on");
+  $("title").textContent = "Chat"; $("back").hidden = true; $("pill").hidden = true; $("hav").hidden = true;
+  $("more").hidden = true; $("add").hidden = false; $("remote").hidden = false; $("notify").hidden = true;
+  loadList();
+  clearInterval(listTimer);
+  listTimer = setInterval(() => { if (!document.hidden && (!cur || wide.matches)) loadList(); }, 5000);
+}
+window.addEventListener("hashchange", route);
+$("back").onclick = () => { location.hash = ""; };
+$("q").addEventListener("input", loadList);
+$("sb-add").onclick = () => $("add").click();
+
+// --- one conversation -------------------------------------------------------
+function closeStream() { if (cur && cur.es) { cur.es.close(); cur.es = null; } }
+function openTalk(k, id) {
+  if (wide.matches) {                      // the list stays beside the chat
+    kind = k;
+    document.querySelectorAll("#tabs button").forEach((x) => x.classList.toggle("on", x.dataset.k === k));
+    if (!listTimer) listTimer = setInterval(() => { if (!document.hidden) loadList(); }, 5000);
+    loadList();
+  } else { clearInterval(listTimer); listTimer = null; }
+  cur = { kind: k, id, es: null, lastSeq: 0, pending: new Set(), tools: new Map(), asks: new Map(), members: {}, firstSeq: 0, state: "idle", live: {} };
+  $("list").classList.remove("on"); $("talk").classList.add("on");
+  $("back").hidden = false; $("more").hidden = false; $("add").hidden = true; $("remote").hidden = true;
+  $("notify").hidden = !("Notification" in window);
+  $("msgs").innerHTML = ""; $("title").textContent = "…"; status("");
+  $("chips").style.display = "none"; setReply(null);
+  $("text").value = localStorage.getItem("draft:" + id) || ""; grow();
+  connect();
+}
+function connect() {
+  if (!cur) return;
+  const me = cur;
+  const es = new EventSource(`${base(me.kind)}/${me.id}/events?tail=300&since=${me.lastSeq}`);
+  me.es = es;
+  es.addEventListener("chat", (e) => { $("conn").style.display = "none"; take(me, JSON.parse(e.data)); });
+  es.addEventListener("alive", () => { $("conn").style.display = "none"; });
+  es.onerror = () => {
+    if (cur !== me) return;
+    $("conn").style.display = "block";
+    if (es.readyState === EventSource.CLOSED) {          // refused (off, or gone): look why
+      api(`${base(me.kind)}/${me.id}`).catch((er) => { $("conn").textContent = er.message; });
+    }
+  };
+}
+
+function take(me, d) {
+  if (cur !== me) return;
+  const box = $("msgs");
+  const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 90;
+  me.state = d.state;
+  me.meta = d.meta;
+  if (me.kind === "groups") d.meta.members.forEach((m) => { me.members[m.id] = m.alias; });
+  me.pending = new Set(d.pending.map((p) => p.rid));
+  d.pending.forEach((p) => me.asks.set(p.rid, p));
+  const fresh = d.events.filter((ev) => ev.seq > me.lastSeq);
+  if (!me.lastSeq && d.older && d.events.length) {
+    const b = document.createElement("button");
+    b.id = "older"; b.textContent = "Load earlier"; b.onclick = loadOlder; box.prepend(b);
+  }
+  if (!me.firstSeq && d.events.length) me.firstSeq = d.events[0].seq;
+  let finished = false;
+  for (const ev of fresh) {
+    const el = draw(me, ev);
+    if (el) liveSpot().before(el);
+    if (ev.t === "done") finished = true;
+  }
+  me.lastSeq = Math.max(me.lastSeq, d.seq);
+  me.live = d.live;
+  paintLive(me);
+  paintAsks(me);
+  header(me);
+  if (finished && document.hidden && localStorage.getItem("notify") === "1" && Notification.permission === "granted")
+    new Notification(d.meta.title, { body: "Claude is done." });
+  if (stick) box.scrollTop = box.scrollHeight;
+  else $("jump").style.display = "block";
+}
+
+function header(me) {
+  const m = me.meta;
+  $("title").textContent = m.title;
+  const hav = $("hav"); const hv = avOf(m); hav.hidden = false; hav.className = "av sm " + hv.cls; hav.style.cssText = hv.style; hav.innerHTML = hv.html;
+  const p = $("pill");
+  p.hidden = false; p.className = "pill " + me.state;
+  p.textContent = me.state === "idle" ? (me.kind === "chats" ? (m.tab ? "mirror" : m.mode) : "idle") : me.state === "waiting" ? "waiting for you" : me.kind === "groups" ? "talking…" : "typing…";
+  $("stop").hidden = me.state === "idle";
+    const chips = $("chips");
+  if (me.kind === "groups") {
+    chips.style.display = "flex";
+    chips.innerHTML = m.members.map((x) => `<button data-a="${esc(x.alias)}" style="color:${colorOf(x.alias)}"><span class="dot ${esc(x.state)}"></span>@${esc(x.alias)}</button>`).join("");
+    markChips();
+  }
+}
+// chips for the names at the start of the message light up
+function markChips() {
+  const lead = $("text").value.match(/^(?:\s*@[\w-]+[\s,]*)+/);
+  const on = new Set(lead ? [...lead[0].matchAll(/@([\w-]+)/g)].map((x) => x[1].toLowerCase()) : []);
+  document.querySelectorAll("#chips button").forEach((b) => b.classList.toggle("on", on.has(b.dataset.a.toLowerCase())));
+}
+$("text").addEventListener("input", markChips);
+// where the cursor was when the box last lost focus: tapping a chip takes the focus away
+let lastSel = null;
+$("text").addEventListener("blur", () => { const t = $("text"); lastSel = [t.selectionStart, t.selectionEnd]; });
+$("chips").addEventListener("mousedown", (e) => e.preventDefault());       // keep the keyboard up
+$("chips").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  const t = $("text");
+  // tap puts @name where the cursor is (or replaces what is selected)
+  const end = t.value.length;
+  let [s, f] = document.activeElement === t ? [t.selectionStart, t.selectionEnd] : (lastSel || [end, end]);
+  s = Math.min(s, end); f = Math.min(f, end);
+  const before = t.value.slice(0, s), after = t.value.slice(f);
+  const ins = (before && !/\s$/.test(before) ? " " : "") + "@" + b.dataset.a + (/^\s/.test(after) ? "" : " ");
+  t.value = before + ins + after;
+  const pos = before.length + ins.length + (/^\s/.test(after) ? 1 : 0);
+  t.focus(); t.setSelectionRange(pos, pos); lastSel = null; grow(); markChips();
+});
+
+// one human sentence for a tool call; the raw input stays inside the chip
+function plain(ev) {
+  let i = {};
+  try { i = JSON.parse(ev.detail || "{}") || {}; } catch (_e) { /* cut off: use the summary */ }
+  const file = (i.file_path || i.path || "").split("/").pop() || ev.summary || "";
+  const one = (t) => String(t || "").split("\n")[0].slice(0, 80);
+  switch (ev.name) {
+    case "Write": return "📝 Wrote " + file;
+    case "Edit": case "MultiEdit": return "✏️ Edited " + file;
+    case "NotebookEdit": return "✏️ Edited notebook " + file;
+    case "Read": return "📖 Read " + file;
+    case "Bash": return "⌨️ Ran: " + one(i.command || ev.summary);
+    case "Grep": case "Glob": return "🔎 Looked for " + one(i.pattern || ev.summary);
+    case "WebSearch": return "🌐 Searched the web: " + one(i.query || ev.summary);
+    case "WebFetch": return "🌐 Opened " + one(i.url || ev.summary);
+    case "TodoWrite": return "📋 Updated the to-do list";
+    case "Task": case "Agent": return "🤝 Asked a helper: " + one(i.description || ev.summary);
+    default: return "🔧 " + ev.name + (ev.summary ? " · " + one(ev.summary) : "");
+  }
+}
+
+// the live part sits at the end of the list; new things go before it
+function liveSpot() {
+  let l = $("live");
+  if (!l) { l = document.createElement("div"); l.id = "live"; l.style.display = "contents"; $("msgs").append(l); }
+  return l;
+}
+function paintLive(me) {
+  const l = liveSpot();
+  const items = me.kind === "chats" ? (me.live ? { "": me.live } : {}) : me.live;
+  let html = "";
+  for (const [cid, text] of Object.entries(items)) {
+    const who = me.kind === "groups" ? me.members[cid] || "" : "";
+    html += `<div class="b ai">${who ? `<div class="who" style="color:${colorOf(who)}">${esc(who)}</div>` : ""}${md(text)}</div>`;
+  }
+  if (!html && me.state === "working") html = '<div class="b ai"><span class="dots"><span></span><span></span><span></span></span></div>';
+  l.innerHTML = html;
+}
+
+// a message of the user, Claude or a member can be replied to: it carries its seq, who and a short quote
+const REPLYABLE = new Set(["user", "text", "say"]);
+function clock(ts) {                     // 14:05 today; "11/01 14:05" on another day
+  const d = new Date(ts * 1000), t = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  return d.toDateString() === new Date().toDateString() ? t : `${d.getMonth() + 1}/${d.getDate()} ${t}`;
+}
+function draw(me, ev) {
+  const el = drawOne(me, ev);
+  if (el && ev.ts && el.classList.contains("b")) el.insertAdjacentHTML("beforeend", `<div class="ts">${clock(ev.ts)}</div>`);
+  if (el && REPLYABLE.has(ev.t) && ev.text) {
+    el.dataset.seq = ev.seq;
+    el.dataset.who = ev.t === "user" ? "You" : ev.name || "Claude";
+    el.dataset.snip = ev.text.replace(/\s+/g, " ").trim().slice(0, 140);
+    el.insertAdjacentHTML("beforeend", '<button type="button" class="rp">↩ Reply</button>');
+  }
+  return el;
+}
+function drawOne(me, ev) {
+  const div = (cls, html) => { const d = document.createElement("div"); d.className = cls; d.innerHTML = html; return d; };
+  switch (ev.t) {
+    case "user":
+      return div("b me", `${ev.reply ? `<div class="quote"${ev.reply.seq ? ` data-go="${+ev.reply.seq}"` : ""}><b>${esc(ev.reply.who)}</b>${esc(ev.reply.snip)}</div>` : ""}${esc(ev.text)}${ev.to && me.kind === "groups" ? `<div class="to">to ${ev.to.map((x) => "@" + esc(x)).join(" ")}</div>` : ""}`);
+    case "text":
+      return div("b ai", md(ev.text));
+    case "say":
+      return div("b ai", `<div class="who" style="color:${colorOf(ev.name)}">${esc(ev.name)}</div>${md(ev.text)}`);
+    case "tool": {
+      const d = document.createElement("details");
+      d.className = "tool";
+      d.innerHTML = `<summary>${esc(plain(ev))}</summary><pre>${esc(ev.detail)}</pre>`;
+      me.tools.set(ev.id, d);
+      return d;
+    }
+    case "result": {
+      const d = me.tools.get(ev.id);
+      const pre = `<pre class="${ev.error ? "err" : ""}">${esc(ev.text || "(no output)")}</pre>`;
+      if (d) { d.insertAdjacentHTML("beforeend", pre); if (ev.error) d.querySelector("summary").textContent += " ⚠"; return null; }
+      return div("tool", `<details><summary>result</summary>${pre}</details>`);
+    }
+    case "ask": {
+      const d = document.createElement("div");
+      d.className = "ask closed"; d.dataset.rid = ev.rid; d.dataset.chat = ev.chat || me.id;
+      me.asks.set(ev.rid, Object.assign(me.asks.get(ev.rid) || {}, ev));
+      return d;
+    }
+    case "answered": {
+      const card = document.querySelector(`#msgs .ask[data-rid="${CSS.escape(ev.rid)}"]`);
+      if (card) { card.dataset.verdict = ev.allow ? "Allowed" : ev.why === "answered in the tab" ? "Answered in the tab" : ev.why === "cancelled" ? "Cancelled" : ev.why === "stopped" ? "Stopped" : "Denied"; }
+      return null;
+    }
+    case "relay":
+      return div("note", `${esc(ev.from)} → ${esc(ev.to)}`);
+    case "notice":
+      return div("note", esc(ev.text));
+    case "error":
+      return div("note err", `${ev.name ? esc(ev.name) + ": " : ""}${esc(ev.text)}`);
+    case "done":
+      return null;
+  }
+  return null;
+}
+
+// permission cards: buttons only while the question is open on the server
+function paintAsks(me) {
+  document.querySelectorAll("#msgs .ask").forEach((card) => {
+    const rid = card.dataset.rid, ev = me.asks.get(rid);
+    if (!ev) return;
+    const open = me.pending.has(rid);
+    const sig = open ? "open" : card.dataset.verdict || "closed";
+    if (card.dataset.sig === sig) return;
+    card.dataset.sig = sig;
+    card.className = "ask" + (open ? "" : " closed");
+    const who = ev.name ? ` <span style="color:${colorOf(ev.name)}">(${esc(ev.name)})</span>` : "";
+    let body = "";
+    if (ev.questions) {
+      body = ev.questions.map((q, i) => `<div class="q">${esc(q.question)}</div><div class="opts" data-q="${i}">${(q.options || []).map((o) =>
+        `<button type="button" data-l="${esc(o.label)}" title="${esc(o.description || "")}">${esc(o.label)}</button>`).join("")}</div>`).join("");
+      body += open ? '<div class="row"><button class="primary" data-act="answerq" disabled>Answer</button><button data-act="deny">Skip</button></div>' : "";
+    } else {
+      body = (ev.plan ? `<div class="what">${md(ev.plan)}</div>` : `<div class="what">${esc(ev.summary || "")}</div>`) +
+        (ev.detail && !ev.plan ? `<details><summary>details</summary><pre>${esc(ev.detail)}</pre></details>` : "");
+      if (open) body += `<div class="row"><button class="primary" data-act="allow">${ev.plan ? "Approve" : "Allow"}</button>` +
+        (ev.can_remember ? '<button data-act="always">Allow &amp; don’t ask again</button>' : "") +
+        '<button class="danger" data-act="deny">Deny</button></div>';
+    }
+    card.innerHTML = `<h3>${open ? "" : "✓ "}Claude wants to ${ev.questions ? "ask you" : ev.plan ? "start the plan" : "use " + esc(ev.tool)}${who}</h3>${body}` +
+      (open ? "" : `<div class="verdict">${esc(card.dataset.verdict || "answered")}</div>`);
+  });
+}
+$("msgs").addEventListener("click", async (e) => {
+  const quote = e.target.closest(".quote[data-go]");
+  if (quote) { jumpTo(+quote.dataset.go); return; }
+  const rp = e.target.closest(".rp");
+  if (rp) {
+    const b = rp.closest(".b");
+    setReply({ seq: +b.dataset.seq, who: b.dataset.who, snip: b.dataset.snip });
+    b.classList.remove("sel"); $("text").focus();
+    return;
+  }
+  const bubble = e.target.closest(".b[data-seq]");
+  if (bubble && !e.target.closest("a, pre, code, summary, button")) {       // a tap shows or hides "Reply"
+    document.querySelectorAll("#msgs .b.sel").forEach((x) => { if (x !== bubble) x.classList.remove("sel"); });
+    bubble.classList.toggle("sel");
+  }
+  const opt = e.target.closest(".ask .opts button");
+  if (opt) {
+    opt.parentElement.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b === opt));
+    const card = opt.closest(".ask");
+    card.querySelector('[data-act="answerq"]').disabled = card.querySelectorAll(".opts").length !== card.querySelectorAll(".opts .on").length;
+    return;
+  }
+  const b = e.target.closest(".ask button[data-act]");
+  if (!b || !cur) return;
+  const card = b.closest(".ask"), rid = card.dataset.rid, act = b.dataset.act;
+  const body = { rid, chat: card.dataset.chat, allow: act !== "deny", always: act === "always" };
+  if (act === "answerq") {
+    const ev = cur.asks.get(rid), answers = {};
+    card.querySelectorAll(".opts").forEach((o) => { answers[ev.questions[o.dataset.q].question] = o.querySelector(".on").dataset.l; });
+    body.answers = answers;
+  }
+  b.disabled = true;
+  try { await api(`${base(cur.kind)}/${cur.id}/answer`, body); }
+  catch (er) { status(er.message, true); b.disabled = false; }
+});
+
+// replying: the bar over the box says what to, and send() passes its seq
+let replyTo = null;
+function setReply(r) {
+  replyTo = r;
+  $("replybar").style.display = r ? "flex" : "none";
+  if (r) $("replybar").querySelector(".rq").innerHTML = `<b>${esc(r.who)}</b>${esc(r.snip)}`;
+}
+$("rcancel").onclick = () => setReply(null);
+// back to the message a reply points at; older ones are loaded until it shows
+async function jumpTo(seq) {
+  const find = () => document.querySelector(`#msgs [data-seq="${seq}"]`);
+  for (let tries = 0; !find() && $("older") && tries < 40; tries++) await loadOlder();
+  const el = find();
+  if (!el) { status("That message is too old to show.", true); return; }
+  el.scrollIntoView({ block: "center", behavior: "smooth" });
+  el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash");
+}
+
+async function loadOlder() {
+  const me = cur; if (!me) return;
+  try {
+    const { events } = await api(`${base(me.kind)}/${me.id}/history?before=${me.firstSeq}`);
+    if (!events.length) { $("older")?.remove(); return; }
+    const box = $("msgs"), h = box.scrollHeight, anchor = $("older");
+    const holder = document.createElement("div"); holder.style.display = "contents";
+    for (const ev of events) { const el = draw(me, ev); if (el) holder.append(el); }
+    anchor.after(holder);
+    me.firstSeq = events[0].seq;
+    box.scrollTop += box.scrollHeight - h;
+    paintAsks(me);
+    if (events[0].seq <= 1) anchor.remove();
+  } catch (e) { status(e.message, true); }
+}
+$("msgs").addEventListener("scroll", () => {
+  const box = $("msgs");
+  $("jump").style.display = box.scrollHeight - box.scrollTop - box.clientHeight < 90 ? "none" : "block";
+});
+$("jump").onclick = () => { const b = $("msgs"); b.scrollTop = b.scrollHeight; };
+
+// --- typing -----------------------------------------------------------------
+function grow() { const t = $("text"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, window.innerHeight * 0.4) + "px"; }
+$("text").addEventListener("input", () => { grow(); if (cur) localStorage.setItem("draft:" + cur.id, $("text").value); });
+$("text").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); send(); }
+});
+$("send").onclick = send;
+async function send() {
+  if (!cur) return;
+  const t = $("text"), text = t.value.trim();
+  if (!text) return;
+  $("send").disabled = true; status("");
+  try {
+    await api(`${base(cur.kind)}/${cur.id}/send`, { text, reply: replyTo ? replyTo.seq : undefined });
+    setReply(null);
+    t.value = ""; localStorage.removeItem("draft:" + cur.id); grow(); markChips();
+    const b = $("msgs"); b.scrollTop = b.scrollHeight;
+  } catch (e) { status(e.message, true); }
+  $("send").disabled = false; t.focus();
+}
+$("stop").onclick = async () => { try { await api(`${base(cur.kind)}/${cur.id}/stop`, {}); } catch (e) { status(e.message, true); } };
+
+// a file or a photo goes to tabit's uploads folder; its path goes into the message
+async function upload(file) {
+  const name = file.name || "paste." + (file.type.split("/")[1] || "bin");
+  status(`uploading ${name}…`);
+  try {
+    const res = await fetch(`api/upload?name=${encodeURIComponent(name)}`, { method: "POST", body: file,
+      headers: { "Content-Type": "application/octet-stream", "X-Tabit": "1" } });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    const t = $("text");
+    t.value = (t.value && !/\s$/.test(t.value) ? t.value + " " : t.value) + body.path + " ";
+    t.dispatchEvent(new Event("input")); t.focus(); status("");
+  } catch (e) { status("upload: " + e.message, true); }
+}
+$("attach").onclick = () => $("file").click();
+$("file").onchange = () => { const f = $("file").files[0]; $("file").value = ""; if (f) upload(f); };
+$("text").addEventListener("paste", (e) => {
+  const f = [...(e.clipboardData?.files || [])][0];
+  if (f) { e.preventDefault(); upload(f); }
+});
+document.addEventListener("dragover", (e) => e.preventDefault());
+document.addEventListener("drop", (e) => { const f = e.dataTransfer?.files[0]; if (f && cur) { e.preventDefault(); upload(f); } });
+
+$("notify").onclick = async () => {
+  if (localStorage.getItem("notify") === "1") { localStorage.removeItem("notify"); status("Notifications off."); return; }
+  const p = await Notification.requestPermission();
+  if (p === "granted") { localStorage.setItem("notify", "1"); status("You will be told when Claude is done and this page is hidden."); }
+  else status("Notifications are blocked in this browser.", true);
+};
+
+// --- sheets -----------------------------------------------------------------
+function sheet(html) { $("sheetin").innerHTML = html; $("sheet").classList.add("on"); }
+function closeSheet() { $("sheet").classList.remove("on"); $("sheetin").innerHTML = ""; }
+$("sheet").addEventListener("click", (e) => { if (e.target === $("sheet")) closeSheet(); });
+const opts = (list, pick, label) => list.map((v) => `<option value="${esc(v)}"${v === pick ? " selected" : ""}>${esc(label ? label(v) : v)}</option>`).join("");
+
+$("add").onclick = () => (kind === "chats" ? newChat() : newGroup());
+async function newChat() {
+  if (!cfg) await loadList();
+  const recent = [...new Set((cfg?.chats || []).map((c) => c.cwd))].slice(0, 6);
+  const last = localStorage.getItem("lastcwd") || "~";
+  sheet(`<h2>New chat</h2>
+    <div id="n-look"></div>
+    <label>Mirror a Claude tab (optional)</label><select id="n-tab"></select>
+    <div class="hint" id="n-mirror" hidden>This chat shows that tab. What you type goes into the tab, and what the tab says shows here.</div>
+    <div id="n-own">
+    <label>Folder on this computer</label>
+    <input id="n-cwd" value="${esc(last)}" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <div class="chips"><button id="n-browse" type="button">Browse…</button>${recent.map((c) => `<button type="button" data-cwd="${esc(c)}">${esc(tilde(c))}</button>`).join("")}</div>
+    <label>When Claude wants to do something</label>
+    <select id="n-mode">${opts(cfg.modes, "ask", (m) => MODE_NAME[m])}</select>
+    <div class="hint warn" id="n-warn" hidden>Bypass: Claude runs commands and edits files without asking. Only use it for work you can undo.</div>
+    <label>Model</label><select id="n-model">${opts(cfg.models, "", (m) => m || "default")}</select>
+    </div>
+    <label>Name (optional)</label><input id="n-title" maxlength="80">
+    <div class="hint" id="n-err" style="color:var(--red)"></div>
+    <div class="acts"><button type="button" id="n-cancel">Cancel</button><button type="button" class="primary" id="n-go">Start</button></div>`);
+  const look = picker($("n-look"), { id: String(Math.random()), roll: true });
+  const tab = tabPick($("n-tab"));
+  $("n-tab").onchange = () => { $("n-own").hidden = !!tab(); $("n-mirror").hidden = !tab(); };
+  $("n-mode").onchange = () => { $("n-warn").hidden = $("n-mode").value !== "bypass"; };
+  $("n-cancel").onclick = closeSheet;
+  $("n-browse").onclick = () => browse($("n-cwd").value, (p) => { $("n-cwd").value = p; });
+  $("sheetin").querySelectorAll("[data-cwd]").forEach((b) => { b.onclick = () => { $("n-cwd").value = b.dataset.cwd; }; });
+  $("n-go").onclick = async () => {
+    try {
+      const cwd = $("n-cwd").value.trim() || "~";
+      const { chat } = await api("api/chats", { cwd, mode: $("n-mode").value,
+        model: $("n-model").value, title: $("n-title").value, tab: tab(), ...look.get() });
+      localStorage.setItem("lastcwd", cwd);
+      closeSheet(); location.hash = "#c/" + chat.id;
+    } catch (e) { $("n-err").textContent = e.message; }
+  };
+}
+// the folder picker is a second sheet on top, so the form under it keeps what was typed
+async function browse(start, done) {
+  const top = $("sheet2"), box = $("sheet2in");
+  const close = () => { top.classList.remove("on"); box.innerHTML = ""; };
+  top.classList.add("on");
+  async function show(path) {
+    try {
+      const d = await api("api/dirs?path=" + encodeURIComponent(path || "~"));
+      box.innerHTML = `<h2>Pick a folder</h2><div class="hint">${esc(d.show)}</div>
+        <div class="chips"><button type="button" id="d-new">＋ New folder</button></div>
+        <div class="chips" id="d-form" hidden><input id="d-name" placeholder="Folder name" maxlength="200" autocapitalize="off" autocorrect="off" spellcheck="false" style="flex:1"><button type="button" class="primary" id="d-make">Create</button></div>
+        <div class="hint" id="d-err" style="color:var(--red)"></div>
+        <div class="dirs">${d.parent ? '<div data-p="' + esc(d.parent) + '">‹ ..</div>' : ""}${d.dirs.map((x) => `<div data-p="${esc(x.path)}">📁 ${esc(x.name)}</div>`).join("")}${d.more ? '<div class="hint">more folders than shown</div>' : ""}</div>
+        <div class="acts"><button type="button" id="d-cancel">Back</button><button type="button" class="primary" id="d-use">Use this folder</button></div>`;
+      box.querySelectorAll(".dirs [data-p]").forEach((el) => { el.onclick = () => show(el.dataset.p); });
+      $("d-use").onclick = () => { close(); done(d.path); };
+      $("d-new").onclick = () => { $("d-form").hidden = false; $("d-new").hidden = true; $("d-name").focus(); };
+      $("d-make").onclick = async () => {
+        try { const out = await api("api/dirs/new", { parent: d.path, name: $("d-name").value }); show(out.path); }
+        catch (e) { $("d-err").textContent = e.message; }
+      };
+    } catch (e) {
+      box.innerHTML = `<h2>Pick a folder</h2><div class="hint warn">${esc(e.message)}</div><div class="acts"><button id="d-cancel" type="button">Back</button></div>`;
+    }
+    $("d-cancel").onclick = close;
+  }
+  show(start);
+}
+
+async function newGroup() {
+  if (!cfg) await loadList();
+  const chats = (cfg?.chats || []).filter((c) => !c.tab);     // a chat that mirrors a tab cannot join
+  if (chats.length < 2) { sheet(`<h2>New group</h2><div class="hint">A group needs two chats or more. Start the chats first.</div><div class="acts"><button type="button" id="g-cancel">OK</button></div>`); $("g-cancel").onclick = closeSheet; return; }
+  sheet(`<h2>New group</h2>
+    <div class="hint">You talk to everyone at once, or to one with @name. A chat can pass a message on by starting a line with @name. After ${8} passes it stops and waits for you.</div>
+    <label>Name</label><input id="g-title" maxlength="80" placeholder="Team">
+    <label>Chats in it</label>
+    ${chats.map((c) => `<label class="pick"><input type="checkbox" value="${esc(c.id)}"><span>${esc(c.title)} <span class="badge">${esc(tilde(c.cwd))}</span></span></label>`).join("")}
+    <div class="hint" id="g-err" style="color:var(--red)"></div>
+    <div class="acts"><button type="button" id="g-cancel">Cancel</button><button type="button" class="primary" id="g-go">Create</button></div>`);
+  $("g-cancel").onclick = closeSheet;
+  $("g-go").onclick = async () => {
+    const members = [...$("sheetin").querySelectorAll("input[type=checkbox]:checked")].map((x) => x.value);
+    try {
+      const { group } = await api("api/chat-groups", { title: $("g-title").value, members });
+      closeSheet(); kind = "groups"; location.hash = "#g/" + group.id;
+    } catch (e) { $("g-err").textContent = e.message; }
+  };
+}
+
+// the profile: who this is, what it made (the library), and the way to settings
+const ago = (t) => { const d = Math.floor((Date.now() / 1000 - t) / 86400); return d < 1 ? "Today" : d < 7 ? "This week" : "Older"; };
+async function profile() {
+  if (!cur || !cur.meta) return;
+  const m = cur.meta;
+  const hv = avOf(m), av = `<div class="av big ${hv.cls}" style="${hv.style}">${hv.html}</div>`;
+  if (cur.kind === "groups") {
+    sheet(`<div class="prof">${av}<h2>${esc(m.title)}</h2><div class="hint">${m.members.length} chats in this room</div></div>
+      <div class="plist">${m.members.map((x) => `<div class="prow" data-go="${esc(x.id)}"><span class="dot ${esc(x.state)}"></span><b style="color:${colorOf(x.alias)}">@${esc(x.alias)}</b><span class="hint">${esc(x.title)}</span></div>`).join("")}</div>
+      <div class="acts"><button type="button" id="p-set">Settings</button><button type="button" class="primary" id="p-close">Close</button></div>`);
+    document.querySelectorAll(".prow").forEach((r) => { r.onclick = () => { closeSheet(); kind = "chats"; location.hash = "#c/" + r.dataset.go; }; });
+  } else {
+    sheet(`<div class="prof">${av}<h2>${esc(m.title)}</h2><div class="hint">${esc(tilde(m.cwd))}</div>
+      <div class="meta">${m.tab ? `<span class="badge">🔗 mirrors ${esc(m.tab.title)}</span>` : `<span class="badge m-${esc(m.mode)}">${esc(MODE_NAME[m.mode] || m.mode)}</span><span class="badge">${esc(m.model || "default model")}</span>`}</div></div>
+      <div id="p-lib" class="hint">Loading…</div>
+      <div class="acts"><button type="button" id="p-set">Settings</button><button type="button" class="primary" id="p-close">Close</button></div>`);
+    try {
+      const lib = await (await fetch(`api/chats/${cur.id}/library`)).json();
+      const groups = {};
+      for (const f of lib.files || []) (groups[ago(f.ts)] ||= []).push(f);
+      const rows = ["Today", "This week", "Older"].filter((k) => groups[k]).map((k) => `<div class="lh">${k}</div>` +
+        groups[k].map((f) => `<a class="file" target="_blank" rel="noopener" href="api/file?path=${encodeURIComponent(f.path)}&amp;render=1"><span>${f.action === "Write" ? "📝" : "✏️"}</span><div><b>${esc(f.name)}</b><div class="hint">${esc(tilde(f.path))}</div></div></a>`).join("")).join("");
+      const el = $("p-lib");
+      if (el) el.outerHTML = `<div class="stats"><div><b>${lib.turns}</b>replies</div><div><b>${(lib.files || []).length}</b>files</div></div>
+        <div class="lib"><h3>Library</h3>${rows || '<div class="hint">Nothing made yet. Files Claude writes show up here.</div>'}</div>`;
+    } catch (_e) { const el = $("p-lib"); if (el) el.textContent = "Could not load the library."; }
+  }
+  $("p-close").onclick = closeSheet;
+  $("p-set").onclick = () => { closeSheet(); settings(); };
+}
+$("hav").onclick = $("ttl").onclick = profile;
+
+// t is the open conversation, or a row of the list ({kind, id}); its meta is fetched when missing
+const settings = async (t = cur) => {
+  if (!t) return;
+  if (!t.meta) {
+    try { t = { kind: t.kind, id: t.id, meta: (await api(`${base(t.kind)}/${t.id}`)).meta }; } catch (e) { return; }
+  }
+  const m = t.meta;
+  const done = () => { closeSheet(); if (!cur || cur.id !== t.id) loadList(); };
+  const gone = () => { closeSheet(); if (cur && cur.id === t.id) location.hash = ""; else loadList(); };
+  if (t.kind === "groups") {
+    sheet(`<h2>Group</h2><label>Name</label><input id="e-title" value="${esc(m.title)}" maxlength="80">
+      <label>Members</label><div id="e-members"></div>
+      <div class="hint" id="e-err" style="color:var(--red)"></div>
+      <div class="acts"><button type="button" class="danger" id="e-del">Delete group</button><button type="button" id="e-cancel">Cancel</button><button type="button" class="primary" id="e-save">Save</button></div>
+      <div class="hint">Deleting a group keeps its chats.</div>`);
+    const members = (g) => {
+      const inside = new Set(g.members.map((x) => x.id));
+      const others = (cfg.chats || []).filter((c) => !inside.has(c.id) && !c.tab);
+      $("e-members").innerHTML = g.members.map((x) => `<div class="prow"><b style="color:${colorOf(x.alias)}">@${esc(x.alias)}</b><span class="hint" style="flex:1">${esc(x.title)}</span><button type="button" data-rm="${esc(x.id)}" title="take out">✕</button></div>`).join("") +
+        (others.length ? `<div class="hint">Add a chat</div><div class="chips">${others.map((c) => `<button type="button" data-add="${esc(c.id)}">＋ ${esc(c.title)}</button>`).join("")}</div>` : "");
+    };
+    const change = async (body) => {
+      try { const out = await api(`api/chat-groups/${t.id}/members`, body); t.meta = out.group; members(out.group); $("e-err").textContent = ""; }
+      catch (e) { $("e-err").textContent = e.message; }
+    };
+    cfg = await api("api/chats");                       // the chats a group can take in
+    members(m);
+    $("e-members").onclick = (e) => {
+      const b = e.target.closest("button"); if (!b) return;
+      if (b.dataset.rm) change({ remove: [b.dataset.rm] });
+      if (b.dataset.add) change({ add: [b.dataset.add] });
+    };
+    $("e-save").onclick = async () => { try { await api(`api/chat-groups/${t.id}/edit`, { title: $("e-title").value }); done(); } catch (e) { $("e-err").textContent = e.message; } };
+    $("e-del").onclick = async () => { if (!confirm("Delete this group? Its chats stay.")) return; await api(`api/chat-groups/${t.id}/delete`, {}); gone(); };
+  } else {
+    sheet(`<h2>Chat</h2><div id="e-look"></div><div class="hint">${m.tab ? "🔗 Shows the tab “" + esc(m.tab.title) + "”" : esc(tilde(m.cwd))}</div>
+      <label>Name</label><input id="e-title" value="${esc(m.title)}" maxlength="80">
+      <div ${m.tab ? "hidden" : ""}><label>When Claude wants to do something</label><select id="e-mode">${opts(cfg.modes, m.mode, (x) => MODE_NAME[x])}</select>
+      <div class="hint warn" id="e-warn" ${m.mode === "bypass" ? "" : "hidden"}>Bypass: no questions asked.</div>
+      <label>Model</label><select id="e-model">${opts(cfg.models, m.model, (x) => x || "default")}</select></div>
+      <div class="hint" id="e-err" style="color:var(--red)"></div>
+      <div class="acts">${m.default ? "" : '<button type="button" class="danger" id="e-del">Delete</button>'}<button type="button" id="e-cancel">Cancel</button><button type="button" class="primary" id="e-save">Save</button></div>`);
+    const look = picker($("e-look"), m);
+    $("e-mode").onchange = () => { $("e-warn").hidden = $("e-mode").value !== "bypass"; };
+    $("e-save").onclick = async () => { try { await api(`api/chats/${t.id}/edit`, { title: $("e-title").value, mode: $("e-mode").value, model: $("e-model").value, ...look.get() }); done(); } catch (e) { $("e-err").textContent = e.message; } };
+    if ($("e-del")) $("e-del").onclick = async () => { if (!confirm("Delete this chat and its history?")) return; await api(`api/chats/${t.id}/delete`, {}); gone(); };
+  }
+  $("e-cancel").onclick = closeSheet;
+};
+$("more").onclick = () => settings();
+
+document.addEventListener("visibilitychange", () => { if (!document.hidden && !cur) loadList(); });
+route();
+</script>
+</body>
+</html>

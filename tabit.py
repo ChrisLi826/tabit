@@ -400,10 +400,10 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.1.0"
+APP_VERSION = "v2.2.0"
 # Taiwan main dish of the major version + a fresh snack or drink, picked at
 # release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
-APP_CODENAME = "Three Cup Chicken + Wheel Cake"
+APP_CODENAME = "Ginger Duck + Oolong Tea"
 _VERSION_CODENAME_SEP = " · "
 
 
@@ -970,6 +970,14 @@ REMOTE_MANIFEST = json.dumps({
              # edge to edge: the system rounds it, not a grey tile around it
              + [{"src": "icon-maskable.png", "sizes": "512x512",
                  "type": "image/png", "purpose": "maskable"}]}).encode()
+# Tabit Chat: the chat page, and its own manifest so it installs as its own app
+REMOTE_CHAT_PAGE = "chat.html"
+REMOTE_CHAT_MANIFEST = json.dumps({
+    "name": "tabit chat", "short_name": "chat", "start_url": "chat", "scope": "./",
+    "display": "standalone", "background_color": "#1a1b26",
+    "theme_color": "#1a1b26",
+    "icons": [{"src": f"icon-{n}.png", "sizes": f"{n}x{n}", "type": "image/png"}
+              for n in (192, 512)]}).encode()
 REMOTE_PUSH_EVERY = 10       # /api/events checks for a change this often (s)
 # A phone that drops off the network (airplane mode, out of range) leaves
 # its stream open on our side until TCP gives up, which can take many
@@ -2056,7 +2064,12 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         parts = self.path.split("?", 1)[0].strip("/").split("/")
         manage = None                       # (op, target) for tabs and groups
         admin = None                        # the Settings sheet: /api/admin/<op>
-        if parts == ["api", "new"]:
+        chat = parts[:2] in (["api", "chats"], ["api", "chat-groups"])
+        if chat:
+            pass                            # Tabit Chat: tabit_chat.py owns the routes
+        elif parts == ["api", "dirs", "new"]:
+            pass                            # a folder, made below
+        elif parts == ["api", "new"]:
             manage = ("new", None)
         elif len(parts) == 3 and parts[:2] == ["api", "admin"] and parts[2] != "state":
             admin = parts[2]
@@ -2079,6 +2092,12 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 raise ValueError
         except ValueError:
             self._json(400, {"error": "body must be a JSON object"})
+            return
+        if chat:
+            self._json(*self._chat("POST", parts, body))
+            return
+        if parts == ["api", "dirs", "new"]:
+            self._json(*self._mkdir(body))
             return
         if admin:
             self._json(*self.app._remote_admin(admin, body))
@@ -2128,7 +2147,17 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 res = (code, out)
             self._json(*self._result(res))
             return
-        if path in ("/", "/index.html"):
+        if parts[:2] in (["api", "chats"], ["api", "chat-groups"]):
+            self._chat_get(parts)
+        elif path == "/chat":
+            page = self.app._remote_page(REMOTE_CHAT_PAGE)
+            if page is None:
+                self._send(404, "text/plain", b"chat.html not installed")
+            else:
+                self._send(200, "text/html; charset=utf-8", page)
+        elif path == "/chat.webmanifest":
+            self._send(200, "application/manifest+json", REMOTE_CHAT_MANIFEST)
+        elif path in ("/", "/index.html"):
             page = self.app._remote_page()
             if page is None:
                 self._send(404, "text/plain", b"remote.html not installed")
@@ -2159,6 +2188,67 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             self._new_options()
         else:
             self._send(404, "text/plain", b"not found")
+
+    def _chat(self, method, parts, body):
+        """(status, object) for /api/chats and /api/chat-groups, off until the
+        phone may type: a chat can run commands on this machine."""
+        if not getattr(self.app, "_remote_send_on", False):
+            return 403, {"error": "chat is off (Settings > Remote > Allow typing into tabs)"}
+        mgr = self.app._chat_mgr()
+        if mgr is None:
+            return 404, {"error": "tabit_chat.py is not installed"}
+        mod = sys.modules["tabit_chat"]
+        fn = mod.group_api if parts[1] == "chat-groups" else mod.api
+        return fn(mgr, method, parts[2:], body)
+
+    _chat_streams = []              # stop events of open chat streams, oldest first
+
+    def _chat_get(self, parts):
+        """GET /api/chats[/<id>[/events|/history]] and the same for /api/chat-groups."""
+        q = urllib.parse.parse_qs(self.path.partition("?")[2])
+        op = parts[3] if len(parts) == 4 else ""
+        if op not in ("events", "history"):
+            self._json(*self._chat("GET", parts, {}))
+            return
+        code, out = self._chat("GET", parts[:3], {})
+        if code != 200:
+            self._json(code, out)
+            return
+        mgr = self.app._chat_mgr()
+        obj = (mgr.chats if parts[1] == "chats" else mgr.groups).get(parts[2])
+
+        def num(raw, default):
+            try:
+                return max(0, int(raw))
+            except (TypeError, ValueError):
+                return default
+        if op == "history":
+            self._json(200, {"events": obj.before(num((q.get("before") or [""])[0], 0))})
+            return
+        since = num(self.headers.get("Last-Event-ID") or (q.get("since") or [""])[0], 0)
+        tail = num((q.get("tail") or [""])[0], 0) or None
+        mine = threading.Event()
+        with self._streams_lock:
+            self._chat_streams.append(mine)
+            while len(self._chat_streams) > REMOTE_MAX_STREAMS:
+                self._chat_streams.pop(0).set()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+        def write(data):
+            self.wfile.write(data)
+            self.wfile.flush()
+        try:
+            sys.modules["tabit_chat"].stream(
+                obj, since, write, self.stop, mine, tail=None if since else tail)
+        except OSError:
+            pass
+        finally:
+            with self._streams_lock:
+                if mine in self._chat_streams:
+                    self._chat_streams.remove(mine)
 
     @staticmethod
     def _upload_name(raw):
@@ -2293,6 +2383,27 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             "dirs": dirs,
             "more": more,
         })
+
+    def _mkdir(self, body):
+        """POST /api/dirs/new {"parent", "name"}: one new folder, for the picker.
+        The name is one plain name: it cannot walk out of its parent."""
+        if not getattr(self.app, "_remote_send_on", False):
+            return 403, {"error": "managing tabs from the phone is off (Settings > Remote)"}
+        parent = os.path.realpath(os.path.expanduser(str(body.get("parent") or "~")))
+        name = str(body.get("name") or "").strip()
+        if not name or len(name) > 200 or name in (".", "..") or "/" in name or "\0" in name:
+            return 400, {"error": "a folder name of one plain word or phrase, no /"}
+        if not os.path.isdir(parent):
+            return 400, {"error": "no such folder: %s" % parent}
+        path = os.path.join(parent, name)
+        try:
+            os.mkdir(path)
+        except FileExistsError:
+            return 409, {"error": "%s is already there" % name}
+        except OSError as e:
+            return 403, {"error": e.strerror or "cannot make it"}
+        print(f"[remote] new folder {path}", file=sys.stderr)
+        return 200, {"path": path}
 
     def _new_options(self):
         """GET /api/new-options: serial devices and connect defaults.
@@ -2596,6 +2707,8 @@ class Tabit(Gtk.Window):
         adders.pack_start(system_box, False, False, 0)
         self._remote_srv = None
         self._remote_url = ""
+        self._chat_manager = None
+        self._chat_lock = threading.Lock()
         self._remote_send_on = False
         self._remote_files_on = False
         self._remote_update = None          # the phone's update job
@@ -12945,9 +13058,71 @@ if (data !== null) {{
             done.wait()                     # it is running now: let it finish
         return box[0] if box else None
 
-    def _remote_page(self):
+    def _chat_mgr(self):
+        """The Tabit Chat manager, made on first use; None when tabit_chat.py
+        is not installed."""
+        with self._chat_lock:
+            if self._chat_manager is None:
+                for d in self._agent_detect_roots():
+                    path = os.path.join(d, "tabit_chat.py")
+                    if os.path.isfile(path):
+                        if d not in sys.path:
+                            sys.path.insert(0, d)
+                        import tabit_chat
+                        self._chat_manager = tabit_chat.ChatManager(
+                            accounts=Tabit._claude_accounts,
+                            env_drop=CLAUDE_SESSION_ENV,
+                            auth=Tabit._claude_auth_status,
+                            tab_hook=self._chat_tab_hook,
+                            extra_env=self._chat_tool_env)
+                        self._chat_manager.ensure_default()
+                        break
+            return self._chat_manager
+
+    def _chat_tool_env(self):
+        """What a chat's tabit-tabs tool needs to reach this server."""
+        srv = getattr(self, "_remote_srv", None)
+        owner = getattr(getattr(srv, "handler_cls", None), "owner", None)
+        return {"TABIT_SOCK": REMOTE_SOCK, "TABIT_OWNER": owner or ""}
+
+    def _chat_tab_hook(self, tab_id, text=None, key=None, queue=False):
+        """For a chat: info about an AI tab; with text, type a line into it;
+        with key, press one. Info is {"title", "status", "transcript",
+        "claude"} or {"error"}; the others give (code, body). queue: a busy tab
+        takes the line too (Claude Code holds it), only a question stops it.
+        Runs on the GTK thread through _remote_call."""
+        acts = text is not None or key is not None
+
+        def work():
+            row = self._tg_row_by_id(tab_id)
+            if row is None or not _is_ai_icon(getattr(row, "icon_name", None)):
+                return (404, {"error": "that is not an AI tab"}) if acts else \
+                    {"error": "that is not an AI tab"}
+            status = "exited" if getattr(row, "dead", False) else \
+                getattr(row, "agent_status", None) or "unknown"
+            if not acts:
+                got = self._ai_cli_path_of(getattr(row, "argv", None))
+                return {"title": getattr(row, "title_text", "") or tab_id,
+                        "status": status,
+                        "transcript": getattr(row, "_agent_hook_tx", "") or "",
+                        "claude": bool(got and self._ai_is_claude(got[0]))}
+            if key is not None:
+                return self._remote_act(tab_id, "key", {"key": key})
+            if status == "blocked" or (status == "working" and not queue):
+                return 409, {"error": "that tab is %s: %s" % (
+                    "asking something" if status == "blocked" else "busy",
+                    "answer it in the tab" if status == "blocked" else "wait for it")}
+            return self._remote_act(tab_id, "send", {"text": text})
+        res = self._remote_call(work)
+        if res is None:
+            return (503, {"error": "tabit busy"}) if acts else {"error": "tabit busy"}
+        if acts and not isinstance(res, tuple):
+            return 500, res                 # the exception text
+        return res
+
+    def _remote_page(self, name=REMOTE_PAGE):
         for d in self._agent_detect_roots():
-            path = os.path.join(d, REMOTE_PAGE)
+            path = os.path.join(d, name)
             if os.path.isfile(path):
                 with open(path, "rb") as f:
                     return f.read()
@@ -13029,7 +13204,8 @@ if (data !== null) {{
         # its own stream list: an old server's streams must not count here
         handler = type("Handler", (_RemoteHandler,),
                        {"app": self, "stop": threading.Event(), "owner": None,
-                        "_streams": [], "_streams_lock": threading.Lock()})
+                        "_streams": [], "_chat_streams": [],
+                        "_streams_lock": threading.Lock()})
         try:
             srv = _RemoteServer(REMOTE_SOCK, handler)
             os.chmod(REMOTE_SOCK, 0o600)
