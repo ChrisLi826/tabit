@@ -94,8 +94,6 @@
   .card .sub.last { color: #aab1d6; margin-top: 1px; }
   .card .sub.last.st-work { color: var(--yellow); }
   .card .sub.last.st-wait { color: var(--orange); font-weight: 600; }
-  .card .sub.last.st-ready { color: var(--green); } .card .sub.last.st-bg { color: var(--purple); }
-  .card .sub.last.st-gone { color: var(--dim); }
   .badge { font-size: 11px; padding: 1px 8px; border-radius: 99px; background: #ffffff0d; color: var(--dim); }
   .badge .gdot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
   .badge.m-bypass { color: var(--red); background: #f7768e1f; } .badge.m-ask, .badge.need { color: var(--orange); background: #ff9e641f; }
@@ -240,7 +238,6 @@
   #hero { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 0 6px; font-size: 17px; }
   .mainbot { display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; padding: 6px 14px; border-radius: 18px; }
   .mainbot.sel { background: #262b45; } .mainbot .sub { font-size: 13px; } .mainbot .st-wait { color: var(--orange); } .mainbot .st-work { color: var(--yellow); }
-  .mainbot .st-ready { color: var(--green); } .mainbot .st-bg { color: var(--purple); } .mainbot .st-gone { color: var(--dim); }
   /* the state as a speech bubble on the picture's top right; none when idle.
      One shape, body and tail together, so its dark edge runs round both */
   .av .bub { position: absolute; right: -11px; top: -10px; width: 28px; height: 24px; z-index: 1; }
@@ -497,11 +494,10 @@ function bub(r) {
   return glyph ? `<span class="bub ${st}" title="${esc(st)}"><svg viewBox="0 0 30 26" aria-hidden="true"><path
     d="M7 1 H23 A6 6 0 0 1 29 7 V13 A6 6 0 0 1 23 19 H12 L5 25 L7 19 A6 6 0 0 1 1 13 V7 A6 6 0 0 1 7 1 Z"/></svg><b>${glyph}</b></span>` : "";
 }
-// [class, words] for a chat's state under its name; null when idle: the last message shows
+// [class, words] under a chat's name when it needs you; null otherwise: the
+// bubble on the picture says the state, and the last message shows here
 function stateLine(r) {
-  if (r.asks || r.state === "waiting") return ["st-wait", "needs your OK"];
-  return { working: ["st-work", "typing…"], ready: ["st-ready", "✓ done, new reply"],
-           background: ["st-bg", "↻ replied, agents still running"], exited: ["st-gone", "the tab has exited"] }[r.state] || null;
+  return r.asks || r.state === "waiting" ? ["st-wait", "needs your OK"] : null;
 }
 async function loadList() {
   let data;
