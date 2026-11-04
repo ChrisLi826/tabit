@@ -1651,11 +1651,6 @@ def api(mgr, method, parts, body):
         if chat.meta.get("default"):
             return 400, {"error": "the main chat cannot be deleted"}
         if chat.mirrored and mgr.tab_ops:        # the chat and its tab are one: the tab closes too
-            info = mgr.tab_hook(chat.meta["tab"]["id"]) if mgr.tab_hook else {}
-            busy = {"working": "is working", "blocked": "is asking something",
-                    "background": "still runs agents"}.get(info.get("status"))
-            if busy:                 # closing it would end Claude's work, and its tmux session
-                return 409, {"error": "the tab %s: press Stop, or wait until it is done" % busy}
             code, out = mgr.tab_ops("close", chat.meta["tab"]["id"], {})
             if code not in (200, 404):           # 404: the tab was gone already
                 return code, out

@@ -1040,17 +1040,6 @@ class TabSyncTest(Base):
         self.assertIn(("close", "t2", {}), self.ops)
         self.assertEqual(self.titles(), ["MOT"])
 
-    def test_a_tab_at_work_is_not_closed_from_the_phone(self):
-        self.mgr.sync_tabs()
-        chat = self.chat_of("t2")
-        for busy in ("working", "blocked", "background"):
-            self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False, b=busy: {
-                "title": "Blog", "status": b, "transcript": "", "claude": True}
-            code, out = tc.api(self.mgr, "POST", [chat.id, "delete"], {})
-            self.assertEqual(code, 409, busy)
-        self.assertNotIn("close", [o[0] for o in self.ops])
-        self.assertEqual(self.titles(), ["Blog", "MOT"])
-
     def test_the_chat_stays_when_the_tab_will_not_close(self):
         self.mgr.sync_tabs()
         chat = self.chat_of("t2")
