@@ -613,14 +613,27 @@ function connect() {
   const me = cur;
   const es = new EventSource(`${base(me.kind)}/${me.id}/events?tail=300&since=${me.lastSeq}`);
   me.es = es;
-  es.addEventListener("chat", (e) => { $("conn").style.display = "none"; take(me, JSON.parse(e.data)); });
+  es.addEventListener("chat", (e) => { $("conn").style.display = "none"; me.retry = 0; take(me, JSON.parse(e.data)); });
   es.addEventListener("alive", () => { $("conn").style.display = "none"; });
   es.onerror = () => {
     if (cur !== me) return;
+    $("conn").textContent = "Reconnecting…";
     $("conn").style.display = "block";
-    if (es.readyState === EventSource.CLOSED) {          // refused (off, or gone): look why
-      api(`${base(me.kind)}/${me.id}`).catch((er) => { $("conn").textContent = er.message; });
-    }
+    if (es.readyState !== EventSource.CLOSED) return;   // the browser tries again by itself
+    // A refused stream is not tried again by the browser. Refused for good
+    // (typing off, the chat gone): say why. Anything else (tabit restarting
+    // answers 502 for a moment): try again, a little later each time.
+    fetch(`${base(me.kind)}/${me.id}`, { cache: "no-store" }).then(async (res) => {
+      if (res.status === 403 || res.status === 404) {
+        const out = await res.json().catch(() => ({}));
+        $("conn").textContent = out.error || `HTTP ${res.status}`;
+        return;
+      }
+      throw new Error("not yet");
+    }).catch(() => {
+      me.retry = (me.retry || 0) + 1;
+      setTimeout(() => { if (cur === me && me.es === es) connect(); }, Math.min(15000, 1000 * 2 ** me.retry));
+    });
   };
 }
 
