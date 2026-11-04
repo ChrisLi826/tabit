@@ -267,6 +267,7 @@ class TestRemoteServer(_ServerCase):
         head, body = http_get("/icon.svg", self.sock)
         self.assertIn("image/svg+xml", head)
         self.assertIn(b"<svg", body)
+        self.assertIn(b"chat bubble", body)     # the phone's icon, not the desk's
         for path, size in (("/favicon.png", 32), ("/apple-touch-icon.png", 180),
                            ("/icon-192.png", 192), ("/icon-512.png", 512),
                            ("/icon-maskable.png", 512)):

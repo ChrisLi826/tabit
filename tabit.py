@@ -955,11 +955,13 @@ CLAUDE_SEED_KEYS = ("hasCompletedOnboarding", "lastOnboardingVersion", "theme",
                     "bypassPermissionsModeAccepted")
 # the page's icons: tab favicon (SVG, and a PNG for Safari), iPhone home
 # screen, and the installed app (Chrome, Edge, Android)
-REMOTE_ICONS = {"/icon.svg": ("tabit.svg", None), "/favicon.png": ("tabit.svg", 32),
-                "/apple-touch-icon.png": ("tabit-app.svg", 180),
-                "/icon-192.png": ("tabit.svg", 192),       # no backdrop: the
-                "/icon-512.png": ("tabit.svg", 512),       # logo is the tile
-                "/icon-maskable.png": ("tabit-app.svg", 512)}  # macOS, Android
+# The phone's tabit wears a chat bubble on the corner, so its icon is told
+# apart from the desk's.
+REMOTE_ICONS = {"/icon.svg": ("tabit-remote.svg", None), "/favicon.png": ("tabit-remote.svg", 32),
+                "/apple-touch-icon.png": ("tabit-remote-app.svg", 180),
+                "/icon-192.png": ("tabit-remote.svg", 192),       # no backdrop: the
+                "/icon-512.png": ("tabit-remote.svg", 512),       # logo is the tile
+                "/icon-maskable.png": ("tabit-remote-app.svg", 512)}  # macOS, Android
 # lets a browser install the page as an app in its own window
 REMOTE_MANIFEST = json.dumps({
     "name": "tabit", "short_name": "tabit", "start_url": "./", "scope": "./",
