@@ -66,6 +66,12 @@
   #tabs button { flex: 1; border: 0; background: none; color: var(--dim); border-radius: 10px; font-weight: 600; }
   #tabs button.on { background: #2a2f47; color: var(--fg); box-shadow: 0 1px 4px #0006; }
   #cards { flex: 1; overflow-y: auto; padding: 10px 14px calc(20px + env(safe-area-inset-bottom)); }
+  /* a phone: the owl and Chats/Groups scroll with the list, getting smaller
+     and fainter until they are gone (--fold, 0 to 1, set while scrolling) */
+  #scroller { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+  #scroller #cards { flex: none; overflow: visible; }
+  #top { display: flex; flex-direction: column; flex: none; transform-origin: 50% 100%;
+         opacity: calc(1 - var(--fold, 0)); transform: scale(calc(1 - .45 * var(--fold, 0))); }
   .card { display: flex; gap: 14px; align-items: center; border-radius: 16px; padding: 11px 8px; cursor: pointer; transition: background .12s; }
   .card:active { background: #ffffff0f; }
   .av { position: relative; flex: none; width: 54px; height: 54px; border-radius: 50%; display: grid; place-items: center;
@@ -257,6 +263,8 @@
     #sbhead button { border-radius: 99px; min-width: 38px; height: 38px; padding: 0 12px; }
     #sbhead a { text-decoration: none; }
     #cards { padding: 8px 10px 20px; }
+    #scroller, #top { display: contents; }
+    #scroller #cards { flex: 1; overflow-y: auto; }
     .card { border: 0; background: none; border-radius: 14px; padding: 10px 12px; margin-bottom: 2px; }
     .card:hover { background: #ffffff0a; } .card.sel { background: #262b45; }
     .card .sub.path { display: none; }
@@ -284,10 +292,14 @@
 <main>
   <section id="list" class="view on">
     <div id="sbhead"><h1>Chat</h1><button id="sb-add" type="button" class="primary" title="new chat">＋</button><a href="/" title="the terminal view"><button type="button">⌨</button></a></div>
+    <div id="scroller">
+    <div id="top">
     <div id="hero"></div>
     <button id="acct" type="button" hidden title="the Claude login every chat uses"></button>
     <div id="tabs"><button data-k="chats" class="on">Chats</button><button data-k="groups">Groups</button></div>
+    </div>
     <div id="cards"></div>
+    </div>
     <div id="searchbar"><input id="q" type="search" placeholder="Search chats" autocomplete="off"></div>
   </section>
   <section id="talk" class="view">
@@ -456,7 +468,7 @@ const status = (msg, bad) => { const s = $("status"); s.textContent = msg || "";
 // --- the list ---------------------------------------------------------------
 async function loadList() {
   let data;
-  const keep = $("cards").scrollTop;
+  const keep = listScroll().scrollTop;
   try { data = await api("api/chats"); }
   catch (e) { $("cards").innerHTML = `<div class="empty">${esc(e.message)}<br><br><a href="/">Open the terminal view</a></div>`; return; }
   cfg = data;
@@ -486,7 +498,7 @@ async function loadList() {
         ${badges ? `<div class="meta">${badges}</div>` : ""}
       </div></div>`;
   }).join("");
-  $("cards").scrollTop = keep;
+  listScroll().scrollTop = keep;
 }
 // one Claude login for the whole of Tabit Chat; sessions are shared, so chats go on
 $("acct").onclick = () => {
@@ -505,6 +517,12 @@ $("hero").addEventListener("click", (e) => {
   const c = e.target.closest(".mainbot");
   if (c) location.hash = "#c/" + c.dataset.id;
 });
+// what scrolls the list: the cards alone on a wide screen, all of it on a phone
+const listScroll = () => (getComputedStyle($("scroller")).display === "contents" ? $("cards") : $("scroller"));
+$("scroller").addEventListener("scroll", () => {
+  const top = $("top"), h = top.offsetHeight || 1;
+  top.style.setProperty("--fold", Math.min(1, $("scroller").scrollTop / h).toFixed(3));
+}, { passive: true });
 $("cards").addEventListener("click", (e) => {
   const c = e.target.closest(".card");
   if (c && e.target.closest("[data-more]")) { settings({ kind, id: c.dataset.id }); return; }
