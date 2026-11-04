@@ -14781,6 +14781,8 @@ if (data !== null) {{
             return "Claude is working: switch when it stops"
         if status == "blocked":
             return "Claude is asking something: answer it first"
+        if status == "background":
+            return "agents still run in the background: switch when they are done"
         sid = self._ai_session_of(row)
         if not sid:
             return "no conversation yet: send one message first"

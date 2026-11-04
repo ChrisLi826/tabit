@@ -55,8 +55,11 @@
   header h1 { font-size: 20px; font-weight: 700; letter-spacing: -.01em; margin: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pill { font-size: 12px; padding: 2px 9px; border-radius: 99px; background: var(--panel); color: var(--dim); white-space: nowrap; }
   .pill.working { color: var(--yellow); } .pill.waiting { color: var(--orange); }
+  .pill.ready { color: var(--green); } .pill.background { color: var(--purple); } .pill.exited { color: var(--dim); }
   .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--dim); margin-right: 6px; }
   .dot.working { background: var(--yellow); } .dot.waiting { background: var(--orange); }
+  .dot.ready { background: var(--green); } .dot.background { background: var(--purple); }
+  .dot.exited { background: transparent; box-shadow: inset 0 0 0 2px var(--dim); }
   main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .view { display: none; flex: 1; min-height: 0; flex-direction: column; }
   .view.on { display: flex; }
@@ -78,6 +81,8 @@
         font-size: 40px; line-height: 1; }
   .av .dot { position: absolute; right: -1px; bottom: -1px; width: 13px; height: 13px; margin: 0; border: 2px solid var(--bg); background: var(--dim); }
   .av .dot.working { background: var(--yellow); } .av .dot.waiting { background: var(--orange); }
+  .av .dot.ready { background: var(--green); } .av .dot.background { background: var(--purple); }
+  .av .dot.exited { background: var(--bg); box-shadow: inset 0 0 0 2px var(--dim); }
   .card .body { flex: 1; min-width: 0; }
   .card .top { display: flex; align-items: baseline; gap: 6px; }
   .card .t { font-weight: 650; font-size: 17px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -89,6 +94,8 @@
   .card .sub.last { color: #aab1d6; margin-top: 1px; }
   .card .sub.last.st-work { color: var(--yellow); }
   .card .sub.last.st-wait { color: var(--orange); font-weight: 600; }
+  .card .sub.last.st-ready { color: var(--green); } .card .sub.last.st-bg { color: var(--purple); }
+  .card .sub.last.st-gone { color: var(--dim); }
   .badge { font-size: 11px; padding: 1px 8px; border-radius: 99px; background: #ffffff0d; color: var(--dim); }
   .badge .gdot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
   .badge.m-bypass { color: var(--red); background: #f7768e1f; } .badge.m-ask, .badge.need { color: var(--orange); background: #ff9e641f; }
@@ -233,6 +240,7 @@
   #hero { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 0 6px; font-size: 17px; }
   .mainbot { display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; padding: 6px 14px; border-radius: 18px; }
   .mainbot.sel { background: #262b45; } .mainbot .sub { font-size: 13px; } .mainbot .st-wait { color: var(--orange); } .mainbot .st-work { color: var(--yellow); }
+  .mainbot .st-ready { color: var(--green); } .mainbot .st-bg { color: var(--purple); } .mainbot .st-gone { color: var(--dim); }
   .av .star { position: absolute; right: -2px; top: -2px; width: 24px; height: 24px; border-radius: 50%; background: var(--orange); color: #fff; font-size: 13px; display: grid; place-items: center; border: 2px solid var(--bg); }
   .av.huge .dot { right: 4px; bottom: 4px; width: 16px; height: 16px; }
   .av.huge { width: 84px; height: 84px; font-size: 58px; }
@@ -466,6 +474,12 @@ const MODE_NAME = { ask: "Ask each time", edits: "Accept edits", plan: "Plan fir
 const status = (msg, bad) => { const s = $("status"); s.textContent = msg || ""; s.className = bad ? "err" : ""; };
 
 // --- the list ---------------------------------------------------------------
+// [class, words] for a chat's state under its name; null when idle: the last message shows
+function stateLine(r) {
+  if (r.asks || r.state === "waiting") return ["st-wait", "needs your OK"];
+  return { working: ["st-work", "typing…"], ready: ["st-ready", "✓ done, new reply"],
+           background: ["st-bg", "↻ replied, agents still running"], exited: ["st-gone", "the tab has exited"] }[r.state] || null;
+}
 async function loadList() {
   let data;
   const keep = listScroll().scrollTop;
@@ -475,7 +489,7 @@ async function loadList() {
   const main = data.chats.find((c) => c.default);
   $("hero").innerHTML = main ? `<div class="mainbot${cur && cur.id === main.id ? " sel" : ""}" data-id="${esc(main.id)}">
       <div class="av huge">${emo(face(main))}<span class="star">★</span><span class="dot ${esc(main.state)}"></span></div>
-      <div>${esc(main.title)}</div>${main.asks || main.state === "waiting" ? '<div class="sub st-wait">needs your OK</div>' : main.state === "working" ? '<div class="sub st-work">typing…</div>' : ""}</div>` : "";
+      <div>${esc(main.title)}</div>${stateLine(main) ? `<div class="sub ${stateLine(main)[0]}">${stateLine(main)[1]}</div>` : ""}</div>` : "";
   const acc = (data.accounts || []).find((a) => a.name === data.account);
   $("acct").hidden = (data.accounts || []).length < 2;
   $("acct").textContent = "🔑 " + (acc ? acc.label : "Default");
@@ -494,7 +508,7 @@ async function loadList() {
       <div class="av ${avOf(r).cls}" style="${avOf(r).style}">${avOf(r).html}<span class="dot ${esc(r.state)}"></span></div>
       <div class="body">
         <div class="top"><span class="t">${esc(r.title)}</span><span class="ago">${timeAgo(r.updated)}</span><button type="button" class="more" data-more title="Settings">⋯</button></div>
-        ${r.asks || r.state === "waiting" ? '<div class="sub last st-wait">needs your OK</div>' : r.state === "working" ? '<div class="sub last st-work">typing…</div>' : `<div class="sub last">${esc(r.last) || "&nbsp;"}</div>`}
+        ${stateLine(r) ? `<div class="sub last ${stateLine(r)[0]}">${stateLine(r)[1]}</div>` : `<div class="sub last">${esc(r.last) || "&nbsp;"}</div>`}
         ${badges ? `<div class="meta">${badges}</div>` : ""}
       </div></div>`;
   }).join("");
@@ -596,6 +610,8 @@ function take(me, d) {
   const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 90;
   me.state = d.state;
   me.meta = d.meta;
+  if (d.state === "ready" && d.meta.tab && !document.hidden)
+    api(`api/tabs/${encodeURIComponent(d.meta.tab.id)}/ack`, {}).catch(() => {});
   if (me.kind === "groups") d.meta.members.forEach((m) => { me.members[m.id] = m.alias; });
   me.pending = new Set(d.pending.map((p) => p.rid));
   d.pending.forEach((p) => me.asks.set(p.rid, p));
@@ -628,8 +644,11 @@ function header(me) {
   const hav = $("hav"); const hv = avOf(m); hav.hidden = false; hav.className = "av sm " + hv.cls; hav.style.cssText = hv.style; hav.innerHTML = hv.html;
   const p = $("pill");
   p.hidden = false; p.className = "pill " + me.state;
-  p.textContent = me.state === "idle" ? (me.kind === "chats" ? (m.tab ? m.tab.group || "tab" : m.mode) : "idle") : me.state === "waiting" ? "waiting for you" : me.kind === "groups" ? "talking…" : "typing…";
-  $("stop").hidden = me.state === "idle";
+  p.textContent = me.state === "idle" ? (me.kind === "chats" ? (m.tab ? m.tab.group || "tab" : m.mode) : "idle")
+    : me.state === "waiting" ? "waiting for you" : me.state === "ready" ? "✓ done, new reply"
+    : me.state === "background" ? "↻ replied, agents still running" : me.state === "exited" ? "the tab has exited"
+    : me.kind === "groups" ? "talking…" : "typing…";
+  $("stop").hidden = me.state !== "working" && me.state !== "waiting";
     const chips = $("chips");
   if (me.kind === "groups") {
     chips.style.display = "flex";

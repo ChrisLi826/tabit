@@ -250,6 +250,7 @@ class TestSwitchAccount(AccountDirs):
         cases = [(self.row(), "", "already"),
                  (self.row(agent_status="working"), "work", "working"),
                  (self.row(agent_status="blocked"), "work", "answer"),
+                 (self.row(agent_status="background"), "work", "background"),
                  (self.row(), "gone", "no Claude account"),
                  (self.row(dead=True), "work", "exited"),
                  (self.row(argv=T._ai_launch_pair("codex", self.tmp, [], tmux=True)[1]),

@@ -668,7 +668,10 @@ class Chat(_Log):
         if info.get("error"):
             self._set_tab_state("idle")
             return
-        self._set_tab_state({"working": "working", "blocked": "waiting"}.get(info["status"], "idle"))
+        # every status but idle shows: done with a new reply, agents still
+        # running after the reply, the tab gone
+        self._set_tab_state({"working": "working", "blocked": "waiting", "ready": "ready",
+                             "background": "background", "exited": "exited"}.get(info["status"], "idle"))
         if info.get("transcript"):
             if not self._model_looked and not self.meta["tab"].get("model"):
                 self._model_looked = True            # once: a transcript read from its end would miss it

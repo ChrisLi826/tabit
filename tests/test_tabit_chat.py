@@ -711,6 +711,15 @@ class MirrorTest(Base):
         chat.mirror_poll()
         self.assertEqual(self.texts(chat)[-1], ("text", "More."))
 
+    def test_every_tab_status_but_idle_shows_in_the_chat(self):
+        chat = self.mirror()
+        for tab, want in (("working", "working"), ("blocked", "waiting"), ("ready", "ready"),
+                          ("background", "background"), ("exited", "exited"),
+                          ("idle", "idle"), ("unknown", "idle")):
+            self.status = tab
+            chat.mirror_poll()
+            self.assertEqual(chat.state, want, tab)
+
     def test_lines_that_are_no_message_do_not_make_it_new(self):
         # Claude Code writes its own bookkeeping into the transcript; the
         # list's "13m" must stay the time of the last message
