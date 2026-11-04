@@ -97,6 +97,7 @@
           white-space: pre-wrap; box-shadow: 0 2px 10px #6f97f233; }
   .b.ai { align-self: flex-start; background: var(--panel); border-bottom-left-radius: 6px; max-width: 94%; }
   .who { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
+  #grip { display: none; }
   .b .ts { margin-top: 4px; font-size: 11px; opacity: .55; text-align: right; }
   .b .rp { display: none; margin-top: 6px; padding: 3px 12px; font-size: 12px; border-radius: 12px; border: 0; background: #ffffff22; color: inherit; }
   .b.sel .rp { display: block; } .b:hover .rp { display: block; }
@@ -199,6 +200,9 @@
   .pk { text-align: center; margin-bottom: 4px; }
   .pk .av.big { margin: 0 auto 10px; }
   .pk-animals, .pk-hues { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-bottom: 8px; }
+  .pk-tabs { display: flex; gap: 6px; justify-content: center; margin-bottom: 10px; }
+  .pk-tabs button { padding: 5px 13px; font-size: 13px; border-radius: 99px; }
+  .pk-tabs button.on { border-color: #7aa2f7; background: #7aa2f733; }
   .pk-animals button { width: 42px; height: 42px; padding: 0; font-size: 22px; border-radius: 12px; }
   .pk-hues button { width: 34px; height: 34px; padding: 0; border-radius: 50%; border: 2px solid transparent; }
   .pk-animals button.on { border-color: #7aa2f7; background: #7aa2f733; } .pk-hues button.on { border-color: #fff; }
@@ -232,7 +236,7 @@
   #sbhead, #pick { display: none; }
   /* a wide screen: the list stays on the left, the conversation on the right */
   @media (min-width: 900px) {
-    body { display: grid; grid-template-columns: 340px 1fr; grid-template-rows: auto auto 1fr; }
+    body { display: grid; grid-template-columns: var(--listw, 340px) minmax(0, 1fr); grid-template-rows: auto auto 1fr; }
     main { display: contents; }
     #list { grid-column: 1; grid-row: 1 / 4; display: flex; border-right: 1px solid var(--line); background: #0c0e17; min-height: 0; }
     header { grid-column: 2; grid-row: 1; padding-top: 12px; }
@@ -242,6 +246,8 @@
     #pick .big { font-size: 54px; }
     #talk.on ~ #pick { display: none; }
     body:has(#talk:not(.on)) header { visibility: hidden; }
+    #grip { display: block; position: fixed; top: 0; bottom: 0; left: calc(var(--listw, 340px) - 4px); width: 9px; cursor: col-resize; z-index: 4; touch-action: none; }
+    #grip:hover, #grip.on { background: #7aa2f744; }
     #back, #add, #remote { display: none !important; }
     #hero { padding: 4px 0 2px; } #hero .av.huge { width: 60px; height: 60px; font-size: 42px; } #hero .mainbot { font-size: 15px; }
     body:has(#list.on) header h1 { visibility: visible; }
@@ -252,7 +258,7 @@
     #cards { padding: 8px 10px 20px; }
     .card { border: 0; background: none; border-radius: 14px; padding: 10px 12px; margin-bottom: 2px; }
     .card:hover { background: #ffffff0a; } .card.sel { background: #262b45; }
-    .card .meta, .card .sub.path { display: none; }
+    .card .sub.path { display: none; }
     .card .av .dot { border-color: #0c0e17; } .card.sel .av .dot { border-color: #262b45; }
     #msgs { padding: 24px max(28px, calc((100% - 820px) / 2)) 10px; gap: 14px; }
     #composer { padding: 6px max(28px, calc((100% - 820px) / 2)) 18px; }
@@ -263,6 +269,7 @@
 </style>
 </head>
 <body>
+<div id="grip" title="drag to resize, double-click to reset"></div>
 <header>
   <button id="back" type="button" title="back" hidden>‹</button>
   <span id="hav" class="av sm" hidden></span>
@@ -312,6 +319,11 @@ const colorOf = (s) => { let h = 0; for (const c of String(s)) h = (h * 31 + c.c
 
 // every chat gets an animal and a colour from its id; the main chat is the owl
 const ANIMALS = ["🦊", "🐼", "🐯", "🐸", "🐙", "🦄", "🐧", "🦁", "🐨", "🐰", "🐻", "🐵", "🐳", "🦋", "🐢", "🦔", "🐝", "🦦", "🐶", "🐱", "🐮", "🐷", "🦖"];
+const WORK = ["📷", "🎥", "📡", "📶", "🌐", "🔌", "🔧", "🛠️", "💻", "🖥️", "🤖", "🧠", "✨", "🔒", "🔑", "🧱", "☁️", "💾", "🗄️", "📦", "🧪", "🔬", "🛰️", "💡", "📊", "🐛", "⚙️", "🕹️"];
+const RIDES = ["🚗", "🚕", "🚌", "🚓", "🚑", "🚒", "🚚", "🚜", "🏎️", "🏍️", "🚲", "🛴", "✈️", "🚁", "🚀", "🛸", "🚂", "🚄", "🚇", "⛵", "🚤", "🚢", "🛶", "🚡", "🛺", "🛻", "🚐", "🛵"];
+const SPORT = ["🏃", "🏃‍♀️", "🏃‍♂️", "👟", "🎽", "🥾", "⏱️", "🏅", "🥇", "🏆", "🚴", "🏊", "⛰️", "🧗"];
+// the animals also choose a chat's own picture (by its id) and are what the dice rolls: keep that list as it is
+const PICK = [["Animals", ANIMALS], ["Work", WORK], ["Rides", RIDES], ["Sport", SPORT]];
 const HUES = [0, 40, 90, 150, 200, 250, 300];     // how far the emoji's own colour is turned
 const emo = (f) => `<span class="em" style="filter:${f.f}">${esc(f.e)}</span>`;
 function face(r) {
@@ -334,9 +346,13 @@ function picker(host, r) {
   const roll = () => { pick.emoji = ANIMALS[Math.floor(Math.random() * ANIMALS.length)]; pick.hue = HUES[Math.floor(Math.random() * HUES.length)]; };
   if (r.roll) roll();
   host.innerHTML = `<div class="pk"><div class="av big" id="pk-prev"></div>
-    <div class="pk-animals">${ANIMALS.map((a) => `<button type="button" data-e="${a}">${a}</button>`).join("")}</div>
+    <div class="pk-tabs">${PICK.map(([name]) => `<button type="button" data-c="${name}">${name}</button>`).join("")}</div>
+    <div class="pk-animals"></div>
     <div class="pk-hues"></div></div>`;
+  let cat = (PICK.find(([, list]) => list.includes(pick.emoji)) || PICK[0])[0];      // the shelf of the picture it has now
   const paint = () => {
+    host.querySelectorAll("[data-c]").forEach((b) => b.classList.toggle("on", b.dataset.c === cat));
+    host.querySelector(".pk-animals").innerHTML = PICK.find(([name]) => name === cat)[1].map((a) => `<button type="button" data-e="${a}">${a}</button>`).join("");
     const f = face(Object.assign({}, r, pick));
     const prev = host.querySelector("#pk-prev"); prev.innerHTML = emo(f);
     host.querySelector(".pk-hues").innerHTML = `<button type="button" data-roll title="roll a new one">🎲</button>` +
@@ -347,6 +363,7 @@ function picker(host, r) {
   host.onclick = (e) => {
     const b = e.target.closest("button"); if (!b) return;
     if (b.dataset.roll !== undefined) roll();
+    if (b.dataset.c !== undefined) cat = b.dataset.c;
     if (b.dataset.e !== undefined) pick.emoji = b.dataset.e;
     if (b.dataset.h !== undefined) pick.hue = +b.dataset.h;
     paint();
@@ -1039,8 +1056,14 @@ const settings = async (t = cur) => {
       <div ${m.tab ? "hidden" : ""}><label>When Claude wants to do something</label><select id="e-mode">${opts(cfg.modes, m.mode, (x) => MODE_NAME[x])}</select>
       <div class="hint warn" id="e-warn" ${m.mode === "bypass" ? "" : "hidden"}>Bypass: no questions asked.</div>
       <label>Model</label><select id="e-model">${opts(cfg.models, m.model, (x) => x || "default")}</select></div>
+      <div ${m.tab ? "hidden" : ""}><label>Connectors</label><button type="button" id="e-reload">↻ Reload Claude</button>
+      <div class="hint" id="e-reloaded">Changed a connector (Gmail, Strava…)? Tap this. The chat keeps its history.</div></div>
       <div class="hint" id="e-err" style="color:var(--red)"></div>
       <div class="acts">${m.default ? "" : '<button type="button" class="danger" id="e-del">Delete</button>'}<button type="button" id="e-cancel">Cancel</button><button type="button" class="primary" id="e-save">Save</button></div>`);
+    $("e-reload").onclick = async () => {
+      try { await api(`api/chats/${t.id}/reload`, {}); $("e-err").textContent = ""; $("e-reloaded").textContent = "Done. Your next message starts a fresh Claude."; }
+      catch (e) { $("e-err").textContent = e.message; }
+    };
     const look = picker($("e-look"), m);
     $("e-mode").onchange = () => { $("e-warn").hidden = $("e-mode").value !== "bypass"; };
     $("e-save").onclick = async () => { try { await api(`api/chats/${t.id}/edit`, { title: $("e-title").value, mode: $("e-mode").value, model: $("e-model").value, ...look.get() }); done(); } catch (e) { $("e-err").textContent = e.message; } };
@@ -1052,6 +1075,22 @@ $("more").onclick = () => settings();
 
 document.addEventListener("visibilitychange", () => { if (!document.hidden && !cur) loadList(); });
 route();
+</script>
+<script>
+/* a wide screen: drag the line between the list and the chat; the width is kept */
+(() => {
+  const grip = document.getElementById("grip"), root = document.documentElement, KEY = "chatListW", MIN = 240;
+  const set = (w) => root.style.setProperty("--listw", Math.round(Math.min(Math.max(w, MIN), Math.max(MIN, innerWidth - 360))) + "px");
+  const saved = +localStorage.getItem(KEY); if (saved) set(saved);
+  grip.onpointerdown = (e) => {
+    grip.setPointerCapture(e.pointerId); grip.classList.add("on");
+    grip.onpointermove = (m) => set(m.clientX);
+    grip.onpointerup = () => { grip.classList.remove("on"); grip.onpointermove = grip.onpointerup = null;
+      localStorage.setItem(KEY, parseInt(root.style.getPropertyValue("--listw")) || ""); };
+  };
+  grip.ondblclick = () => { root.style.removeProperty("--listw"); localStorage.removeItem(KEY); };
+  addEventListener("resize", () => { const w = parseInt(root.style.getPropertyValue("--listw")); if (w) set(w); });
+})();
 </script>
 </body>
 </html>

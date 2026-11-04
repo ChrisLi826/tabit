@@ -321,6 +321,26 @@ class TestChat(Base):
         argv = self.argvs()[-1]
         self.assertEqual(argv[argv.index("--permission-mode") + 1], "acceptEdits")
 
+    def test_reload_ends_the_process_and_keeps_the_session(self):
+        chat = self.new()
+        chat.send("hi")
+        wait(lambda: "done" in self.kinds(chat))
+        session = chat.meta["session"]
+        self.assertTrue(chat.running)
+        self.assertEqual(tc.api(self.mgr, "POST", [chat.id, "reload"], {})[0], 200)
+        self.assertTrue(wait(lambda: not chat.running))
+        chat.send("again")
+        wait(lambda: self.kinds(chat).count("done") == 2)
+        argv = self.argvs()[-1]
+        self.assertEqual(argv[argv.index("--resume") + 1], session)
+
+    def test_reload_waits_for_an_idle_chat(self):
+        chat = self.new()
+        chat.send("slow")
+        wait(lambda: chat.live)
+        self.assertEqual(tc.api(self.mgr, "POST", [chat.id, "reload"], {})[0], 409)
+        chat.interrupt()
+
     def test_bypass_is_asked_for_by_name_only(self):
         chat = self.new(mode="bypass")
         chat.send("hi")
@@ -890,6 +910,76 @@ class MirrorTest(Base):
         code, out = self.mgr.create_group({"members": [mirror.id, plain.id]})
         self.assertEqual(code, 400)
 
+
+
+class TabSyncTest(Base):
+    """Every Claude tab gets a chat that mirrors it, named "group · tab"."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, tc, "MIRROR_EVERY", tc.MIRROR_EVERY)
+        tc.MIRROR_EVERY = 3600       # the tests sync by hand
+        self.tabs = [{"id": "t1", "title": "MOT", "group": "Work"},
+                     {"id": "t2", "title": "Blog", "group": ""}]
+        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False: {
+            "title": "x", "status": "idle", "transcript": "", "claude": True}
+        self.mgr.tabs_hook = lambda: [dict(t) for t in self.tabs] if self.tabs is not None else None
+
+    def titles(self):
+        return sorted(c.meta["title"] for c in self.mgr.chats.values() if c.mirrored)
+
+    def test_every_tab_gets_a_chat_once(self):
+        self.mgr.sync_tabs()
+        self.mgr.sync_tabs()
+        self.assertEqual(self.titles(), ["Blog", "Work · MOT"])
+
+    def test_a_chat_made_by_hand_is_left_alone(self):
+        code, out = self.mgr.create({"title": "Mine", "tab": {"id": "t1", "title": "MOT"}})
+        self.mgr.sync_tabs()
+        self.assertEqual(self.titles(), ["Blog", "Mine"])
+
+    def test_the_name_follows_the_tab_until_the_person_renames_it(self):
+        self.mgr.sync_tabs()
+        self.tabs[0]["title"] = "MOT 2"
+        self.mgr.sync_tabs()
+        self.assertIn("Work · MOT 2", self.titles())
+        chat = next(c for c in self.mgr.chats.values() if c.mirrored and c.meta["tab"]["id"] == "t1")
+        self.assertEqual(tc.api(self.mgr, "POST", [chat.id, "edit"], {"title": "Car"})[0], 200)
+        self.tabs[0]["title"] = "MOT 3"
+        self.mgr.sync_tabs()
+        self.assertIn("Car", self.titles())
+
+    def test_saving_with_the_same_name_does_not_lock_it(self):
+        self.mgr.sync_tabs()
+        chat = next(c for c in self.mgr.chats.values() if c.mirrored and c.meta["tab"]["id"] == "t1")
+        tc.api(self.mgr, "POST", [chat.id, "edit"], {"title": chat.meta["title"]})
+        self.tabs[0]["title"] = "MOT 2"
+        self.mgr.sync_tabs()
+        self.assertIn("Work · MOT 2", self.titles())
+
+    def test_a_deleted_chat_does_not_come_back(self):
+        self.mgr.sync_tabs()
+        chat = next(c for c in self.mgr.chats.values() if c.mirrored and c.meta["tab"]["id"] == "t2")
+        self.assertEqual(tc.api(self.mgr, "POST", [chat.id, "delete"], {})[0], 200)
+        self.mgr.sync_tabs()
+        self.assertEqual(self.titles(), ["Work · MOT"])
+
+    def test_a_closed_tab_takes_its_chat_after_a_while(self):
+        self.mgr.sync_tabs()
+        del self.tabs[1]
+        for _ in range(tc.GONE_AFTER - 1):
+            self.mgr.sync_tabs()
+        self.assertEqual(self.titles(), ["Blog", "Work · MOT"])
+        self.mgr.sync_tabs()
+        self.assertEqual(self.titles(), ["Work · MOT"])
+
+    def test_no_answer_or_no_tabs_changes_nothing(self):
+        self.mgr.sync_tabs()
+        for gone in (None, []):
+            self.tabs = gone
+            for _ in range(tc.GONE_AFTER + 1):
+                self.mgr.sync_tabs()
+        self.assertEqual(self.titles(), ["Blog", "Work · MOT"])
 
 
 class ReplyTest(Base):

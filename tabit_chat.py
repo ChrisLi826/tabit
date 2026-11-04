@@ -26,6 +26,8 @@ MODES = {"ask": "default", "edits": "acceptEdits", "plan": "plan",
 MODELS = ("", "opus", "sonnet", "haiku", "fable")
 
 MAX_RUNNING = 6              # claude processes alive at once
+SYNC_EVERY = 10              # seconds between looks at the list of tabs
+GONE_AFTER = 6               # looks without its tab before an automatic mirror goes
 IDLE_STOP = 20 * 60          # an idle chat gives its process back after this
 MAX_SEND = 20000             # one message, in characters: 3 bytes each still fit 64 KB
 KEEP_TEXT = 4000             # a tool's input or result, in characters
@@ -1005,7 +1007,7 @@ class Group(_Log):
 
 class ChatManager:
     def __init__(self, accounts=None, env_drop=(), root=CHAT_DIR, claude=None, auth=None,
-                 tab_hook=None, extra_env=None):
+                 tab_hook=None, extra_env=None, tabs_hook=None):
         self.accounts = accounts or (lambda: [])     # [(name, cli)]
         self.auth = auth                             # fn(cli) -> {"email", "subscriptionType"}
         self._labels = (0, [])
@@ -1013,6 +1015,9 @@ class ChatManager:
         self.env_drop = tuple(env_drop)
         self.root = root
         self.tab_hook = tab_hook     # (tab id, text=None, key=None, queue=False), from tabit
+        self.tabs_hook = tabs_hook   # () -> [{"id", "title", "group"}] for the Claude tabs, or None
+        self._synced = 0.0
+        self._missed = {}            # chat id -> looks without its tab
         self._mirrorer = None
         self._mirror_off = threading.Event()
         self.extra_env = extra_env   # () -> env the chats' tools need
@@ -1022,7 +1027,7 @@ class ChatManager:
         self.lock = threading.RLock()
         self._reaper = None
         self._load()
-        if any(c.mirrored for c in self.chats.values()):
+        if self.tabs_hook or any(c.mirrored for c in self.chats.values()):
             self.start_mirrors()
         try:
             with open(os.path.join(self.root, "account.json"), encoding="utf-8") as f:
@@ -1149,12 +1154,64 @@ class ChatManager:
 
     def _mirror_loop(self):
         while not self._mirror_off.wait(MIRROR_EVERY):
+            if self.tabs_hook and time.time() - self._synced >= SYNC_EVERY:
+                self._synced = time.time()
+                try:
+                    self.sync_tabs()
+                except Exception as e:
+                    self._missed["error"] = str(e)
             for chat in list(self.chats.values()):
                 if chat.mirrored:
                     try:
                         chat.mirror_poll()
                     except Exception as e:           # one tab must not stop the others
                         chat.errtail.append("mirror: %s" % e)
+
+    def _ignored_path(self):
+        return os.path.join(self.root, "ignored_tabs.json")
+
+    def _ignored(self):
+        try:
+            with open(self._ignored_path(), encoding="utf-8") as f:
+                return set(json.load(f))
+        except (OSError, ValueError, TypeError):
+            return set()
+
+    def sync_tabs(self):
+        """Every Claude tab has a chat that mirrors it, named "group · tab".
+        A chat made here follows its tab's name, and goes when its tab has
+        been closed for a while. One the person deleted does not come back."""
+        tabs = self.tabs_hook()
+        if not tabs:                 # tabit busy or still starting: change nothing
+            return
+        by_id = {t["id"]: t for t in tabs}
+        have = {c.meta["tab"]["id"]: c for c in list(self.chats.values()) if c.mirrored}
+        ignored = self._ignored()
+        for tab in tabs:
+            name = " · ".join(x for x in (tab.get("group"), tab.get("title")) if x)[:80] or "Tab"
+            chat = have.get(tab["id"])
+            if chat is None:
+                if tab["id"] in ignored:
+                    continue
+                code, out = self.create({"title": name, "tab": {"id": tab["id"], "title": tab.get("title") or ""}})
+                if code == 200:
+                    made = self.chats[out["chat"]["id"]]
+                    made.meta["auto"] = True
+                    made._save_meta()
+            elif chat.meta.get("auto") and not chat.meta.get("named") and chat.meta["title"] != name:
+                chat.meta["title"] = name
+                chat.meta["tab"]["title"] = tab.get("title") or ""
+                chat._save_meta()
+        for tid, chat in have.items():
+            if not chat.meta.get("auto"):
+                continue
+            if tid in by_id:
+                self._missed.pop(chat.id, None)
+            else:
+                self._missed[chat.id] = self._missed.get(chat.id, 0) + 1
+                if self._missed[chat.id] >= GONE_AFTER:
+                    self._missed.pop(chat.id, None)
+                    self.delete(chat, dismiss=False)
 
     def start_reaper(self):
         with self.lock:
@@ -1272,8 +1329,15 @@ class ChatManager:
         except OSError:
             pass
 
-    def delete(self, chat):
+    def delete(self, chat, dismiss=True):
         chat.stop_process()
+        if dismiss and chat.mirrored and chat.meta.get("auto"):     # do not make it again
+            ids = sorted(self._ignored() | {chat.meta["tab"]["id"]})
+            try:
+                with open(self._ignored_path(), "w", encoding="utf-8") as f:
+                    json.dump(ids, f)
+            except OSError:
+                pass
         with self.lock:
             self.chats.pop(chat.id, None)
             for group in list(self.groups.values()):
@@ -1367,6 +1431,13 @@ def api(mgr, method, parts, body):
         except RuntimeError as e:
             return 409, {"error": str(e)}
         return (200, {"ok": True}) if ok else (404, {"error": "that question is gone"})
+    if op == "reload":
+        if chat.mirrored:
+            return 400, {"error": "a mirror has no Claude of its own"}
+        if chat.state != "idle":
+            return 409, {"error": "wait until Claude is done, or press Stop"}
+        chat.stop_process()          # the next message starts it again, with the connectors as they are now
+        return 200, {"ok": True}
     if op == "edit":
         return _edit(chat, body)
     if op == "delete":
@@ -1472,6 +1543,8 @@ def _edit(chat, body):
             return 400, {"error": "a title of 1 to 80 characters"}
         new["title"] = title
         new["titled"] = True
+        if title != chat.meta["title"]:
+            new["named"] = True          # a name the person chose is kept
     if "mode" in body:
         if body["mode"] not in MODES:
             return 400, {"error": "mode is one of: " + ", ".join(MODES)}

@@ -13074,6 +13074,7 @@ if (data !== null) {{
                             env_drop=CLAUDE_SESSION_ENV,
                             auth=Tabit._claude_auth_status,
                             tab_hook=self._chat_tab_hook,
+                            tabs_hook=self._chat_tabs_hook,
                             extra_env=self._chat_tool_env)
                         self._chat_manager.ensure_default()
                         break
@@ -13084,6 +13085,25 @@ if (data !== null) {{
         srv = getattr(self, "_remote_srv", None)
         owner = getattr(getattr(srv, "handler_cls", None), "owner", None)
         return {"TABIT_SOCK": REMOTE_SOCK, "TABIT_OWNER": owner or ""}
+
+    def _chat_tabs_hook(self):
+        """For a chat: every Claude AI tab as {"id", "title", "group"}, or None
+        when tabit is busy. Runs on the GTK thread through _remote_call."""
+        def work():
+            out = []
+            for row in self._session_rows():
+                if not _is_ai_icon(getattr(row, "icon_name", None)):
+                    continue
+                got = self._ai_cli_path_of(getattr(row, "argv", None))
+                if not (got and self._ai_is_claude(got[0])):
+                    continue
+                color = getattr(row, "group_color", None) or ""
+                out.append({"id": self._tg_row_id(row),
+                            "title": getattr(row, "title_text", "") or "",
+                            "group": (self._group_names.get(color) or color.capitalize()) if color else ""})
+            return out
+        res = self._remote_call(work)
+        return res if isinstance(res, list) else None
 
     def _chat_tab_hook(self, tab_id, text=None, key=None, queue=False):
         """For a chat: info about an AI tab; with text, type a line into it;
