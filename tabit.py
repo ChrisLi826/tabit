@@ -14737,11 +14737,14 @@ if (data !== null) {{
         if not sid:
             return "no conversation yet: send one message first"
         old_tmux = getattr(row, "_live_tmux", None)   # what runs, not what argv says
+        # A tab that never spoke has no transcript: --resume would fail. It
+        # starts that same session afresh instead, and resumes it later.
+        spoke = self._claude_session_saved(got[1], sid)
         launch, stored, _icon = self._ai_launch_pair(
-            new_cli, got[1], [], resume_id=sid,
+            new_cli, got[1], [], resume_id=sid if spoke else None,
             tmux=self._ai_tmux_unwrap(argv)[1] is not None,
-            continue_now=True, resume_later=True, bypass=self._ai_has_bypass(argv),
-            model=new_model)
+            continue_now=spoke, resume_later=True, bypass=self._ai_has_bypass(argv),
+            model=new_model, new_sid=None if spoke else sid)
         row._respawn = (launch, got[1], got[0], new_cli)
         row.argv = stored                   # before the old one stops
         row.ai_hunt = False
@@ -14754,6 +14757,16 @@ if (data !== null) {{
                 os.kill(row.pid, signal.SIGHUP)
         self._save_sessions_soon()
         return None
+
+    @staticmethod
+    def _claude_session_saved(path, sid):
+        """Whether claude has saved session `sid` of folder `path` yet: it
+        writes the transcript only with the first message."""
+        for p in (path, os.path.realpath(path)):
+            d = os.path.join(CLAUDE_PROJECTS_DIR, re.sub(r"[^A-Za-z0-9]", "-", p))
+            if os.path.isfile(os.path.join(d, sid + ".jsonl")):
+                return True
+        return False
 
     def _ai_respawn(self, row):
         """The old claude of an account switch has ended: start the new one

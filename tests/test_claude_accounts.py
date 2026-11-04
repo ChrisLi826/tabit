@@ -2,6 +2,7 @@
 """Claude accounts: one wrapper per account, picked per +AI tab."""
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -212,8 +213,17 @@ class TestSwitchAccount(AccountDirs):
         for name in ("_ai_switch_account", "_ai_session_of", "_ai_respawn",
                      "_remote_manage_op"):
             setattr(self.app, name, getattr(T, name).__get__(self.app))
+        # the sessions these tests switch have spoken: their transcript is there
+        self.projects = os.path.join(self.tmp, "projects")
+        spoken = os.path.join(self.projects, re.sub(r"[^A-Za-z0-9]", "-", self.tmp))
+        os.makedirs(spoken)
+        open(os.path.join(spoken, A + ".jsonl"), "w").close()
+        p = mock.patch.object(tabit, "CLAUDE_PROJECTS_DIR", self.projects)
+        p.start()
+        self.addCleanup(p.stop)
         for name in ("_ai_cli_path_of", "_ai_is_claude", "_claude_account_of",
-                     "_ai_tmux_unwrap", "_ai_launch_pair", "_ai_has_bypass", "_ai_model_of"):
+                     "_ai_tmux_unwrap", "_ai_launch_pair", "_ai_has_bypass", "_ai_model_of",
+                     "_claude_session_saved"):
             setattr(self.app, name, getattr(T, name))
 
     def row(self, cli="claude", tmux=True, model="", **kw):
@@ -275,6 +285,23 @@ class TestSwitchAccount(AccountDirs):
         self.app._spawn_term.assert_called_once_with(r, launch, self.tmp)
         self.app._set_tab_name.assert_called_once_with(r, "claude · work")
         self.assertIsNone(r._respawn)
+
+    def test_a_tab_that_never_spoke_starts_its_session_afresh(self):
+        # no transcript yet: --resume would fail and drop to a shell
+        r = self.row()
+        with mock.patch.object(tabit, "CLAUDE_PROJECTS_DIR", os.path.join(self.tmp, "none")), \
+                mock.patch.object(tabit, "_tmux_kill_session"):
+            self.assertIsNone(self.app._ai_switch_account(r, "", model="haiku"))
+        launch = T._ai_tmux_unwrap(r._respawn[0])[0][2]
+        self.assertIn("--session-id %s" % A, launch)
+        self.assertNotIn("--resume", launch)
+        self.assertIn(A, r.argv[2])                    # the next start resumes it, once it spoke
+
+    def test_a_tab_that_spoke_resumes(self):
+        r = self.row()
+        with mock.patch.object(tabit, "_tmux_kill_session"):
+            self.app._ai_switch_account(r, "", model="haiku")
+        self.assertIn("--resume %s" % A, T._ai_tmux_unwrap(r._respawn[0])[0][2])
 
     def test_a_model_switch_restarts_the_tab_with_that_model(self):
         r = self.row()
