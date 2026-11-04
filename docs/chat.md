@@ -4,9 +4,11 @@ Tabit Chat is Remote as a conversation. You talk to Claude on this computer
 from a phone or another computer, in chat bubbles, not in a terminal. Back to
 [Remote](remote.md).
 
-Open `https://<this-host>.<tailnet>.ts.net/chat`. It needs the same switch as
-typing into tabs (**Settings… → Remote → Allow typing into tabs**), because a
-chat can run commands on this machine. On a phone, **Share → Add to Home
+Open `https://<this-host>.<tailnet>.ts.net/`: the address opens the chat
+(`/chat` still works). It needs the same switch as typing into tabs
+(**Settings… → Remote → Allow typing into tabs**), because a chat can run
+commands on this machine; with that switch off, the address goes on to the
+terminal view. ⌨ opens the terminal view, at `/terminal`. On a phone, **Share → Add to Home
 Screen** makes it an app of its own.
 
 ## What it does
@@ -73,19 +75,52 @@ The **Send to tab** card guards against Claude's mistakes; it is not a lock.
 A Claude that may run any command (Bypass, or a command you allowed) can
 reach tabit the way `tabit-tabs` does, and do what the phone can do. The real
 boundary is your user account on this computer, as for anything else you run.
+Tabs that talk to each other with `@name` (below) have no card at all: a tab's
+reply is typed into the other tab as it is, even into a tab in Bypass.
 
-## Mirror a tab
+## Chats are tabs
 
-New chat can **mirror a Claude tab** instead of starting a Claude of its own.
-The chat then shows that tab's conversation, and what you type goes into the
-tab. A tab that is working takes your line too: Claude holds it until the
-turn is done. **Stop** presses Esc in the tab. The list marks the chat with
-🔗 and the tab's name.
+Every Claude tab in tabit has a chat, and every new chat is a Claude tab. The
+chat shows that tab's conversation, and what you type goes into the tab. A tab
+that is working takes your line too: Claude reads it at its next step, in the
+same turn, and the chat shows it.
+**Stop** presses Esc in the tab.
 
-- Mode and model belong to the tab, so the chat has none. A mirror cannot
-  join a group.
+- **One name, one group.** The chat has the tab's name and shows the tab's
+  group under it, with the group's colour. Rename the chat and the tab is
+  renamed. Rename or regroup the tab and the chat follows within 10 seconds.
+- **New chat** opens a Claude tab in the group you pick, in the folder you
+  pick. With no group picked, the tab is in no group.
+- **Delete.** Deleting a chat closes its tab. The chat asks first. The last
+  tab in tabit cannot be closed from the phone, so that chat stays. Closing a
+  tab removes its chat after about a minute.
+- **Old chats move into tabs.** A chat that ran its own Claude (not the main
+  Tabit Chat) moves into a tab when it is idle: the tab goes on with the same
+  conversation (`--resume`), keeps the login and bypass, and the chat that
+  mirrors it takes the old one's picture and name, and its place in the
+  groups (rooms) the old chat was in. The old chat's folder is kept as
+  `~/.local/share/tabit/chats/<id>.moved`, history and all. Of the modes only
+  Bypass goes along; a chat in Accept edits or Plan first becomes a tab that
+  asks each time (unless **Settings → AI → Claude bypass** is on, which makes
+  every new Claude tab bypass, this one too). A chat that cannot move is tried 3 times.
+- **Account and model.** A chat's settings show Account and Model, and each
+  row shows `account · model`. Either switch restarts the tab's Claude in
+  place, on the same conversation (`--resume`, with `--model` for a model),
+  and both together are one restart. Not while Claude works, asks something
+  or still runs agents. Claude's own settings are not touched. The tab shows
+  the model that answered last, read from its transcript.
+- Tabs of other tools (Codex, Grok) have no chat: only Claude's transcript is
+  read.
 - When the tab starts a new conversation, the chat says so and goes on with
   the new one.
+- **Menus on the tab's screen.** A tab that waits on a menu (the trust
+  question for a folder, a permission question with numbered choices) shows
+  as a card too, with the whole prompt above the menu (a long command in
+  full; a prompt taller than the screen says its top is cut). Tap a choice
+  and **Answer**, and tabit presses the number, or the arrow keys and Enter,
+  in the tab. Before every key it reads the menu again, and stops if it has
+  gone. **Skip** picks a numbered No; on a menu without numbers (the trust
+  question) it presses nothing and leaves the menu to the tab.
 - **Questions from the tab.** When the tab's Claude asks you to pick from a
   list, the chat shows the question as a card. Tap an option for each
   question and tap **Answer**; tabit presses the keys in the tab. **Skip**
@@ -94,16 +129,51 @@ turn is done. **Stop** presses Esc in the tab. The list marks the chat with
   away when the question is answered in the tab. While it is open, the chat
   does not type into the tab.
 
+## Tabs talk to each other
+
+A Claude tab can send a message to another Claude tab. When a line of its
+reply starts with `@name`, tabit types the whole reply into that tab, marked
+`[from @me]`; the other tab answers the same way, with a line that starts
+with `@me`. Each tab's name is its tab name made into one word (`[Claude] LPR`
+is `@claude-lpr`; two of the same name get `-2`, `-3`).
+
+- Every Claude tab is told, with each prompt, its own name and the other
+  tabs it can call, through tabit's hooks. A tab that is alone is told
+  nothing.
+- Only replies written from now on count: what a tab said before is not sent.
+  A line inside a code block, or a file name like `@tabit.py`, is no call.
+- There is no limit on how often tabs answer each other. Two tabs that keep
+  replying to each other go on until you press Stop (Esc) in one of them.
+- A tab that is asking you something does not take a message; the sender's
+  chat says so.
+- Two tabs in the same group talk through the group when they use the
+  group's names (see Groups). With their tab names (which differ when two
+  tabs have the same title) they talk directly, without the group's 8-pass
+  pause.
+- It runs from the time tabit starts, with or without the chat page open.
+- **You can call tabs too.** A message that starts with `@name` (or several:
+  `@ann @ben ...`, with or without commas) goes only to those tabs, as in a
+  group, from any chat; the chat shows it with "to @name". Their answers stay
+  in their own chats. A message that names no tab first goes to the chat as
+  always.
+- Type `@` in the text box and a list of the other tabs' names comes up.
+  Keep typing to narrow it; tap a name (or Enter or Tab) to put it in. In a
+  group, the list is the group's members.
+
 ## Groups
 
 A group puts two or more chats in one room.
 
 - Your message goes to everyone. `@name` at the start sends it to one (or
-  several: `@ann @ben ...`).
+  several: `@ann @ben ...`, with or without commas).
 - A chat can talk to another: when its reply has a line that starts with
   `@name`, tabit passes that message on. This is how chats talk to each other.
 - After 8 such passes the group stops and waits for you, so two chats can never
   talk forever. Anything you say starts the count again.
+- A chat that is a tab joins like any other: the group's messages are typed
+  into its tab, and what the tab's Claude replies comes back into the group.
+  The tab's past (what was said before it joined, or before a new
+  conversation) is not passed on.
 - Questions from any member show in the group. Stop stops all of them.
 - Deleting a group keeps its chats.
 
@@ -115,7 +185,7 @@ working goes on until it is done. Press **Stop** first if you want it to end.
 Each chat runs one headless `claude -p --input-format stream-json
 --output-format stream-json`. Its events become chat events; nothing reads a
 terminal screen, except the AI tabs above. The code is in `tabit_chat.py` (no
-GTK), `chat.html` and `tabit-tabs`. The routes are `/chat`,
+GTK), `chat.html` and `tabit-tabs`. The routes are `/` (and `/chat`),
 `/chat.webmanifest`, `/api/chats`, `/api/chat-groups` and `/api/dirs/new`,
 behind the same checks as the rest of Remote. A mirror reads the tab's Claude
 transcript every 2 seconds.

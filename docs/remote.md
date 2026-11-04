@@ -20,7 +20,8 @@ tabit serves the page through **Tailscale Serve**, so it travels only inside
 your own tailnet. Only your own Tailscale login gets in; other people on a
 shared tailnet get 403.
 
-Open `https://<this-host>.<tailnet>.ts.net/` on the other device. On a phone,
+Open `https://<this-host>.<tailnet>.ts.net/terminal` on the other device (the
+address alone opens [Tabit Chat](chat.md) when typing is allowed). On a phone,
 **Share → Add to Home Screen** makes it an app. In Chrome or Edge, **Install**
 in the address bar opens it in its own window. The other device needs the
 Tailscale app, signed in to the same account.

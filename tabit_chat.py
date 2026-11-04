@@ -9,11 +9,13 @@ No GTK in this file. tabit.py serves the routes; this file owns the chats.
 """
 import collections
 import datetime
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import textwrap
 import threading
 import time
 import uuid
@@ -26,6 +28,10 @@ MODES = {"ask": "default", "edits": "acceptEdits", "plan": "plan",
 MODELS = ("", "opus", "sonnet", "haiku", "fable")
 
 MAX_RUNNING = 6              # claude processes alive at once
+TAB_TEXT = 8000              # the most tabit types into a tab at once
+SYNC_EVERY = 10              # seconds between looks at the list of tabs
+MOVE_TRIES = 3               # tries to move one chat into a tab before it is left alone
+GONE_AFTER = 6               # looks without its tab before an automatic mirror goes
 IDLE_STOP = 20 * 60          # an idle chat gives its process back after this
 MAX_SEND = 20000             # one message, in characters: 3 bytes each still fit 64 KB
 KEEP_TEXT = 4000             # a tool's input or result, in characters
@@ -149,6 +155,14 @@ def _transcript_events(raw):
     if (not isinstance(raw, dict) or raw.get("isSidechain") or raw.get("isMeta")
             or raw.get("isCompactSummary")):
         return []
+    if raw.get("type") == "attachment":     # a message typed while Claude worked
+        a = raw.get("attachment") or {}
+        typed = a.get("prompt")
+        if (a.get("type") == "queued_command" and a.get("commandMode") == "prompt"
+                and (a.get("origin") or {}).get("kind") == "human" and isinstance(typed, str)
+                and typed.strip() and not typed.strip().startswith(NOT_TYPED)):
+            return [_typed_event(typed.strip())]
+        return []
     if raw.get("type") != "user":
         return translate(raw)
     content = (raw.get("message") or {}).get("content")
@@ -160,13 +174,17 @@ def _transcript_events(raw):
                       if isinstance(b, dict) and b.get("type") == "text").strip()
     out = translate(raw)
     if typed and not typed.startswith(NOT_TYPED):
-        ev = {"t": "user", "text": _cut(typed, 20000)}
-        said = REPLY_LINE.match(typed)
-        if said:                     # a reply sent from a chat: show it as one
-            ev["text"] = _cut(typed[said.end():], 20000)
-            ev["reply"] = {"who": said.group(1), "snip": said.group(2)}
-        out.insert(0, ev)
+        out.insert(0, _typed_event(typed))
     return out
+
+
+def _typed_event(typed):
+    ev = {"t": "user", "text": _cut(typed, 20000)}
+    said = REPLY_LINE.match(typed)
+    if said:                     # a reply sent from a chat: show it as one
+        ev["text"] = _cut(typed[said.end():], 20000)
+        ev["reply"] = {"who": said.group(1), "snip": said.group(2)}
+    return ev
 
 
 def transcript_events(raw):
@@ -179,6 +197,76 @@ def transcript_events(raw):
     for ev in out:
         ev["ts"] = round(ts, 2)
     return out
+
+
+SCREEN_ROWS = 40             # the lines of a waiting tab's screen tabit hands over
+
+
+def screen_prompt(lines):
+    """The menu a tab waits on, read from its screen: {"id", "question",
+    "options", "numbers", "selected"}, or None. A menu is two rows or more, the
+    chosen one marked with ❯ and the others indented two more spaces; a numbered
+    one (a permission question) or one that says "Enter to confirm" (the trust
+    question) counts, so the box where one types does not."""
+    if not isinstance(lines, list):
+        return None
+    rows = [x if isinstance(x, str) else "" for x in lines]
+    sel = next((i for i in range(len(rows) - 1, -1, -1) if re.match(r"^\s*❯\s+\S", rows[i])), None)
+    if sel is None:
+        return None
+    ind = len(rows[sel]) - len(rows[sel].lstrip())
+    # a numbered menu has only numbered rows: a hint under it is not one more choice
+    other = re.compile(r"^ {%d}%s\S" % (ind + 2, r"\d+\.\s+" if re.match(r"^\s*❯\s+\d+\.\s", rows[sel]) else ""))
+    top = bot = sel
+    while top > 0 and other.match(rows[top - 1]):
+        top -= 1
+    while bot + 1 < len(rows) and other.match(rows[bot + 1]):
+        bot += 1
+    picks = [re.sub(r"^\s*❯?\s*", "", r).rstrip() for r in rows[top:bot + 1]]
+    numbers = []
+    for i, p in enumerate(picks):
+        m = re.match(r"(\d+)\.\s+(.*)", p)
+        numbers.append(int(m.group(1)) if m else None)
+        picks[i] = (m.group(2) if m else p)[:200]
+    tail = " ".join(rows[bot + 1:bot + 7])
+    numbered = all(n is not None for n in numbers)
+    if len(picks) < 2 or not (numbered or "Enter to confirm" in tail):
+        return None
+    # the whole prompt above it, up to the box line: a long command is what
+    # the person says yes to, so all of it goes on the card
+    above, i = [], top - 1
+    while i >= 0 and "─" not in rows[i]:
+        if rows[i].strip():
+            above.append(rows[i].rstrip())
+        i -= 1
+    above.reverse()
+    detail = textwrap.dedent("\n".join(above))[:6000]
+    if i < 0 and len(rows) >= SCREEN_ROWS:       # it starts above what tabit gave
+        detail = "… (the top is cut: open the tab to see all of it)\n" + detail
+    question = (above[-1].strip() if above else "The tab asks you to choose")[:200]
+    key = hashlib.md5((detail + "|".join(picks)).encode()).hexdigest()[:10]
+    return {"id": "scr-" + key, "question": question, "detail": detail, "options": picks,
+            "numbers": numbers, "selected": sel - top}
+
+
+def transcript_model(path):
+    """The model that answered last in a Claude transcript (its tail), or None."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            f.seek(max(0, size - MIRROR_TAIL))
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            raw = json.loads(line)
+        except ValueError:
+            continue
+        said = (raw.get("message") or {}).get("model") if isinstance(raw, dict) and raw.get("type") == "assistant" else None
+        if isinstance(said, str) and not said.startswith("<"):
+            return said
+    return None
 
 
 def open_question(path):
@@ -352,14 +440,29 @@ class Chat(_Log):
         self.pending = {}            # request id -> {"ev", "input", "suggest"}
         self.tab_state = "idle"      # a mirrored chat: what its tab is doing
         self._tab_answered = set()   # tool ids of the tab's questions answered from here
+        self._model_looked = False   # the tab's model was looked for in its transcript
         self.inflight = 0            # messages sent that have no "done" yet
         self.proc = None
         self.wlock = threading.Lock()
         self.slock = threading.Lock()   # one claude per chat, even when two send at once
+        self.moving = False             # on its way into a tab: no Claude of its own again
         self.last_used = time.time()
         self.errtail = collections.deque(maxlen=12)
         self._expected_exit = False
         self._log_init()
+
+    def login(self):
+        """The Claude login this chat uses: its tab's, or its own, or the shared one."""
+        if self.mirrored:
+            return self.meta["tab"].get("account", "")
+        return self.meta["account"] if "account" in self.meta else self.mgr.account
+
+    def push(self):
+        """Tell the open pages that the name or the group changed."""
+        with self.cond:
+            self.live_ver += 1
+            self.cond.notify_all()
+        self._changed(None)
 
     def _set_live(self, text):
         with self.cond:
@@ -390,9 +493,12 @@ class Chat(_Log):
         last = next((e for e in reversed(self.events)
                      if e["t"] in ("user", "text")), None)
         return {"id": self.id, "title": self.meta["title"],
-                "cwd": self.meta["cwd"], "account": self.mgr.account,
+                "cwd": self.meta["cwd"], "account": self.login(),
                 "mode": self.meta["mode"], "model": self.meta.get("model", ""),
-                "state": self.state, "updated": self.meta.get("updated", 0),
+                # the last message, not the last save: a mirror's transcript
+                # gains lines that are no message, and a rename is no news
+                "state": self.state, "updated": last["ts"] if last and last.get("ts")
+                else self.meta.get("created") or self.meta.get("updated", 0),
                 "last": (last["text"][:120] if last else ""),
                 "asks": len(self.pending), "default": bool(self.meta.get("default")),
                 "emoji": self.meta.get("emoji", ""), "hue": self.meta.get("hue"),
@@ -427,7 +533,7 @@ class Chat(_Log):
 
     # -- the claude process
     def _argv(self):
-        argv = [self.mgr.cli_for(self.mgr.account), "-p",
+        argv = [self.mgr.cli_for(self.login()), "-p",
                 "--input-format", "stream-json", "--output-format", "stream-json",
                 "--verbose", "--include-partial-messages",
                 "--permission-prompt-tool", "stdio",
@@ -569,6 +675,8 @@ class Chat(_Log):
         """quiet: a group sends it, so the chat's title is not made from it.
         reply: the message this one answers, from quote()."""
         with self.slock:
+            if self.moving:
+                raise RuntimeError("this chat is moving into a tab")
             if not self.running:
                 self._spawn()
         self.last_used = time.time()
@@ -586,30 +694,55 @@ class Chat(_Log):
         if info.get("error"):
             self._set_tab_state("idle")
             return
-        self._set_tab_state({"working": "working", "blocked": "waiting"}.get(info["status"], "idle"))
+        # every status but idle shows: done with a new reply, agents still
+        # running after the reply, the tab gone
+        self._set_tab_state({"working": "working", "blocked": "waiting", "ready": "ready",
+                             "background": "background", "exited": "exited"}.get(info["status"], "idle"))
         if info.get("transcript"):
+            if not self._model_looked and not self.meta["tab"].get("model"):
+                self._model_looked = True            # once: a transcript read from its end would miss it
+                model = transcript_model(info["transcript"])
+                if model:
+                    self.meta["tab"] = dict(self.meta["tab"], model=model)
+                    self._save_meta()
+                    self.push()
             self._mirror_read(info["transcript"])
-        self._sync_question(info.get("transcript"))
+        self._sync_question(info)
 
-    def _sync_question(self, path):
-        """While the tab is asking a question, the chat holds it as a card with
-        the options; the card goes when the tab no longer asks."""
+    def _sync_question(self, info):
+        """While the tab waits on a question, the chat holds it as a card with
+        the options; the card goes when the tab no longer waits. The question is
+        Claude's own (AskUserQuestion, from the transcript) or a menu on the
+        tab's screen (a trust or permission question)."""
+        path = info.get("transcript")
+        if self.tab_state != "waiting":              # a menu has no id of its own: the same one may come again
+            self._tab_answered = {i for i in self._tab_answered if not i.startswith("scr-")}
         asked = {rid: p for rid, p in self.pending.items() if p.get("tab")}
         q = open_question(path) if self.tab_state == "waiting" and path else None
         if q and q["id"] in self._tab_answered:      # answered here: the transcript is not caught up yet
             q = None
+        card = None
+        if q:
+            card = {"rid": "tab-" + q["id"], "id": q["id"], "questions": q["questions"]}
+        elif self.tab_state == "waiting":
+            sp = screen_prompt(info.get("screen"))
+            if sp and sp["id"] not in self._tab_answered:
+                card = {"rid": sp["id"], "id": sp["id"], "screen": sp, "questions": [
+                    {"question": sp["question"], "header": "", "multiSelect": False,
+                     "options": [{"label": o, "description": ""} for o in sp["options"]]}]}
         for rid in asked:
-            if not q or rid != "tab-" + q["id"]:
+            if not card or rid != card["rid"]:
                 self._unask(rid, "answered in the tab")
-        if not q or "tab-" + q["id"] in asked:
+        if not card or card["rid"] in asked:
             return
-        rid = "tab-" + q["id"]
-        ev = {"t": "ask", "rid": rid, "tool": "AskUserQuestion", "id": q["id"],
-              "summary": q["questions"][0]["question"][:200], "questions": q["questions"],
-              "detail": "", "can_remember": False}
+        ev = {"t": "ask", "rid": card["rid"], "tool": "AskUserQuestion", "id": card["id"],
+              "summary": card["questions"][0]["question"][:200], "questions": card["questions"],
+              "detail": card.get("screen", {}).get("detail", ""), "can_remember": False}
+        held = {"tab": True, "input": {"questions": card["questions"]}, "suggest": None, "ev": ev}
+        if "screen" in card:
+            held["screen"] = card["screen"]
         with self.cond:
-            self.pending[rid] = {"tab": True, "input": {"questions": q["questions"]},
-                                 "suggest": None, "ev": ev}
+            self.pending[card["rid"]] = held
         self.emit(ev)
 
     def _answer_tab(self, held, allow, answers):
@@ -619,6 +752,17 @@ class Chat(_Log):
         # The desk may have answered it since the last look: then a number
         # would land in the next prompt, and Esc would stop Claude.
         info = self.mgr.tab_hook(tab)
+        if held.get("screen"):
+            now = screen_prompt(info.get("screen")) if info.get("status") == "blocked" else None
+            if not now or now["id"] != held["ev"]["id"]:
+                raise _Gone("that question is no longer open in the tab")
+
+            def still_there():       # between two keys too: the desk may answer meanwhile
+                info = self.mgr.tab_hook(tab)
+                again = screen_prompt(info.get("screen")) if info.get("status") == "blocked" else None
+                if not again or again["id"] != held["ev"]["id"]:
+                    raise _Gone("that question is no longer open in the tab")
+            return self._press(tab, self._screen_keys(now, held, allow, answers), still_there)
         q = open_question(info.get("transcript")) if info.get("status") == "blocked" \
             and info.get("transcript") else None
         if not q or q["id"] != held["ev"]["id"]:
@@ -635,9 +779,33 @@ class Chat(_Log):
                 keys.append(str(labels.index(label) + 1))
             if len(qs) > 1:
                 keys.append("1")
+        self._press(tab, keys)
+
+    def _screen_keys(self, menu, held, allow, answers):
+        """The keys for a menu on the screen: its number, or the arrows and Enter.
+        A skip picks a numbered No (what Esc does there); a menu without
+        numbers (the trust question, whose No and Esc both end Claude) gets
+        no key: the tab answers it."""
+        if not allow:
+            no = next((i for i, o in enumerate(menu["options"]) if re.match(r"No\b", o)), None)
+            num = menu["numbers"][no] if no is not None else None
+            return [str(num)] if num is not None and num < 10 else []
+        label = (answers or {}).get(held["input"]["questions"][0]["question"])
+        if label not in menu["options"]:
+            raise RuntimeError("pick one of the options")
+        i = menu["options"].index(label)
+        num = menu["numbers"][i]
+        if num is not None and num < 10:
+            return [str(num)]
+        move = i - menu["selected"]
+        return ["down" if move > 0 else "up"] * abs(move) + ["enter"]
+
+    def _press(self, tab, keys, check=None):
         for i, key in enumerate(keys):
             if i:
                 time.sleep(ANSWER_STEP)
+                if check:
+                    check()
             code, out = self.mgr.tab_hook(tab, key=key)
             if code != 200:
                 raise RuntimeError(out.get("error") or "the tab did not take the key")
@@ -659,7 +827,8 @@ class Chat(_Log):
             size = os.path.getsize(path)
         except OSError:
             return
-        fresh = have.get("path") != path or size < have.get("offset", 0)
+        fresh = (not have.get("path") or os.path.realpath(have["path"]) != os.path.realpath(path)
+                 or size < have.get("offset", 0))
         start = max(0, size - MIRROR_TAIL) if fresh else have["offset"]
         if size <= start:
             return
@@ -672,22 +841,31 @@ class Chat(_Log):
         data = data[:end + 1]
         if fresh and start > 0:
             data = data[data.find(b"\n") + 1:]      # the first line is cut in half
-        events = []
+        events, model = [], None
         for line in data.splitlines():
             try:
-                events += transcript_events(json.loads(line))
+                raw = json.loads(line)
             except ValueError:
                 continue
+            events += transcript_events(raw)
+            said = (raw.get("message") or {}).get("model") if isinstance(raw, dict) and raw.get("type") == "assistant" else None
+            if isinstance(said, str) and not said.startswith("<"):
+                model = said             # the model that answered last
+        if model and self.meta["tab"].get("model") != model:
+            self.meta["tab"] = dict(self.meta["tab"], model=model)
+            self.push()
         if fresh:
             if have.get("path"):
                 self.emit({"t": "notice", "text": "The tab started a new conversation."})
             events = events[-MIRROR_FIRST:]
+            for ev in events:
+                ev["replay"] = True  # the past: a group does not pass it on
+        self.meta["mirror"] = {"path": path, "offset": start + end + 1}
+        self._save_meta()            # first: a stop between the two must not pass a line on twice
         for ev in events:
             if ev.get("reply"):
                 ev["reply"]["seq"] = self._seq_of(ev["reply"]["snip"])
             self.emit(ev)
-        self.meta["mirror"] = {"path": path, "offset": start + end + 1}
-        self._save_meta()
 
     def _seq_of(self, snip):
         """The newest message of this chat that begins with this quote, or None."""
@@ -790,6 +968,33 @@ BRIEF = ('You are in a group chat called "{title}" with these members: {names}. 
          'not answer just to say thanks.')
 
 
+NAME_END = r"(?![\w-]|[./\\]\S)"     # @tabit.py or @docs/x.md is a file, not a name
+
+
+def mentions(text):
+    """The names a reply calls by @name at the start of a line (several per
+    line allowed), lower case, in order."""
+    named, code = [], False
+    for line in (text or "").splitlines():
+        if line.lstrip().startswith("```"):
+            code = not code
+        m = not code and re.match(r"\s*((?:@[\w-]+%s[\s,:]*)+)" % NAME_END, line)
+        if m:
+            for x in re.findall(r"@([\w-]+)", m.group(1)):
+                if x.lower() not in named:
+                    named.append(x.lower())
+    return named
+
+
+ROSTER = ("You are the AI tab @{me} in tabit, on this computer. Other AI tabs you can "
+          "talk to: {others}. To send one a message, start a line of your reply with "
+          "@name: tabit types your whole reply into that tab, marked [from @{me}]. A "
+          "message that starts with [from @name] came from that tab (another AI, not "
+          "the user); answer it the same "
+          "way, with a line that starts with @name. Only do this when you need another "
+          "tab. A reply with no @name stays in this tab.")
+
+
 def slug(text):
     out = "".join(c if c.isalnum() else "-" for c in text.lower()).strip("-")
     return "-".join(p for p in out.split("-") if p)[:40] or "chat"
@@ -847,8 +1052,6 @@ class Group(_Log):
         remove = [i for i in dict.fromkeys(remove) if i in self.meta["members"]]
         if any(i not in self.mgr.chats for i in add):
             return 400, {"error": "no such chat"}
-        if any(self.mgr.chats[i].mirrored for i in add):
-            return 400, {"error": "a chat that mirrors a tab cannot join a group"}
         if len(self.meta["members"]) + len(add) - len(remove) < 2:
             return 400, {"error": "a group needs at least two chats: delete the group instead"}
         for i in remove:
@@ -862,6 +1065,21 @@ class Group(_Log):
         self.meta["briefed"] = []
         self._save_meta()
         return 200, {"group": self.summary()}
+
+    def swap_member(self, old, new):
+        """`new` takes `old`'s place, name and briefing: the same conversation
+        goes on in a tab."""
+        if old.id not in self.meta["members"]:
+            return
+        self.meta["members"][self.meta["members"].index(old.id)] = new.id
+        self.meta["alias"][new.id] = self.meta["alias"].pop(old.id, self._new_alias(new))
+        if old.id in self.meta["briefed"]:
+            self.meta["briefed"][self.meta["briefed"].index(old.id)] = new.id
+        if self._on_member in old.listeners:
+            old.listeners.remove(self._on_member)
+        if self._on_member not in new.listeners:
+            new.listeners.append(self._on_member)
+        self._save_meta()
 
     def _leave(self, cid, why):
         name = self.meta["alias"].pop(cid, cid)
@@ -900,7 +1118,8 @@ class Group(_Log):
     def summary(self):
         last = next((e for e in reversed(self.events) if e["t"] in ("user", "say")), None)
         return {"id": self.id, "title": self.meta["title"], "kind": "group",
-                "state": self.state, "updated": self.meta.get("updated", 0),
+                "state": self.state, "updated": last["ts"] if last and last.get("ts")
+                else self.meta.get("created") or self.meta.get("updated", 0),
                 "members": [{"id": c.id, "alias": self.alias(c), "title": c.meta["title"],
                              "state": c.state, "default": bool(c.meta.get("default")),
                              "emoji": c.meta.get("emoji", ""), "hue": c.meta.get("hue")}
@@ -923,7 +1142,7 @@ class Group(_Log):
     def _on_member(self, chat, ev):
         with self.cond:
             self.cond.notify_all()
-        if not ev:
+        if not ev or ev.get("replay"):  # a mirror reading its tab's past: history, not news
             return
         name = self.alias(chat)
         if ev["t"] == "text":
@@ -934,11 +1153,7 @@ class Group(_Log):
 
     def _mentions(self, text, skip=None):
         """Members named by @name at the start of a line, several per line allowed."""
-        named = set()
-        for line in text.splitlines():
-            m = re.match(r"\s*((?:@[\w-]+[\s,]*)+)", line)
-            if m:
-                named.update(x.lower() for x in re.findall(r"@([\w-]+)", m.group(1)))
+        named = set(mentions(text))
         return [c for c in self.members()
                 if c is not skip and self.alias(c).lower() in named]
 
@@ -964,6 +1179,12 @@ class Group(_Log):
             text = head + "\n\n" + "[%s]: %s" % (sender, text)
         else:
             text = "[%s]: %s" % (sender, text)
+        if chat.mirrored:            # typed into its tab; the reply comes back from the transcript
+            code, out = chat.mirror_send(_cut(text, TAB_TEXT - 16))
+            if code != 200:
+                self.emit({"t": "error", "chat": chat.id, "name": self.alias(chat),
+                           "text": "could not reach it: %s" % (out or {}).get("error", code)})
+            return
         try:
             chat.send(text, quiet=True)
         except (OSError, RuntimeError, ValueError) as e:
@@ -977,7 +1198,7 @@ class Group(_Log):
         self.paused = False
         targets, rest = [], text
         while True:
-            m = re.match(r"\s*@([\w-]+)\s*", rest)
+            m = re.match(r"[\s,]*@([\w-]+)%s[\s,:]*" % NAME_END, rest)      # "@a @b" or "@a, @b"
             hit = m and next((c for c in self.members()
                               if self.alias(c).lower() == m.group(1).lower()), None)
             if not hit:
@@ -1005,7 +1226,7 @@ class Group(_Log):
 
 class ChatManager:
     def __init__(self, accounts=None, env_drop=(), root=CHAT_DIR, claude=None, auth=None,
-                 tab_hook=None, extra_env=None):
+                 tab_hook=None, extra_env=None, tabs_hook=None, tab_ops=None, roster_dir=None):
         self.accounts = accounts or (lambda: [])     # [(name, cli)]
         self.auth = auth                             # fn(cli) -> {"email", "subscriptionType"}
         self._labels = (0, [])
@@ -1013,6 +1234,14 @@ class ChatManager:
         self.env_drop = tuple(env_drop)
         self.root = root
         self.tab_hook = tab_hook     # (tab id, text=None, key=None, queue=False), from tabit
+        self.tabs_hook = tabs_hook   # () -> [{"id", "title", "group"}] for the Claude tabs, or None
+        self.tab_ops = tab_ops       # (op, tab id, body) -> (code, body): groups | new | close | rename
+        self._tabs_lock = threading.Lock()   # a tab and its chat are made together
+        self.roster_dir = roster_dir # where each tab's roster goes for its prompt hook
+        self._rosters = {}           # hook key -> the roster text written
+        self._synced = 0.0
+        self._missed = {}            # chat id -> looks without its tab
+        self._move_failed = {}       # chat id -> tries to move it into a tab that failed
         self._mirrorer = None
         self._mirror_off = threading.Event()
         self.extra_env = extra_env   # () -> env the chats' tools need
@@ -1022,7 +1251,7 @@ class ChatManager:
         self.lock = threading.RLock()
         self._reaper = None
         self._load()
-        if any(c.mirrored for c in self.chats.values()):
+        if self.tabs_hook or any(c.mirrored for c in self.chats.values()):
             self.start_mirrors()
         try:
             with open(os.path.join(self.root, "account.json"), encoding="utf-8") as f:
@@ -1149,12 +1378,249 @@ class ChatManager:
 
     def _mirror_loop(self):
         while not self._mirror_off.wait(MIRROR_EVERY):
+            if self.tabs_hook and time.time() - self._synced >= SYNC_EVERY:
+                self._synced = time.time()
+                try:
+                    self.sync_tabs()
+                except Exception as e:
+                    self._missed["error"] = str(e)
             for chat in list(self.chats.values()):
                 if chat.mirrored:
                     try:
                         chat.mirror_poll()
                     except Exception as e:           # one tab must not stop the others
                         chat.errtail.append("mirror: %s" % e)
+
+    def sync_tabs(self):
+        """Every Claude tab has a chat that mirrors it, with the tab's name and
+        group. The chat follows the tab, and goes when the tab has been closed
+        for a while."""
+        tabs = self.tabs_hook()
+        if tabs is None:             # tabit busy: change nothing ([] is no Claude tab at all)
+            return
+        with self._tabs_lock:
+            by_id = {t["id"]: t for t in tabs}
+            have = {c.meta["tab"]["id"]: c for c in list(self.chats.values()) if c.mirrored}
+            for tab in tabs:
+                name = (tab.get("title") or "")[:80] or "Tab"
+                chat = have.get(tab["id"])
+                want = {"id": tab["id"], "title": tab.get("title") or "",
+                        "group": tab.get("group") or "", "color": tab.get("color") or "",
+                        "account": tab.get("account") or "",
+                        "model": chat.meta["tab"].get("model", "") if chat else ""}
+                if chat is None:
+                    code, out = self.create({"title": name, "tab": want})
+                    if code != 200:
+                        continue
+                    chat = self.chats[out["chat"]["id"]]
+                    chat.meta["tab"] = want
+                    have[tab["id"]] = chat
+                    chat._save_meta()
+                if chat.meta["title"] != name or chat.meta["tab"] != want:
+                    chat.meta["title"] = name
+                    chat.meta["tab"] = want
+                    chat._save_meta()
+                    chat.push()
+            for chat in have.values():
+                if self._tab_talk not in chat.listeners:
+                    chat.listeners.append(self._tab_talk)
+            self._write_rosters(tabs, have)
+            for tid, chat in have.items():
+                if tid in by_id:
+                    self._missed.pop(chat.id, None)
+                else:
+                    self._missed[chat.id] = self._missed.get(chat.id, 0) + 1
+                    if self._missed[chat.id] >= GONE_AFTER:
+                        self._missed.pop(chat.id, None)
+                        self.delete(chat)
+            self._move_old_chats()
+
+    def tab_names(self):
+        """{name: chat} for every chat that mirrors a tab: @name is how tabs
+        call each other. One place, so the roster and the routing agree."""
+        with self.lock:
+            mirrors = sorted((c for c in self.chats.values() if c.mirrored),
+                             key=lambda c: (c.meta.get("created", 0), c.id))
+        bases = [slug(c.meta["title"]) for c in mirrors]
+        names = {}
+        for c, base in zip(mirrors, bases):
+            group = c.meta["tab"].get("group") or ""
+            if bases.count(base) > 1 and group:      # many "claude" tabs: say which group
+                base = slug("%s %s" % (group, c.meta["title"]))
+            name, n = base, 2
+            while name in names:
+                name, n = "%s-%d" % (base, n), n + 1
+            names[name] = c
+        return names
+
+    def _tab_talk(self, chat, ev):
+        """A tab's reply with a line that starts with @name is typed into that
+        tab, marked [from @me]. Its past (a first look) is not news. Two tabs
+        in one group leave it to the group."""
+        if not ev or ev.get("t") != "text" or ev.get("replay") or not chat.mirrored:
+            return
+        called = mentions(ev.get("text"))
+        if not called:
+            return
+        names = self.tab_names()
+        me = next((n for n, c in names.items() if c is chat), None)
+        for name in called:
+            target = names.get(name)
+            if me is None or target is None or target is chat:
+                continue
+            if any(chat.id in g.meta["members"] and name in g.meta["alias"].values()
+                   for g in self.groups.values()):
+                continue
+            code, out = target.mirror_send(_cut("[from @%s]: %s" % (me, ev["text"]), TAB_TEXT - 16))
+            if code == 200:
+                chat.emit({"t": "relay", "from": me, "to": name})
+            else:
+                chat.emit({"t": "error", "text": "could not reach @%s: %s" % (
+                    name, (out or {}).get("error", code))})
+
+    def send_to_tabs(self, chat, text, reply=None):
+        """The user's message that starts with @name (one or more, with commas
+        or not) goes to those tabs only, as in a group. None when it names no
+        tab: then the chat takes it."""
+        names, called, rest = self.tab_names(), [], text
+        while True:
+            m = re.match(r"[\s,]*@([\w-]+)%s[\s,:]*" % NAME_END, rest)
+            target = m and names.get(m.group(1).lower())
+            if not target:
+                break
+            if (m.group(1).lower(), target) not in called:
+                called.append((m.group(1).lower(), target))
+            rest = rest[m.end():]
+        if not called:
+            return None
+        msg, sent, failed = quoted(reply, rest or text), [], []
+        me_too = any(target is chat for _n, target in called)     # "@me @ben": me too
+        for name, target in called:
+            if target is not chat:
+                code, out = target.mirror_send(msg)
+                if code == 200:
+                    sent.append(name)
+                else:
+                    failed.append("@%s: %s" % (name, (out or {}).get("error", code)))
+        if sent and not (me_too and chat.mirrored):     # then the tab's transcript shows it
+            chat.emit(dict({"t": "user", "text": text, "to": sent},
+                           **({"reply": reply} if reply else {})))
+        if me_too and not chat.mirrored:
+            chat.send(rest or text, reply=reply)
+        elif me_too:
+            code, out = chat.mirror_send(msg)
+            if code != 200:
+                return code, out
+        if failed and not sent and not me_too:
+            return 409, {"error": "could not reach " + "; ".join(failed)}
+        if failed:
+            chat.emit({"t": "error", "text": "could not reach " + "; ".join(failed)})
+        return 200, {"ok": True}
+
+    def _write_rosters(self, tabs, have):
+        """Each tab's roster, for its prompt hook: who it is, whom it can @.
+        Written only when it changed; gone when the tab, or every other tab,
+        is gone."""
+        if not self.roster_dir:
+            return
+        names = self.tab_names()
+        name_of = {c.meta["tab"]["id"]: n for n, c in names.items()}
+        want = {}
+        for tab in tabs:
+            key, me = tab.get("key"), name_of.get(tab["id"])
+            if not key or not me or not re.fullmatch(r"[\w.-]{1,80}", key):
+                continue
+            others = ["@%s" % n + (" (group %s)" % c.meta["tab"].get("group")
+                                   if c.meta["tab"].get("group") else "")
+                      for n, c in names.items() if n != me and c.meta["tab"]["id"] in have]
+            if others:
+                want[key] = ROSTER.format(me=me, others=", ".join(others))
+        try:                         # files of a tabit before this one count too
+            on_disk = {f[:-len(".roster")] for f in os.listdir(self.roster_dir) if f.endswith(".roster")}
+        except OSError:
+            on_disk = set()
+        for key in (set(self._rosters) | on_disk) - set(want):
+            try:
+                os.remove(os.path.join(self.roster_dir, key + ".roster"))
+            except OSError:
+                pass
+            self._rosters.pop(key, None)
+        for key, text in want.items():
+            if self._rosters.get(key) == text:
+                continue
+            path = os.path.join(self.roster_dir, key + ".roster")
+            try:
+                with open(path + ".tmp", "w", encoding="utf-8") as f:
+                    json.dump({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                                                      "additionalContext": text}}, f)
+                os.replace(path + ".tmp", path)
+                self._rosters[key] = text
+            except OSError:
+                pass
+
+    def _move_old_chats(self):
+        """A chat that runs its own Claude moves into a tab, once it is idle: the
+        tab goes on with the same conversation, a chat that mirrors the tab takes
+        the place, and the groups that held the old chat let it go."""
+        for chat in list(self.chats.values()):
+            if (chat.mirrored or chat.meta.get("default") or not self.tab_ops
+                    or self._move_failed.get(chat.id, 0) >= MOVE_TRIES or chat.state != "idle"):
+                continue
+            with chat.slock:         # no message may start its Claude while the tab takes over
+                if chat.state != "idle" or chat.inflight:
+                    continue
+                chat.moving = True
+            chat.stop_process()
+            title = chat.meta["title"][:80]
+            want = {"kind": "ai", "cli": "claude", "cwd": chat.meta["cwd"], "name": title,
+                    "group": "", "account": chat.login(), "bypass": chat.meta.get("mode") == "bypass"}
+            if chat.meta.get("started"):
+                want["resume"] = chat.meta["session"]
+            code, out = self.tab_ops("new", None, want)
+            if code != 200:
+                chat.moving = False
+                self._move_failed[chat.id] = self._move_failed.get(chat.id, 0) + 1
+                continue
+            made = {"title": title, "tab": {"id": out["id"], "title": title, "group": "", "color": ""}}
+            made.update({k: chat.meta[k] for k in ("emoji", "hue") if chat.meta.get(k) not in (None, "")})
+            code, out = self.create(made)
+            if code != 200:          # the tab is there: the next look makes its chat
+                chat.moving = False
+                self._move_failed[chat.id] = MOVE_TRIES
+                continue
+            new = self.chats[out["chat"]["id"]]
+            for room in self.groups.values():        # its rooms keep it: the tab goes on as it
+                room.swap_member(chat, new)
+            self._retire(chat)
+
+    def new_tab_chat(self, body):
+        """(status, object): open a Claude tab in tabit, in the group asked for
+        (none: no group), and a chat that mirrors it."""
+        if not self.tab_ops:
+            return 400, {"error": "no tabs here"}
+        cwd = os.path.expanduser((body.get("cwd") or "").strip() or "~")
+        title = " ".join(str(body.get("title") or "").split())[:80]
+        want = {"kind": "ai", "cli": "claude", "cwd": cwd, "group": body.get("group") or "",
+                "account": self.account}
+        if title:
+            want["name"] = title
+        with self._tabs_lock:
+            code, out = self.tab_ops("new", None, want)
+            if code != 200:
+                return code, out
+            tab = {"id": out["id"], "title": title, "group": "", "color": ""}
+            info = self.tab_hook(tab["id"]) if self.tab_hook else {}
+            tab["title"] = info.get("title") or title
+            made = {"title": tab["title"] or "Tab", "tab": tab}
+            made.update({k: body[k] for k in ("emoji", "hue") if k in body})
+            code, out = self.create(made)
+        if code == 200:              # the tab's group and name, now and not at the next look
+            try:
+                self.sync_tabs()
+            except Exception:
+                pass
+            out = {"chat": self.chats[out["chat"]["id"]].summary()}
+        return code, out
 
     def start_reaper(self):
         with self.lock:
@@ -1176,6 +1642,10 @@ class ChatManager:
     def listing(self):
         with self.lock:
             rows = [c.summary() for c in self.chats.values()]
+        at = {c.id: n for n, c in self.tab_names().items()}     # for @ in the text box
+        for r in rows:
+            if r["id"] in at:
+                r["at"] = at[r["id"]]
         rows.sort(key=lambda r: (not r["default"], -r["updated"]))
         return rows
 
@@ -1240,8 +1710,6 @@ class ChatManager:
             return 400, {"error": "pick at least two chats"}
         if any(i not in self.chats for i in ids):
             return 400, {"error": "no such chat"}
-        if any(self.chats[i].mirrored for i in ids):
-            return 400, {"error": "a chat that mirrors a tab cannot join a group"}
         title = " ".join(str(body.get("title") or "").split())[:80] or "Group"
         alias, used = {}, set()
         for i in dict.fromkeys(ids):
@@ -1269,6 +1737,23 @@ class ChatManager:
             shutil.rmtree(gone, ignore_errors=True)
             os.replace(group.dir, gone)
             shutil.rmtree(gone, ignore_errors=True)
+        except OSError:
+            pass
+
+    def _retire(self, chat):
+        """A chat that moved into a tab leaves the list, but its folder stays
+        on disk as <id>.moved: its history is kept, and it does not load as a
+        chat again (the folder name is not its id)."""
+        chat.stop_process()
+        with self.lock:
+            self.chats.pop(chat.id, None)
+            for group in list(self.groups.values()):
+                group.member_deleted(chat)
+        kept, n = chat.dir + ".moved", 2
+        while os.path.exists(kept):
+            kept, n = "%s.moved-%d" % (chat.dir, n), n + 1
+        try:
+            os.replace(chat.dir, kept)
         except OSError:
             pass
 
@@ -1320,12 +1805,17 @@ def api(mgr, method, parts, body):
     that typing from the phone is on."""
     if not parts:
         if method == "GET":
+            tabgroups = {}
+            if mgr.tab_ops:
+                code, out = mgr.tab_ops("groups")
+                tabgroups = out if code == 200 else {}
             return 200, {"chats": mgr.listing(),
                          "groups": [g.summary() for g in mgr.groups.values()],
+                         "tabgroups": tabgroups,
                          "accounts": mgr.account_choices(), "account": mgr.account,
                          "modes": list(MODES), "models": list(MODELS)}
         if method == "POST":
-            return mgr.create(body)
+            return mgr.new_tab_chat(body) if body.get("kind") == "tab" else mgr.create(body)
         return 405, {"error": "GET or POST"}
     if parts[0] == "account":
         if method == "POST":
@@ -1350,6 +1840,12 @@ def api(mgr, method, parts, body):
         if len(text) > MAX_SEND:
             return 400, {"error": "that message is too long"}
         reply = chat.quote(body.get("reply"))
+        try:
+            out = chat.mgr.send_to_tabs(chat, text, reply)
+        except (OSError, RuntimeError, ValueError) as e:
+            return 500, {"error": "could not start Claude: %s" % e}
+        if out:
+            return out
         if chat.mirrored:
             return chat.mirror_send(quoted(reply, text))
         try:
@@ -1367,11 +1863,22 @@ def api(mgr, method, parts, body):
         except RuntimeError as e:
             return 409, {"error": str(e)}
         return (200, {"ok": True}) if ok else (404, {"error": "that question is gone"})
+    if op == "reload":
+        if chat.mirrored:
+            return 400, {"error": "a mirror has no Claude of its own"}
+        if chat.state != "idle":
+            return 409, {"error": "wait until Claude is done, or press Stop"}
+        chat.stop_process()          # the next message starts it again, with the connectors as they are now
+        return 200, {"ok": True}
     if op == "edit":
         return _edit(chat, body)
     if op == "delete":
         if chat.meta.get("default"):
             return 400, {"error": "the main chat cannot be deleted"}
+        if chat.mirrored and mgr.tab_ops:        # the chat and its tab are one: the tab closes too
+            code, out = mgr.tab_ops("close", chat.meta["tab"]["id"], {})
+            if code not in (200, 404):           # 404: the tab was gone already
+                return code, out
         mgr.delete(chat)
         return 200, {"ok": True}
     return 404, {"error": "not found"}
@@ -1460,6 +1967,41 @@ def link(body):
     return "", {"tab": {"id": tab["id"], "title": title}}
 
 
+def model_alias(model):
+    """opus, sonnet, haiku or fable for a model id such as claude-opus-4-5; "" otherwise."""
+    return next((a for a in MODELS if a and a in str(model or "")), "")
+
+
+def _edit_tab(chat, body):
+    """The login and the model of a chat that is a tab: tabit restarts the
+    tab's claude on the same conversation, once for both. None when it went
+    well, else (status, object)."""
+    mgr, tab = chat.mgr, chat.meta["tab"]
+    acct = body["account"] if "account" in body and body["account"] != tab.get("account", "") else None
+    model = body["model"] if "model" in body and body["model"] != model_alias(tab.get("model")) else None
+    if acct is not None and acct not in [""] + [n for n, _ in mgr.accounts()]:
+        return 400, {"error": "no such Claude account"}
+    if model is not None and model not in MODELS:
+        return 400, {"error": "no such model"}
+    if acct is None and model is None:
+        return None
+    if not mgr.tab_ops:
+        return 400, {"error": "no tabs here"}
+    if model is not None:
+        code, out = mgr.tab_ops("model", tab["id"], dict({"model": model},
+                                                         **({"account": acct} if acct is not None else {})))
+    else:
+        code, out = mgr.tab_ops("account", tab["id"], {"account": acct})
+    if code != 200:
+        return code, out
+    if acct is not None:
+        tab = dict(tab, account=acct)
+    if model is not None:
+        tab = dict(tab, model=model)     # the next answer says the full name
+    chat.meta["tab"] = tab
+    return None
+
+
 def _edit(chat, body):
     new = {}
     err, picture = look(body)
@@ -1472,20 +2014,37 @@ def _edit(chat, body):
             return 400, {"error": "a title of 1 to 80 characters"}
         new["title"] = title
         new["titled"] = True
-    if "mode" in body:
-        if body["mode"] not in MODES:
-            return 400, {"error": "mode is one of: " + ", ".join(MODES)}
-        new["mode"] = body["mode"]
-    if "model" in body:
-        if body["model"] not in MODELS:
-            return 400, {"error": "no such model"}
-        new["model"] = body["model"]
+        if chat.mirrored and title != chat.meta["title"]:      # the tab has the name: rename the tab
+            if not chat.mgr.tab_ops:
+                return 400, {"error": "no tabs here"}
+            code, out = chat.mgr.tab_ops("rename", chat.meta["tab"]["id"], {"name": title})
+            if code != 200:
+                return code, out
+            chat.meta["tab"] = dict(chat.meta["tab"], title=title)
+    if chat.mirrored:
+        bad = _edit_tab(chat, body)
+        if bad:
+            return bad
+    else:
+        if "mode" in body:
+            if body["mode"] not in MODES:
+                return 400, {"error": "mode is one of: " + ", ".join(MODES)}
+            new["mode"] = body["mode"]
+        if "model" in body:
+            if body["model"] not in MODELS:
+                return 400, {"error": "no such model"}
+            new["model"] = body["model"]
+        if "account" in body:
+            if body["account"] not in [""] + [n for n, _ in chat.mgr.accounts()]:
+                return 400, {"error": "no such Claude account"}
+            new["account"] = body["account"]
     restart = any(new.get(k, chat.meta.get(k)) != chat.meta.get(k)
-                  for k in ("mode", "model"))
+                  for k in ("mode", "model", "account")) and not chat.mirrored
     if restart and chat.state != "idle":
         return 409, {"error": "wait until Claude is done, or press Stop"}
     chat.meta.update(new)
     chat._save_meta()
+    chat.push()
     if restart:
         chat.stop_process()          # the next message starts it with the change
     return 200, {"chat": chat.summary()}

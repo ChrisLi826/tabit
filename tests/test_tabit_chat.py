@@ -321,6 +321,26 @@ class TestChat(Base):
         argv = self.argvs()[-1]
         self.assertEqual(argv[argv.index("--permission-mode") + 1], "acceptEdits")
 
+    def test_reload_ends_the_process_and_keeps_the_session(self):
+        chat = self.new()
+        chat.send("hi")
+        wait(lambda: "done" in self.kinds(chat))
+        session = chat.meta["session"]
+        self.assertTrue(chat.running)
+        self.assertEqual(tc.api(self.mgr, "POST", [chat.id, "reload"], {})[0], 200)
+        self.assertTrue(wait(lambda: not chat.running))
+        chat.send("again")
+        wait(lambda: self.kinds(chat).count("done") == 2)
+        argv = self.argvs()[-1]
+        self.assertEqual(argv[argv.index("--resume") + 1], session)
+
+    def test_reload_waits_for_an_idle_chat(self):
+        chat = self.new()
+        chat.send("slow")
+        wait(lambda: chat.live)
+        self.assertEqual(tc.api(self.mgr, "POST", [chat.id, "reload"], {})[0], 409)
+        chat.interrupt()
+
     def test_bypass_is_asked_for_by_name_only(self):
         chat = self.new(mode="bypass")
         chat.send("hi")
@@ -456,6 +476,14 @@ class TestGroup(Base):
     def test_several_at_names_talk_to_those_only(self):
         group, (a, b, c) = self.group(3)
         group.send("@alice @cy say just us")
+        self.assertTrue(wait(lambda: len(self.says(group)) == 2))
+        time.sleep(0.3)
+        self.assertEqual(sorted(n for n, _ in self.says(group)), ["alice", "cy"])
+        self.assertEqual(b.events, [])
+
+    def test_several_at_names_with_commas_talk_to_those_only(self):
+        group, (a, b, c) = self.group(3)
+        group.send("@alice, @cy, say just us")
         self.assertTrue(wait(lambda: len(self.says(group)) == 2))
         time.sleep(0.3)
         self.assertEqual(sorted(n for n, _ in self.says(group)), ["alice", "cy"])
@@ -691,6 +719,27 @@ class MirrorTest(Base):
         chat.mirror_poll()
         self.assertEqual(self.texts(chat)[-1], ("text", "More."))
 
+    def test_every_tab_status_but_idle_shows_in_the_chat(self):
+        chat = self.mirror()
+        for tab, want in (("working", "working"), ("blocked", "waiting"), ("ready", "ready"),
+                          ("background", "background"), ("exited", "exited"),
+                          ("idle", "idle"), ("unknown", "idle")):
+            self.status = tab
+            chat.mirror_poll()
+            self.assertEqual(chat.state, want, tab)
+
+    def test_lines_that_are_no_message_do_not_make_it_new(self):
+        # Claude Code writes its own bookkeeping into the transcript; the
+        # list's "13m" must stay the time of the last message
+        chat = self.mirror()
+        chat.mirror_poll()
+        said = [e for e in chat.events if e["t"] in ("user", "text")][-1]["ts"]
+        with open(self.path, "a") as f:
+            f.write(json.dumps({"type": "atis-latch", "timestamp": "2099-01-01T00:00:00Z"}) + "\n")
+        time.sleep(0.05)
+        chat.mirror_poll()
+        self.assertEqual(chat.summary()["updated"], said)
+
     def test_a_half_written_line_waits(self):
         chat = self.mirror()
         chat.mirror_poll()
@@ -879,17 +928,696 @@ class MirrorTest(Base):
         tc.api(self.mgr, "POST", [chat.id, "stop"], {})
         self.assertEqual(self.calls[-1], (None, "esc", False))
 
-    def test_only_a_claude_tab_and_not_in_a_group(self):
+    def test_only_a_claude_tab(self):
         old = self.mgr.tab_hook
         self.mgr.tab_hook = lambda tab, *a, **k: dict(old(tab), claude=False)
         self.assertEqual(self.mgr.create({"tab": {"id": "t1"}})[0], 400)
         self.mgr.tab_hook = old
         self.assertEqual(self.mgr.create({"tab": {"id": "zz"}})[0], 400)
         self.assertEqual(self.mgr.create({"tab": {"id": "a b;rm"}})[0], 400)
-        mirror, plain = self.mirror(), self.new()
-        code, out = self.mgr.create_group({"members": [mirror.id, plain.id]})
-        self.assertEqual(code, 400)
 
+    def test_a_mirror_joins_a_group_and_hears_it_through_its_tab(self):
+        chat = self.mirror()
+        chat.mirror_poll()
+        bob = self.new(title="Bob")
+        code, out = self.mgr.create_group({"title": "Team", "members": [chat.id, bob.id]})
+        self.assertEqual(code, 200, out)
+        group = self.mgr.groups[out["group"]["id"]]
+        group.send("@mot hello")
+        text, key, queue = self.calls[-1]
+        self.assertTrue(queue)
+        self.assertIn("[user]: hello", text)                   # typed into the tab
+        with open(self.path, "a") as f:                         # the tab answers, naming bob
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "@bob can you check it"}]}}) + "\n")
+        chat.mirror_poll()
+        self.assertIn(("mot", "@bob can you check it"),
+                      [(e["name"], e["text"]) for e in group.events if e["t"] == "say"])
+        self.assertTrue(wait(lambda: any(e["t"] == "relay" and e["to"] == "bob" for e in group.events)))
+        self.assertTrue(wait(lambda: any("[mot]: @bob can you check it" in e["text"]
+                                         for e in bob.events if e["t"] == "user")))
+
+    def test_old_lines_of_a_mirror_are_not_passed_on(self):
+        # the first look reads the tab's past: it is history, not news
+        with open(self.path, "a") as f:
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "@bob an old line"}]}}) + "\n")
+        chat, bob = self.mirror(), self.new(title="Bob")
+        code, out = self.mgr.create_group({"members": [chat.id, bob.id]})
+        group = self.mgr.groups[out["group"]["id"]]
+        chat.mirror_poll()
+        self.assertEqual([e for e in group.events if e["t"] in ("say", "relay")], [])
+        self.assertFalse(any(e["t"] == "user" for e in bob.events))
+
+
+
+class TabSyncTest(Base):
+    """A chat and a Claude tab are one: same name, same group, made and closed together."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, tc, "MIRROR_EVERY", tc.MIRROR_EVERY)
+        tc.MIRROR_EVERY = 3600       # the tests sync by hand
+        self.tabs = [{"id": "t1", "title": "MOT", "group": "Work", "color": "blue"},
+                     {"id": "t2", "title": "Blog", "group": "", "color": ""}]
+        self.ops = []
+        self.reply = (200, {"ok": True})
+        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False: {
+            "title": "MOT", "status": "idle", "transcript": "", "claude": True}
+        self.mgr.tabs_hook = lambda: [dict(t) for t in self.tabs] if self.tabs is not None else None
+
+        def ops(op, target=None, body=None):
+            self.ops.append((op, target, body))
+            if op == "new":
+                return (200, {"id": "t9"}) if self.reply[0] == 200 else self.reply
+            if op == "groups":
+                return 200, {"groups": [{"color": "blue", "name": "Work"}]}
+            return self.reply
+        self.mgr.tab_ops = ops
+
+    def titles(self):
+        return sorted(c.meta["title"] for c in self.mgr.chats.values() if c.mirrored)
+
+    def chat_of(self, tab):
+        return next(c for c in self.mgr.chats.values() if c.mirrored and c.meta["tab"]["id"] == tab)
+
+    def test_every_tab_gets_a_chat_once_with_its_name_and_group(self):
+        self.mgr.sync_tabs()
+        self.mgr.sync_tabs()
+        self.assertEqual(self.titles(), ["Blog", "MOT"])
+        tab = self.chat_of("t1").meta["tab"]
+        self.assertEqual((tab["group"], tab["color"]), ("Work", "blue"))
+
+    def test_a_chat_made_by_hand_takes_the_tab_name_too(self):
+        self.mgr.create({"title": "Mine", "tab": {"id": "t1", "title": "MOT"}})
+        self.mgr.sync_tabs()
+        self.assertEqual(self.titles(), ["Blog", "MOT"])
+
+    def test_the_name_and_group_follow_the_tab(self):
+        self.mgr.sync_tabs()
+        self.tabs[0].update(title="MOT 2", group="Cars", color="red")
+        self.mgr.sync_tabs()
+        chat = self.chat_of("t1")
+        self.assertEqual(chat.meta["title"], "MOT 2")
+        self.assertEqual(chat.meta["tab"]["group"], "Cars")
+
+    def test_renaming_the_chat_renames_the_tab(self):
+        self.mgr.sync_tabs()
+        chat = self.chat_of("t1")
+        self.assertEqual(tc.api(self.mgr, "POST", [chat.id, "edit"], {"title": "Car"})[0], 200)
+        self.assertIn(("rename", "t1", {"name": "Car"}), self.ops)
+        self.assertEqual(chat.meta["title"], "Car")
+
+    def test_a_rename_the_tab_refuses_changes_nothing(self):
+        self.mgr.sync_tabs()
+        chat = self.chat_of("t1")
+        self.reply = (400, {"error": "name of 1 to 80 characters"})
+        self.assertEqual(tc.api(self.mgr, "POST", [chat.id, "edit"], {"title": "Car"})[0], 400)
+        self.assertEqual(chat.meta["title"], "MOT")
+
+    def test_saving_with_the_same_name_does_not_rename_the_tab(self):
+        self.mgr.sync_tabs()
+        chat = self.chat_of("t1")
+        tc.api(self.mgr, "POST", [chat.id, "edit"], {"title": "MOT"})
+        self.assertFalse([o for o in self.ops if o[0] == "rename"])
+
+    def test_deleting_the_chat_closes_the_tab(self):
+        self.mgr.sync_tabs()
+        chat = self.chat_of("t2")
+        self.assertEqual(tc.api(self.mgr, "POST", [chat.id, "delete"], {})[0], 200)
+        self.assertIn(("close", "t2", {}), self.ops)
+        self.assertEqual(self.titles(), ["MOT"])
+
+    def test_the_chat_stays_when_the_tab_will_not_close(self):
+        self.mgr.sync_tabs()
+        chat = self.chat_of("t2")
+        self.reply = (409, {"error": "that is the last tab"})
+        code, out = tc.api(self.mgr, "POST", [chat.id, "delete"], {})
+        self.assertEqual(code, 409)
+        self.assertEqual(self.titles(), ["Blog", "MOT"])
+
+    def test_the_chat_goes_when_the_tab_was_gone_already(self):
+        self.mgr.sync_tabs()
+        chat = self.chat_of("t2")
+        self.reply = (404, {"error": "that tab is gone"})
+        self.assertEqual(tc.api(self.mgr, "POST", [chat.id, "delete"], {})[0], 200)
+        self.assertEqual(self.titles(), ["MOT"])
+
+    def test_a_closed_tab_takes_its_chat_after_a_while(self):
+        self.mgr.sync_tabs()
+        del self.tabs[1]
+        for _ in range(tc.GONE_AFTER - 1):
+            self.mgr.sync_tabs()
+        self.assertEqual(self.titles(), ["Blog", "MOT"])
+        self.mgr.sync_tabs()
+        self.assertEqual(self.titles(), ["MOT"])
+        self.assertFalse([o for o in self.ops if o[0] == "close"])     # it is gone: nothing to close
+
+    def test_no_answer_changes_nothing(self):
+        self.mgr.sync_tabs()
+        self.tabs = None
+        for _ in range(tc.GONE_AFTER + 1):
+            self.mgr.sync_tabs()
+        self.assertEqual(self.titles(), ["Blog", "MOT"])
+
+    def test_the_last_tab_closed_takes_its_chat_too(self):
+        self.mgr.sync_tabs()
+        self.tabs = []                   # no Claude tab at all: an answer, not tabit busy
+        for _ in range(tc.GONE_AFTER):
+            self.mgr.sync_tabs()
+        self.assertEqual(self.titles(), [])
+
+    def test_a_tab_with_no_group_stays_out_of_groups(self):
+        self.mgr.sync_tabs()
+        self.mgr.sync_tabs()
+        self.assertEqual([o for o in self.ops if o[0] not in ("groups",)], [])
+        tab = self.chat_of("t2").meta["tab"]
+        self.assertEqual((tab["group"], tab["color"]), ("", ""))
+
+    def news(self):
+        return [o[2] for o in self.ops if o[0] == "new"]
+
+    def old_chat(self, **kw):
+        chat = self.new(**kw)
+        chat.send("hi")
+        wait(lambda: "done" in self.kinds(chat))
+        return chat
+
+    def test_an_old_chat_moves_into_a_tab_that_goes_on_with_its_conversation(self):
+        chat = self.old_chat(mode="bypass", emoji="🏃", hue=40, title="Run")
+        session, old_id = chat.meta["session"], chat.id
+        self.mgr.sync_tabs()
+        body = self.news()[0]
+        self.assertEqual((body["resume"], body["name"], body["cwd"], body["bypass"], body["group"]),
+                         (session, "Run", chat.meta["cwd"], True, ""))
+        self.assertNotIn(old_id, self.mgr.chats)
+        moved = self.chat_of("t9")
+        self.assertEqual((moved.meta["emoji"], moved.meta["hue"], moved.meta["title"]), ("🏃", 40, "Run"))
+        self.assertFalse(chat.running)
+        # the old chat's folder is kept, not deleted: its history stays on disk
+        kept = os.path.join(self.mgr.root, old_id + ".moved")
+        self.assertTrue(os.path.isfile(os.path.join(kept, "events.jsonl")))
+        self.assertFalse(os.path.exists(os.path.join(self.mgr.root, old_id)))
+        self.assertNotIn(old_id, self.make().chats)          # and it does not load as a chat again
+
+    def test_a_chat_that_never_spoke_moves_as_a_new_tab(self):
+        self.new(title="Fresh")
+        self.mgr.sync_tabs()
+        self.assertNotIn("resume", self.news()[0])
+
+    def test_the_main_chat_stays(self):
+        chat = self.old_chat()
+        chat.meta["default"] = True
+        self.mgr.sync_tabs()
+        self.assertEqual(self.news(), [])
+        self.assertIn(chat.id, self.mgr.chats)
+
+    def test_a_busy_chat_is_moved_when_it_is_done(self):
+        chat = self.new()
+        chat.send("slow")
+        wait(lambda: chat.live)
+        self.mgr.sync_tabs()
+        self.assertEqual(self.news(), [])
+        chat.interrupt()
+        wait(lambda: chat.state == "idle")
+        self.mgr.sync_tabs()
+        self.assertEqual(len(self.news()), 1)
+
+    def test_a_chat_on_its_way_into_a_tab_takes_no_message(self):
+        chat = self.old_chat()
+        seen = []
+
+        def ops(op, target=None, body=None):         # the user sends while the tab opens
+            if op == "new":
+                seen.append(tc.api(self.mgr, "POST", [chat.id, "send"], {"text": "now"})[0])
+            return self.tab_ops_was(op, target, body)
+        self.tab_ops_was, self.mgr.tab_ops = self.mgr.tab_ops, ops
+        self.mgr.sync_tabs()
+        self.assertEqual(seen, [500])
+        self.assertFalse(chat.running)
+
+    def test_a_chat_that_will_not_move_is_left_after_a_few_tries(self):
+        chat = self.old_chat()
+        self.reply = (403, {"error": "managing tabs from the phone is off"})
+        for _ in range(tc.MOVE_TRIES + 2):
+            self.mgr.sync_tabs()
+        self.assertEqual(len(self.news()), tc.MOVE_TRIES)
+        self.assertIn(chat.id, self.mgr.chats)
+
+    def test_a_room_keeps_its_chats_when_they_move_into_tabs(self):
+        a, b = self.old_chat(title="A"), self.old_chat(title="B")
+        code, out = self.mgr.create_group({"members": [a.id, b.id]})
+        self.assertEqual(code, 200)
+        group = self.mgr.groups[out["group"]["id"]]
+        names = sorted(group.meta["alias"].values())
+        self.mgr.sync_tabs()
+        self.assertIn(group.id, self.mgr.groups)
+        members = group.members()
+        self.assertEqual(len(members), 2)
+        self.assertTrue(all(c.mirrored for c in members))
+        self.assertEqual(sorted(group.meta["alias"].values()), names)
+        self.assertNotIn(a.id, group.meta["members"])
+
+    def test_a_new_chat_opens_a_tab_in_the_group_and_mirrors_it(self):
+        code, out = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "title": "Run", "group": "blue", "emoji": "🏃"})
+        self.assertEqual(code, 200, out)
+        op, target, body = next(o for o in self.ops if o[0] == "new")
+        self.assertEqual((body["kind"], body["cli"], body["group"], body["name"]), ("ai", "claude", "blue", "Run"))
+        chat = self.mgr.get(out["chat"]["id"])
+        self.assertEqual((chat.meta["tab"]["id"], chat.meta["emoji"]), ("t9", "🏃"))
+        self.tabs.append({"id": "t9", "title": "MOT", "group": "Work", "color": "blue"})
+        self.mgr.sync_tabs()
+        self.assertEqual(len([c for c in self.mgr.chats.values() if c.mirrored and c.meta["tab"]["id"] == "t9"]), 1)
+
+    def test_a_new_chat_with_no_group_leaves_it_to_tabit(self):
+        tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir})
+        body = next(o for o in self.ops if o[0] == "new")[2]
+        self.assertEqual(body["group"], "")
+
+    def test_a_tab_tabit_will_not_open_makes_no_chat(self):
+        self.reply = (403, {"error": "managing tabs from the phone is off"})
+        code, out = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir})
+        self.assertEqual(code, 403)
+        self.assertEqual(self.titles(), [])
+
+    def test_the_list_says_which_groups_a_tab_can_go_in(self):
+        code, out = tc.api(self.mgr, "GET", [], {})
+        self.assertEqual(out["tabgroups"]["groups"][0]["name"], "Work")
+
+
+class TabSwitchTest(Base):
+    """The login and the model of a chat, from its page."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, tc, "MIRROR_EVERY", tc.MIRROR_EVERY)
+        tc.MIRROR_EVERY = 3600
+        self.typed, self.ops, self.busy = [], [], False
+        self.path = os.path.join(self.dir, "tx.jsonl")
+        self.mgr.accounts = lambda: [("Personal", FAKE)]
+
+        def hook(tab, text=None, key=None, queue=False):
+            if text is None and key is None:
+                return {"title": "MOT", "status": "idle", "transcript": self.path, "claude": True}
+            if self.busy:
+                return 409, {"error": "that tab is busy: wait for it"}
+            self.typed.append(text)
+            return 200, {"ok": True}
+        self.mgr.tab_hook = hook
+        def ops(op, target=None, body=None):
+            self.ops.append((op, target, body))
+            if op == "model":
+                return (409, {"error": "that tab is busy: wait for it"}) if self.busy else (200, {"ok": True})
+            return 200, {"ok": True}
+        self.mgr.tab_ops = ops
+        code, out = self.mgr.create({"tab": {"id": "t1", "title": "MOT"}})
+        self.chat = self.mgr.get(out["chat"]["id"])
+
+    def edit(self, body):
+        return tc.api(self.mgr, "POST", [self.chat.id, "edit"], body)
+
+    def test_the_model_is_switched_by_tabit(self):
+        self.assertEqual(self.edit({"model": "sonnet"})[0], 200)
+        self.assertEqual(self.ops, [("model", "t1", {"model": "sonnet"})])
+        self.assertEqual(model := tc.model_alias(self.chat.meta["tab"]["model"]), "sonnet")
+
+    def test_default_model_and_no_change(self):
+        self.chat.meta["tab"]["model"] = "claude-opus-4-5"
+        self.edit({"model": "opus"})
+        self.assertEqual(self.ops, [])
+        self.edit({"model": ""})
+        self.assertEqual(self.ops, [("model", "t1", {"model": ""})])
+
+    def test_a_busy_tab_keeps_its_model(self):
+        self.busy = True
+        code, out = self.edit({"model": "haiku"})
+        self.assertEqual(code, 409)
+        self.assertNotIn("model", self.chat.meta["tab"])
+
+    def test_a_model_nobody_knows(self):
+        self.assertEqual(self.edit({"model": "gpt"})[0], 400)
+        self.assertEqual(self.ops, [])
+
+    def test_login_and_model_change_in_one_restart(self):
+        self.assertEqual(self.edit({"account": "Personal", "model": "haiku"})[0], 200)
+        self.assertEqual(self.ops, [("model", "t1", {"model": "haiku", "account": "Personal"})])
+        self.assertEqual(self.chat.summary()["account"], "Personal")
+
+    def test_the_login_is_switched_by_tabit(self):
+        self.assertEqual(self.edit({"account": "Personal"})[0], 200)
+        self.assertEqual(self.ops, [("account", "t1", {"account": "Personal"})])
+        self.assertEqual(self.chat.summary()["account"], "Personal")
+        self.assertEqual(self.edit({"account": "Nobody"})[0], 400)
+        self.edit({"account": "Personal"})
+        self.assertEqual(len(self.ops), 1)          # no change: nothing asked
+
+    def test_the_model_that_answered_last_shows(self):
+        with open(self.path, "w") as f:
+            f.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "model": "claude-haiku-4-5",
+                                "content": [{"type": "text", "text": "hi"}]}}) + "\n")
+            f.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "model": "<synthetic>",
+                                "content": [{"type": "text", "text": "x"}]}}) + "\n")
+        self.chat.mirror_poll()
+        self.assertEqual(self.chat.meta["tab"]["model"], "claude-haiku-4-5")
+
+    def test_the_model_is_found_in_the_end_of_an_old_transcript(self):
+        with open(self.path, "w") as f:
+            for m in ("claude-opus-5-5", "claude-sonnet-5-5"):
+                f.write(json.dumps({"type": "assistant", "message": {"model": m, "content": []}}) + "\n")
+        self.chat.meta["mirror"] = {"path": self.path, "offset": os.path.getsize(self.path)}   # all read already
+        self.chat.mirror_poll()
+        self.assertEqual(self.chat.meta["tab"]["model"], "claude-sonnet-5-5")
+
+    def test_a_chat_with_its_own_claude_has_its_own_login(self):
+        own = self.new()
+        self.assertEqual(tc.api(self.mgr, "POST", [own.id, "edit"], {"account": "Personal"})[0], 200)
+        self.assertEqual(own.login(), "Personal")
+        self.assertEqual(own._argv()[0], FAKE)
+        self.assertEqual(self.mgr.account, "")      # the shared login did not move
+
+
+TRUST_SCREEN = ["", " Accessing workspace:", "", " /home/chris/strava", "",
+                " Quick safety check: Is this a project you trust?", "",
+                " ❯ No, exit", "   Yes, I trust this folder", "", " Enter to confirm · Esc to cancel"]
+PERMISSION_SCREEN = [" Do you want to create a.txt?", " ❯ 1. Yes", "   2. Yes, allow all edits", "   3. No (esc)", ""]
+
+
+class ScreenMenuTest(Base):
+    """A tab that waits on a menu (trust, permission): the chat shows it as a card."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, tc, "MIRROR_EVERY", tc.MIRROR_EVERY)
+        self.addCleanup(setattr, tc, "ANSWER_STEP", tc.ANSWER_STEP)
+        tc.MIRROR_EVERY = 3600
+        tc.ANSWER_STEP = 0
+        self.screen, self.status, self.keys = TRUST_SCREEN, "blocked", []
+
+        def hook(tab, text=None, key=None, queue=False):
+            if text is None and key is None:
+                info = {"title": "MOT", "status": self.status, "transcript": "", "claude": True}
+                if self.status == "blocked":
+                    info["screen"] = self.screen
+                return info
+            self.keys.append(key)
+            return 200, {"ok": True}
+        self.mgr.tab_hook = hook
+        code, out = self.mgr.create({"tab": {"id": "t1", "title": "MOT"}})
+        self.chat = self.mgr.get(out["chat"]["id"])
+
+    def card(self):
+        self.chat.mirror_poll()
+        return next(iter(self.chat.view()["pending"]), None)
+
+    def test_the_trust_question_is_a_card(self):
+        ev = self.card()
+        self.assertEqual([o["label"] for o in ev["questions"][0]["options"]],
+                         ["No, exit", "Yes, I trust this folder"])
+        self.assertIn("Quick safety check", ev["questions"][0]["question"])
+        self.assertEqual(len(self.chat.view()["pending"]), 1)
+        self.chat.mirror_poll()
+        self.assertEqual(len(self.chat.view()["pending"]), 1)        # not made twice
+
+    def test_a_menu_without_numbers_is_walked_with_arrows(self):
+        ev = self.card()
+        q = ev["questions"][0]["question"]
+        self.assertTrue(self.chat.answer(ev["rid"], True, answers={q: "Yes, I trust this folder"}))
+        self.assertEqual(self.keys, ["down", "enter"])
+
+    def test_the_chosen_row_needs_no_arrow(self):
+        ev = self.card()
+        q = ev["questions"][0]["question"]
+        self.chat.answer(ev["rid"], True, answers={q: "No, exit"})
+        self.assertEqual(self.keys, ["enter"])
+
+    def test_a_numbered_menu_takes_its_number(self):
+        self.screen = PERMISSION_SCREEN
+        ev = self.card()
+        q = ev["questions"][0]["question"]
+        self.chat.answer(ev["rid"], True, answers={q: "Yes, allow all edits"})
+        self.assertEqual(self.keys, ["2"])
+
+    def test_skip_leaves_the_trust_question_to_the_tab(self):
+        # its No and its Esc both end Claude: a skip presses nothing
+        ev = self.card()
+        self.chat.answer(ev["rid"], False)
+        self.assertEqual(self.keys, [])
+        self.assertIsNone(self.card())                  # not asked again while it waits
+
+    def test_skip_on_a_permission_question_picks_no(self):
+        self.screen = PERMISSION_SCREEN
+        ev = self.card()
+        self.chat.answer(ev["rid"], False)
+        self.assertEqual(self.keys, ["3"])
+
+    def test_the_whole_prompt_shows_however_long(self):
+        cmd = ["   line %d of a long command" % i for i in range(12)]
+        self.screen = ["────────", " Bash command", ""] + cmd + ["", " Do you want to proceed?",
+                       " ❯ 1. Yes", "   2. No (esc)", ""]
+        ev = self.card()
+        self.assertEqual(ev["questions"][0]["question"], "Do you want to proceed?")
+        for line in cmd:
+            self.assertIn(line.strip(), ev["detail"])
+        self.assertNotIn("cut", ev["detail"])
+
+    def test_a_prompt_taller_than_the_screen_says_so(self):
+        self.screen = ["  more of it %d" % i for i in range(40)] + [" Do you want to proceed?",
+                                                                     " ❯ 1. Yes", "   2. No"]
+        self.assertIn("open the tab", self.card()["detail"])
+
+    def test_every_key_waits_for_the_menu_to_be_there(self):
+        ev = self.card()
+        q = ev["questions"][0]["question"]
+        hook = self.mgr.tab_hook
+
+        def gone_after_one(tab, text=None, key=None, queue=False):
+            out = hook(tab, text, key, queue)
+            if key is not None:
+                self.status = "idle"                    # answered at the desk meanwhile
+            return out
+        self.mgr.tab_hook = gone_after_one
+        with self.assertRaises(tc._Gone):
+            self.chat.answer(ev["rid"], True, answers={q: "Yes, I trust this folder"})
+        self.assertEqual(self.keys, ["down"])
+
+    def test_a_menu_that_is_gone_presses_nothing(self):
+        ev = self.card()
+        q = ev["questions"][0]["question"]
+        self.status = "idle"
+        with self.assertRaises(tc._Gone):
+            self.chat.answer(ev["rid"], True, answers={q: "No, exit"})
+        self.assertEqual(self.keys, [])
+
+    def test_the_card_goes_when_the_tab_goes_on(self):
+        self.card()
+        self.status = "idle"
+        self.chat.mirror_poll()
+        self.assertEqual(self.chat.view()["pending"], [])
+
+    def test_the_same_menu_asked_again_is_a_card_again(self):
+        ev = self.card()
+        q = ev["questions"][0]["question"]
+        self.chat.answer(ev["rid"], True, answers={q: "No, exit"})
+        self.assertIsNone(self.card())                  # still on screen: not asked twice
+        self.status = "idle"
+        self.chat.mirror_poll()
+        self.status = "blocked"
+        self.assertEqual(self.card()["rid"], ev["rid"])
+
+    def test_a_blocked_tab_with_no_menu_makes_no_card(self):
+        self.screen = ["────", "❯ hello", "────"]
+        self.assertIsNone(self.card())
+
+    def test_a_hint_under_a_numbered_menu_is_not_a_choice(self):
+        menu = tc.screen_prompt([" Do you want to run it?", " ❯ 1. Yes", "   2. No", "   Esc to cancel"])
+        self.assertEqual(menu["options"], ["Yes", "No"])
+
+    def test_the_parser(self):
+        self.assertIsNone(tc.screen_prompt(None))
+        self.assertEqual(tc.screen_prompt(PERMISSION_SCREEN)["numbers"], [1, 2, 3])
+        self.assertIsNone(tc.screen_prompt([" ❯ a", "   b"]))          # two rows, no number, no "Enter to confirm"
+
+
+class TabTalkTest(Base):
+    """A Claude tab's reply line that starts with @name is typed into that tab."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, tc, "MIRROR_EVERY", tc.MIRROR_EVERY)
+        tc.MIRROR_EVERY = 3600
+        self.tx = {}
+        for t in ("ta", "tb"):
+            self.tx[t] = os.path.join(self.dir, t + ".jsonl")
+            shutil.copy(os.path.join(HERE, "fixtures", "chat", "tab_transcript.jsonl"), self.tx[t])
+        self.titles = {"ta": "Alpha", "tb": "Beta"}
+        self.tabs = [{"id": "ta", "title": "Alpha", "group": "", "color": "", "key": "ai-a"},
+                     {"id": "tb", "title": "Beta", "group": "Work", "color": "blue", "key": "ai-b"}]
+        self.typed, self.refuse = [], set()
+
+        def hook(tab, text=None, key=None, queue=False):
+            if text is None and key is None:
+                return {"title": self.titles[tab], "status": "idle", "transcript": self.tx[tab], "claude": True}
+            if tab in self.refuse:
+                return 409, {"error": "that tab is asking something"}
+            self.typed.append((tab, text))
+            return 200, {"ok": True}
+        self.mgr.tab_hook = hook
+        self.mgr.tabs_hook = lambda: [dict(t) for t in self.tabs]
+        self.mgr.tab_ops = lambda op, target=None, body=None: (200, {"ok": True})
+        self.mgr.roster_dir = os.path.join(self.dir, "hooks")
+        os.makedirs(self.mgr.roster_dir)
+        self.mgr.sync_tabs()
+        self.a, self.b = (next(c for c in self.mgr.chats.values() if c.mirrored and c.meta["tab"]["id"] == t)
+                          for t in ("ta", "tb"))
+        self.a.mirror_poll()
+        self.b.mirror_poll()
+
+    def say(self, tab, text):
+        with open(self.tx[tab], "a") as f:
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": text}]}}) + "\n")
+        (self.a if tab == "ta" else self.b).mirror_poll()
+
+    def test_a_line_starting_with_at_name_goes_to_that_tab(self):
+        self.say("ta", "Let me ask.\n@beta can you check the build?")
+        self.assertEqual(self.typed, [("tb", "[from @alpha]: Let me ask.\n@beta can you check the build?")])
+        self.assertTrue(any(e["t"] == "relay" and e["to"] == "beta" for e in self.a.events))
+        self.say("tb", "@alpha it passes")                   # and back
+        self.assertEqual(self.typed[-1], ("ta", "[from @beta]: @alpha it passes"))
+
+    def test_no_mention_no_name_and_no_self_send_nothing(self):
+        self.say("ta", "all done, nobody to ask")
+        self.say("ta", "@nobody hello")
+        self.say("ta", "@alpha talking to myself")
+        self.assertEqual(self.typed, [])
+
+    def test_the_past_is_not_sent(self):
+        with open(self.tx["ta"], "a") as f:
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "@beta an old line"}]}}) + "\n")
+        self.a.meta["mirror"] = {}                            # a first look again: the past
+        self.a.mirror_poll()
+        self.assertEqual(self.typed, [])
+
+    def test_a_tab_that_cannot_take_it_says_so_in_the_sender(self):
+        self.refuse.add("tb")
+        self.say("ta", "@beta hello")
+        self.assertTrue(any(e["t"] == "error" and "beta" in e["text"] for e in self.a.events))
+
+    def test_tabs_in_one_group_leave_it_to_the_group(self):
+        code, out = self.mgr.create_group({"members": [self.a.id, self.b.id]})
+        self.assertEqual(code, 200, out)
+        self.say("ta", "@beta hello")
+        self.assertEqual(len([t for t in self.typed if t[0] == "tb"]), 1)
+
+    def test_tabs_of_one_name_are_told_apart_by_their_group(self):
+        for c, group in ((self.a, "EHR330"), (self.b, "Work")):
+            c.meta["title"] = "claude"
+            c.meta["tab"]["group"] = group
+        names = sorted(self.mgr.tab_names())
+        self.assertEqual(names, ["ehr330-claude", "work-claude"])
+
+    def test_a_file_or_a_code_block_is_no_call(self):
+        self.say("ta", "@beta.py is the file\n@beta/x.md too")
+        self.say("ta", "Like this:\n```\n@beta hello\n```\ndone")
+        self.assertEqual(self.typed, [])
+        self.say("ta", "@beta, please look")
+        self.say("ta", "@beta: and this")
+        self.assertEqual(len(self.typed), 2)
+        self.assertEqual(tc.mentions("@beta，請看"), ["beta"])
+
+    def test_the_same_file_by_another_path_is_no_new_conversation(self):
+        link = os.path.join(self.dir, "acct")
+        os.symlink(self.dir, link)                  # an account's config dir: projects is a link
+        before = len(self.a.events)
+        self.a._mirror_read(os.path.join(link, os.path.basename(self.tx["ta"])))
+        self.assertEqual(len(self.a.events), before)
+        self.say("ta", "@beta still here")
+        self.assertEqual(len(self.typed), 1)
+
+    def send(self, chat, text):
+        return tc.api(self.mgr, "POST", [chat.id, "send"], {"text": text})
+
+    def test_me_and_another_is_one_bubble(self):
+        self.send(self.a, "@alpha @beta compare")
+        self.assertEqual(sorted(self.typed), [("ta", "compare"), ("tb", "compare")])
+        self.assertFalse([e for e in self.a.events if e["t"] == "user" and e.get("to")])
+
+    def test_a_long_group_message_reaches_a_tab_cut(self):
+        code, out = self.mgr.create_group({"members": [self.a.id, self.b.id]})
+        group = self.mgr.groups[out["group"]["id"]]
+        group.send("@beta " + "y" * 9000)
+        [(tab, text)] = self.typed
+        self.assertEqual(tab, "tb")
+        self.assertLessEqual(len(text), 8000)
+
+    def test_a_file_name_first_goes_to_the_chat(self):
+        self.send(self.a, "@beta.py fix this")
+        self.assertEqual(self.typed, [("ta", "@beta.py fix this")])
+
+    def test_the_user_at_names_send_to_those_tabs_only(self):
+        self.assertEqual(self.send(self.a, "@beta can you check the build?")[0], 200)
+        self.assertEqual(self.typed, [("tb", "can you check the build?")])
+        self.assertTrue(any(e["t"] == "user" and e.get("to") == ["beta"] for e in self.a.events))
+        self.typed.clear()
+        self.assertEqual(self.send(self.a, "@alpha, @beta hello")[0], 200)
+        self.assertEqual(sorted(self.typed), [("ta", "hello"), ("tb", "hello")])
+
+    def test_no_known_name_first_the_chat_takes_it(self):
+        self.send(self.a, "@nobody hello")
+        self.send(self.a, "ask @beta later")
+        self.assertEqual(self.typed, [("ta", "@nobody hello"), ("ta", "ask @beta later")])
+
+    def test_a_tab_that_cannot_take_it_is_said(self):
+        self.refuse.add("tb")
+        code, out = self.send(self.a, "@beta hello")
+        self.assertNotEqual(code, 200)
+        self.assertIn("beta", out["error"])
+
+    def test_the_list_gives_each_tab_its_name_for_the_text_box(self):
+        at = {r["id"]: r.get("at") for r in self.mgr.listing()}
+        self.assertEqual((at[self.a.id], at[self.b.id]), ("alpha", "beta"))
+        self.assertTrue(all(at[c.id] is None for c in self.mgr.chats.values() if not c.mirrored))
+
+    def roster(self, key):
+        path = os.path.join(self.mgr.roster_dir, key + ".roster")
+        if not os.path.exists(path):
+            return None
+        with open(path) as f:
+            return json.load(f)["hookSpecificOutput"]
+
+    def test_the_roster_tells_each_tab_who_is_there(self):
+        a = self.roster("ai-a")
+        self.assertEqual(a["hookEventName"], "UserPromptSubmit")
+        self.assertIn("@alpha", a["additionalContext"])
+        self.assertIn("@beta", a["additionalContext"])
+        self.assertIn("@beta", self.roster("ai-b")["additionalContext"])
+        path = os.path.join(self.mgr.roster_dir, "ai-a.roster")
+        before = os.stat(path).st_mtime_ns
+        time.sleep(0.02)
+        self.mgr.sync_tabs()
+        self.assertEqual(os.stat(path).st_mtime_ns, before)         # unchanged: not written again
+        self.tabs.pop()                                              # Beta closes
+        for _ in range(tc.GONE_AFTER + 1):
+            self.mgr.sync_tabs()
+        self.assertIsNone(self.roster("ai-b"))
+        self.assertIsNone(self.roster("ai-a"))                       # alone: nobody to talk to
+
+    def test_a_roster_left_from_before_a_restart_goes(self):
+        old = os.path.join(self.mgr.roster_dir, "ai-old.roster")
+        with open(old, "w") as f:
+            f.write("{}")
+        self.mgr._rosters.clear()                                    # a new tabit knows nothing
+        self.mgr.sync_tabs()
+        self.assertFalse(os.path.exists(old))
+        self.assertIsNotNone(self.roster("ai-a"))
+
+    def test_a_long_reply_reaches_the_other_tab_cut(self):
+        self.say("ta", "@beta here it is\n" + "x" * 9000)
+        [(tab, text)] = self.typed
+        self.assertEqual(tab, "tb")
+        self.assertLessEqual(len(text), 8000)
+        self.assertTrue(text.endswith("(cut)"))
 
 
 class ReplyTest(Base):
@@ -947,6 +1675,26 @@ class TranscriptTimeTest(unittest.TestCase):
     def test_line_without_time_gets_none(self):
         [ev] = tc.transcript_events({"type": "user", "message": {"content": "hi"}})
         self.assertNotIn("ts", ev)
+
+
+class QueuedMessageTest(unittest.TestCase):
+    """A message sent while Claude works reaches it inside the turn, as an
+    attachment line, not a user line: the chat still shows it."""
+
+    def line(self, prompt, mode="prompt", kind="human"):
+        return {"type": "attachment", "timestamp": "2026-11-04T12:28:03.470Z",
+                "attachment": {"type": "queued_command", "prompt": prompt,
+                               "commandMode": mode, "origin": {"kind": kind}}}
+
+    def test_a_message_sent_mid_turn_shows(self):
+        [ev] = tc.transcript_events(self.line("Also say SECOND"))
+        self.assertEqual((ev["t"], ev["text"]), ("user", "Also say SECOND"))
+
+    def test_notes_that_are_not_typed_do_not(self):
+        self.assertEqual(tc.transcript_events(self.line("<task-notification>x")), [])
+        self.assertEqual(tc.transcript_events(self.line("x", mode="task-notification")), [])
+        self.assertEqual(tc.transcript_events(self.line("x", kind="task")), [])
+        self.assertEqual(tc.transcript_events({"type": "attachment", "attachment": {"type": "date"}}), [])
 
 
 if __name__ == "__main__":

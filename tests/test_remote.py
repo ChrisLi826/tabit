@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 import socket
 import urllib.parse
 import sys
@@ -33,8 +34,8 @@ class FakeApp:
         self.snap = {"time": 1, "version": "v0", "groups": [],
                      "tabs": [{"id": "a", "type": "ai", "ai_status": "idle"}]}
 
-    def _remote_page(self):
-        return b"<html>page</html>"
+    def _remote_page(self, name="remote.html"):
+        return b"<html>page</html>" if name == "remote.html" else b"<html>chat</html>"
 
     def _remote_snapshot(self):
         return dict(self.snap)
@@ -122,9 +123,11 @@ class _ServerCase(unittest.TestCase):
 class TestRemoteServer(_ServerCase):
 
     def test_page_status_and_404(self):
-        head, body = http_get("/", self.sock)
+        head, body = http_get("/", self.sock)                # the address opens the chat
         self.assertIn("200", head.splitlines()[0])
-        self.assertEqual(body, b"<html>page</html>")
+        self.assertEqual(body, b"<html>chat</html>")
+        self.assertEqual(http_get("/terminal", self.sock)[1], b"<html>page</html>")
+        self.assertEqual(http_get("/chat", self.sock)[1], b"<html>chat</html>")   # old links still work
         head, body = http_get("/api/status", self.sock)
         self.assertIn("application/json", head)
         self.assertEqual(json.loads(body)["tabs"][0]["ai_status"], "idle")
@@ -266,6 +269,7 @@ class TestRemoteServer(_ServerCase):
         head, body = http_get("/icon.svg", self.sock)
         self.assertIn("image/svg+xml", head)
         self.assertIn(b"<svg", body)
+        self.assertIn(b"chat bubble", body)     # the phone's icon, not the desk's
         for path, size in (("/favicon.png", 32), ("/apple-touch-icon.png", 180),
                            ("/icon-192.png", 192), ("/icon-512.png", 512),
                            ("/icon-maskable.png", 512)):
@@ -794,6 +798,13 @@ class TestRemoteGroupColour(unittest.TestCase):
         self.assertEqual(self.app._group_names["teal"], "Misc")
         self.assertEqual(self.op("pink", {"loose": True}), 404)   # none left
 
+    def test_a_group_named_chat_is_like_any_other(self):
+        self.app._group_names["red"] = "chat"
+        self.app._ungroup = lambda c: [setattr(r, "group_color", None)
+                                       for r in self.rows if r.group_color == c]
+        self.assertEqual(self.op("red", {"ungroup": True}), 200)
+        self.assertEqual(self.colours(), [None, None, None])
+
     def test_every_check_comes_before_a_change(self):
         self.assertEqual(self.op("nope", {}), 404)
         self.assertEqual(self.op("teal", {"loose": True, "color": "red"}), 409)
@@ -980,6 +991,94 @@ class TestRemoteSetupLinks(unittest.TestCase):
         app = unittest.mock.Mock(_remote_pending=("log in to Tailscale", "https://x"))
         tabit.Tabit._remote_fresh(app)
         self.assertIsNone(app._remote_pending)
+
+
+
+class TestChatTabOps(unittest.TestCase):
+    """What Tabit Chat asks of the tabs: the groups and a new tab."""
+
+    def setUp(self):
+        Row = type("Row", (), {})
+        self.rows = [Row()]
+        self.rows[0].group_color = "red"
+        self.calls = []
+        test = self
+
+        class App:
+            _group_names = {"red": "Work"}
+            _session_rows = lambda _s: test.rows
+            _remote_call = lambda _s, fn, timeout=3: fn()
+
+            def _remote_manage(self, op, target, body):
+                test.calls.append((op, target, body))
+                return 200, {"id": "n1"}
+
+        self.app = App()
+
+    def ops(self, op, target=None, body=None):
+        return tabit.Tabit._chat_tab_ops(self.app, op, target, body)
+
+    def test_groups_lists_the_used_ones(self):
+        code, out = self.ops("groups")
+        self.assertEqual(out["groups"], [{"color": "red", "name": "Work"}])
+
+    def test_a_new_tab_with_no_group_stays_out_of_groups(self):
+        self.assertEqual(self.ops("new", None, {"kind": "ai"})[0], 200)
+        self.assertEqual(self.calls, [("new", None, {"kind": "ai"})])
+
+    def test_a_new_tab_in_a_picked_group_is_left_alone(self):
+        self.ops("new", None, {"kind": "ai", "group": "red"})
+        self.assertEqual(self.calls, [("new", None, {"kind": "ai", "group": "red"})])
+
+    def test_there_is_no_filing_any_more(self):
+        self.assertEqual(self.ops("file", "t1")[0], 404)
+        self.assertEqual(self.calls, [])
+
+    def test_close_rename_and_account_go_to_the_phone_switch(self):
+        self.ops("close", "t1")
+        self.ops("rename", "t1", {"name": "x"})
+        self.ops("account", "t1", {"account": "Personal"})
+        self.assertEqual(self.calls, [("close", "t1", {}), ("rename", "t1", {"name": "x"}),
+                                      ("account", "t1", {"account": "Personal"})])
+
+
+class TestChatModelSwitch(unittest.TestCase):
+    """A chat switches a tab's model the way it switches its login: tabit
+    restarts the tab's claude with --model. Claude's settings are not touched."""
+
+    def setUp(self):
+        self.row = type("Row", (), {"argv": tabit.Tabit._ai_argv("claude", "/tmp", [])})()
+        test = self
+        self.asked = []
+
+        class App:
+            _remote_call = lambda _s, fn, timeout=3: fn()
+            _tg_row_by_id = lambda _s, tid: test.row if tid == "t1" else None
+            _ai_cli_path_of = staticmethod(tabit.Tabit._ai_cli_path_of)
+            _claude_account_of = staticmethod(tabit.Tabit._claude_account_of)
+
+            def _ai_switch_account(self, row, name, model=None):
+                test.asked.append((row, name, model))
+                return test.why
+        App._chat_model = tabit.Tabit._chat_model
+        self.app = App()
+        self.why = None
+
+    def ops(self, body):
+        return tabit.Tabit._chat_tab_ops(self.app, "model", "t1", body)
+
+    def test_the_tab_restarts_with_the_model_and_keeps_its_login(self):
+        self.assertEqual(self.ops({"model": "haiku"}), (200, {"ok": True}))
+        self.assertEqual(self.asked, [(self.row, "", "haiku")])
+
+    def test_a_login_can_change_in_the_same_restart(self):
+        self.ops({"model": "", "account": "Personal"})
+        self.assertEqual(self.asked, [(self.row, "Personal", "")])
+
+    def test_a_tab_that_will_not_switch_says_why(self):
+        self.why = "Claude is working: switch when it stops"
+        self.assertEqual(self.ops({"model": "opus"}), (409, {"error": self.why}))
+        self.assertEqual(tabit.Tabit._chat_tab_ops(self.app, "model", "zz", {"model": "opus"})[0], 404)
 
 
 if __name__ == "__main__":

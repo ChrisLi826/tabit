@@ -400,10 +400,10 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.2.0"
+APP_VERSION = "v2.2.1"
 # Taiwan main dish of the major version + a fresh snack or drink, picked at
 # release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
-APP_CODENAME = "Ginger Duck + Oolong Tea"
+APP_CODENAME = "Ginger Duck + Tea Egg"
 _VERSION_CODENAME_SEP = " · "
 
 
@@ -955,14 +955,16 @@ CLAUDE_SEED_KEYS = ("hasCompletedOnboarding", "lastOnboardingVersion", "theme",
                     "bypassPermissionsModeAccepted")
 # the page's icons: tab favicon (SVG, and a PNG for Safari), iPhone home
 # screen, and the installed app (Chrome, Edge, Android)
-REMOTE_ICONS = {"/icon.svg": ("tabit.svg", None), "/favicon.png": ("tabit.svg", 32),
-                "/apple-touch-icon.png": ("tabit-app.svg", 180),
-                "/icon-192.png": ("tabit.svg", 192),       # no backdrop: the
-                "/icon-512.png": ("tabit.svg", 512),       # logo is the tile
-                "/icon-maskable.png": ("tabit-app.svg", 512)}  # macOS, Android
+# The phone's tabit wears a chat bubble on the corner, so its icon is told
+# apart from the desk's.
+REMOTE_ICONS = {"/icon.svg": ("tabit-remote.svg", None), "/favicon.png": ("tabit-remote.svg", 32),
+                "/apple-touch-icon.png": ("tabit-remote-app.svg", 180),
+                "/icon-192.png": ("tabit-remote.svg", 192),       # no backdrop: the
+                "/icon-512.png": ("tabit-remote.svg", 512),       # logo is the tile
+                "/icon-maskable.png": ("tabit-remote-app.svg", 512)}  # macOS, Android
 # lets a browser install the page as an app in its own window
 REMOTE_MANIFEST = json.dumps({
-    "name": "tabit", "short_name": "tabit", "start_url": "./", "scope": "./",
+    "name": "tabit", "short_name": "tabit", "start_url": "terminal", "scope": "./",
     "display": "standalone", "background_color": "#1a1b26",
     "theme_color": "#1a1b26",
     "icons": [{"src": f"icon-{n}.png", "sizes": f"{n}x{n}", "type": "image/png"}
@@ -970,10 +972,11 @@ REMOTE_MANIFEST = json.dumps({
              # edge to edge: the system rounds it, not a grey tile around it
              + [{"src": "icon-maskable.png", "sizes": "512x512",
                  "type": "image/png", "purpose": "maskable"}]}).encode()
-# Tabit Chat: the chat page, and its own manifest so it installs as its own app
+# Tabit Chat: the chat page, the one the address opens, and its own manifest
+# so it installs as its own app. The terminal view is at /terminal.
 REMOTE_CHAT_PAGE = "chat.html"
 REMOTE_CHAT_MANIFEST = json.dumps({
-    "name": "tabit chat", "short_name": "chat", "start_url": "chat", "scope": "./",
+    "name": "tabit chat", "short_name": "chat", "start_url": "./", "scope": "./",
     "display": "standalone", "background_color": "#1a1b26",
     "theme_color": "#1a1b26",
     "icons": [{"src": f"icon-{n}.png", "sizes": f"{n}x{n}", "type": "image/png"}
@@ -1864,6 +1867,14 @@ def _claude_hooks_settings(hook_dir):
             f'printf "%s\\n%s\\n%s\\n%s\\n%s\\n" "$s" "$t" "$n" "$b" "$w" >{d}/"$k".tmp 2>/dev/null '
             f'&& mv -f {d}/"$k".tmp {d}/"$k" 2>/dev/null; exit 0')}
 
+    # each prompt brings the tab's roster (the other AI tabs it can @), as
+    # context: tabit writes <key>.roster ready to print
+    roster = {"type": "command", "command": (
+        'cat >/dev/null; k=$TABIT_AGENT; '
+        'if [ -n "$TMUX_PANE" ]; then '
+        'k=$(tmux display-message -p -t "$TMUX_PANE" "#S" 2>/dev/null); fi; '
+        f'[ -n "$k" ] && [ -f {d}/"$k".roster ] && cat {d}/"$k".roster; exit 0')}
+
     def ev(state, matcher=None):
         e = {"hooks": [put(state)]}
         if matcher is not None:
@@ -1911,7 +1922,7 @@ def _claude_hooks_settings(hook_dir):
         # not "compact": claude compacts in the middle of a turn. These two
         # start afresh: no question can be up when a prompt was typed
         "SessionStart": ev("s=idle; ", "startup|resume|clear"),
-        "UserPromptSubmit": ev("s=working; "),
+        "UserPromptSubmit": [{"hooks": [put("s=working; "), roster]}],
         "PreToolUse": ev(ask, "*"),
         "PostToolUse": ev(done, "*"),
         "PostToolUseFailure": ev(done, "*"),
@@ -2149,7 +2160,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             return
         if parts[:2] in (["api", "chats"], ["api", "chat-groups"]):
             self._chat_get(parts)
-        elif path == "/chat":
+        elif path in ("/", "/index.html", "/chat"):        # /chat: links from before
             page = self.app._remote_page(REMOTE_CHAT_PAGE)
             if page is None:
                 self._send(404, "text/plain", b"chat.html not installed")
@@ -2157,7 +2168,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 self._send(200, "text/html; charset=utf-8", page)
         elif path == "/chat.webmanifest":
             self._send(200, "application/manifest+json", REMOTE_CHAT_MANIFEST)
-        elif path in ("/", "/index.html"):
+        elif path == "/terminal":
             page = self.app._remote_page()
             if page is None:
                 self._send(404, "text/plain", b"remote.html not installed")
@@ -2921,6 +2932,10 @@ class Tabit(Gtk.Window):
         GLib.timeout_add_seconds(self._AI_HUNT_SEC, self._ai_hunt_session_ids)
         _tmux_apply_user_conf()
         GLib.idle_add(self._check_weekly_auto_update)
+        # Tabit Chat runs from the start, not from the first /chat: it carries
+        # @name messages between AI tabs. Off the GTK thread: it asks tabit.
+        GLib.timeout_add_seconds(5, lambda: threading.Thread(
+            target=self._chat_mgr, daemon=True).start() and False)
         self._tg_start_listening()
         self._tg_watch_replies()
         # Second launcher click writes tabit.raise — present this window
@@ -11150,7 +11165,8 @@ if (data !== null) {{
 
                     new_argv = self._ai_argv(
                         cli_val, path_val, tries,
-                        bypass=self._ai_has_bypass(row.argv))
+                        bypass=self._ai_has_bypass(row.argv),
+                        model=self._ai_model_of(row.argv))
                     if want_tmux:
                         new_argv = self._ai_tmux_argv(
                             new_argv,
@@ -12300,6 +12316,13 @@ if (data !== null) {{
                     return 400, {"error": "pick an AI from tabit's list"}
                 # a Claude account runs as its own claude, as in +AI
                 account = body.get("account") if self._ai_is_claude(tool) else None
+                # one exact conversation to go on with (a Tabit Chat moving to a tab)
+                resume = body.get("resume") if self._ai_is_claude(tool) else None
+                if resume is not None and not (isinstance(resume, str)
+                                               and re.fullmatch(r"[0-9a-f-]{36}", resume)):
+                    return 400, {"error": "resume is a session id"}
+                if resume and self._ai_session_open_elsewhere(resume):
+                    return 409, {"error": "that conversation is open in another Claude"}
                 run = tool
                 if account:
                     run = dict(self._claude_accounts()).get(account)
@@ -12307,10 +12330,12 @@ if (data !== null) {{
                         return 400, {"error": f"no Claude account “{account}”"}
                 launch, argv, icon = self._ai_launch_pair(
                     run, cwd, list(entry.get("try") or []),
-                    bypass=bool(self._load_settings().get("ai_claude_bypass"))
-                    and self._ai_is_claude(tool),
-                    tmux=True, continue_now=False, resume_later=True,
-                    new_sid=(str(uuid.uuid4()) if self._ai_takes_new_id(run) else None))
+                    bypass=(bool(self._load_settings().get("ai_claude_bypass"))
+                            or (body.get("bypass") is True and getattr(self, "_from_chat", False)))
+                           and self._ai_is_claude(tool),
+                    tmux=True, continue_now=bool(resume), resume_later=True,
+                    resume_id=resume or None,
+                    new_sid=(str(uuid.uuid4()) if not resume and self._ai_takes_new_id(run) else None))
                 row = self._add_session(f"{tool} · {account}" if account else tool,
                                         argv, icon, sub=self._ai_sub(cwd, run),
                                         cwd=cwd, launch_argv=launch)
@@ -13074,7 +13099,10 @@ if (data !== null) {{
                             env_drop=CLAUDE_SESSION_ENV,
                             auth=Tabit._claude_auth_status,
                             tab_hook=self._chat_tab_hook,
-                            extra_env=self._chat_tool_env)
+                            tabs_hook=self._chat_tabs_hook,
+                            tab_ops=self._chat_tab_ops,
+                            extra_env=self._chat_tool_env,
+                            roster_dir=AGENT_HOOK_DIR)
                         self._chat_manager.ensure_default()
                         break
             return self._chat_manager
@@ -13085,10 +13113,80 @@ if (data !== null) {{
         owner = getattr(getattr(srv, "handler_cls", None), "owner", None)
         return {"TABIT_SOCK": REMOTE_SOCK, "TABIT_OWNER": owner or ""}
 
+    def _chat_tabs_hook(self):
+        """For a chat: every Claude AI tab as {"id", "title", "group"}, or None
+        when tabit is busy. Runs on the GTK thread through _remote_call."""
+        def work():
+            out = []
+            for row in self._session_rows():
+                if not _is_ai_icon(getattr(row, "icon_name", None)):
+                    continue
+                got = self._ai_cli_path_of(getattr(row, "argv", None))
+                if not (got and self._ai_is_claude(got[0])):
+                    continue
+                color = getattr(row, "group_color", None) or ""
+                out.append({"id": self._tg_row_id(row),
+                            "key": self._agent_hook_key(row) or "",   # its roster file's name
+                            "account": self._claude_account_of(got[0]) or "",
+                            "title": getattr(row, "title_text", "") or "",
+                            "group": (self._group_names.get(color) or color.capitalize()) if color else "",
+                            "color": color})
+            return out
+        res = self._remote_call(work)
+        return res if isinstance(res, list) else None
+
+    def _chat_model(self, tab_id, model, account=None):
+        """Switch a tab's model, and its login when asked: tabit restarts its
+        claude with --model, on the same conversation, as for a login."""
+        def work():
+            row = self._tg_row_by_id(tab_id)
+            got = self._ai_cli_path_of(getattr(row, "argv", None)) if row is not None else None
+            if not got:
+                return 404, {"error": "that is not an AI tab"}
+            name = (self._claude_account_of(got[0]) or "") if account is None else account
+            why = self._ai_switch_account(row, name, model or "")
+            return (409, {"error": why}) if why else (200, {"ok": True})
+        res = self._remote_call(work, timeout=10)
+        if res is None:
+            return 503, {"error": "tabit busy"}
+        return res if isinstance(res, tuple) else (500, res)
+
+    def _chat_tab_ops(self, op, target=None, body=None):
+        """For a chat: manage tabs the way the phone does. op: groups | new |
+        close | rename | account | model. Gives (code, body). A new tab with
+        no group asked for stays out of groups."""
+        body = dict(body or {})
+        if op == "model":
+            return self._chat_model(target, body.get("model"), body.get("account"))
+
+        def work():
+            if op == "groups":
+                used = {}
+                for r in self._session_rows():
+                    c = getattr(r, "group_color", None)
+                    if c and c not in used:
+                        used[c] = self._group_names.get(c) or c.capitalize()
+                return 200, {"groups": [{"color": c, "name": n} for c, n in used.items()]}
+            if op in ("new", "close", "rename", "account"):
+                return self._remote_manage(op, target, body)
+            return 404, {"error": "unknown action"}
+        def from_chat():
+            self._from_chat = True       # a chat may open a tab that skips permission questions; the phone page may not
+            try:
+                return work()
+            finally:
+                self._from_chat = False
+        res = self._remote_call(from_chat, timeout=10)
+        if res is None:
+            return 503, {"error": "tabit busy"}
+        if not isinstance(res, tuple):
+            return 500, res
+        return res
+
     def _chat_tab_hook(self, tab_id, text=None, key=None, queue=False):
         """For a chat: info about an AI tab; with text, type a line into it;
         with key, press one. Info is {"title", "status", "transcript",
-        "claude"} or {"error"}; the others give (code, body). queue: a busy tab
+        "claude"} (a blocked tab adds "screen", its last lines) or {"error"}; the others give (code, body). queue: a busy tab
         takes the line too (Claude Code holds it), only a question stops it.
         Runs on the GTK thread through _remote_call."""
         acts = text is not None or key is not None
@@ -13102,10 +13200,15 @@ if (data !== null) {{
                 getattr(row, "agent_status", None) or "unknown"
             if not acts:
                 got = self._ai_cli_path_of(getattr(row, "argv", None))
-                return {"title": getattr(row, "title_text", "") or tab_id,
+                info = {"title": getattr(row, "title_text", "") or tab_id,
                         "status": status,
                         "transcript": getattr(row, "_agent_hook_tx", "") or "",
                         "claude": bool(got and self._ai_is_claude(got[0]))}
+                term = getattr(row, "term", None)
+                if status == "blocked" and term is not None and self._remote_send_on:
+                    # the menu the tab waits on, so the chat can show it (typing switch: as the screen)
+                    info["screen"] = self._term_tail_text(term, 60).rstrip().splitlines()[-40:]
+                return info
             if key is not None:
                 return self._remote_act(tab_id, "key", {"key": key})
             if status == "blocked" or (status == "working" and not queue):
@@ -14598,11 +14701,13 @@ if (data !== null) {{
         got = re.findall(_UUID_RE, " ".join(getattr(row, "argv", None) or []))
         return got[-1] if got else None
 
-    def _ai_switch_account(self, row, name):
+    def _ai_switch_account(self, row, name, model=None):
         """GTK thread: go on with this Claude tab's conversation under
-        account `name` ("" = Default), in the same tab. None when it is under
-        way, else why not. The old claude stops; the new one resumes the
-        same session, which every account shares."""
+        account `name` ("" = Default), and `model` ("" = Claude's default,
+        None = the one it has), in the same tab. None when it is under way,
+        else why not. The old claude stops; the new one resumes the same
+        session, which every account shares. Claude's own settings are not
+        touched."""
         argv = getattr(row, "argv", None) or []
         got = self._ai_cli_path_of(argv)
         if (getattr(row, "kind", None) != "term" or not got
@@ -14611,8 +14716,13 @@ if (data !== null) {{
         if getattr(row, "dead", False):
             return "that tab has exited"
         old = self._claude_account_of(got[0]) or ""
-        if (name or "") == old:
-            return f"it is on {old or 'Default'} already"
+        old_model = self._ai_model_of(argv)
+        new_model = old_model if model is None else model
+        if (name or "") == old and new_model == old_model:
+            return (f"it is on {old or 'Default'} already" if model is None
+                    else f"it uses {old_model or 'the default model'} already")
+        if getattr(row, "_respawn", None):
+            return "it is switching already: wait a moment"
         new_cli = "claude" if not name else dict(self._claude_accounts()).get(name)
         if new_cli is None:
             return f"no Claude account “{name}”"
@@ -14621,14 +14731,20 @@ if (data !== null) {{
             return "Claude is working: switch when it stops"
         if status == "blocked":
             return "Claude is asking something: answer it first"
+        if status == "background":
+            return "agents still run in the background: switch when they are done"
         sid = self._ai_session_of(row)
         if not sid:
             return "no conversation yet: send one message first"
         old_tmux = getattr(row, "_live_tmux", None)   # what runs, not what argv says
+        # A tab that never spoke has no transcript: --resume would fail. It
+        # starts that same session afresh instead, and resumes it later.
+        spoke = self._claude_session_saved(got[1], sid)
         launch, stored, _icon = self._ai_launch_pair(
-            new_cli, got[1], [], resume_id=sid,
+            new_cli, got[1], [], resume_id=sid if spoke else None,
             tmux=self._ai_tmux_unwrap(argv)[1] is not None,
-            continue_now=True, resume_later=True, bypass=self._ai_has_bypass(argv))
+            continue_now=spoke, resume_later=True, bypass=self._ai_has_bypass(argv),
+            model=new_model, new_sid=None if spoke else sid)
         row._respawn = (launch, got[1], got[0], new_cli)
         row.argv = stored                   # before the old one stops
         row.ai_hunt = False
@@ -14641,6 +14757,16 @@ if (data !== null) {{
                 os.kill(row.pid, signal.SIGHUP)
         self._save_sessions_soon()
         return None
+
+    @staticmethod
+    def _claude_session_saved(path, sid):
+        """Whether claude has saved session `sid` of folder `path` yet: it
+        writes the transcript only with the first message."""
+        for p in (path, os.path.realpath(path)):
+            d = os.path.join(CLAUDE_PROJECTS_DIR, re.sub(r"[^A-Za-z0-9]", "-", p))
+            if os.path.isfile(os.path.join(d, sid + ".jsonl")):
+                return True
+        return False
 
     def _ai_respawn(self, row):
         """The old claude of an account switch has ended: start the new one
@@ -14904,6 +15030,9 @@ if (data !== null) {{
                     and tokens[i + 1] == CLAUDE_HOOKS_FILE:
                 i += 2
                 continue
+            if t == "--model" and i + 1 < len(tokens):      # tabit adds the tab's own model
+                i += 2
+                continue
             if t == "--permission-mode" and i + 1 < len(tokens) \
                     and tokens[i + 1] == "bypassPermissions":
                 i += 2
@@ -14925,13 +15054,22 @@ if (data !== null) {{
         return "--dangerously-skip-permissions" in blob
 
     @classmethod
-    def _ai_argv(cls, cli, path, tries=None, bypass=False):
+    def _ai_model_of(cls, argv):
+        """The model a Claude tab's command asks for (--model), or ""."""
+        inner, _sess = cls._ai_tmux_unwrap(argv or [])
+        m = re.search(r"(?:^|\s)--model[ =](\S+)", inner[2] if len(inner) == 3 else "")
+        return m.group(1).strip("'\"") if m else ""
+
+    @classmethod
+    def _ai_argv(cls, cli, path, tries=None, bypass=False, model=""):
         # For each try string T: run `cli T`; if all fail, plain `cli`.
         c = shlex.quote(cli)
         d = shlex.quote(path)
+        # a model picked for this tab (a chat switched it): kept in the command
+        model_tokens = ["--model", model] if model and cls._ai_is_claude(cli) else []
         tail = " ".join(shlex.quote(t) for t in (
             cls._ai_bypass_tokens(cli, bypass) + cls._ai_hook_tokens(cli)
-            + cls._ai_screen_tokens(cli)))
+            + model_tokens + cls._ai_screen_tokens(cli)))
         tail = f" {tail}" if tail else ""
         parts = [f"cd {d} || exit 1"]
         cmds = []
@@ -15105,7 +15243,7 @@ if (data !== null) {{
     @classmethod
     def _ai_launch_pair(cls, cli, cwd, tries, bypass=False, tmux=False,
                         continue_now=True, resume_later=True, new_sid=None,
-                        resume_id=None):
+                        resume_id=None, model=""):
         """(launch argv, stored argv, icon) for a new +AI tab.
 
         The two questions are separate: continue_now picks what runs now
@@ -15125,15 +15263,15 @@ if (data !== null) {{
         resume_id = (resume_id or "").strip() if continue_now else ""
         tries = list(tries or [])
         launch = cls._ai_argv(cli, cwd, tries if continue_now else [],
-                              bypass=bypass)
+                              bypass=bypass, model=model)
         stored = cls._ai_argv(cli, cwd, tries if resume_later else [],
-                              bypass=bypass)
+                              bypass=bypass, model=model)
         base = os.path.basename(cli.rstrip("/"))
         if base in AI_SESSION_FILES and not continue_now:
             # Its id is not known until the first message. Until then a
             # restart starts fresh: "the newest in this folder" may be
             # another tab's session. The hunt fills the id in.
-            stored = cls._ai_argv(cli, cwd, [], bypass=bypass)
+            stored = cls._ai_argv(cli, cwd, [], bypass=bypass, model=model)
         new_arg = AI_NEW_ID_ARGS.get(base)
         if new_sid and new_arg and not continue_now:
             # exec, not a try: "a || b" also runs b when a exits nonzero
@@ -15150,7 +15288,7 @@ if (data !== null) {{
                 # one in the folder would pick up another tab's session.
                 stored = cls._ai_argv(
                     cli, cwd, cls._ai_tries_with_id(cli, [], new_sid),
-                    bypass=bypass)
+                    bypass=bypass, model=model)
         if resume_id:
             first = cls._ai_tries_with_id(cli, [], resume_id)[0]
             ways = [first]
@@ -15159,7 +15297,7 @@ if (data !== null) {{
                 # `claude attach <short id>` opens it (and ignores, with a
                 # warning, the hooks flag every try gets)
                 ways.append("attach " + resume_id[:8])
-            plain = cls._ai_argv(cli, cwd, [], bypass=bypass)
+            plain = cls._ai_argv(cli, cwd, [], bypass=bypass, model=model)
             head, _sep, tail = plain[2].rpartition("; exec ")
             tries = " || ".join(tail.replace(shlex.quote(cli), "%s %s" % (
                 shlex.quote(cli), " ".join(shlex.quote(t) for t in shlex.split(w))), 1)
@@ -15169,7 +15307,7 @@ if (data !== null) {{
             launch = ["/bin/sh", "-c", "%s; %s || { printf %%b %s; "
                       'exec "${SHELL:-sh}"; }' % (head, tries, note)]
             stored = cls._ai_argv(cli, cwd, ways if resume_later else [],
-                                  bypass=bypass)
+                                  bypass=bypass, model=model)
         if not tmux:
             return launch, stored, ICON_AI
         name = cls._ai_tmux_session(cli, cwd, unique=not continue_now)
@@ -15241,7 +15379,7 @@ if (data !== null) {{
             return argv
         cli, path = got
         new = cls._ai_argv(cli, path, cls._ai_tries_with_id(cli, [], sid),
-                           bypass=cls._ai_has_bypass(argv))
+                           bypass=cls._ai_has_bypass(argv), model=cls._ai_model_of(argv))
         _inner, sess = cls._ai_tmux_unwrap(argv)
         return cls._ai_tmux_argv(new, sess) if sess else new
 

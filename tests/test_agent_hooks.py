@@ -86,6 +86,20 @@ class TestHookCommand(unittest.TestCase):
             self.run_hook("PreToolUse", {"transcript_path": self.tx, "tool_name": tool})
             self.assertEqual(self.state()[0], "blocked", tool)
 
+    def test_each_prompt_brings_the_tabs_roster(self):
+        # a second UserPromptSubmit command prints <key>.roster: the other
+        # AI tabs this one can @, as context Claude reads
+        cmd = self.hooks["UserPromptSubmit"][0]["hooks"][1]["command"]
+        e = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+        e["TABIT_AGENT"] = "k1"
+        sh = shutil.which("dash") or "/bin/sh"
+        r = subprocess.run([sh, "-c", cmd], input="{}", text=True, env=e, capture_output=True, timeout=10)
+        self.assertEqual((r.returncode, r.stdout), (0, ""))            # no roster: nothing
+        with open(os.path.join(self.dir, "k1.roster"), "w") as f:
+            f.write('{"hookSpecificOutput": {}}')
+        r = subprocess.run([sh, "-c", cmd], input="{}", text=True, env=e, capture_output=True, timeout=10)
+        self.assertEqual((r.returncode, r.stdout), (0, '{"hookSpecificOutput": {}}'))
+
     def test_compaction_is_not_the_end_of_a_turn(self):
         self.assertEqual(self.hooks["SessionStart"][0]["matcher"],
                          "startup|resume|clear")
