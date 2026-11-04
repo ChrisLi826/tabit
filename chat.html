@@ -230,6 +230,8 @@
   .prow { display: flex; align-items: center; gap: 8px; background: var(--panel); border-radius: 14px; padding: 11px 13px; margin-bottom: 6px; cursor: pointer; }
   .hint { color: var(--dim); font-size: 12.5px; margin-top: 4px; }
   .hint.warn { color: var(--red); }
+  .ask pre.prompt { margin: 0 0 8px; max-height: 16em; overflow: auto; white-space: pre-wrap; word-break: break-word;
+                    font: 12px/1.45 ui-monospace, Menlo, monospace; background: #0003; border-radius: 8px; padding: 8px 10px; }
 
   html { scrollbar-color: #2f3549 transparent; } * { scrollbar-width: thin; scrollbar-color: #2f3549 transparent; }
   #acct { align-self: center; max-width: 92%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 99px; font-size: 13px; padding: 5px 14px; color: var(--dim); background: #ffffff0a; margin-bottom: 4px; }
@@ -813,7 +815,8 @@ function paintAsks(me) {
     const who = ev.name ? ` <span style="color:${colorOf(ev.name)}">(${esc(ev.name)})</span>` : "";
     let body = "";
     if (ev.questions) {
-      body = ev.questions.map((q, i) => `<div class="q">${esc(q.question)}</div><div class="opts" data-q="${i}">${(q.options || []).map((o) =>
+      // a menu read off a tab's screen brings the whole prompt: a long command is what you say yes to
+      body = (ev.detail ? `<pre class="prompt">${esc(ev.detail)}</pre>` : "") + ev.questions.map((q, i) => `<div class="q">${esc(q.question)}</div><div class="opts" data-q="${i}">${(q.options || []).map((o) =>
         `<button type="button" data-l="${esc(o.label)}" title="${esc(o.description || "")}">${esc(o.label)}</button>`).join("")}</div>`).join("");
       body += open ? '<div class="row"><button class="primary" data-act="answerq" disabled>Answer</button><button data-act="deny">Skip</button></div>' : "";
     } else {

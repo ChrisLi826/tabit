@@ -1325,10 +1325,48 @@ class ScreenMenuTest(Base):
         self.chat.answer(ev["rid"], True, answers={q: "Yes, allow all edits"})
         self.assertEqual(self.keys, ["2"])
 
-    def test_skip_presses_escape(self):
+    def test_skip_leaves_the_trust_question_to_the_tab(self):
+        # its No and its Esc both end Claude: a skip presses nothing
         ev = self.card()
         self.chat.answer(ev["rid"], False)
-        self.assertEqual(self.keys, ["esc"])
+        self.assertEqual(self.keys, [])
+        self.assertIsNone(self.card())                  # not asked again while it waits
+
+    def test_skip_on_a_permission_question_picks_no(self):
+        self.screen = PERMISSION_SCREEN
+        ev = self.card()
+        self.chat.answer(ev["rid"], False)
+        self.assertEqual(self.keys, ["3"])
+
+    def test_the_whole_prompt_shows_however_long(self):
+        cmd = ["   line %d of a long command" % i for i in range(12)]
+        self.screen = ["────────", " Bash command", ""] + cmd + ["", " Do you want to proceed?",
+                       " ❯ 1. Yes", "   2. No (esc)", ""]
+        ev = self.card()
+        self.assertEqual(ev["questions"][0]["question"], "Do you want to proceed?")
+        for line in cmd:
+            self.assertIn(line.strip(), ev["detail"])
+        self.assertNotIn("cut", ev["detail"])
+
+    def test_a_prompt_taller_than_the_screen_says_so(self):
+        self.screen = ["  more of it %d" % i for i in range(40)] + [" Do you want to proceed?",
+                                                                     " ❯ 1. Yes", "   2. No"]
+        self.assertIn("open the tab", self.card()["detail"])
+
+    def test_every_key_waits_for_the_menu_to_be_there(self):
+        ev = self.card()
+        q = ev["questions"][0]["question"]
+        hook = self.mgr.tab_hook
+
+        def gone_after_one(tab, text=None, key=None, queue=False):
+            out = hook(tab, text, key, queue)
+            if key is not None:
+                self.status = "idle"                    # answered at the desk meanwhile
+            return out
+        self.mgr.tab_hook = gone_after_one
+        with self.assertRaises(tc._Gone):
+            self.chat.answer(ev["rid"], True, answers={q: "Yes, I trust this folder"})
+        self.assertEqual(self.keys, ["down"])
 
     def test_a_menu_that_is_gone_presses_nothing(self):
         ev = self.card()

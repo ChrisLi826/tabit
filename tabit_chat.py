@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import textwrap
 import threading
 import time
 import uuid
@@ -185,6 +186,9 @@ def transcript_events(raw):
     return out
 
 
+SCREEN_ROWS = 40             # the lines of a waiting tab's screen tabit hands over
+
+
 def screen_prompt(lines):
     """The menu a tab waits on, read from its screen: {"id", "question",
     "options", "numbers", "selected"}, or None. A menu is two rows or more, the
@@ -215,15 +219,21 @@ def screen_prompt(lines):
     numbered = all(n is not None for n in numbers)
     if len(picks) < 2 or not (numbered or "Enter to confirm" in tail):
         return None
+    # the whole prompt above it, up to the box line: a long command is what
+    # the person says yes to, so all of it goes on the card
     above, i = [], top - 1
-    while i >= 0 and "─" not in rows[i] and len(above) < 8:
+    while i >= 0 and "─" not in rows[i]:
         if rows[i].strip():
-            above.append(rows[i].strip())
+            above.append(rows[i].rstrip())
         i -= 1
-    question = "\n".join(reversed(above))[:400] or "The tab asks you to choose"
-    key = hashlib.md5((question + "|".join(picks)).encode()).hexdigest()[:10]
-    return {"id": "scr-" + key, "question": question, "options": picks, "numbers": numbers,
-            "selected": sel - top}
+    above.reverse()
+    detail = textwrap.dedent("\n".join(above))[:6000]
+    if i < 0 and len(rows) >= SCREEN_ROWS:       # it starts above what tabit gave
+        detail = "… (the top is cut: open the tab to see all of it)\n" + detail
+    question = (above[-1].strip() if above else "The tab asks you to choose")[:200]
+    key = hashlib.md5((detail + "|".join(picks)).encode()).hexdigest()[:10]
+    return {"id": "scr-" + key, "question": question, "detail": detail, "options": picks,
+            "numbers": numbers, "selected": sel - top}
 
 
 def transcript_model(path):
@@ -711,7 +721,7 @@ class Chat(_Log):
             return
         ev = {"t": "ask", "rid": card["rid"], "tool": "AskUserQuestion", "id": card["id"],
               "summary": card["questions"][0]["question"][:200], "questions": card["questions"],
-              "detail": "", "can_remember": False}
+              "detail": card.get("screen", {}).get("detail", ""), "can_remember": False}
         held = {"tab": True, "input": {"questions": card["questions"]}, "suggest": None, "ev": ev}
         if "screen" in card:
             held["screen"] = card["screen"]
@@ -730,7 +740,13 @@ class Chat(_Log):
             now = screen_prompt(info.get("screen")) if info.get("status") == "blocked" else None
             if not now or now["id"] != held["ev"]["id"]:
                 raise _Gone("that question is no longer open in the tab")
-            return self._press(tab, self._screen_keys(now, held, allow, answers))
+
+            def still_there():       # between two keys too: the desk may answer meanwhile
+                info = self.mgr.tab_hook(tab)
+                again = screen_prompt(info.get("screen")) if info.get("status") == "blocked" else None
+                if not again or again["id"] != held["ev"]["id"]:
+                    raise _Gone("that question is no longer open in the tab")
+            return self._press(tab, self._screen_keys(now, held, allow, answers), still_there)
         q = open_question(info.get("transcript")) if info.get("status") == "blocked" \
             and info.get("transcript") else None
         if not q or q["id"] != held["ev"]["id"]:
@@ -750,9 +766,14 @@ class Chat(_Log):
         self._press(tab, keys)
 
     def _screen_keys(self, menu, held, allow, answers):
-        """The keys for a menu on the screen: its number, or the arrows and Enter."""
+        """The keys for a menu on the screen: its number, or the arrows and Enter.
+        A skip picks a numbered No (what Esc does there); a menu without
+        numbers (the trust question, whose No and Esc both end Claude) gets
+        no key: the tab answers it."""
         if not allow:
-            return ["esc"]
+            no = next((i for i, o in enumerate(menu["options"]) if re.match(r"No\b", o)), None)
+            num = menu["numbers"][no] if no is not None else None
+            return [str(num)] if num is not None and num < 10 else []
         label = (answers or {}).get(held["input"]["questions"][0]["question"])
         if label not in menu["options"]:
             raise RuntimeError("pick one of the options")
@@ -763,10 +784,12 @@ class Chat(_Log):
         move = i - menu["selected"]
         return ["down" if move > 0 else "up"] * abs(move) + ["enter"]
 
-    def _press(self, tab, keys):
+    def _press(self, tab, keys, check=None):
         for i, key in enumerate(keys):
             if i:
                 time.sleep(ANSWER_STEP)
+                if check:
+                    check()
             code, out = self.mgr.tab_hook(tab, key=key)
             if code != 200:
                 raise RuntimeError(out.get("error") or "the tab did not take the key")
