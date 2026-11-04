@@ -154,6 +154,14 @@ def _transcript_events(raw):
     if (not isinstance(raw, dict) or raw.get("isSidechain") or raw.get("isMeta")
             or raw.get("isCompactSummary")):
         return []
+    if raw.get("type") == "attachment":     # a message typed while Claude worked
+        a = raw.get("attachment") or {}
+        typed = a.get("prompt")
+        if (a.get("type") == "queued_command" and a.get("commandMode") == "prompt"
+                and (a.get("origin") or {}).get("kind") == "human" and isinstance(typed, str)
+                and typed.strip() and not typed.strip().startswith(NOT_TYPED)):
+            return [_typed_event(typed.strip())]
+        return []
     if raw.get("type") != "user":
         return translate(raw)
     content = (raw.get("message") or {}).get("content")
@@ -165,13 +173,17 @@ def _transcript_events(raw):
                       if isinstance(b, dict) and b.get("type") == "text").strip()
     out = translate(raw)
     if typed and not typed.startswith(NOT_TYPED):
-        ev = {"t": "user", "text": _cut(typed, 20000)}
-        said = REPLY_LINE.match(typed)
-        if said:                     # a reply sent from a chat: show it as one
-            ev["text"] = _cut(typed[said.end():], 20000)
-            ev["reply"] = {"who": said.group(1), "snip": said.group(2)}
-        out.insert(0, ev)
+        out.insert(0, _typed_event(typed))
     return out
+
+
+def _typed_event(typed):
+    ev = {"t": "user", "text": _cut(typed, 20000)}
+    said = REPLY_LINE.match(typed)
+    if said:                     # a reply sent from a chat: show it as one
+        ev["text"] = _cut(typed[said.end():], 20000)
+        ev["reply"] = {"who": said.group(1), "snip": said.group(2)}
+    return ev
 
 
 def transcript_events(raw):

@@ -1607,5 +1607,25 @@ class TranscriptTimeTest(unittest.TestCase):
         self.assertNotIn("ts", ev)
 
 
+class QueuedMessageTest(unittest.TestCase):
+    """A message sent while Claude works reaches it inside the turn, as an
+    attachment line, not a user line: the chat still shows it."""
+
+    def line(self, prompt, mode="prompt", kind="human"):
+        return {"type": "attachment", "timestamp": "2026-11-04T12:28:03.470Z",
+                "attachment": {"type": "queued_command", "prompt": prompt,
+                               "commandMode": mode, "origin": {"kind": kind}}}
+
+    def test_a_message_sent_mid_turn_shows(self):
+        [ev] = tc.transcript_events(self.line("Also say SECOND"))
+        self.assertEqual((ev["t"], ev["text"]), ("user", "Also say SECOND"))
+
+    def test_notes_that_are_not_typed_do_not(self):
+        self.assertEqual(tc.transcript_events(self.line("<task-notification>x")), [])
+        self.assertEqual(tc.transcript_events(self.line("x", mode="task-notification")), [])
+        self.assertEqual(tc.transcript_events(self.line("x", kind="task")), [])
+        self.assertEqual(tc.transcript_events({"type": "attachment", "attachment": {"type": "date"}}), [])
+
+
 if __name__ == "__main__":
     unittest.main()
