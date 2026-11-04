@@ -74,18 +74,48 @@ A Claude that may run any command (Bypass, or a command you allowed) can
 reach tabit the way `tabit-tabs` does, and do what the phone can do. The real
 boundary is your user account on this computer, as for anything else you run.
 
-## Mirror a tab
+## Chats are tabs
 
-New chat can **mirror a Claude tab** instead of starting a Claude of its own.
-The chat then shows that tab's conversation, and what you type goes into the
-tab. A tab that is working takes your line too: Claude holds it until the
-turn is done. **Stop** presses Esc in the tab. The list marks the chat with
-🔗 and the tab's name.
+Every Claude tab in tabit has a chat, and every new chat is a Claude tab. The
+chat shows that tab's conversation, and what you type goes into the tab. A tab
+that is working takes your line too: Claude holds it until the turn is done.
+**Stop** presses Esc in the tab.
 
-- Mode and model belong to the tab, so the chat has none. A mirror cannot
-  join a group.
+- **One name, one group.** The chat has the tab's name and shows the tab's
+  group under it, with the group's colour. Rename the chat and the tab is
+  renamed. Rename or regroup the tab and the chat follows within 10 seconds.
+- **New chat** opens a Claude tab in the group you pick, in the folder you
+  pick. With no group it goes in the **Chat** group, which is made when there
+  is none. The Chat group cannot be ungrouped, in tabit or from the phone.
+- **Delete.** Deleting a chat closes its tab. The chat asks first. The last
+  tab in tabit cannot be closed from the phone, so that chat stays. Closing a
+  tab removes its chat after about a minute.
+- **A tab with no group** goes in the Chat group once, when its chat is made.
+  Take it out later and it stays out.
+- **Old chats move into tabs.** A chat that ran its own Claude (not the main
+  Tabit Chat) moves into a tab when it is idle: the tab goes on with the same
+  conversation (`--resume`), keeps the login and bypass, and the chat that
+  mirrors it takes the old one's picture and name. A group (room) the old chat
+  was in is deleted when fewer than two chats are left in it. A chat that
+  cannot move is tried 3 times.
+- **Account and model.** A chat's settings show Account and Model, and each
+  row shows `account · model`. A tab's account is switched by tabit, in place.
+  The model is switched by typing `/model <name>` into the tab, which needs a
+  tab that is not busy. Claude saves `/model` as the default for new sessions;
+  tabit puts the `model` line of `settings.json` back as it was, within
+  10 seconds, and touches nothing else in that file. The tab shows the model
+  that answered last, read from its transcript.
+- Tabs of other tools (Codex, Grok) have no chat: only Claude's transcript is
+  read.
+- Mode and model belong to the tab, so the chat has none. A chat that is a
+  tab cannot join a room (see Groups).
 - When the tab starts a new conversation, the chat says so and goes on with
   the new one.
+- **Menus on the tab's screen.** A tab that waits on a menu (the trust
+  question for a folder, a permission question with numbered choices) shows
+  as a card too: tap a choice and **Answer**, and tabit presses the number, or
+  the arrow keys and Enter, in the tab. It reads the menu again just before
+  it presses, and presses nothing if the menu has gone.
 - **Questions from the tab.** When the tab's Claude asks you to pick from a
   list, the chat shows the question as a card. Tap an option for each
   question and tap **Answer**; tabit presses the keys in the tab. **Skip**

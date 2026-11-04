@@ -1017,6 +1017,7 @@ HAS_SSH_TOOL = os.path.isdir(SSH_TOOL_DIR) and (os.path.isfile(SSH_TOOL_CONNECT_
 # by default — add your own from the bar's edit button)
 DEFAULT_COMMANDS = []
 # tab-group colors (names match the .group-bar.grp-* CSS classes)
+CHAT_GROUP = "Chat"      # the tab group that Tabit Chat puts a new chat in when none is picked; it cannot be ungrouped
 GROUP_COLORS = [
     "red", "orange", "yellow", "green", "teal", "cyan",
     "blue", "indigo", "purple", "pink", "gray", "white", "brown"
@@ -5983,6 +5984,7 @@ if (data !== null) {{
         dn.connect("activate", lambda *_: self._move_group(color, 1))
         ug = Gtk.MenuItem(label="Ungroup")
         ug.connect("activate", lambda *_: self._ungroup(color))
+        ug.set_sensitive(not self._is_chat_group(color))     # Tabit Chat files its chats here
         for it in (ce, rn, up, dn, ug):
             menu.append(it)
         menu.show_all()
@@ -6175,6 +6177,9 @@ if (data !== null) {{
         self._save_sessions()
 
     def _ungroup(self, color):
+        if self._is_chat_group(color):
+            print("[tabit] the Chat group cannot be ungrouped", file=sys.stderr)
+            return
         for r in self._session_rows():
             if r.group_color == color:
                 self._apply_group(r, None)
@@ -12300,6 +12305,13 @@ if (data !== null) {{
                     return 400, {"error": "pick an AI from tabit's list"}
                 # a Claude account runs as its own claude, as in +AI
                 account = body.get("account") if self._ai_is_claude(tool) else None
+                # one exact conversation to go on with (a Tabit Chat moving to a tab)
+                resume = body.get("resume") if self._ai_is_claude(tool) else None
+                if resume is not None and not (isinstance(resume, str)
+                                               and re.fullmatch(r"[0-9a-f-]{36}", resume)):
+                    return 400, {"error": "resume is a session id"}
+                if resume and self._ai_session_open_elsewhere(resume):
+                    return 409, {"error": "that conversation is open in another Claude"}
                 run = tool
                 if account:
                     run = dict(self._claude_accounts()).get(account)
@@ -12307,10 +12319,12 @@ if (data !== null) {{
                         return 400, {"error": f"no Claude account “{account}”"}
                 launch, argv, icon = self._ai_launch_pair(
                     run, cwd, list(entry.get("try") or []),
-                    bypass=bool(self._load_settings().get("ai_claude_bypass"))
-                    and self._ai_is_claude(tool),
-                    tmux=True, continue_now=False, resume_later=True,
-                    new_sid=(str(uuid.uuid4()) if self._ai_takes_new_id(run) else None))
+                    bypass=(bool(self._load_settings().get("ai_claude_bypass"))
+                            or (body.get("bypass") is True and getattr(self, "_from_chat", False)))
+                           and self._ai_is_claude(tool),
+                    tmux=True, continue_now=bool(resume), resume_later=True,
+                    resume_id=resume or None,
+                    new_sid=(str(uuid.uuid4()) if not resume and self._ai_takes_new_id(run) else None))
                 row = self._add_session(f"{tool} · {account}" if account else tool,
                                         argv, icon, sub=self._ai_sub(cwd, run),
                                         cwd=cwd, launch_argv=launch)
@@ -12368,6 +12382,8 @@ if (data !== null) {{
         new = body.get("color", color)
         if new not in GROUP_COLORS:
             return 400, {"error": "unknown group colour"}
+        if body.get("ungroup") and self._is_chat_group(color):
+            return 409, {"error": "the Chat group cannot be deleted"}
         if new != color and new in used:
             return 409, {"error": "that colour has a group"}
         if body.get("loose"):
@@ -13075,6 +13091,7 @@ if (data !== null) {{
                             auth=Tabit._claude_auth_status,
                             tab_hook=self._chat_tab_hook,
                             tabs_hook=self._chat_tabs_hook,
+                            tab_ops=self._chat_tab_ops,
                             extra_env=self._chat_tool_env)
                         self._chat_manager.ensure_default()
                         break
@@ -13099,16 +13116,132 @@ if (data !== null) {{
                     continue
                 color = getattr(row, "group_color", None) or ""
                 out.append({"id": self._tg_row_id(row),
+                            "account": self._claude_account_of(got[0]) or "",
                             "title": getattr(row, "title_text", "") or "",
-                            "group": (self._group_names.get(color) or color.capitalize()) if color else ""})
+                            "group": (self._group_names.get(color) or color.capitalize()) if color else "",
+                            "color": color})
             return out
         res = self._remote_call(work)
         return res if isinstance(res, list) else None
 
+    def _is_chat_group(self, color):
+        return bool(color) and (self._group_names.get(color) or "").strip().lower() == CHAT_GROUP.lower()
+
+    @staticmethod
+    def _settings_model(path):
+        """The "model" line of Claude's settings: its text (None when there is none)."""
+        try:
+            with open(path, encoding="utf-8") as f:
+                m = re.search(r'^[ \t]*"model"[ \t]*:[ \t]*"([^"\n]*)"', f.read(), re.M)
+        except OSError:
+            return None
+        return m.group(1) if m else None
+
+    @staticmethod
+    def _put_settings_model(path, model):
+        """Give the "model" line of Claude's settings this value again; nothing
+        else in the file is touched, and a file that would not parse is not written."""
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            if model is None:        # there was none: take the one Claude wrote out
+                new = re.sub(r'^[ \t]*"model"[ \t]*:[ \t]*"[^"\n]*",?[ \t]*\n', "", text, count=1, flags=re.M)
+            else:
+                new = re.sub(r'^([ \t]*"model"[ \t]*:[ \t]*)"[^"\n]*"', lambda m: m.group(1) + json.dumps(model),
+                             text, count=1, flags=re.M)
+            json.loads(new)
+            tmp = path + ".tabit-tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(new)
+            os.chmod(tmp, os.stat(path).st_mode & 0o777)
+            os.replace(tmp, path)
+        except (OSError, ValueError) as e:
+            print(f"[chat] could not put the model setting back: {e}", file=sys.stderr)
+
+    def _chat_model(self, tab_id, model):
+        """Switch a tab's model by typing /model into it. Claude also saves that
+        as the default for new sessions, which a chat switching one tab must not
+        do: the setting is put back as it was."""
+        path = os.path.realpath(os.path.join(CLAUDE_DEFAULT_DIR, "settings.json"))
+        before = self._settings_model(path)
+        res = self._chat_tab_hook(tab_id, "/model " + (model or "default"))
+        if res[0] == 200:
+            def restore():
+                for _ in range(20):
+                    time.sleep(0.5)
+                    now = self._settings_model(path)
+                    if now != before:
+                        self._put_settings_model(path, before)
+                        return
+            threading.Thread(target=restore, daemon=True).start()
+        return res
+
+    def _chat_tab_ops(self, op, target=None, body=None):
+        """For a chat: manage tabs the way the phone does. op: groups | new |
+        close | rename | account | model | file (put a tab that has no group in the Chat group). Gives
+        (code, body). A new tab with no group goes in the Chat group, which is
+        made on the way when there is none."""
+        body = dict(body or {})
+        if op == "model":
+            return self._chat_model(target, body.get("model"))
+
+        def work():
+            used = {}
+            for r in self._session_rows():
+                c = getattr(r, "group_color", None)
+                if c and c not in used:
+                    used[c] = self._group_names.get(c) or c.capitalize()
+            chat_color = next((c for c in used if self._is_chat_group(c)), None)
+            if op == "groups":
+                free = next((c for c in reversed(GROUP_COLORS) if c not in used), None)
+                return 200, {"groups": [{"color": c, "name": n} for c, n in used.items()],
+                             "default": {"color": chat_color or free or "", "name": CHAT_GROUP}}
+            if op == "new":
+                made = False
+                if not body.get("group"):
+                    if chat_color is None:
+                        chat_color = next((c for c in reversed(GROUP_COLORS) if c not in used), None)
+                        if chat_color is None:
+                            return 409, {"error": "no free group colour for the Chat group: pick a group"}
+                        made = True
+                    body["group"] = chat_color
+                code, out = self._remote_manage("new", None, body)
+                if code == 200 and made:
+                    self._remote_manage("groupop", chat_color, {"name": CHAT_GROUP})
+                return code, out
+            if op == "file":
+                made = False
+                if chat_color is None:
+                    chat_color = next((c for c in reversed(GROUP_COLORS) if c not in used), None)
+                    if chat_color is None:
+                        return 409, {"error": "no free group colour for the Chat group"}
+                    made = True
+                code, out = self._remote_manage("group", target, {"color": chat_color})
+                if code != 200:
+                    return code, out
+                if made:
+                    self._remote_manage("groupop", chat_color, {"name": CHAT_GROUP})
+                return 200, {"color": chat_color, "name": CHAT_GROUP}
+            if op in ("close", "rename", "account"):
+                return self._remote_manage(op, target, body)
+            return 404, {"error": "unknown action"}
+        def from_chat():
+            self._from_chat = True       # a chat may open a tab that skips permission questions; the phone page may not
+            try:
+                return work()
+            finally:
+                self._from_chat = False
+        res = self._remote_call(from_chat, timeout=10)
+        if res is None:
+            return 503, {"error": "tabit busy"}
+        if not isinstance(res, tuple):
+            return 500, res
+        return res
+
     def _chat_tab_hook(self, tab_id, text=None, key=None, queue=False):
         """For a chat: info about an AI tab; with text, type a line into it;
         with key, press one. Info is {"title", "status", "transcript",
-        "claude"} or {"error"}; the others give (code, body). queue: a busy tab
+        "claude"} (a blocked tab adds "screen", its last lines) or {"error"}; the others give (code, body). queue: a busy tab
         takes the line too (Claude Code holds it), only a question stops it.
         Runs on the GTK thread through _remote_call."""
         acts = text is not None or key is not None
@@ -13122,10 +13255,15 @@ if (data !== null) {{
                 getattr(row, "agent_status", None) or "unknown"
             if not acts:
                 got = self._ai_cli_path_of(getattr(row, "argv", None))
-                return {"title": getattr(row, "title_text", "") or tab_id,
+                info = {"title": getattr(row, "title_text", "") or tab_id,
                         "status": status,
                         "transcript": getattr(row, "_agent_hook_tx", "") or "",
                         "claude": bool(got and self._ai_is_claude(got[0]))}
+                term = getattr(row, "term", None)
+                if status == "blocked" and term is not None and self._remote_send_on:
+                    # the menu the tab waits on, so the chat can show it (typing switch: as the screen)
+                    info["screen"] = self._term_tail_text(term, 60).rstrip().splitlines()[-40:]
+                return info
             if key is not None:
                 return self._remote_act(tab_id, "key", {"key": key})
             if status == "blocked" or (status == "working" and not queue):

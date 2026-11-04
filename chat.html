@@ -84,6 +84,7 @@
   .card .sub.last.st-work { color: var(--yellow); }
   .card .sub.last.st-wait { color: var(--orange); font-weight: 600; }
   .badge { font-size: 11px; padding: 1px 8px; border-radius: 99px; background: #ffffff0d; color: var(--dim); }
+  .badge .gdot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
   .badge.m-bypass { color: var(--red); background: #f7768e1f; } .badge.m-ask, .badge.need { color: var(--orange); background: #ff9e641f; }
   .empty { color: var(--dim); text-align: center; padding: 56px 28px; line-height: 1.6; }
   .empty .big { font-size: 44px; margin-bottom: 8px; }
@@ -138,7 +139,7 @@
   .ask .row button { flex: 1; min-width: 90px; }
   .ask .opts { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
   .ask .opts button.on { background: var(--blue); color: #111; border: 0; }
-  .ask .q { font-weight: 600; margin-top: 6px; }
+  .ask .q { font-weight: 600; margin-top: 6px; white-space: pre-line; }
   .ask.closed { border-color: var(--line); background: none; opacity: .7; }
   .ask.closed h3 { color: var(--dim); }
   .ask .verdict { color: var(--dim); font-size: 13px; }
@@ -372,14 +373,22 @@ function picker(host, r) {
   return { get: () => ({ emoji: pick.emoji, hue: pick.hue }) };
 }
 // "Mirror a tab" chooser: the Claude tabs open in tabit; get() is null or {id, title}
-function tabPick(sel) {
-  sel.innerHTML = `<option value="">None: a Claude of its own</option>`;
-  api("api/status").then((st) => {
-    const ai = (st.tabs || []).filter((t) => t.type === "ai" && "account" in t && !t.exited);   // only a Claude tab has an account
-    sel.insertAdjacentHTML("beforeend", ai.map((t) => `<option value="${esc(t.id)}" data-t="${esc(t.title)}">${esc(t.title || t.id)}</option>`).join(""));
-  }).catch(() => {});
-  return () => { const o = sel.selectedOptions[0]; return o && o.value ? { id: o.value, title: o.dataset.t || "" } : null; };
-}
+// opus, sonnet, haiku or fable for a model id such as claude-opus-4-5; "" (default) otherwise
+const aliasOf = (id) => (cfg?.models || []).find((a) => a && String(id || "").includes(a)) || "";
+// the colours tabit gives its tab groups
+const GROUP_CSS = { red: "#f7768e", orange: "#ff9e64", yellow: "#e0af68", green: "#9ece6a", teal: "#73daca", cyan: "#7dcfff", blue: "#7aa2f7",
+  indigo: "#8c8cff", purple: "#bb9af7", pink: "#ff79c6", gray: "#a9b1d6", white: "#e6e6e6", brown: "#c49a6c" };
+// which tabit group a mirrored chat's tab sits in; "" when it sits in none
+// "claude-sonnet-5-5" -> "sonnet 5.5"; an alias or an unknown id stays as it is
+const modelShort = (id) => { const m = /^claude-([a-z]+)-(\d+)(?:-(\d+))?/.exec(id || ""); return m ? `${m[1]} ${m[2]}${m[3] ? "." + m[3] : ""}` : (id || ""); };
+// the login and the model a chat uses, as one small badge
+const usingBadge = (r) => {
+  const model = r.tab ? modelShort(r.tab.model) : (r.model || "default");
+  return `<span class="badge">${esc([r.account || "Default", model].filter(Boolean).join(" · "))}</span>`;
+};
+// a chat with no tab of its own, or a tab with no group, shows the default group: Chat
+const ownGroup = () => { const d = cfg?.tabgroups?.default; return { group: d?.name || "Chat", color: d?.color || "" }; };
+const groupBadge = (tab) => tab && tab.group ? `<span class="badge"><i class="gdot" style="background:${GROUP_CSS[tab.color] || "var(--dim)"}"></i>${esc(tab.group)}</span>` : "";
 const base = (k) => (k === "groups" ? "api/chat-groups" : "api/chats");
 async function api(path, body) {
   const res = await fetch(path, body === undefined ? {} : {
@@ -468,7 +477,7 @@ async function loadList() {
   }
   $("cards").innerHTML = rows.map((r) => {
     const badges = (kind === "chats" && r.mode === "bypass" ? '<span class="badge m-bypass">bypass</span>' : "") +
-      (kind === "chats" && r.tab ? `<span class="badge">🔗 ${esc(r.tab.title || r.tab.id)}</span>` : "");
+      (kind === "chats" ? groupBadge(r.tab && r.tab.group ? r.tab : ownGroup()) + usingBadge(r) : "");
     return `<div class="card${cur && cur.id === r.id ? " sel" : ""}" data-id="${esc(r.id)}">
       <div class="av ${avOf(r).cls}" style="${avOf(r).style}">${avOf(r).html}<span class="dot ${esc(r.state)}"></span></div>
       <div class="body">
@@ -601,7 +610,7 @@ function header(me) {
   const hav = $("hav"); const hv = avOf(m); hav.hidden = false; hav.className = "av sm " + hv.cls; hav.style.cssText = hv.style; hav.innerHTML = hv.html;
   const p = $("pill");
   p.hidden = false; p.className = "pill " + me.state;
-  p.textContent = me.state === "idle" ? (me.kind === "chats" ? (m.tab ? "mirror" : m.mode) : "idle") : me.state === "waiting" ? "waiting for you" : me.kind === "groups" ? "talking…" : "typing…";
+  p.textContent = me.state === "idle" ? (me.kind === "chats" ? (m.tab ? m.tab.group || "tab" : m.mode) : "idle") : me.state === "waiting" ? "waiting for you" : me.kind === "groups" ? "talking…" : "typing…";
   $("stop").hidden = me.state === "idle";
     const chips = $("chips");
   if (me.kind === "groups") {
@@ -898,37 +907,31 @@ const opts = (list, pick, label) => list.map((v) => `<option value="${esc(v)}"${
 
 $("add").onclick = () => (kind === "chats" ? newChat() : newGroup());
 async function newChat() {
+  cfg = await api("api/chats").catch(() => cfg) || cfg;          // fresh: the groups in tabit change
   if (!cfg) await loadList();
   const recent = [...new Set((cfg?.chats || []).map((c) => c.cwd))].slice(0, 6);
   const last = localStorage.getItem("lastcwd") || "~";
+  const tg = cfg?.tabgroups || {};
+  const others = (tg.groups || []).filter((g) => g.name.toLowerCase() !== "chat");
   sheet(`<h2>New chat</h2>
     <div id="n-look"></div>
-    <label>Mirror a Claude tab (optional)</label><select id="n-tab"></select>
-    <div class="hint" id="n-mirror" hidden>This chat shows that tab. What you type goes into the tab, and what the tab says shows here.</div>
-    <div id="n-own">
+    <label>Name (optional)</label><input id="n-title" maxlength="80">
+    <label>Group</label>
+    <select id="n-group"><option value="">Chat (default)</option>${others.map((g) => `<option value="${esc(g.color)}">${esc(g.name)}</option>`).join("")}</select>
     <label>Folder on this computer</label>
     <input id="n-cwd" value="${esc(last)}" autocapitalize="off" autocorrect="off" spellcheck="false">
     <div class="chips"><button id="n-browse" type="button">Browse…</button>${recent.map((c) => `<button type="button" data-cwd="${esc(c)}">${esc(tilde(c))}</button>`).join("")}</div>
-    <label>When Claude wants to do something</label>
-    <select id="n-mode">${opts(cfg.modes, "ask", (m) => MODE_NAME[m])}</select>
-    <div class="hint warn" id="n-warn" hidden>Bypass: Claude runs commands and edits files without asking. Only use it for work you can undo.</div>
-    <label>Model</label><select id="n-model">${opts(cfg.models, "", (m) => m || "default")}</select>
-    </div>
-    <label>Name (optional)</label><input id="n-title" maxlength="80">
+    <div class="hint">This opens a Claude tab in tabit, in that group. The chat is that tab.</div>
     <div class="hint" id="n-err" style="color:var(--red)"></div>
     <div class="acts"><button type="button" id="n-cancel">Cancel</button><button type="button" class="primary" id="n-go">Start</button></div>`);
   const look = picker($("n-look"), { id: String(Math.random()), roll: true });
-  const tab = tabPick($("n-tab"));
-  $("n-tab").onchange = () => { $("n-own").hidden = !!tab(); $("n-mirror").hidden = !tab(); };
-  $("n-mode").onchange = () => { $("n-warn").hidden = $("n-mode").value !== "bypass"; };
   $("n-cancel").onclick = closeSheet;
   $("n-browse").onclick = () => browse($("n-cwd").value, (p) => { $("n-cwd").value = p; });
   $("sheetin").querySelectorAll("[data-cwd]").forEach((b) => { b.onclick = () => { $("n-cwd").value = b.dataset.cwd; }; });
   $("n-go").onclick = async () => {
     try {
       const cwd = $("n-cwd").value.trim() || "~";
-      const { chat } = await api("api/chats", { cwd, mode: $("n-mode").value,
-        model: $("n-model").value, title: $("n-title").value, tab: tab(), ...look.get() });
+      const { chat } = await api("api/chats", { kind: "tab", cwd, group: $("n-group").value, title: $("n-title").value, ...look.get() });
       localStorage.setItem("lastcwd", cwd);
       closeSheet(); location.hash = "#c/" + chat.id;
     } catch (e) { $("n-err").textContent = e.message; }
@@ -997,7 +1000,7 @@ async function profile() {
     document.querySelectorAll(".prow").forEach((r) => { r.onclick = () => { closeSheet(); kind = "chats"; location.hash = "#c/" + r.dataset.go; }; });
   } else {
     sheet(`<div class="prof">${av}<h2>${esc(m.title)}</h2><div class="hint">${esc(tilde(m.cwd))}</div>
-      <div class="meta">${m.tab ? `<span class="badge">🔗 mirrors ${esc(m.tab.title)}</span>` : `<span class="badge m-${esc(m.mode)}">${esc(MODE_NAME[m.mode] || m.mode)}</span><span class="badge">${esc(m.model || "default model")}</span>`}</div></div>
+      <div class="meta">${m.tab ? groupBadge(m.tab.group ? m.tab : ownGroup()) : `${groupBadge(ownGroup())}<span class="badge m-${esc(m.mode)}">${esc(MODE_NAME[m.mode] || m.mode)}</span><span class="badge">${esc(m.model || "default model")}</span>`}</div></div>
       <div id="p-lib" class="hint">Loading…</div>
       <div class="acts"><button type="button" id="p-set">Settings</button><button type="button" class="primary" id="p-close">Close</button></div>`);
     try {
@@ -1051,11 +1054,13 @@ const settings = async (t = cur) => {
     $("e-save").onclick = async () => { try { await api(`api/chat-groups/${t.id}/edit`, { title: $("e-title").value }); done(); } catch (e) { $("e-err").textContent = e.message; } };
     $("e-del").onclick = async () => { if (!confirm("Delete this group? Its chats stay.")) return; await api(`api/chat-groups/${t.id}/delete`, {}); gone(); };
   } else {
-    sheet(`<h2>Chat</h2><div id="e-look"></div><div class="hint">${m.tab ? "🔗 Shows the tab “" + esc(m.tab.title) + "”" : esc(tilde(m.cwd))}</div>
+    sheet(`<h2>Chat</h2><div id="e-look"></div><div class="hint">${m.tab ? "Its tab in tabit: the name is the tab’s name" : esc(tilde(m.cwd))}</div>
       <label>Name</label><input id="e-title" value="${esc(m.title)}" maxlength="80">
+      <label>Account</label><select id="e-account">${(cfg.accounts || []).map((a) => `<option value="${esc(a.name)}"${a.name === (m.account || "") ? " selected" : ""}>${esc(a.label)}</option>`).join("")}</select>
       <div ${m.tab ? "hidden" : ""}><label>When Claude wants to do something</label><select id="e-mode">${opts(cfg.modes, m.mode, (x) => MODE_NAME[x])}</select>
-      <div class="hint warn" id="e-warn" ${m.mode === "bypass" ? "" : "hidden"}>Bypass: no questions asked.</div>
-      <label>Model</label><select id="e-model">${opts(cfg.models, m.model, (x) => x || "default")}</select></div>
+      <div class="hint warn" id="e-warn" ${m.mode === "bypass" ? "" : "hidden"}>Bypass: no questions asked.</div></div>
+      <label>Model</label><select id="e-model">${opts(cfg.models, m.tab ? aliasOf(m.tab.model) : m.model, (x) => x || "default")}</select>
+      <div class="hint" ${m.tab && m.tab.model ? "" : "hidden"}>${m.tab ? "Answering as " + esc(m.tab.model) + ". A new model starts with the next message, and only when the tab is not busy." : ""}</div>
       <div ${m.tab ? "hidden" : ""}><label>Connectors</label><button type="button" id="e-reload">↻ Reload Claude</button>
       <div class="hint" id="e-reloaded">Changed a connector (Gmail, Strava…)? Tap this. The chat keeps its history.</div></div>
       <div class="hint" id="e-err" style="color:var(--red)"></div>
@@ -1066,8 +1071,8 @@ const settings = async (t = cur) => {
     };
     const look = picker($("e-look"), m);
     $("e-mode").onchange = () => { $("e-warn").hidden = $("e-mode").value !== "bypass"; };
-    $("e-save").onclick = async () => { try { await api(`api/chats/${t.id}/edit`, { title: $("e-title").value, mode: $("e-mode").value, model: $("e-model").value, ...look.get() }); done(); } catch (e) { $("e-err").textContent = e.message; } };
-    if ($("e-del")) $("e-del").onclick = async () => { if (!confirm("Delete this chat and its history?")) return; await api(`api/chats/${t.id}/delete`, {}); gone(); };
+    $("e-save").onclick = async () => { try { await api(`api/chats/${t.id}/edit`, { title: $("e-title").value, mode: $("e-mode").value, model: $("e-model").value, ...($("e-account").value !== (m.account || "") ? { account: $("e-account").value } : {}), ...look.get() }); done(); } catch (e) { $("e-err").textContent = e.message; } };
+    if ($("e-del")) $("e-del").onclick = async () => { if (!confirm(m.tab ? "Delete this chat? Its tab in tabit closes too." : "Delete this chat and its history?")) return; try { await api(`api/chats/${t.id}/delete`, {}); gone(); } catch (e) { $("e-err").textContent = e.message; } };
   }
   $("e-cancel").onclick = closeSheet;
 };

@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 import socket
 import urllib.parse
 import sys
@@ -766,6 +767,7 @@ class TestRemoteGroupColour(unittest.TestCase):
                 r.group_color = c
 
         App._recolor_group = tabit.Tabit._recolor_group
+        App._is_chat_group = tabit.Tabit._is_chat_group
         self.app = App()
 
     def op(self, color, body):
@@ -793,6 +795,11 @@ class TestRemoteGroupColour(unittest.TestCase):
         self.assertEqual(self.colours(), ["red", "red", "teal"])
         self.assertEqual(self.app._group_names["teal"], "Misc")
         self.assertEqual(self.op("pink", {"loose": True}), 404)   # none left
+
+    def test_the_chat_group_cannot_be_ungrouped(self):
+        self.app._group_names["red"] = "chat"
+        self.assertEqual(self.op("red", {"ungroup": True}), 409)
+        self.assertEqual(self.colours(), ["red", "red", None])
 
     def test_every_check_comes_before_a_change(self):
         self.assertEqual(self.op("nope", {}), 404)
@@ -980,6 +987,126 @@ class TestRemoteSetupLinks(unittest.TestCase):
         app = unittest.mock.Mock(_remote_pending=("log in to Tailscale", "https://x"))
         tabit.Tabit._remote_fresh(app)
         self.assertIsNone(app._remote_pending)
+
+
+
+class TestChatTabOps(unittest.TestCase):
+    """What Tabit Chat asks of the tabs: the groups, a new tab, and the Chat group."""
+
+    def setUp(self):
+        Row = type("Row", (), {})
+        self.rows = [Row()]
+        self.rows[0].group_color = "red"
+        self.calls = []
+        test = self
+
+        class App:
+            _group_names = {"red": "Work"}
+            _session_rows = lambda _s: test.rows
+            _remote_call = lambda _s, fn, timeout=3: fn()
+
+            def _remote_manage(self, op, target, body):
+                test.calls.append((op, target, body))
+                return 200, {"id": "n1"}
+
+        App._is_chat_group = tabit.Tabit._is_chat_group
+        self.app = App()
+
+    def ops(self, op, target=None, body=None):
+        return tabit.Tabit._chat_tab_ops(self.app, op, target, body)
+
+    def test_groups_lists_the_used_ones_and_a_free_colour_for_chat(self):
+        code, out = self.ops("groups")
+        self.assertEqual(out["groups"], [{"color": "red", "name": "Work"}])
+        self.assertEqual(out["default"], {"color": "brown", "name": "Chat"})
+
+    def test_groups_names_the_chat_group_that_exists(self):
+        self.rows[0].group_color = "teal"
+        self.app._group_names = {"teal": "Chat"}
+        self.assertEqual(self.ops("groups")[1]["default"]["color"], "teal")
+
+    def test_a_new_tab_with_no_group_makes_the_chat_group(self):
+        self.assertEqual(self.ops("new", None, {"kind": "ai"})[0], 200)
+        self.assertEqual(self.calls, [("new", None, {"kind": "ai", "group": "brown"}),
+                                      ("groupop", "brown", {"name": "Chat"})])
+
+    def test_a_new_tab_with_no_group_joins_the_chat_group_that_exists(self):
+        self.rows[0].group_color = "teal"
+        self.app._group_names = {"teal": "Chat"}
+        self.ops("new", None, {"kind": "ai"})
+        self.assertEqual(self.calls, [("new", None, {"kind": "ai", "group": "teal"})])
+
+    def test_a_new_tab_in_a_picked_group_is_left_alone(self):
+        self.ops("new", None, {"kind": "ai", "group": "red"})
+        self.assertEqual(self.calls, [("new", None, {"kind": "ai", "group": "red"})])
+
+    def test_no_free_colour_for_the_chat_group(self):
+        Row = type("Row", (), {})
+        self.rows = []
+        for c in tabit.GROUP_COLORS:
+            r = Row(); r.group_color = c; self.rows.append(r)
+        self.app._group_names = {}
+        self.assertEqual(self.ops("new", None, {"kind": "ai"})[0], 409)
+        self.assertEqual(self.calls, [])
+
+    def test_file_puts_a_tab_in_the_chat_group_and_makes_it(self):
+        code, out = self.ops("file", "t1")
+        self.assertEqual((code, out), (200, {"color": "brown", "name": "Chat"}))
+        self.assertEqual(self.calls, [("group", "t1", {"color": "brown"}),
+                                      ("groupop", "brown", {"name": "Chat"})])
+
+    def test_file_uses_the_chat_group_that_exists(self):
+        self.rows[0].group_color = "teal"
+        self.app._group_names = {"teal": "Chat"}
+        self.assertEqual(self.ops("file", "t1")[1]["color"], "teal")
+        self.assertEqual(self.calls, [("group", "t1", {"color": "teal"})])
+
+    def test_close_rename_and_account_go_to_the_phone_switch(self):
+        self.ops("close", "t1")
+        self.ops("rename", "t1", {"name": "x"})
+        self.ops("account", "t1", {"account": "Personal"})
+        self.assertEqual(self.calls, [("close", "t1", {}), ("rename", "t1", {"name": "x"}),
+                                      ("account", "t1", {"account": "Personal"})])
+
+
+class TestChatModelSetting(unittest.TestCase):
+    """A chat switching one tab's model must not change Claude's saved default."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.path = os.path.join(self.dir, "settings.json")
+
+    def write(self, text):
+        with open(self.path, "w") as f:
+            f.write(text)
+
+    def test_read_and_put_back_only_the_model(self):
+        text = '{\n  "permissions": {"allow": []},\n  "model": "sonnet",\n  "effortLevel": "xhigh"\n}\n'
+        self.write(text)
+        self.assertEqual(tabit.Tabit._settings_model(self.path), "sonnet")
+        self.write(text.replace("sonnet", "haiku"))
+        tabit.Tabit._put_settings_model(self.path, "sonnet")
+        with open(self.path) as f:
+            self.assertEqual(f.read(), text)
+
+    def test_no_model_line_and_a_missing_file(self):
+        self.write('{"a": 1}')
+        self.assertIsNone(tabit.Tabit._settings_model(self.path))
+        self.assertIsNone(tabit.Tabit._settings_model(self.path + ".none"))
+        tabit.Tabit._put_settings_model(self.path + ".none", "x")        # no file: no crash
+
+    def test_a_model_line_that_was_not_there_is_taken_out_again(self):
+        self.write('{\n  "a": 1,\n  "model": "haiku",\n  "b": 2\n}\n')
+        tabit.Tabit._put_settings_model(self.path, None)
+        with open(self.path) as f:
+            self.assertEqual(json.loads(f.read()), {"a": 1, "b": 2})
+
+    def test_a_model_name_that_would_break_the_file_is_not_written(self):
+        self.write('{\n  "model": "haiku"\n}\n')
+        tabit.Tabit._put_settings_model(self.path, 'a"b\n')
+        with open(self.path) as f:
+            json.loads(f.read())
 
 
 if __name__ == "__main__":
