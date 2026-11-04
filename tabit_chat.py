@@ -445,6 +445,7 @@ class Chat(_Log):
         self.proc = None
         self.wlock = threading.Lock()
         self.slock = threading.Lock()   # one claude per chat, even when two send at once
+        self.moving = False             # on its way into a tab: no Claude of its own again
         self.last_used = time.time()
         self.errtail = collections.deque(maxlen=12)
         self._expected_exit = False
@@ -674,6 +675,8 @@ class Chat(_Log):
         """quiet: a group sends it, so the chat's title is not made from it.
         reply: the message this one answers, from quote()."""
         with self.slock:
+            if self.moving:
+                raise RuntimeError("this chat is moving into a tab")
             if not self.running:
                 self._spawn()
         self.last_used = time.time()
@@ -1177,7 +1180,7 @@ class Group(_Log):
         else:
             text = "[%s]: %s" % (sender, text)
         if chat.mirrored:            # typed into its tab; the reply comes back from the transcript
-            code, out = chat.mirror_send(text)
+            code, out = chat.mirror_send(_cut(text, TAB_TEXT - 16))
             if code != 200:
                 self.emit({"t": "error", "chat": chat.id, "name": self.alias(chat),
                            "text": "could not reach it: %s" % (out or {}).get("error", code)})
@@ -1499,7 +1502,7 @@ class ChatManager:
                     sent.append(name)
                 else:
                     failed.append("@%s: %s" % (name, (out or {}).get("error", code)))
-        if sent:
+        if sent and not (me_too and chat.mirrored):     # then the tab's transcript shows it
             chat.emit(dict({"t": "user", "text": text, "to": sent},
                            **({"reply": reply} if reply else {})))
         if me_too and not chat.mirrored:
@@ -1563,6 +1566,10 @@ class ChatManager:
             if (chat.mirrored or chat.meta.get("default") or not self.tab_ops
                     or self._move_failed.get(chat.id, 0) >= MOVE_TRIES or chat.state != "idle"):
                 continue
+            with chat.slock:         # no message may start its Claude while the tab takes over
+                if chat.state != "idle" or chat.inflight:
+                    continue
+                chat.moving = True
             chat.stop_process()
             title = chat.meta["title"][:80]
             want = {"kind": "ai", "cli": "claude", "cwd": chat.meta["cwd"], "name": title,
@@ -1571,12 +1578,14 @@ class ChatManager:
                 want["resume"] = chat.meta["session"]
             code, out = self.tab_ops("new", None, want)
             if code != 200:
+                chat.moving = False
                 self._move_failed[chat.id] = self._move_failed.get(chat.id, 0) + 1
                 continue
             made = {"title": title, "tab": {"id": out["id"], "title": title, "group": "", "color": ""}}
             made.update({k: chat.meta[k] for k in ("emoji", "hue") if chat.meta.get(k) not in (None, "")})
             code, out = self.create(made)
             if code != 200:          # the tab is there: the next look makes its chat
+                chat.moving = False
                 self._move_failed[chat.id] = MOVE_TRIES
                 continue
             new = self.chats[out["chat"]["id"]]

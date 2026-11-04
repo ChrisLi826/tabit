@@ -1143,6 +1143,19 @@ class TabSyncTest(Base):
         self.mgr.sync_tabs()
         self.assertEqual(len(self.news()), 1)
 
+    def test_a_chat_on_its_way_into_a_tab_takes_no_message(self):
+        chat = self.old_chat()
+        seen = []
+
+        def ops(op, target=None, body=None):         # the user sends while the tab opens
+            if op == "new":
+                seen.append(tc.api(self.mgr, "POST", [chat.id, "send"], {"text": "now"})[0])
+            return self.tab_ops_was(op, target, body)
+        self.tab_ops_was, self.mgr.tab_ops = self.mgr.tab_ops, ops
+        self.mgr.sync_tabs()
+        self.assertEqual(seen, [500])
+        self.assertFalse(chat.running)
+
     def test_a_chat_that_will_not_move_is_left_after_a_few_tries(self):
         chat = self.old_chat()
         self.reply = (403, {"error": "managing tabs from the phone is off"})
@@ -1524,6 +1537,19 @@ class TabTalkTest(Base):
 
     def send(self, chat, text):
         return tc.api(self.mgr, "POST", [chat.id, "send"], {"text": text})
+
+    def test_me_and_another_is_one_bubble(self):
+        self.send(self.a, "@alpha @beta compare")
+        self.assertEqual(sorted(self.typed), [("ta", "compare"), ("tb", "compare")])
+        self.assertFalse([e for e in self.a.events if e["t"] == "user" and e.get("to")])
+
+    def test_a_long_group_message_reaches_a_tab_cut(self):
+        code, out = self.mgr.create_group({"members": [self.a.id, self.b.id]})
+        group = self.mgr.groups[out["group"]["id"]]
+        group.send("@beta " + "y" * 9000)
+        [(tab, text)] = self.typed
+        self.assertEqual(tab, "tb")
+        self.assertLessEqual(len(text), 8000)
 
     def test_a_file_name_first_goes_to_the_chat(self):
         self.send(self.a, "@beta.py fix this")
