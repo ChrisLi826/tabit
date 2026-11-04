@@ -920,16 +920,46 @@ class MirrorTest(Base):
         tc.api(self.mgr, "POST", [chat.id, "stop"], {})
         self.assertEqual(self.calls[-1], (None, "esc", False))
 
-    def test_only_a_claude_tab_and_not_in_a_group(self):
+    def test_only_a_claude_tab(self):
         old = self.mgr.tab_hook
         self.mgr.tab_hook = lambda tab, *a, **k: dict(old(tab), claude=False)
         self.assertEqual(self.mgr.create({"tab": {"id": "t1"}})[0], 400)
         self.mgr.tab_hook = old
         self.assertEqual(self.mgr.create({"tab": {"id": "zz"}})[0], 400)
         self.assertEqual(self.mgr.create({"tab": {"id": "a b;rm"}})[0], 400)
-        mirror, plain = self.mirror(), self.new()
-        code, out = self.mgr.create_group({"members": [mirror.id, plain.id]})
-        self.assertEqual(code, 400)
+
+    def test_a_mirror_joins_a_group_and_hears_it_through_its_tab(self):
+        chat = self.mirror()
+        chat.mirror_poll()
+        bob = self.new(title="Bob")
+        code, out = self.mgr.create_group({"title": "Team", "members": [chat.id, bob.id]})
+        self.assertEqual(code, 200, out)
+        group = self.mgr.groups[out["group"]["id"]]
+        group.send("@mot hello")
+        text, key, queue = self.calls[-1]
+        self.assertTrue(queue)
+        self.assertIn("[user]: hello", text)                   # typed into the tab
+        with open(self.path, "a") as f:                         # the tab answers, naming bob
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "@bob can you check it"}]}}) + "\n")
+        chat.mirror_poll()
+        self.assertIn(("mot", "@bob can you check it"),
+                      [(e["name"], e["text"]) for e in group.events if e["t"] == "say"])
+        self.assertTrue(wait(lambda: any(e["t"] == "relay" and e["to"] == "bob" for e in group.events)))
+        self.assertTrue(wait(lambda: any("[mot]: @bob can you check it" in e["text"]
+                                         for e in bob.events if e["t"] == "user")))
+
+    def test_old_lines_of_a_mirror_are_not_passed_on(self):
+        # the first look reads the tab's past: it is history, not news
+        with open(self.path, "a") as f:
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "@bob an old line"}]}}) + "\n")
+        chat, bob = self.mirror(), self.new(title="Bob")
+        code, out = self.mgr.create_group({"members": [chat.id, bob.id]})
+        group = self.mgr.groups[out["group"]["id"]]
+        chat.mirror_poll()
+        self.assertEqual([e for e in group.events if e["t"] in ("say", "relay")], [])
+        self.assertFalse(any(e["t"] == "user" for e in bob.events))
 
 
 
@@ -944,7 +974,6 @@ class TabSyncTest(Base):
                      {"id": "t2", "title": "Blog", "group": "", "color": ""}]
         self.ops = []
         self.reply = (200, {"ok": True})
-        self.file_reply = (200, {"color": "gray", "name": "Chat"})
         self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False: {
             "title": "MOT", "status": "idle", "transcript": "", "claude": True}
         self.mgr.tabs_hook = lambda: [dict(t) for t in self.tabs] if self.tabs is not None else None
@@ -954,11 +983,7 @@ class TabSyncTest(Base):
             if op == "new":
                 return (200, {"id": "t9"}) if self.reply[0] == 200 else self.reply
             if op == "groups":
-                return 200, {"groups": [{"color": "blue", "name": "Work"}], "default": {"color": "gray", "name": "Chat"}}
-            if op == "file":
-                if self.file_reply[0] == 200:        # tabit now says the tab is in the group
-                    next(t for t in self.tabs if t["id"] == target).update(group="Chat", color="gray")
-                return self.file_reply
+                return 200, {"groups": [{"color": "blue", "name": "Work"}]}
             return self.reply
         self.mgr.tab_ops = ops
 
@@ -1048,36 +1073,12 @@ class TabSyncTest(Base):
                 self.mgr.sync_tabs()
         self.assertEqual(self.titles(), ["Blog", "MOT"])
 
-    def filed(self):
-        return [o for o in self.ops if o[0] == "file"]
-
-    def test_a_tab_with_no_group_goes_in_the_chat_group_once(self):
+    def test_a_tab_with_no_group_stays_out_of_groups(self):
         self.mgr.sync_tabs()
         self.mgr.sync_tabs()
-        self.assertEqual(self.filed(), [("file", "t2", {})])
+        self.assertEqual([o for o in self.ops if o[0] not in ("groups",)], [])
         tab = self.chat_of("t2").meta["tab"]
-        self.assertEqual((tab["group"], tab["color"]), ("Chat", "gray"))
-
-    def test_a_tab_the_person_takes_out_is_not_put_back(self):
-        self.mgr.sync_tabs()
-        self.tabs[1].update(group="", color="")
-        self.mgr.sync_tabs()
-        self.assertEqual(len(self.filed()), 1)
-
-    def test_a_tab_that_has_a_group_is_not_filed(self):
-        self.mgr.sync_tabs()
-        self.assertNotIn("t1", [o[1] for o in self.filed()])
-
-    def test_filing_is_tried_again_when_it_fails(self):
-        self.file_reply = (403, {"error": "managing tabs from the phone is off"})
-        self.mgr.sync_tabs()
-        self.mgr.sync_tabs()
-        self.assertEqual(len(self.filed()), 2)
-        self.file_reply = (200, {"color": "gray", "name": "Chat"})
-        self.mgr.sync_tabs()
-        self.mgr.sync_tabs()
-        self.assertEqual(len(self.filed()), 3)
-        self.assertEqual(self.chat_of("t2").meta["tab"]["group"], "Chat")
+        self.assertEqual((tab["group"], tab["color"]), ("", ""))
 
     def news(self):
         return [o[2] for o in self.ops if o[0] == "new"]
@@ -1131,12 +1132,19 @@ class TabSyncTest(Base):
         self.assertEqual(len(self.news()), tc.MOVE_TRIES)
         self.assertIn(chat.id, self.mgr.chats)
 
-    def test_a_room_of_moved_chats_goes(self):
+    def test_a_room_keeps_its_chats_when_they_move_into_tabs(self):
         a, b = self.old_chat(title="A"), self.old_chat(title="B")
         code, out = self.mgr.create_group({"members": [a.id, b.id]})
         self.assertEqual(code, 200)
+        group = self.mgr.groups[out["group"]["id"]]
+        names = sorted(group.meta["alias"].values())
         self.mgr.sync_tabs()
-        self.assertEqual(self.mgr.groups, {})
+        self.assertIn(group.id, self.mgr.groups)
+        members = group.members()
+        self.assertEqual(len(members), 2)
+        self.assertTrue(all(c.mirrored for c in members))
+        self.assertEqual(sorted(group.meta["alias"].values()), names)
+        self.assertNotIn(a.id, group.meta["members"])
 
     def test_a_new_chat_opens_a_tab_in_the_group_and_mirrors_it(self):
         code, out = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "title": "Run", "group": "blue", "emoji": "🏃"})
@@ -1162,7 +1170,6 @@ class TabSyncTest(Base):
 
     def test_the_list_says_which_groups_a_tab_can_go_in(self):
         code, out = tc.api(self.mgr, "GET", [], {})
-        self.assertEqual(out["tabgroups"]["default"]["name"], "Chat")
         self.assertEqual(out["tabgroups"]["groups"][0]["name"], "Work")
 
 

@@ -1019,7 +1019,6 @@ HAS_SSH_TOOL = os.path.isdir(SSH_TOOL_DIR) and (os.path.isfile(SSH_TOOL_CONNECT_
 # by default — add your own from the bar's edit button)
 DEFAULT_COMMANDS = []
 # tab-group colors (names match the .group-bar.grp-* CSS classes)
-CHAT_GROUP = "Chat"      # the tab group that Tabit Chat puts a new chat in when none is picked; it cannot be ungrouped
 GROUP_COLORS = [
     "red", "orange", "yellow", "green", "teal", "cyan",
     "blue", "indigo", "purple", "pink", "gray", "white", "brown"
@@ -5986,7 +5985,6 @@ if (data !== null) {{
         dn.connect("activate", lambda *_: self._move_group(color, 1))
         ug = Gtk.MenuItem(label="Ungroup")
         ug.connect("activate", lambda *_: self._ungroup(color))
-        ug.set_sensitive(not self._is_chat_group(color))     # Tabit Chat files its chats here
         for it in (ce, rn, up, dn, ug):
             menu.append(it)
         menu.show_all()
@@ -6179,9 +6177,6 @@ if (data !== null) {{
         self._save_sessions()
 
     def _ungroup(self, color):
-        if self._is_chat_group(color):
-            print("[tabit] the Chat group cannot be ungrouped", file=sys.stderr)
-            return
         for r in self._session_rows():
             if r.group_color == color:
                 self._apply_group(r, None)
@@ -12384,8 +12379,6 @@ if (data !== null) {{
         new = body.get("color", color)
         if new not in GROUP_COLORS:
             return 400, {"error": "unknown group colour"}
-        if body.get("ungroup") and self._is_chat_group(color):
-            return 409, {"error": "the Chat group cannot be deleted"}
         if new != color and new in used:
             return 409, {"error": "that colour has a group"}
         if body.get("loose"):
@@ -13126,10 +13119,6 @@ if (data !== null) {{
         res = self._remote_call(work)
         return res if isinstance(res, list) else None
 
-    def _is_chat_group(self, color):
-        return bool(color) and (self._group_names.get(color) or "").strip().lower() == CHAT_GROUP.lower()
-
-    @staticmethod
     def _settings_model(path):
         """The "model" line of Claude's settings: its text (None when there is none)."""
         try:
@@ -13180,51 +13169,21 @@ if (data !== null) {{
 
     def _chat_tab_ops(self, op, target=None, body=None):
         """For a chat: manage tabs the way the phone does. op: groups | new |
-        close | rename | account | model | file (put a tab that has no group in the Chat group). Gives
-        (code, body). A new tab with no group goes in the Chat group, which is
-        made on the way when there is none."""
+        close | rename | account | model. Gives (code, body). A new tab with
+        no group asked for stays out of groups."""
         body = dict(body or {})
         if op == "model":
             return self._chat_model(target, body.get("model"))
 
         def work():
-            used = {}
-            for r in self._session_rows():
-                c = getattr(r, "group_color", None)
-                if c and c not in used:
-                    used[c] = self._group_names.get(c) or c.capitalize()
-            chat_color = next((c for c in used if self._is_chat_group(c)), None)
             if op == "groups":
-                free = next((c for c in reversed(GROUP_COLORS) if c not in used), None)
-                return 200, {"groups": [{"color": c, "name": n} for c, n in used.items()],
-                             "default": {"color": chat_color or free or "", "name": CHAT_GROUP}}
-            if op == "new":
-                made = False
-                if not body.get("group"):
-                    if chat_color is None:
-                        chat_color = next((c for c in reversed(GROUP_COLORS) if c not in used), None)
-                        if chat_color is None:
-                            return 409, {"error": "no free group colour for the Chat group: pick a group"}
-                        made = True
-                    body["group"] = chat_color
-                code, out = self._remote_manage("new", None, body)
-                if code == 200 and made:
-                    self._remote_manage("groupop", chat_color, {"name": CHAT_GROUP})
-                return code, out
-            if op == "file":
-                made = False
-                if chat_color is None:
-                    chat_color = next((c for c in reversed(GROUP_COLORS) if c not in used), None)
-                    if chat_color is None:
-                        return 409, {"error": "no free group colour for the Chat group"}
-                    made = True
-                code, out = self._remote_manage("group", target, {"color": chat_color})
-                if code != 200:
-                    return code, out
-                if made:
-                    self._remote_manage("groupop", chat_color, {"name": CHAT_GROUP})
-                return 200, {"color": chat_color, "name": CHAT_GROUP}
-            if op in ("close", "rename", "account"):
+                used = {}
+                for r in self._session_rows():
+                    c = getattr(r, "group_color", None)
+                    if c and c not in used:
+                        used[c] = self._group_names.get(c) or c.capitalize()
+                return 200, {"groups": [{"color": c, "name": n} for c, n in used.items()]}
+            if op in ("new", "close", "rename", "account"):
                 return self._remote_manage(op, target, body)
             return 404, {"error": "unknown action"}
         def from_chat():

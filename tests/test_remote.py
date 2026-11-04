@@ -768,7 +768,6 @@ class TestRemoteGroupColour(unittest.TestCase):
                 r.group_color = c
 
         App._recolor_group = tabit.Tabit._recolor_group
-        App._is_chat_group = tabit.Tabit._is_chat_group
         self.app = App()
 
     def op(self, color, body):
@@ -797,10 +796,12 @@ class TestRemoteGroupColour(unittest.TestCase):
         self.assertEqual(self.app._group_names["teal"], "Misc")
         self.assertEqual(self.op("pink", {"loose": True}), 404)   # none left
 
-    def test_the_chat_group_cannot_be_ungrouped(self):
+    def test_a_group_named_chat_is_like_any_other(self):
         self.app._group_names["red"] = "chat"
-        self.assertEqual(self.op("red", {"ungroup": True}), 409)
-        self.assertEqual(self.colours(), ["red", "red", None])
+        self.app._ungroup = lambda c: [setattr(r, "group_color", None)
+                                       for r in self.rows if r.group_color == c]
+        self.assertEqual(self.op("red", {"ungroup": True}), 200)
+        self.assertEqual(self.colours(), [None, None, None])
 
     def test_every_check_comes_before_a_change(self):
         self.assertEqual(self.op("nope", {}), 404)
@@ -992,7 +993,7 @@ class TestRemoteSetupLinks(unittest.TestCase):
 
 
 class TestChatTabOps(unittest.TestCase):
-    """What Tabit Chat asks of the tabs: the groups, a new tab, and the Chat group."""
+    """What Tabit Chat asks of the tabs: the groups and a new tab."""
 
     def setUp(self):
         Row = type("Row", (), {})
@@ -1010,57 +1011,26 @@ class TestChatTabOps(unittest.TestCase):
                 test.calls.append((op, target, body))
                 return 200, {"id": "n1"}
 
-        App._is_chat_group = tabit.Tabit._is_chat_group
         self.app = App()
 
     def ops(self, op, target=None, body=None):
         return tabit.Tabit._chat_tab_ops(self.app, op, target, body)
 
-    def test_groups_lists_the_used_ones_and_a_free_colour_for_chat(self):
+    def test_groups_lists_the_used_ones(self):
         code, out = self.ops("groups")
         self.assertEqual(out["groups"], [{"color": "red", "name": "Work"}])
-        self.assertEqual(out["default"], {"color": "brown", "name": "Chat"})
 
-    def test_groups_names_the_chat_group_that_exists(self):
-        self.rows[0].group_color = "teal"
-        self.app._group_names = {"teal": "Chat"}
-        self.assertEqual(self.ops("groups")[1]["default"]["color"], "teal")
-
-    def test_a_new_tab_with_no_group_makes_the_chat_group(self):
+    def test_a_new_tab_with_no_group_stays_out_of_groups(self):
         self.assertEqual(self.ops("new", None, {"kind": "ai"})[0], 200)
-        self.assertEqual(self.calls, [("new", None, {"kind": "ai", "group": "brown"}),
-                                      ("groupop", "brown", {"name": "Chat"})])
-
-    def test_a_new_tab_with_no_group_joins_the_chat_group_that_exists(self):
-        self.rows[0].group_color = "teal"
-        self.app._group_names = {"teal": "Chat"}
-        self.ops("new", None, {"kind": "ai"})
-        self.assertEqual(self.calls, [("new", None, {"kind": "ai", "group": "teal"})])
+        self.assertEqual(self.calls, [("new", None, {"kind": "ai"})])
 
     def test_a_new_tab_in_a_picked_group_is_left_alone(self):
         self.ops("new", None, {"kind": "ai", "group": "red"})
         self.assertEqual(self.calls, [("new", None, {"kind": "ai", "group": "red"})])
 
-    def test_no_free_colour_for_the_chat_group(self):
-        Row = type("Row", (), {})
-        self.rows = []
-        for c in tabit.GROUP_COLORS:
-            r = Row(); r.group_color = c; self.rows.append(r)
-        self.app._group_names = {}
-        self.assertEqual(self.ops("new", None, {"kind": "ai"})[0], 409)
+    def test_there_is_no_filing_any_more(self):
+        self.assertEqual(self.ops("file", "t1")[0], 404)
         self.assertEqual(self.calls, [])
-
-    def test_file_puts_a_tab_in_the_chat_group_and_makes_it(self):
-        code, out = self.ops("file", "t1")
-        self.assertEqual((code, out), (200, {"color": "brown", "name": "Chat"}))
-        self.assertEqual(self.calls, [("group", "t1", {"color": "brown"}),
-                                      ("groupop", "brown", {"name": "Chat"})])
-
-    def test_file_uses_the_chat_group_that_exists(self):
-        self.rows[0].group_color = "teal"
-        self.app._group_names = {"teal": "Chat"}
-        self.assertEqual(self.ops("file", "t1")[1]["color"], "teal")
-        self.assertEqual(self.calls, [("group", "t1", {"color": "teal"})])
 
     def test_close_rename_and_account_go_to_the_phone_switch(self):
         self.ops("close", "t1")

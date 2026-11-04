@@ -818,6 +818,8 @@ class Chat(_Log):
             if have.get("path"):
                 self.emit({"t": "notice", "text": "The tab started a new conversation."})
             events = events[-MIRROR_FIRST:]
+            for ev in events:
+                ev["replay"] = True  # the past: a group does not pass it on
         for ev in events:
             if ev.get("reply"):
                 ev["reply"]["seq"] = self._seq_of(ev["reply"]["snip"])
@@ -983,8 +985,6 @@ class Group(_Log):
         remove = [i for i in dict.fromkeys(remove) if i in self.meta["members"]]
         if any(i not in self.mgr.chats for i in add):
             return 400, {"error": "no such chat"}
-        if any(self.mgr.chats[i].mirrored for i in add):
-            return 400, {"error": "a chat that mirrors a tab cannot join a group"}
         if len(self.meta["members"]) + len(add) - len(remove) < 2:
             return 400, {"error": "a group needs at least two chats: delete the group instead"}
         for i in remove:
@@ -998,6 +998,21 @@ class Group(_Log):
         self.meta["briefed"] = []
         self._save_meta()
         return 200, {"group": self.summary()}
+
+    def swap_member(self, old, new):
+        """`new` takes `old`'s place, name and briefing: the same conversation
+        goes on in a tab."""
+        if old.id not in self.meta["members"]:
+            return
+        self.meta["members"][self.meta["members"].index(old.id)] = new.id
+        self.meta["alias"][new.id] = self.meta["alias"].pop(old.id, self._new_alias(new))
+        if old.id in self.meta["briefed"]:
+            self.meta["briefed"][self.meta["briefed"].index(old.id)] = new.id
+        if self._on_member in old.listeners:
+            old.listeners.remove(self._on_member)
+        if self._on_member not in new.listeners:
+            new.listeners.append(self._on_member)
+        self._save_meta()
 
     def _leave(self, cid, why):
         name = self.meta["alias"].pop(cid, cid)
@@ -1060,7 +1075,7 @@ class Group(_Log):
     def _on_member(self, chat, ev):
         with self.cond:
             self.cond.notify_all()
-        if not ev:
+        if not ev or ev.get("replay"):  # a mirror reading its tab's past: history, not news
             return
         name = self.alias(chat)
         if ev["t"] == "text":
@@ -1101,6 +1116,12 @@ class Group(_Log):
             text = head + "\n\n" + "[%s]: %s" % (sender, text)
         else:
             text = "[%s]: %s" % (sender, text)
+        if chat.mirrored:            # typed into its tab; the reply comes back from the transcript
+            code, out = chat.mirror_send(text)
+            if code != 200:
+                self.emit({"t": "error", "chat": chat.id, "name": self.alias(chat),
+                           "text": "could not reach it: %s" % (out or {}).get("error", code)})
+            return
         try:
             chat.send(text, quiet=True)
         except (OSError, RuntimeError, ValueError) as e:
@@ -1330,7 +1351,6 @@ class ChatManager:
                     chat.meta["tab"] = want
                     have[tab["id"]] = chat
                     chat._save_meta()
-                self._file(chat, want)
                 if chat.meta["title"] != name or chat.meta["tab"] != want:
                     chat.meta["title"] = name
                     chat.meta["tab"] = want
@@ -1366,31 +1386,18 @@ class ChatManager:
                 continue
             made = {"title": title, "tab": {"id": out["id"], "title": title, "group": "", "color": ""}}
             made.update({k: chat.meta[k] for k in ("emoji", "hue") if chat.meta.get(k) not in (None, "")})
-            if self.create(made)[0] != 200:      # the tab is there: the next look makes its chat
+            code, out = self.create(made)
+            if code != 200:          # the tab is there: the next look makes its chat
                 self._move_failed[chat.id] = MOVE_TRIES
                 continue
-            rooms = [g for g in self.groups.values() if chat.id in g.meta["members"]]
+            new = self.chats[out["chat"]["id"]]
+            for room in self.groups.values():        # its rooms keep it: the tab goes on as it
+                room.swap_member(chat, new)
             self.delete(chat)
-            for room in rooms:
-                if len(room.meta["members"]) < 2:        # a room needs two chats
-                    self.delete_group(room)
-
-    def _file(self, chat, tab):
-        """A tab with no group goes in the Chat group, once. A tab that has a
-        group is left as it is, and so is one the person takes out later."""
-        if chat.meta.get("filed"):
-            return
-        if not tab["color"] and self.tab_ops:
-            code, out = self.tab_ops("file", tab["id"], {})
-            if code != 200:
-                return               # try again at the next look
-            tab.update(group=out["name"], color=out["color"])
-        chat.meta["filed"] = True
-        chat._save_meta()
 
     def new_tab_chat(self, body):
         """(status, object): open a Claude tab in tabit, in the group asked for
-        (none: the Chat group), and a chat that mirrors it."""
+        (none: no group), and a chat that mirrors it."""
         if not self.tab_ops:
             return 400, {"error": "no tabs here"}
         cwd = os.path.expanduser((body.get("cwd") or "").strip() or "~")
@@ -1501,8 +1508,6 @@ class ChatManager:
             return 400, {"error": "pick at least two chats"}
         if any(i not in self.chats for i in ids):
             return 400, {"error": "no such chat"}
-        if any(self.chats[i].mirrored for i in ids):
-            return 400, {"error": "a chat that mirrors a tab cannot join a group"}
         title = " ".join(str(body.get("title") or "").split())[:80] or "Group"
         alias, used = {}, set()
         for i in dict.fromkeys(ids):

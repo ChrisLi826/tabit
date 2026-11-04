@@ -422,8 +422,6 @@ const usingBadge = (r) => {
   const model = r.tab ? modelShort(r.tab.model) : (r.model || "default");
   return `<span class="badge">${esc([r.account || "Default", model].filter(Boolean).join(" · "))}</span>`;
 };
-// a chat with no tab of its own, or a tab with no group, shows the default group: Chat
-const ownGroup = () => { const d = cfg?.tabgroups?.default; return { group: d?.name || "Chat", color: d?.color || "" }; };
 const groupBadge = (tab) => tab && tab.group ? `<span class="badge"><i class="gdot" style="background:${GROUP_CSS[tab.color] || "var(--dim)"}"></i>${esc(tab.group)}</span>` : "";
 const base = (k) => (k === "groups" ? "api/chat-groups" : "api/chats");
 async function api(path, body) {
@@ -525,7 +523,7 @@ async function loadList() {
   }
   $("cards").innerHTML = rows.map((r) => {
     const badges = (kind === "chats" && r.mode === "bypass" ? '<span class="badge m-bypass">bypass</span>' : "") +
-      (kind === "chats" ? groupBadge(r.tab && r.tab.group ? r.tab : ownGroup()) + usingBadge(r) : "");
+      (kind === "chats" ? groupBadge(r.tab) + usingBadge(r) : "");
     return `<div class="card${cur && cur.id === r.id ? " sel" : ""}" data-id="${esc(r.id)}">
       <div class="av ${avOf(r).cls}" style="${avOf(r).style}">${avOf(r).html}${bub(r)}</div>
       <div class="body">
@@ -971,12 +969,12 @@ async function newChat() {
   const recent = [...new Set((cfg?.chats || []).map((c) => c.cwd))].slice(0, 6);
   const last = localStorage.getItem("lastcwd") || "~";
   const tg = cfg?.tabgroups || {};
-  const others = (tg.groups || []).filter((g) => g.name.toLowerCase() !== "chat");
+  const others = tg.groups || [];
   sheet(`<h2>New chat</h2>
     <div id="n-look"></div>
     <label>Name (optional)</label><input id="n-title" maxlength="80">
     <label>Group</label>
-    <select id="n-group"><option value="">Chat (default)</option>${others.map((g) => `<option value="${esc(g.color)}">${esc(g.name)}</option>`).join("")}</select>
+    <select id="n-group"><option value="">No group</option>${others.map((g) => `<option value="${esc(g.color)}">${esc(g.name)}</option>`).join("")}</select>
     <label>Folder on this computer</label>
     <input id="n-cwd" value="${esc(last)}" autocapitalize="off" autocorrect="off" spellcheck="false">
     <div class="chips"><button id="n-browse" type="button">Browse…</button>${recent.map((c) => `<button type="button" data-cwd="${esc(c)}">${esc(tilde(c))}</button>`).join("")}</div>
@@ -1027,7 +1025,7 @@ async function browse(start, done) {
 
 async function newGroup() {
   if (!cfg) await loadList();
-  const chats = (cfg?.chats || []).filter((c) => !c.tab);     // a chat that mirrors a tab cannot join
+  const chats = cfg?.chats || [];
   if (chats.length < 2) { sheet(`<h2>New group</h2><div class="hint">A group needs two chats or more. Start the chats first.</div><div class="acts"><button type="button" id="g-cancel">OK</button></div>`); $("g-cancel").onclick = closeSheet; return; }
   sheet(`<h2>New group</h2>
     <div class="hint">You talk to everyone at once, or to one with @name. A chat can pass a message on by starting a line with @name. After ${8} passes it stops and waits for you.</div>
@@ -1059,7 +1057,7 @@ async function profile() {
     document.querySelectorAll(".prow").forEach((r) => { r.onclick = () => { closeSheet(); kind = "chats"; location.hash = "#c/" + r.dataset.go; }; });
   } else {
     sheet(`<div class="prof">${av}<h2>${esc(m.title)}</h2><div class="hint">${esc(tilde(m.cwd))}</div>
-      <div class="meta">${m.tab ? groupBadge(m.tab.group ? m.tab : ownGroup()) : `${groupBadge(ownGroup())}<span class="badge m-${esc(m.mode)}">${esc(MODE_NAME[m.mode] || m.mode)}</span><span class="badge">${esc(m.model || "default model")}</span>`}</div></div>
+      <div class="meta">${m.tab ? groupBadge(m.tab) : `<span class="badge m-${esc(m.mode)}">${esc(MODE_NAME[m.mode] || m.mode)}</span><span class="badge">${esc(m.model || "default model")}</span>`}</div></div>
       <div id="p-lib" class="hint">Loading…</div>
       <div class="acts"><button type="button" id="p-set">Settings</button><button type="button" class="primary" id="p-close">Close</button></div>`);
     try {
@@ -1095,7 +1093,7 @@ const settings = async (t = cur) => {
       <div class="hint">Deleting a group keeps its chats.</div>`);
     const members = (g) => {
       const inside = new Set(g.members.map((x) => x.id));
-      const others = (cfg.chats || []).filter((c) => !inside.has(c.id) && !c.tab);
+      const others = (cfg.chats || []).filter((c) => !inside.has(c.id));
       $("e-members").innerHTML = g.members.map((x) => `<div class="prow"><b style="color:${colorOf(x.alias)}">@${esc(x.alias)}</b><span class="hint" style="flex:1">${esc(x.title)}</span><button type="button" data-rm="${esc(x.id)}" title="take out">✕</button></div>`).join("") +
         (others.length ? `<div class="hint">Add a chat</div><div class="chips">${others.map((c) => `<button type="button" data-add="${esc(c.id)}">＋ ${esc(c.title)}</button>`).join("")}</div>` : "");
     };

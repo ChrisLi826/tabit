@@ -85,19 +85,16 @@ that is working takes your line too: Claude holds it until the turn is done.
   group under it, with the group's colour. Rename the chat and the tab is
   renamed. Rename or regroup the tab and the chat follows within 10 seconds.
 - **New chat** opens a Claude tab in the group you pick, in the folder you
-  pick. With no group it goes in the **Chat** group, which is made when there
-  is none. The Chat group cannot be ungrouped, in tabit or from the phone.
+  pick. With no group picked, the tab is in no group.
 - **Delete.** Deleting a chat closes its tab. The chat asks first. The last
   tab in tabit cannot be closed from the phone, so that chat stays. Closing a
   tab removes its chat after about a minute.
-- **A tab with no group** goes in the Chat group once, when its chat is made.
-  Take it out later and it stays out.
 - **Old chats move into tabs.** A chat that ran its own Claude (not the main
   Tabit Chat) moves into a tab when it is idle: the tab goes on with the same
   conversation (`--resume`), keeps the login and bypass, and the chat that
-  mirrors it takes the old one's picture and name. A group (room) the old chat
-  was in is deleted when fewer than two chats are left in it. A chat that
-  cannot move is tried 3 times.
+  mirrors it takes the old one's picture and name, and its place in the
+  groups (rooms) the old chat was in. A chat that cannot move is tried 3
+  times.
 - **Account and model.** A chat's settings show Account and Model, and each
   row shows `account · model`. A tab's account is switched by tabit, in place.
   The model is switched by typing `/model <name>` into the tab, which needs a
@@ -107,8 +104,6 @@ that is working takes your line too: Claude holds it until the turn is done.
   that answered last, read from its transcript.
 - Tabs of other tools (Codex, Grok) have no chat: only Claude's transcript is
   read.
-- Mode and model belong to the tab, so the chat has none. A chat that is a
-  tab cannot join a room (see Groups).
 - When the tab starts a new conversation, the chat says so and goes on with
   the new one.
 - **Menus on the tab's screen.** A tab that waits on a menu (the trust
@@ -134,6 +129,10 @@ A group puts two or more chats in one room.
   `@name`, tabit passes that message on. This is how chats talk to each other.
 - After 8 such passes the group stops and waits for you, so two chats can never
   talk forever. Anything you say starts the count again.
+- A chat that is a tab joins like any other: the group's messages are typed
+  into its tab, and what the tab's Claude replies comes back into the group.
+  The tab's past (what was said before it joined, or before a new
+  conversation) is not passed on.
 - Questions from any member show in the group. Stop stops all of them.
 - Deleting a group keeps its chats.
 
