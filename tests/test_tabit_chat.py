@@ -1490,6 +1490,11 @@ class TabTalkTest(Base):
         names = sorted(self.mgr.tab_names())
         self.assertEqual(names, ["ehr330-claude", "work-claude"])
 
+    def test_the_list_gives_each_tab_its_name_for_the_text_box(self):
+        at = {r["id"]: r.get("at") for r in self.mgr.listing()}
+        self.assertEqual((at[self.a.id], at[self.b.id]), ("alpha", "beta"))
+        self.assertTrue(all(at[c.id] is None for c in self.mgr.chats.values() if not c.mirrored))
+
     def roster(self, key):
         path = os.path.join(self.mgr.roster_dir, key + ".roster")
         if not os.path.exists(path):

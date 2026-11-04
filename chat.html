@@ -167,6 +167,12 @@
   #chips { display: none; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
   #chips button.on { background: #7aa2f733; border-color: #7aa2f7; }
   #chips button { padding: 3px 10px; font-size: 13px; border-radius: 99px; }
+  #atlist { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; max-height: 40vh; overflow-y: auto;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 4px; }
+  #atlist[hidden] { display: none; }
+  #atlist button { display: flex; align-items: center; gap: 8px; border: 0; background: none; border-radius: 10px; padding: 6px 10px; text-align: left; min-width: 0; }
+  #atlist button.on { background: #7aa2f733; }
+  #atlist .hint { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #row { display: flex; gap: 6px; align-items: flex-end; }
   #text { scrollbar-width: none; flex: 1; min-height: 44px; max-height: 40vh; resize: none; font-size: 16px; border-radius: 22px; padding: 11px 16px; }
   #text::-webkit-scrollbar { display: none; }
@@ -330,6 +336,7 @@
     <button id="jump" type="button">↓</button>
     <div id="composer">
       <div id="replybar"><div class="rq"></div><button id="rcancel" type="button" title="cancel the reply">✕</button></div>
+      <div id="atlist" hidden></div>
       <div id="chips"></div>
       <div id="status"></div>
       <div id="row">
@@ -607,7 +614,7 @@ function openTalk(k, id) {
   $("back").hidden = false; $("more").hidden = false; $("add").hidden = true; $("remote").hidden = true;
   $("notify").hidden = !("Notification" in window);
   $("msgs").innerHTML = ""; $("title").textContent = "…"; status("");
-  $("chips").style.display = "none"; setReply(null);
+  $("chips").style.display = "none"; $("atlist").hidden = true; setReply(null);
   $("text").value = localStorage.getItem("draft:" + id) || ""; grow();
   connect();
 }
@@ -925,9 +932,54 @@ $("jump").onclick = () => { const b = $("msgs"); b.scrollTop = b.scrollHeight; }
 function grow() { const t = $("text"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, window.innerHeight * 0.4) + "px"; }
 $("text").addEventListener("input", () => { grow(); if (cur) localStorage.setItem("draft:" + cur.id, $("text").value); });
 $("text").addEventListener("keydown", (e) => {
+  if (atHit && !e.isComposing) {
+    const n = Math.min(atHit.list.length, AT_MAX);
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); atPick = (atPick + (e.key === "ArrowDown" ? 1 : n - 1)) % n; atShow(); return; }
+    if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); atPut(atPick); return; }
+    if (e.key === "Escape") { e.preventDefault(); atHit = null; $("atlist").hidden = true; return; }
+  }
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); send(); }
 });
 $("send").onclick = send;
+
+// --- @name: typing @ lists whom you can call; a tap, Enter or Tab puts the name in
+const AT_MAX = 8;
+let atHit = null, atPick = 0;     // atHit: {s, f, q, list}, the @word at the cursor
+function atNames() {
+  if (cur.kind === "groups") {
+    const g = (cfg?.groups || []).find((x) => x.id === cur.id);
+    return g ? g.members.map((x) => ({ name: x.alias, title: x.title, r: x }))
+      : Object.values(cur.members).map((a) => ({ name: a, title: "", r: {} }));
+  }
+  // in a chat: the other tabs, by the names tabs call each other by
+  return (cfg?.chats || []).filter((c) => c.at && c.id !== cur.id).map((c) => ({ name: c.at, title: c.title, r: c }));
+}
+function atShow() {
+  const t = $("text"), box = $("atlist");
+  const m = cur && t.selectionStart === t.selectionEnd && t.value.slice(0, t.selectionStart).match(/(?:^|\s)@([\p{L}\p{N}_-]*)$/u);     // a name may be 台中火車站
+  const q = m ? m[1].toLowerCase() : "";
+  const list = m ? atNames().filter((x) => x.name.toLowerCase().includes(q))
+    .sort((a, b) => b.name.toLowerCase().startsWith(q) - a.name.toLowerCase().startsWith(q)) : [];
+  if (!list.length) { atHit = null; box.hidden = true; return; }
+  if (!atHit || atHit.q !== q) atPick = 0;
+  atHit = { s: t.selectionStart - m[1].length - 1, f: t.selectionStart, q, list };
+  box.innerHTML = list.slice(0, AT_MAX).map((x, i) => `<button type="button" data-i="${i}" class="${i === atPick ? "on" : ""}">${emo(face(x.r))}<b style="color:${colorOf(x.name)}">@${esc(x.name)}</b><span class="hint">${esc(x.title)}</span></button>`).join("");
+  box.hidden = false;
+  box.querySelector(".on")?.scrollIntoView({ block: "nearest" });
+}
+function atPut(i) {
+  const t = $("text"), after = t.value.slice(atHit.f);
+  const ins = "@" + atHit.list[i].name + (/^\s/.test(after) ? "" : " ");
+  t.value = t.value.slice(0, atHit.s) + ins + after;
+  const at = atHit.s + ins.length; t.setSelectionRange(at, at);
+  t.dispatchEvent(new Event("input")); t.focus();
+}
+$("text").addEventListener("input", atShow);
+$("text").addEventListener("click", atShow);
+// a tap on the list may blur the box first (iPhone): hide it only if the focus stays away
+$("text").addEventListener("blur", () => setTimeout(() => { if (document.activeElement !== $("text")) { atHit = null; $("atlist").hidden = true; } }, 250));
+$("atlist").addEventListener("mousedown", (e) => e.preventDefault());       // keep the keyboard up
+$("atlist").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b && atHit) atPut(+b.dataset.i); });
 async function send() {
   if (!cur) return;
   const t = $("text"), text = t.value.trim();

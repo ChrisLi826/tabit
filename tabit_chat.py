@@ -1570,6 +1570,10 @@ class ChatManager:
     def listing(self):
         with self.lock:
             rows = [c.summary() for c in self.chats.values()]
+        at = {c.id: n for n, c in self.tab_names().items()}     # for @ in the text box
+        for r in rows:
+            if r["id"] in at:
+                r["at"] = at[r["id"]]
         rows.sort(key=lambda r: (not r["default"], -r["updated"]))
         return rows
 

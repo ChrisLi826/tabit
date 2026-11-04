@@ -143,6 +143,9 @@ is `@claude-lpr`; two of the same name get `-2`, `-3`).
   chat says so.
 - Two tabs in the same group talk through the group instead (see Groups).
 - It runs from the time tabit starts, with or without the chat page open.
+- Type `@` in the text box and a list of the other tabs' names comes up.
+  Keep typing to narrow it; tap a name (or Enter or Tab) to put it in. In a
+  group, the list is the group's members.
 
 ## Groups
 
