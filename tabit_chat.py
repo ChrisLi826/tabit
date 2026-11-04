@@ -1418,9 +1418,12 @@ class ChatManager:
         with self.lock:
             mirrors = sorted((c for c in self.chats.values() if c.mirrored),
                              key=lambda c: (c.meta.get("created", 0), c.id))
+        bases = [slug(c.meta["title"]) for c in mirrors]
         names = {}
-        for c in mirrors:
-            base = slug(c.meta["title"])
+        for c, base in zip(mirrors, bases):
+            group = c.meta["tab"].get("group") or ""
+            if bases.count(base) > 1 and group:      # many "claude" tabs: say which group
+                base = slug("%s %s" % (group, c.meta["title"]))
             name, n = base, 2
             while name in names:
                 name, n = "%s-%d" % (base, n), n + 1

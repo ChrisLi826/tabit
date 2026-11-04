@@ -1483,6 +1483,13 @@ class TabTalkTest(Base):
         self.say("ta", "@beta hello")
         self.assertEqual(len([t for t in self.typed if t[0] == "tb"]), 1)
 
+    def test_tabs_of_one_name_are_told_apart_by_their_group(self):
+        for c, group in ((self.a, "EHR330"), (self.b, "Work")):
+            c.meta["title"] = "claude"
+            c.meta["tab"]["group"] = group
+        names = sorted(self.mgr.tab_names())
+        self.assertEqual(names, ["ehr330-claude", "work-claude"])
+
     def roster(self, key):
         path = os.path.join(self.mgr.roster_dir, key + ".roster")
         if not os.path.exists(path):
