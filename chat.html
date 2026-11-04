@@ -651,8 +651,8 @@ function take(me, d) {
   if (cur !== me) return;
   const box = $("msgs");
   const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 90;
-  // a tab's chat has no "done" event: its turn ends when the tab stops working
-  const tabDone = d.meta.tab && me.state === "working" && (d.state === "ready" || d.state === "idle");
+  // a tab's chat has no "done" event: the tab turning ready (a new reply) is its end
+  const tabDone = d.meta.tab && me.lastSeq && me.state !== "ready" && d.state === "ready";
   me.state = d.state;
   me.meta = d.meta;
   if (d.state === "ready" && d.meta.tab && !document.hidden)
