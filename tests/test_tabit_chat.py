@@ -481,6 +481,14 @@ class TestGroup(Base):
         self.assertEqual(sorted(n for n, _ in self.says(group)), ["alice", "cy"])
         self.assertEqual(b.events, [])
 
+    def test_several_at_names_with_commas_talk_to_those_only(self):
+        group, (a, b, c) = self.group(3)
+        group.send("@alice, @cy, say just us")
+        self.assertTrue(wait(lambda: len(self.says(group)) == 2))
+        time.sleep(0.3)
+        self.assertEqual(sorted(n for n, _ in self.says(group)), ["alice", "cy"])
+        self.assertEqual(b.events, [])
+
     def test_a_reply_can_name_several_chats(self):
         group, (a, b, c) = self.group(3)
         self.assertEqual([x.id for x in group._mentions("@bob, @cy are you there", skip=a)], [b.id, c.id])

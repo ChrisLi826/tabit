@@ -1175,7 +1175,7 @@ class Group(_Log):
         self.paused = False
         targets, rest = [], text
         while True:
-            m = re.match(r"\s*@([\w-]+)\s*", rest)
+            m = re.match(r"[\s,]*@([\w-]+)[\s,]*", rest)      # "@a @b" or "@a, @b"
             hit = m and next((c for c in self.members()
                               if self.alias(c).lower() == m.group(1).lower()), None)
             if not hit:

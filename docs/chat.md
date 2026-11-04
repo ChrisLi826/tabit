@@ -152,7 +152,7 @@ is `@claude-lpr`; two of the same name get `-2`, `-3`).
 A group puts two or more chats in one room.
 
 - Your message goes to everyone. `@name` at the start sends it to one (or
-  several: `@ann @ben ...`).
+  several: `@ann @ben ...`, with or without commas).
 - A chat can talk to another: when its reply has a line that starts with
   `@name`, tabit passes that message on. This is how chats talk to each other.
 - After 8 such passes the group stops and waits for you, so two chats can never
