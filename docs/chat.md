@@ -146,7 +146,10 @@ is `@claude-lpr`; two of the same name get `-2`, `-3`).
   replying to each other go on until you press Stop (Esc) in one of them.
 - A tab that is asking you something does not take a message; the sender's
   chat says so.
-- Two tabs in the same group talk through the group instead (see Groups).
+- Two tabs in the same group talk through the group when they use the
+  group's names (see Groups). With their tab names (which differ when two
+  tabs have the same title) they talk directly, without the group's 8-pass
+  pause.
 - It runs from the time tabit starts, with or without the chat page open.
 - **You can call tabs too.** A message that starts with `@name` (or several:
   `@ann @ben ...`, with or without commas) goes only to those tabs, as in a
