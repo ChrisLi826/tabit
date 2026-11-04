@@ -784,7 +784,7 @@ function drawOne(me, ev) {
   const div = (cls, html) => { const d = document.createElement("div"); d.className = cls; d.innerHTML = html; return d; };
   switch (ev.t) {
     case "user":
-      return div("b me", `${ev.reply ? `<div class="quote"${ev.reply.seq ? ` data-go="${+ev.reply.seq}"` : ""}><b>${esc(ev.reply.who)}</b>${esc(ev.reply.snip)}</div>` : ""}${esc(ev.text)}${ev.to && me.kind === "groups" ? `<div class="to">to ${ev.to.map((x) => "@" + esc(x)).join(" ")}</div>` : ""}`);
+      return div("b me", `${ev.reply ? `<div class="quote"${ev.reply.seq ? ` data-go="${+ev.reply.seq}"` : ""}><b>${esc(ev.reply.who)}</b>${esc(ev.reply.snip)}</div>` : ""}${esc(ev.text)}${ev.to ? `<div class="to">to ${ev.to.map((x) => "@" + esc(x)).join(" ")}</div>` : ""}`);
     case "text":
       return div("b ai", md(ev.text));
     case "say":

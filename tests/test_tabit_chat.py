@@ -1498,6 +1498,28 @@ class TabTalkTest(Base):
         names = sorted(self.mgr.tab_names())
         self.assertEqual(names, ["ehr330-claude", "work-claude"])
 
+    def send(self, chat, text):
+        return tc.api(self.mgr, "POST", [chat.id, "send"], {"text": text})
+
+    def test_the_user_at_names_send_to_those_tabs_only(self):
+        self.assertEqual(self.send(self.a, "@beta can you check the build?")[0], 200)
+        self.assertEqual(self.typed, [("tb", "can you check the build?")])
+        self.assertTrue(any(e["t"] == "user" and e.get("to") == ["beta"] for e in self.a.events))
+        self.typed.clear()
+        self.assertEqual(self.send(self.a, "@alpha, @beta hello")[0], 200)
+        self.assertEqual(sorted(self.typed), [("ta", "hello"), ("tb", "hello")])
+
+    def test_no_known_name_first_the_chat_takes_it(self):
+        self.send(self.a, "@nobody hello")
+        self.send(self.a, "ask @beta later")
+        self.assertEqual(self.typed, [("ta", "@nobody hello"), ("ta", "ask @beta later")])
+
+    def test_a_tab_that_cannot_take_it_is_said(self):
+        self.refuse.add("tb")
+        code, out = self.send(self.a, "@beta hello")
+        self.assertNotEqual(code, 200)
+        self.assertIn("beta", out["error"])
+
     def test_the_list_gives_each_tab_its_name_for_the_text_box(self):
         at = {r["id"]: r.get("at") for r in self.mgr.listing()}
         self.assertEqual((at[self.a.id], at[self.b.id]), ("alpha", "beta"))

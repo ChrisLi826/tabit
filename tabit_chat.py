@@ -1455,6 +1455,45 @@ class ChatManager:
                 chat.emit({"t": "error", "text": "could not reach @%s: %s" % (
                     name, (out or {}).get("error", code))})
 
+    def send_to_tabs(self, chat, text, reply=None):
+        """The user's message that starts with @name (one or more, with commas
+        or not) goes to those tabs only, as in a group. None when it names no
+        tab: then the chat takes it."""
+        names, called, rest = self.tab_names(), [], text
+        while True:
+            m = re.match(r"[\s,]*@([\w-]+)[\s,]*", rest)
+            target = m and names.get(m.group(1).lower())
+            if not target:
+                break
+            if (m.group(1).lower(), target) not in called:
+                called.append((m.group(1).lower(), target))
+            rest = rest[m.end():]
+        if not called:
+            return None
+        msg, sent, failed = quoted(reply, rest or text), [], []
+        me_too = any(target is chat for _n, target in called)     # "@me @ben": me too
+        for name, target in called:
+            if target is not chat:
+                code, out = target.mirror_send(msg)
+                if code == 200:
+                    sent.append(name)
+                else:
+                    failed.append("@%s: %s" % (name, (out or {}).get("error", code)))
+        if sent:
+            chat.emit(dict({"t": "user", "text": text, "to": sent},
+                           **({"reply": reply} if reply else {})))
+        if me_too and not chat.mirrored:
+            chat.send(rest or text, reply=reply)
+        elif me_too:
+            code, out = chat.mirror_send(msg)
+            if code != 200:
+                return code, out
+        if failed and not sent and not me_too:
+            return 409, {"error": "could not reach " + "; ".join(failed)}
+        if failed:
+            chat.emit({"t": "error", "text": "could not reach " + "; ".join(failed)})
+        return 200, {"ok": True}
+
     def _write_rosters(self, tabs, have):
         """Each tab's roster, for its prompt hook: who it is, whom it can @.
         Written only when it changed; gone when the tab, or every other tab,
@@ -1768,6 +1807,12 @@ def api(mgr, method, parts, body):
         if len(text) > MAX_SEND:
             return 400, {"error": "that message is too long"}
         reply = chat.quote(body.get("reply"))
+        try:
+            out = chat.mgr.send_to_tabs(chat, text, reply)
+        except (OSError, RuntimeError, ValueError) as e:
+            return 500, {"error": "could not start Claude: %s" % e}
+        if out:
+            return out
         if chat.mirrored:
             return chat.mirror_send(quoted(reply, text))
         try:
