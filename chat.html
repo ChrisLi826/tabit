@@ -54,8 +54,7 @@
   .av.sm { width: 40px; height: 40px; font-size: 32px; }
   header h1 { font-size: 20px; font-weight: 700; letter-spacing: -.01em; margin: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pill { font-size: 12px; padding: 2px 9px; border-radius: 99px; background: var(--panel); color: var(--dim); white-space: nowrap; }
-  .pill.working { color: var(--yellow); } .pill.waiting { color: var(--orange); }
-  .pill.ready { color: var(--green); } .pill.background { color: var(--purple); } .pill.exited { color: var(--dim); }
+  .pill.waiting { color: var(--orange); }
   .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--dim); margin-right: 6px; }
   .dot.working { background: var(--yellow); } .dot.waiting { background: var(--orange); }
   .dot.ready { background: var(--green); } .dot.background { background: var(--purple); }
@@ -662,11 +661,11 @@ function header(me) {
   $("title").textContent = m.title;
   const hav = $("hav"); const hv = avOf(m); hav.hidden = false; hav.className = "av sm " + hv.cls; hav.style.cssText = hv.style; hav.innerHTML = hv.html + bub({ state: me.state, asks: me.pending ? me.pending.size : 0 });
   const p = $("pill");
-  p.hidden = false; p.className = "pill " + me.state;
-  p.textContent = me.state === "idle" ? (me.kind === "chats" ? (m.tab ? m.tab.group || "tab" : m.mode) : "idle")
-    : me.state === "waiting" ? "waiting for you" : me.state === "ready" ? "✓ done, new reply"
-    : me.state === "background" ? "↻ replied, agents still running" : me.state === "exited" ? "the tab has exited"
-    : me.kind === "groups" ? "talking…" : "typing…";
+  // the bubble on the picture says the state; only "waiting for you" is said here too
+  const asks = me.state === "waiting" || (me.pending && me.pending.size);
+  p.hidden = false; p.className = "pill" + (asks ? " waiting" : "");
+  p.textContent = asks ? "waiting for you"
+    : me.kind === "chats" ? (m.tab ? m.tab.group || "tab" : m.mode) : `${(m.members || []).length} chats`;
   $("stop").hidden = me.state !== "working" && me.state !== "waiting";
     const chips = $("chips");
   if (me.kind === "groups") {
