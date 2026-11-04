@@ -241,6 +241,22 @@
   .mainbot { display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; padding: 6px 14px; border-radius: 18px; }
   .mainbot.sel { background: #262b45; } .mainbot .sub { font-size: 13px; } .mainbot .st-wait { color: var(--orange); } .mainbot .st-work { color: var(--yellow); }
   .mainbot .st-ready { color: var(--green); } .mainbot .st-bg { color: var(--purple); } .mainbot .st-gone { color: var(--dim); }
+  /* the state as a speech bubble on the picture's top right; none when idle */
+  .av .bub { position: absolute; right: -9px; top: -7px; min-width: 22px; height: 20px; padding: 0 5px; z-index: 1;
+             border-radius: 10px; border: 2px solid var(--bg); background: var(--c); color: #111; font: 700 12px/16px system-ui, sans-serif;
+             display: flex; align-items: center; justify-content: center; gap: 2px; box-sizing: border-box; }
+  .av .bub::after { content: ""; position: absolute; left: 1px; bottom: -6px; border: 4px solid transparent;
+                    border-top-color: var(--c); border-left-color: var(--c); }
+  .bub.working { --c: var(--yellow); } .bub.waiting { --c: var(--orange); } .bub.ready { --c: var(--green); }
+  .bub.background { --c: var(--purple); } .bub.exited { --c: #3b4261; color: var(--dim); }
+  .bub i { width: 3px; height: 3px; border-radius: 50%; background: #111; animation: bubdot 1.2s infinite; }
+  .bub i:nth-child(2) { animation-delay: .2s; } .bub i:nth-child(3) { animation-delay: .4s; }
+  @keyframes bubdot { 0%, 60%, 100% { transform: none; opacity: .5; } 30% { transform: translateY(-2px); opacity: 1; } }
+  .av.huge .bub { right: -10px; top: -6px; min-width: 30px; height: 26px; border-radius: 13px; font-size: 15px; }
+  .av.huge .bub i { width: 4px; height: 4px; }
+  .av.sm .bub { right: -7px; top: -6px; min-width: 16px; height: 15px; padding: 0 3px; font-size: 9px; border-width: 1.5px; }
+  .av.sm .bub i { width: 2px; height: 2px; }
+  .av:has(.bub) .star { display: none; }
   .av .star { position: absolute; right: -2px; top: -2px; width: 24px; height: 24px; border-radius: 50%; background: var(--orange); color: #fff; font-size: 13px; display: grid; place-items: center; border: 2px solid var(--bg); }
   .av.huge .dot { right: 4px; bottom: 4px; width: 16px; height: 16px; }
   .av.huge { width: 84px; height: 84px; font-size: 58px; }
@@ -474,6 +490,12 @@ const MODE_NAME = { ask: "Ask each time", edits: "Accept edits", plan: "Plan fir
 const status = (msg, bad) => { const s = $("status"); s.textContent = msg || ""; s.className = bad ? "err" : ""; };
 
 // --- the list ---------------------------------------------------------------
+// the state as a bubble on the picture: "" when idle
+function bub(r) {
+  const st = r.asks ? "waiting" : r.state;
+  const glyph = { working: "<i></i><i></i><i></i>", waiting: "?", ready: "✓", background: "↻", exited: "×" }[st];
+  return glyph ? `<span class="bub ${st}" title="${esc(st)}">${glyph}</span>` : "";
+}
 // [class, words] for a chat's state under its name; null when idle: the last message shows
 function stateLine(r) {
   if (r.asks || r.state === "waiting") return ["st-wait", "needs your OK"];
@@ -488,7 +510,7 @@ async function loadList() {
   cfg = data;
   const main = data.chats.find((c) => c.default);
   $("hero").innerHTML = main ? `<div class="mainbot${cur && cur.id === main.id ? " sel" : ""}" data-id="${esc(main.id)}">
-      <div class="av huge">${emo(face(main))}<span class="star">★</span><span class="dot ${esc(main.state)}"></span></div>
+      <div class="av huge">${emo(face(main))}<span class="star">★</span>${bub(main)}</div>
       <div>${esc(main.title)}</div>${stateLine(main) ? `<div class="sub ${stateLine(main)[0]}">${stateLine(main)[1]}</div>` : ""}</div>` : "";
   const acc = (data.accounts || []).find((a) => a.name === data.account);
   $("acct").hidden = (data.accounts || []).length < 2;
@@ -505,7 +527,7 @@ async function loadList() {
     const badges = (kind === "chats" && r.mode === "bypass" ? '<span class="badge m-bypass">bypass</span>' : "") +
       (kind === "chats" ? groupBadge(r.tab && r.tab.group ? r.tab : ownGroup()) + usingBadge(r) : "");
     return `<div class="card${cur && cur.id === r.id ? " sel" : ""}" data-id="${esc(r.id)}">
-      <div class="av ${avOf(r).cls}" style="${avOf(r).style}">${avOf(r).html}<span class="dot ${esc(r.state)}"></span></div>
+      <div class="av ${avOf(r).cls}" style="${avOf(r).style}">${avOf(r).html}${bub(r)}</div>
       <div class="body">
         <div class="top"><span class="t">${esc(r.title)}</span><span class="ago">${timeAgo(r.updated)}</span><button type="button" class="more" data-more title="Settings">⋯</button></div>
         ${stateLine(r) ? `<div class="sub last ${stateLine(r)[0]}">${stateLine(r)[1]}</div>` : `<div class="sub last">${esc(r.last) || "&nbsp;"}</div>`}
@@ -641,7 +663,7 @@ function take(me, d) {
 function header(me) {
   const m = me.meta;
   $("title").textContent = m.title;
-  const hav = $("hav"); const hv = avOf(m); hav.hidden = false; hav.className = "av sm " + hv.cls; hav.style.cssText = hv.style; hav.innerHTML = hv.html;
+  const hav = $("hav"); const hv = avOf(m); hav.hidden = false; hav.className = "av sm " + hv.cls; hav.style.cssText = hv.style; hav.innerHTML = hv.html + bub({ state: me.state, asks: me.pending ? me.pending.size : 0 });
   const p = $("pill");
   p.hidden = false; p.className = "pill " + me.state;
   p.textContent = me.state === "idle" ? (me.kind === "chats" ? (m.tab ? m.tab.group || "tab" : m.mode) : "idle")
