@@ -87,7 +87,10 @@ class TestChatRoutes(_ServerCase):
         self.assertIn("200", head.splitlines()[0])
         self.assertIn(b"tabit chat", body)
         head, body = http_get("/chat.webmanifest", self.sock)
-        self.assertEqual(json.loads(body)["start_url"], "chat")
+        self.assertEqual(json.loads(body)["start_url"], "./")
+        self.assertIn(b"tabit chat", http_get("/", self.sock)[1])        # the address opens the chat
+        head, body = http_get("/manifest.webmanifest", self.sock)
+        self.assertEqual(json.loads(body)["start_url"], "terminal")
 
     def test_it_is_off_until_the_phone_may_type(self):
         self.app._remote_send_on = False

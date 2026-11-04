@@ -34,8 +34,8 @@ class FakeApp:
         self.snap = {"time": 1, "version": "v0", "groups": [],
                      "tabs": [{"id": "a", "type": "ai", "ai_status": "idle"}]}
 
-    def _remote_page(self):
-        return b"<html>page</html>"
+    def _remote_page(self, name="remote.html"):
+        return b"<html>page</html>" if name == "remote.html" else b"<html>chat</html>"
 
     def _remote_snapshot(self):
         return dict(self.snap)
@@ -123,9 +123,11 @@ class _ServerCase(unittest.TestCase):
 class TestRemoteServer(_ServerCase):
 
     def test_page_status_and_404(self):
-        head, body = http_get("/", self.sock)
+        head, body = http_get("/", self.sock)                # the address opens the chat
         self.assertIn("200", head.splitlines()[0])
-        self.assertEqual(body, b"<html>page</html>")
+        self.assertEqual(body, b"<html>chat</html>")
+        self.assertEqual(http_get("/terminal", self.sock)[1], b"<html>page</html>")
+        self.assertEqual(http_get("/chat", self.sock)[1], b"<html>chat</html>")   # old links still work
         head, body = http_get("/api/status", self.sock)
         self.assertIn("application/json", head)
         self.assertEqual(json.loads(body)["tabs"][0]["ai_status"], "idle")

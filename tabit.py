@@ -964,7 +964,7 @@ REMOTE_ICONS = {"/icon.svg": ("tabit-remote.svg", None), "/favicon.png": ("tabit
                 "/icon-maskable.png": ("tabit-remote-app.svg", 512)}  # macOS, Android
 # lets a browser install the page as an app in its own window
 REMOTE_MANIFEST = json.dumps({
-    "name": "tabit", "short_name": "tabit", "start_url": "./", "scope": "./",
+    "name": "tabit", "short_name": "tabit", "start_url": "terminal", "scope": "./",
     "display": "standalone", "background_color": "#1a1b26",
     "theme_color": "#1a1b26",
     "icons": [{"src": f"icon-{n}.png", "sizes": f"{n}x{n}", "type": "image/png"}
@@ -972,10 +972,11 @@ REMOTE_MANIFEST = json.dumps({
              # edge to edge: the system rounds it, not a grey tile around it
              + [{"src": "icon-maskable.png", "sizes": "512x512",
                  "type": "image/png", "purpose": "maskable"}]}).encode()
-# Tabit Chat: the chat page, and its own manifest so it installs as its own app
+# Tabit Chat: the chat page, the one the address opens, and its own manifest
+# so it installs as its own app. The terminal view is at /terminal.
 REMOTE_CHAT_PAGE = "chat.html"
 REMOTE_CHAT_MANIFEST = json.dumps({
-    "name": "tabit chat", "short_name": "chat", "start_url": "chat", "scope": "./",
+    "name": "tabit chat", "short_name": "chat", "start_url": "./", "scope": "./",
     "display": "standalone", "background_color": "#1a1b26",
     "theme_color": "#1a1b26",
     "icons": [{"src": f"icon-{n}.png", "sizes": f"{n}x{n}", "type": "image/png"}
@@ -2151,7 +2152,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             return
         if parts[:2] in (["api", "chats"], ["api", "chat-groups"]):
             self._chat_get(parts)
-        elif path == "/chat":
+        elif path in ("/", "/index.html", "/chat"):        # /chat: links from before
             page = self.app._remote_page(REMOTE_CHAT_PAGE)
             if page is None:
                 self._send(404, "text/plain", b"chat.html not installed")
@@ -2159,7 +2160,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 self._send(200, "text/html; charset=utf-8", page)
         elif path == "/chat.webmanifest":
             self._send(200, "application/manifest+json", REMOTE_CHAT_MANIFEST)
-        elif path in ("/", "/index.html"):
+        elif path == "/terminal":
             page = self.app._remote_page()
             if page is None:
                 self._send(404, "text/plain", b"remote.html not installed")

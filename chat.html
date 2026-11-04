@@ -309,12 +309,12 @@
   <button id="notify" type="button" title="tell me when Claude is done" hidden>🔔</button>
   <button id="more" type="button" hidden>⋯</button>
   <button id="add" type="button" class="primary">＋</button>
-  <a id="remote" href="/" title="the terminal view"><button type="button">⌨</button></a>
+  <a id="remote" href="terminal" title="the terminal view"><button type="button">⌨</button></a>
 </header>
 <div id="conn">Reconnecting…</div>
 <main>
   <section id="list" class="view on">
-    <div id="sbhead"><h1>Chat</h1><button id="sb-add" type="button" class="primary" title="new chat">＋</button><a href="/" title="the terminal view"><button type="button">⌨</button></a></div>
+    <div id="sbhead"><h1>Chat</h1><button id="sb-add" type="button" class="primary" title="new chat">＋</button><a href="terminal" title="the terminal view"><button type="button">⌨</button></a></div>
     <div id="scroller">
     <div id="top">
     <div id="hero"></div>
@@ -427,7 +427,7 @@ async function api(path, body) {
   const res = await fetch(path, body === undefined ? {} : {
     method: "POST", headers: { "Content-Type": "application/json", "X-Tabit": "1" }, body: JSON.stringify(body) });
   const out = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(out.error || `HTTP ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(out.error || `HTTP ${res.status}`), { status: res.status });
   return out;
 }
 
@@ -504,7 +504,10 @@ async function loadList() {
   let data;
   const keep = listScroll().scrollTop;
   try { data = await api("api/chats"); }
-  catch (e) { $("cards").innerHTML = `<div class="empty">${esc(e.message)}<br><br><a href="/">Open the terminal view</a></div>`; return; }
+  catch (e) {
+    if (e.status === 403) { location.replace("terminal"); return; }     // no chat without typing: the terminal view shows the tabs
+    $("cards").innerHTML = `<div class="empty">${esc(e.message)}<br><br><a href="terminal">Open the terminal view</a></div>`; return;
+  }
   cfg = data;
   const main = data.chats.find((c) => c.default);
   $("hero").innerHTML = main ? `<div class="mainbot${cur && cur.id === main.id ? " sel" : ""}" data-id="${esc(main.id)}">

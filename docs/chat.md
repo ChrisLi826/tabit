@@ -4,9 +4,11 @@ Tabit Chat is Remote as a conversation. You talk to Claude on this computer
 from a phone or another computer, in chat bubbles, not in a terminal. Back to
 [Remote](remote.md).
 
-Open `https://<this-host>.<tailnet>.ts.net/chat`. It needs the same switch as
-typing into tabs (**Settings… → Remote → Allow typing into tabs**), because a
-chat can run commands on this machine. On a phone, **Share → Add to Home
+Open `https://<this-host>.<tailnet>.ts.net/`: the address opens the chat
+(`/chat` still works). It needs the same switch as typing into tabs
+(**Settings… → Remote → Allow typing into tabs**), because a chat can run
+commands on this machine; with that switch off, the address goes on to the
+terminal view. ⌨ opens the terminal view, at `/terminal`. On a phone, **Share → Add to Home
 Screen** makes it an app of its own.
 
 ## What it does
@@ -148,7 +150,7 @@ working goes on until it is done. Press **Stop** first if you want it to end.
 Each chat runs one headless `claude -p --input-format stream-json
 --output-format stream-json`. Its events become chat events; nothing reads a
 terminal screen, except the AI tabs above. The code is in `tabit_chat.py` (no
-GTK), `chat.html` and `tabit-tabs`. The routes are `/chat`,
+GTK), `chat.html` and `tabit-tabs`. The routes are `/` (and `/chat`),
 `/chat.webmanifest`, `/api/chats`, `/api/chat-groups` and `/api/dirs/new`,
 behind the same checks as the rest of Remote. A mirror reads the tab's Claude
 transcript every 2 seconds.
