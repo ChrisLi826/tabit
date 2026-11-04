@@ -1100,6 +1100,11 @@ class TabSyncTest(Base):
         moved = self.chat_of("t9")
         self.assertEqual((moved.meta["emoji"], moved.meta["hue"], moved.meta["title"]), ("🏃", 40, "Run"))
         self.assertFalse(chat.running)
+        # the old chat's folder is kept, not deleted: its history stays on disk
+        kept = os.path.join(self.mgr.root, old_id + ".moved")
+        self.assertTrue(os.path.isfile(os.path.join(kept, "events.jsonl")))
+        self.assertFalse(os.path.exists(os.path.join(self.mgr.root, old_id)))
+        self.assertNotIn(old_id, self.make().chats)          # and it does not load as a chat again
 
     def test_a_chat_that_never_spoke_moves_as_a_new_tab(self):
         self.new(title="Fresh")

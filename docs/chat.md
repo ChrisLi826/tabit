@@ -93,24 +93,28 @@ that is working takes your line too: Claude holds it until the turn is done.
   Tabit Chat) moves into a tab when it is idle: the tab goes on with the same
   conversation (`--resume`), keeps the login and bypass, and the chat that
   mirrors it takes the old one's picture and name, and its place in the
-  groups (rooms) the old chat was in. A chat that cannot move is tried 3
-  times.
+  groups (rooms) the old chat was in. The old chat's folder is kept as
+  `~/.local/share/tabit/chats/<id>.moved`, history and all. Of the modes only
+  Bypass goes along; a chat in Accept edits or Plan first becomes a tab that
+  asks each time. A chat that cannot move is tried 3 times.
 - **Account and model.** A chat's settings show Account and Model, and each
-  row shows `account · model`. A tab's account is switched by tabit, in place.
-  The model is switched by typing `/model <name>` into the tab, which needs a
-  tab that is not busy. Claude saves `/model` as the default for new sessions;
-  tabit puts the `model` line of `settings.json` back as it was, within
-  10 seconds, and touches nothing else in that file. The tab shows the model
-  that answered last, read from its transcript.
+  row shows `account · model`. Either switch restarts the tab's Claude in
+  place, on the same conversation (`--resume`, with `--model` for a model),
+  and both together are one restart. Not while Claude works, asks something
+  or still runs agents. Claude's own settings are not touched. The tab shows
+  the model that answered last, read from its transcript.
 - Tabs of other tools (Codex, Grok) have no chat: only Claude's transcript is
   read.
 - When the tab starts a new conversation, the chat says so and goes on with
   the new one.
 - **Menus on the tab's screen.** A tab that waits on a menu (the trust
   question for a folder, a permission question with numbered choices) shows
-  as a card too: tap a choice and **Answer**, and tabit presses the number, or
-  the arrow keys and Enter, in the tab. It reads the menu again just before
-  it presses, and presses nothing if the menu has gone.
+  as a card too, with the whole prompt above the menu (a long command in
+  full; a prompt taller than the screen says its top is cut). Tap a choice
+  and **Answer**, and tabit presses the number, or the arrow keys and Enter,
+  in the tab. Before every key it reads the menu again, and stops if it has
+  gone. **Skip** picks a numbered No; on a menu without numbers (the trust
+  question) it presses nothing and leaves the menu to the tab.
 - **Questions from the tab.** When the tab's Claude asks you to pick from a
   list, the chat shows the question as a card. Tap an option for each
   question and tap **Answer**; tabit presses the keys in the tab. **Skip**

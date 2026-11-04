@@ -1416,7 +1416,7 @@ class ChatManager:
             new = self.chats[out["chat"]["id"]]
             for room in self.groups.values():        # its rooms keep it: the tab goes on as it
                 room.swap_member(chat, new)
-            self.delete(chat)
+            self._retire(chat)
 
     def new_tab_chat(self, body):
         """(status, object): open a Claude tab in tabit, in the group asked for
@@ -1558,6 +1558,23 @@ class ChatManager:
             shutil.rmtree(gone, ignore_errors=True)
             os.replace(group.dir, gone)
             shutil.rmtree(gone, ignore_errors=True)
+        except OSError:
+            pass
+
+    def _retire(self, chat):
+        """A chat that moved into a tab leaves the list, but its folder stays
+        on disk as <id>.moved: its history is kept, and it does not load as a
+        chat again (the folder name is not its id)."""
+        chat.stop_process()
+        with self.lock:
+            self.chats.pop(chat.id, None)
+            for group in list(self.groups.values()):
+                group.member_deleted(chat)
+        kept, n = chat.dir + ".moved", 2
+        while os.path.exists(kept):
+            kept, n = "%s.moved-%d" % (chat.dir, n), n + 1
+        try:
+            os.replace(chat.dir, kept)
         except OSError:
             pass
 
