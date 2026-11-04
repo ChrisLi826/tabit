@@ -471,7 +471,10 @@ class Chat(_Log):
         return {"id": self.id, "title": self.meta["title"],
                 "cwd": self.meta["cwd"], "account": self.login(),
                 "mode": self.meta["mode"], "model": self.meta.get("model", ""),
-                "state": self.state, "updated": self.meta.get("updated", 0),
+                # the last message, not the last save: a mirror's transcript
+                # gains lines that are no message, and a rename is no news
+                "state": self.state, "updated": last["ts"] if last and last.get("ts")
+                else self.meta.get("created") or self.meta.get("updated", 0),
                 "last": (last["text"][:120] if last else ""),
                 "asks": len(self.pending), "default": bool(self.meta.get("default")),
                 "emoji": self.meta.get("emoji", ""), "hue": self.meta.get("hue"),
@@ -1030,7 +1033,8 @@ class Group(_Log):
     def summary(self):
         last = next((e for e in reversed(self.events) if e["t"] in ("user", "say")), None)
         return {"id": self.id, "title": self.meta["title"], "kind": "group",
-                "state": self.state, "updated": self.meta.get("updated", 0),
+                "state": self.state, "updated": last["ts"] if last and last.get("ts")
+                else self.meta.get("created") or self.meta.get("updated", 0),
                 "members": [{"id": c.id, "alias": self.alias(c), "title": c.meta["title"],
                              "state": c.state, "default": bool(c.meta.get("default")),
                              "emoji": c.meta.get("emoji", ""), "hue": c.meta.get("hue")}

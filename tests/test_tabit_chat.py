@@ -711,6 +711,18 @@ class MirrorTest(Base):
         chat.mirror_poll()
         self.assertEqual(self.texts(chat)[-1], ("text", "More."))
 
+    def test_lines_that_are_no_message_do_not_make_it_new(self):
+        # Claude Code writes its own bookkeeping into the transcript; the
+        # list's "13m" must stay the time of the last message
+        chat = self.mirror()
+        chat.mirror_poll()
+        said = [e for e in chat.events if e["t"] in ("user", "text")][-1]["ts"]
+        with open(self.path, "a") as f:
+            f.write(json.dumps({"type": "atis-latch", "timestamp": "2099-01-01T00:00:00Z"}) + "\n")
+        time.sleep(0.05)
+        chat.mirror_poll()
+        self.assertEqual(chat.summary()["updated"], said)
+
     def test_a_half_written_line_waits(self):
         chat = self.mirror()
         chat.mirror_poll()
