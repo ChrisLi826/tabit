@@ -1040,44 +1040,43 @@ class TestChatTabOps(unittest.TestCase):
                                       ("account", "t1", {"account": "Personal"})])
 
 
-class TestChatModelSetting(unittest.TestCase):
-    """A chat switching one tab's model must not change Claude's saved default."""
+class TestChatModelSwitch(unittest.TestCase):
+    """A chat switches a tab's model the way it switches its login: tabit
+    restarts the tab's claude with --model. Claude's settings are not touched."""
 
     def setUp(self):
-        self.dir = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.dir, True)
-        self.path = os.path.join(self.dir, "settings.json")
+        self.row = type("Row", (), {"argv": tabit.Tabit._ai_argv("claude", "/tmp", [])})()
+        test = self
+        self.asked = []
 
-    def write(self, text):
-        with open(self.path, "w") as f:
-            f.write(text)
+        class App:
+            _remote_call = lambda _s, fn, timeout=3: fn()
+            _tg_row_by_id = lambda _s, tid: test.row if tid == "t1" else None
+            _ai_cli_path_of = staticmethod(tabit.Tabit._ai_cli_path_of)
+            _claude_account_of = staticmethod(tabit.Tabit._claude_account_of)
 
-    def test_read_and_put_back_only_the_model(self):
-        text = '{\n  "permissions": {"allow": []},\n  "model": "sonnet",\n  "effortLevel": "xhigh"\n}\n'
-        self.write(text)
-        self.assertEqual(tabit.Tabit._settings_model(self.path), "sonnet")
-        self.write(text.replace("sonnet", "haiku"))
-        tabit.Tabit._put_settings_model(self.path, "sonnet")
-        with open(self.path) as f:
-            self.assertEqual(f.read(), text)
+            def _ai_switch_account(self, row, name, model=None):
+                test.asked.append((row, name, model))
+                return test.why
+        App._chat_model = tabit.Tabit._chat_model
+        self.app = App()
+        self.why = None
 
-    def test_no_model_line_and_a_missing_file(self):
-        self.write('{"a": 1}')
-        self.assertIsNone(tabit.Tabit._settings_model(self.path))
-        self.assertIsNone(tabit.Tabit._settings_model(self.path + ".none"))
-        tabit.Tabit._put_settings_model(self.path + ".none", "x")        # no file: no crash
+    def ops(self, body):
+        return tabit.Tabit._chat_tab_ops(self.app, "model", "t1", body)
 
-    def test_a_model_line_that_was_not_there_is_taken_out_again(self):
-        self.write('{\n  "a": 1,\n  "model": "haiku",\n  "b": 2\n}\n')
-        tabit.Tabit._put_settings_model(self.path, None)
-        with open(self.path) as f:
-            self.assertEqual(json.loads(f.read()), {"a": 1, "b": 2})
+    def test_the_tab_restarts_with_the_model_and_keeps_its_login(self):
+        self.assertEqual(self.ops({"model": "haiku"}), (200, {"ok": True}))
+        self.assertEqual(self.asked, [(self.row, "", "haiku")])
 
-    def test_a_model_name_that_would_break_the_file_is_not_written(self):
-        self.write('{\n  "model": "haiku"\n}\n')
-        tabit.Tabit._put_settings_model(self.path, 'a"b\n')
-        with open(self.path) as f:
-            json.loads(f.read())
+    def test_a_login_can_change_in_the_same_restart(self):
+        self.ops({"model": "", "account": "Personal"})
+        self.assertEqual(self.asked, [(self.row, "Personal", "")])
+
+    def test_a_tab_that_will_not_switch_says_why(self):
+        self.why = "Claude is working: switch when it stops"
+        self.assertEqual(self.ops({"model": "opus"}), (409, {"error": self.why}))
+        self.assertEqual(tabit.Tabit._chat_tab_ops(self.app, "model", "zz", {"model": "opus"})[0], 404)
 
 
 if __name__ == "__main__":

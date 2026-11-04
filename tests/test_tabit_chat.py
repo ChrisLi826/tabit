@@ -1204,7 +1204,7 @@ class TabSwitchTest(Base):
     def edit(self, body):
         return tc.api(self.mgr, "POST", [self.chat.id, "edit"], body)
 
-    def test_the_model_is_typed_into_the_tab(self):
+    def test_the_model_is_switched_by_tabit(self):
         self.assertEqual(self.edit({"model": "sonnet"})[0], 200)
         self.assertEqual(self.ops, [("model", "t1", {"model": "sonnet"})])
         self.assertEqual(model := tc.model_alias(self.chat.meta["tab"]["model"]), "sonnet")
@@ -1225,6 +1225,11 @@ class TabSwitchTest(Base):
     def test_a_model_nobody_knows(self):
         self.assertEqual(self.edit({"model": "gpt"})[0], 400)
         self.assertEqual(self.ops, [])
+
+    def test_login_and_model_change_in_one_restart(self):
+        self.assertEqual(self.edit({"account": "Personal", "model": "haiku"})[0], 200)
+        self.assertEqual(self.ops, [("model", "t1", {"model": "haiku", "account": "Personal"})])
+        self.assertEqual(self.chat.summary()["account"], "Personal")
 
     def test_the_login_is_switched_by_tabit(self):
         self.assertEqual(self.edit({"account": "Personal"})[0], 200)

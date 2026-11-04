@@ -213,11 +213,11 @@ class TestSwitchAccount(AccountDirs):
                      "_remote_manage_op"):
             setattr(self.app, name, getattr(T, name).__get__(self.app))
         for name in ("_ai_cli_path_of", "_ai_is_claude", "_claude_account_of",
-                     "_ai_tmux_unwrap", "_ai_launch_pair", "_ai_has_bypass"):
+                     "_ai_tmux_unwrap", "_ai_launch_pair", "_ai_has_bypass", "_ai_model_of"):
             setattr(self.app, name, getattr(T, name))
 
-    def row(self, cli="claude", tmux=True, **kw):
-        stored = T._ai_launch_pair(cli, self.tmp, [], tmux=tmux, resume_id=A)[1]
+    def row(self, cli="claude", tmux=True, model="", **kw):
+        stored = T._ai_launch_pair(cli, self.tmp, [], tmux=tmux, resume_id=A, model=model)[1]
         r = types.SimpleNamespace(kind="term", argv=stored, agent_status="idle",
                                   dead=False, pid=4321, title_text="claude",
                                   _live_tmux=T._ai_tmux_unwrap(stored)[1])
@@ -275,6 +275,30 @@ class TestSwitchAccount(AccountDirs):
         self.app._spawn_term.assert_called_once_with(r, launch, self.tmp)
         self.app._set_tab_name.assert_called_once_with(r, "claude · work")
         self.assertIsNone(r._respawn)
+
+    def test_a_model_switch_restarts_the_tab_with_that_model(self):
+        r = self.row()
+        with mock.patch.object(tabit, "_tmux_kill_session") as kill:
+            self.assertIsNone(self.app._ai_switch_account(r, "", model="haiku"))
+        kill.assert_called_once()
+        self.assertEqual(T._ai_model_of(r.argv), "haiku")
+        self.assertEqual(T._ai_cli_path_of(r.argv)[0], "claude")       # same login
+        self.assertIn(A, r.argv[2])
+        self.assertIn("--model haiku", T._ai_tmux_unwrap(r._respawn[0])[0][2])
+        r2 = self.row(model="haiku")
+        self.assertIn("haiku", self.app._ai_switch_account(r2, "", model="haiku"))
+
+    def test_the_model_stays_when_the_login_changes(self):
+        r = self.row(model="opus")
+        with mock.patch.object(tabit, "_tmux_kill_session"):
+            self.assertIsNone(self.app._ai_switch_account(r, "work"))
+        self.assertEqual((T._ai_model_of(r.argv), T._ai_cli_path_of(r.argv)[0]), ("opus", self.cli))
+
+    def test_the_model_survives_a_rebuild_and_is_no_try(self):
+        argv = T._ai_launch_pair("claude", self.tmp, ["--continue"], tmux=True, model="sonnet")[1]
+        self.assertEqual(T._ai_model_of(T._ai_argv_with_session(argv, A)), "sonnet")
+        self.assertEqual(T._ai_tries_of(T._ai_tmux_unwrap(argv)[0][2]), ["--continue"])
+        self.assertEqual(T._ai_model_of(T._ai_launch_pair("claude", self.tmp, [], tmux=True)[1]), "")
 
     def test_from_the_phone(self):
         r = self.row()

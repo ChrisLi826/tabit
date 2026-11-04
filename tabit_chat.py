@@ -1748,26 +1748,32 @@ def model_alias(model):
 
 
 def _edit_tab(chat, body):
-    """The login and the model of a chat that is a tab: the tab is switched. A
-    login is changed by tabit; a model by typing /model into the tab, which
-    takes a tab that is not busy (tabit puts Claude's saved default back). None when it went well, else (status, object)."""
+    """The login and the model of a chat that is a tab: tabit restarts the
+    tab's claude on the same conversation, once for both. None when it went
+    well, else (status, object)."""
     mgr, tab = chat.mgr, chat.meta["tab"]
-    if "account" in body and body["account"] != tab.get("account", ""):
-        if body["account"] not in [""] + [n for n, _ in mgr.accounts()]:
-            return 400, {"error": "no such Claude account"}
-        code, out = mgr.tab_ops("account", tab["id"], {"account": body["account"]}) if mgr.tab_ops else (400, {"error": "no tabs here"})
-        if code != 200:
-            return code, out
-        chat.meta["tab"] = tab = dict(tab, account=body["account"])
-    if "model" in body and body["model"] != model_alias(tab.get("model")):
-        if body["model"] not in MODELS:
-            return 400, {"error": "no such model"}
-        if not mgr.tab_ops:
-            return 400, {"error": "no tabs here"}
-        code, out = mgr.tab_ops("model", tab["id"], {"model": body["model"]})
-        if code != 200:
-            return code, out
-        chat.meta["tab"] = dict(tab, model=body["model"])     # the next answer says the full name
+    acct = body["account"] if "account" in body and body["account"] != tab.get("account", "") else None
+    model = body["model"] if "model" in body and body["model"] != model_alias(tab.get("model")) else None
+    if acct is not None and acct not in [""] + [n for n, _ in mgr.accounts()]:
+        return 400, {"error": "no such Claude account"}
+    if model is not None and model not in MODELS:
+        return 400, {"error": "no such model"}
+    if acct is None and model is None:
+        return None
+    if not mgr.tab_ops:
+        return 400, {"error": "no tabs here"}
+    if model is not None:
+        code, out = mgr.tab_ops("model", tab["id"], dict({"model": model},
+                                                         **({"account": acct} if acct is not None else {})))
+    else:
+        code, out = mgr.tab_ops("account", tab["id"], {"account": acct})
+    if code != 200:
+        return code, out
+    if acct is not None:
+        tab = dict(tab, account=acct)
+    if model is not None:
+        tab = dict(tab, model=model)     # the next answer says the full name
+    chat.meta["tab"] = tab
     return None
 
 

@@ -11152,7 +11152,8 @@ if (data !== null) {{
 
                     new_argv = self._ai_argv(
                         cli_val, path_val, tries,
-                        bypass=self._ai_has_bypass(row.argv))
+                        bypass=self._ai_has_bypass(row.argv),
+                        model=self._ai_model_of(row.argv))
                     if want_tmux:
                         new_argv = self._ai_tmux_argv(
                             new_argv,
@@ -13119,53 +13120,21 @@ if (data !== null) {{
         res = self._remote_call(work)
         return res if isinstance(res, list) else None
 
-    def _settings_model(path):
-        """The "model" line of Claude's settings: its text (None when there is none)."""
-        try:
-            with open(path, encoding="utf-8") as f:
-                m = re.search(r'^[ \t]*"model"[ \t]*:[ \t]*"([^"\n]*)"', f.read(), re.M)
-        except OSError:
-            return None
-        return m.group(1) if m else None
-
-    @staticmethod
-    def _put_settings_model(path, model):
-        """Give the "model" line of Claude's settings this value again; nothing
-        else in the file is touched, and a file that would not parse is not written."""
-        try:
-            with open(path, encoding="utf-8") as f:
-                text = f.read()
-            if model is None:        # there was none: take the one Claude wrote out
-                new = re.sub(r'^[ \t]*"model"[ \t]*:[ \t]*"[^"\n]*",?[ \t]*\n', "", text, count=1, flags=re.M)
-            else:
-                new = re.sub(r'^([ \t]*"model"[ \t]*:[ \t]*)"[^"\n]*"', lambda m: m.group(1) + json.dumps(model),
-                             text, count=1, flags=re.M)
-            json.loads(new)
-            tmp = path + ".tabit-tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(new)
-            os.chmod(tmp, os.stat(path).st_mode & 0o777)
-            os.replace(tmp, path)
-        except (OSError, ValueError) as e:
-            print(f"[chat] could not put the model setting back: {e}", file=sys.stderr)
-
-    def _chat_model(self, tab_id, model):
-        """Switch a tab's model by typing /model into it. Claude also saves that
-        as the default for new sessions, which a chat switching one tab must not
-        do: the setting is put back as it was."""
-        path = os.path.realpath(os.path.join(CLAUDE_DEFAULT_DIR, "settings.json"))
-        before = self._settings_model(path)
-        res = self._chat_tab_hook(tab_id, "/model " + (model or "default"))
-        if res[0] == 200:
-            def restore():
-                for _ in range(20):
-                    time.sleep(0.5)
-                    now = self._settings_model(path)
-                    if now != before:
-                        self._put_settings_model(path, before)
-                        return
-            threading.Thread(target=restore, daemon=True).start()
-        return res
+    def _chat_model(self, tab_id, model, account=None):
+        """Switch a tab's model, and its login when asked: tabit restarts its
+        claude with --model, on the same conversation, as for a login."""
+        def work():
+            row = self._tg_row_by_id(tab_id)
+            got = self._ai_cli_path_of(getattr(row, "argv", None)) if row is not None else None
+            if not got:
+                return 404, {"error": "that is not an AI tab"}
+            name = (self._claude_account_of(got[0]) or "") if account is None else account
+            why = self._ai_switch_account(row, name, model or "")
+            return (409, {"error": why}) if why else (200, {"ok": True})
+        res = self._remote_call(work, timeout=10)
+        if res is None:
+            return 503, {"error": "tabit busy"}
+        return res if isinstance(res, tuple) else (500, res)
 
     def _chat_tab_ops(self, op, target=None, body=None):
         """For a chat: manage tabs the way the phone does. op: groups | new |
@@ -13173,7 +13142,7 @@ if (data !== null) {{
         no group asked for stays out of groups."""
         body = dict(body or {})
         if op == "model":
-            return self._chat_model(target, body.get("model"))
+            return self._chat_model(target, body.get("model"), body.get("account"))
 
         def work():
             if op == "groups":
@@ -14717,11 +14686,13 @@ if (data !== null) {{
         got = re.findall(_UUID_RE, " ".join(getattr(row, "argv", None) or []))
         return got[-1] if got else None
 
-    def _ai_switch_account(self, row, name):
+    def _ai_switch_account(self, row, name, model=None):
         """GTK thread: go on with this Claude tab's conversation under
-        account `name` ("" = Default), in the same tab. None when it is under
-        way, else why not. The old claude stops; the new one resumes the
-        same session, which every account shares."""
+        account `name` ("" = Default), and `model` ("" = Claude's default,
+        None = the one it has), in the same tab. None when it is under way,
+        else why not. The old claude stops; the new one resumes the same
+        session, which every account shares. Claude's own settings are not
+        touched."""
         argv = getattr(row, "argv", None) or []
         got = self._ai_cli_path_of(argv)
         if (getattr(row, "kind", None) != "term" or not got
@@ -14730,8 +14701,13 @@ if (data !== null) {{
         if getattr(row, "dead", False):
             return "that tab has exited"
         old = self._claude_account_of(got[0]) or ""
-        if (name or "") == old:
-            return f"it is on {old or 'Default'} already"
+        old_model = self._ai_model_of(argv)
+        new_model = old_model if model is None else model
+        if (name or "") == old and new_model == old_model:
+            return (f"it is on {old or 'Default'} already" if model is None
+                    else f"it uses {old_model or 'the default model'} already")
+        if getattr(row, "_respawn", None):
+            return "it is switching already: wait a moment"
         new_cli = "claude" if not name else dict(self._claude_accounts()).get(name)
         if new_cli is None:
             return f"no Claude account “{name}”"
@@ -14749,7 +14725,8 @@ if (data !== null) {{
         launch, stored, _icon = self._ai_launch_pair(
             new_cli, got[1], [], resume_id=sid,
             tmux=self._ai_tmux_unwrap(argv)[1] is not None,
-            continue_now=True, resume_later=True, bypass=self._ai_has_bypass(argv))
+            continue_now=True, resume_later=True, bypass=self._ai_has_bypass(argv),
+            model=new_model)
         row._respawn = (launch, got[1], got[0], new_cli)
         row.argv = stored                   # before the old one stops
         row.ai_hunt = False
@@ -15025,6 +15002,9 @@ if (data !== null) {{
                     and tokens[i + 1] == CLAUDE_HOOKS_FILE:
                 i += 2
                 continue
+            if t == "--model" and i + 1 < len(tokens):      # tabit adds the tab's own model
+                i += 2
+                continue
             if t == "--permission-mode" and i + 1 < len(tokens) \
                     and tokens[i + 1] == "bypassPermissions":
                 i += 2
@@ -15046,13 +15026,22 @@ if (data !== null) {{
         return "--dangerously-skip-permissions" in blob
 
     @classmethod
-    def _ai_argv(cls, cli, path, tries=None, bypass=False):
+    def _ai_model_of(cls, argv):
+        """The model a Claude tab's command asks for (--model), or ""."""
+        inner, _sess = cls._ai_tmux_unwrap(argv or [])
+        m = re.search(r"(?:^|\s)--model[ =](\S+)", inner[2] if len(inner) == 3 else "")
+        return m.group(1).strip("'\"") if m else ""
+
+    @classmethod
+    def _ai_argv(cls, cli, path, tries=None, bypass=False, model=""):
         # For each try string T: run `cli T`; if all fail, plain `cli`.
         c = shlex.quote(cli)
         d = shlex.quote(path)
+        # a model picked for this tab (a chat switched it): kept in the command
+        model_tokens = ["--model", model] if model and cls._ai_is_claude(cli) else []
         tail = " ".join(shlex.quote(t) for t in (
             cls._ai_bypass_tokens(cli, bypass) + cls._ai_hook_tokens(cli)
-            + cls._ai_screen_tokens(cli)))
+            + model_tokens + cls._ai_screen_tokens(cli)))
         tail = f" {tail}" if tail else ""
         parts = [f"cd {d} || exit 1"]
         cmds = []
@@ -15226,7 +15215,7 @@ if (data !== null) {{
     @classmethod
     def _ai_launch_pair(cls, cli, cwd, tries, bypass=False, tmux=False,
                         continue_now=True, resume_later=True, new_sid=None,
-                        resume_id=None):
+                        resume_id=None, model=""):
         """(launch argv, stored argv, icon) for a new +AI tab.
 
         The two questions are separate: continue_now picks what runs now
@@ -15246,15 +15235,15 @@ if (data !== null) {{
         resume_id = (resume_id or "").strip() if continue_now else ""
         tries = list(tries or [])
         launch = cls._ai_argv(cli, cwd, tries if continue_now else [],
-                              bypass=bypass)
+                              bypass=bypass, model=model)
         stored = cls._ai_argv(cli, cwd, tries if resume_later else [],
-                              bypass=bypass)
+                              bypass=bypass, model=model)
         base = os.path.basename(cli.rstrip("/"))
         if base in AI_SESSION_FILES and not continue_now:
             # Its id is not known until the first message. Until then a
             # restart starts fresh: "the newest in this folder" may be
             # another tab's session. The hunt fills the id in.
-            stored = cls._ai_argv(cli, cwd, [], bypass=bypass)
+            stored = cls._ai_argv(cli, cwd, [], bypass=bypass, model=model)
         new_arg = AI_NEW_ID_ARGS.get(base)
         if new_sid and new_arg and not continue_now:
             # exec, not a try: "a || b" also runs b when a exits nonzero
@@ -15271,7 +15260,7 @@ if (data !== null) {{
                 # one in the folder would pick up another tab's session.
                 stored = cls._ai_argv(
                     cli, cwd, cls._ai_tries_with_id(cli, [], new_sid),
-                    bypass=bypass)
+                    bypass=bypass, model=model)
         if resume_id:
             first = cls._ai_tries_with_id(cli, [], resume_id)[0]
             ways = [first]
@@ -15280,7 +15269,7 @@ if (data !== null) {{
                 # `claude attach <short id>` opens it (and ignores, with a
                 # warning, the hooks flag every try gets)
                 ways.append("attach " + resume_id[:8])
-            plain = cls._ai_argv(cli, cwd, [], bypass=bypass)
+            plain = cls._ai_argv(cli, cwd, [], bypass=bypass, model=model)
             head, _sep, tail = plain[2].rpartition("; exec ")
             tries = " || ".join(tail.replace(shlex.quote(cli), "%s %s" % (
                 shlex.quote(cli), " ".join(shlex.quote(t) for t in shlex.split(w))), 1)
@@ -15290,7 +15279,7 @@ if (data !== null) {{
             launch = ["/bin/sh", "-c", "%s; %s || { printf %%b %s; "
                       'exec "${SHELL:-sh}"; }' % (head, tries, note)]
             stored = cls._ai_argv(cli, cwd, ways if resume_later else [],
-                                  bypass=bypass)
+                                  bypass=bypass, model=model)
         if not tmux:
             return launch, stored, ICON_AI
         name = cls._ai_tmux_session(cli, cwd, unique=not continue_now)
@@ -15362,7 +15351,7 @@ if (data !== null) {{
             return argv
         cli, path = got
         new = cls._ai_argv(cli, path, cls._ai_tries_with_id(cli, [], sid),
-                           bypass=cls._ai_has_bypass(argv))
+                           bypass=cls._ai_has_bypass(argv), model=cls._ai_model_of(argv))
         _inner, sess = cls._ai_tmux_unwrap(argv)
         return cls._ai_tmux_argv(new, sess) if sess else new
 
