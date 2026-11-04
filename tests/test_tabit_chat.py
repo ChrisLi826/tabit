@@ -1498,8 +1498,30 @@ class TabTalkTest(Base):
         names = sorted(self.mgr.tab_names())
         self.assertEqual(names, ["ehr330-claude", "work-claude"])
 
+    def test_a_file_or_a_code_block_is_no_call(self):
+        self.say("ta", "@beta.py is the file\n@beta/x.md too")
+        self.say("ta", "Like this:\n```\n@beta hello\n```\ndone")
+        self.assertEqual(self.typed, [])
+        self.say("ta", "@beta, please look")
+        self.say("ta", "@beta: and this")
+        self.assertEqual(len(self.typed), 2)
+        self.assertEqual(tc.mentions("@beta，請看"), ["beta"])
+
+    def test_the_same_file_by_another_path_is_no_new_conversation(self):
+        link = os.path.join(self.dir, "acct")
+        os.symlink(self.dir, link)                  # an account's config dir: projects is a link
+        before = len(self.a.events)
+        self.a._mirror_read(os.path.join(link, os.path.basename(self.tx["ta"])))
+        self.assertEqual(len(self.a.events), before)
+        self.say("ta", "@beta still here")
+        self.assertEqual(len(self.typed), 1)
+
     def send(self, chat, text):
         return tc.api(self.mgr, "POST", [chat.id, "send"], {"text": text})
+
+    def test_a_file_name_first_goes_to_the_chat(self):
+        self.send(self.a, "@beta.py fix this")
+        self.assertEqual(self.typed, [("ta", "@beta.py fix this")])
 
     def test_the_user_at_names_send_to_those_tabs_only(self):
         self.assertEqual(self.send(self.a, "@beta can you check the build?")[0], 200)

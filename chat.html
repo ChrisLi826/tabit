@@ -701,8 +701,8 @@ function header(me) {
 }
 // chips for the names at the start of the message light up
 function markChips() {
-  const lead = $("text").value.match(/^(?:\s*@[\w-]+[\s,]*)+/);
-  const on = new Set(lead ? [...lead[0].matchAll(/@([\w-]+)/g)].map((x) => x[1].toLowerCase()) : []);
+  const lead = $("text").value.match(/^(?:\s*@[\p{L}\p{N}_-]+[\s,:]*)+/u);
+  const on = new Set(lead ? [...lead[0].matchAll(/@([\p{L}\p{N}_-]+)/gu)].map((x) => x[1].toLowerCase()) : []);
   document.querySelectorAll("#chips button").forEach((b) => b.classList.toggle("on", on.has(b.dataset.a.toLowerCase())));
 }
 $("text").addEventListener("input", markChips);

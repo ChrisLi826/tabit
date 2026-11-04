@@ -823,7 +823,8 @@ class Chat(_Log):
             size = os.path.getsize(path)
         except OSError:
             return
-        fresh = have.get("path") != path or size < have.get("offset", 0)
+        fresh = (not have.get("path") or os.path.realpath(have["path"]) != os.path.realpath(path)
+                 or size < have.get("offset", 0))
         start = max(0, size - MIRROR_TAIL) if fresh else have["offset"]
         if size <= start:
             return
@@ -855,12 +856,12 @@ class Chat(_Log):
             events = events[-MIRROR_FIRST:]
             for ev in events:
                 ev["replay"] = True  # the past: a group does not pass it on
+        self.meta["mirror"] = {"path": path, "offset": start + end + 1}
+        self._save_meta()            # first: a stop between the two must not pass a line on twice
         for ev in events:
             if ev.get("reply"):
                 ev["reply"]["seq"] = self._seq_of(ev["reply"]["snip"])
             self.emit(ev)
-        self.meta["mirror"] = {"path": path, "offset": start + end + 1}
-        self._save_meta()
 
     def _seq_of(self, snip):
         """The newest message of this chat that begins with this quote, or None."""
@@ -963,12 +964,17 @@ BRIEF = ('You are in a group chat called "{title}" with these members: {names}. 
          'not answer just to say thanks.')
 
 
+NAME_END = r"(?![\w-]|[./\\]\S)"     # @tabit.py or @docs/x.md is a file, not a name
+
+
 def mentions(text):
     """The names a reply calls by @name at the start of a line (several per
     line allowed), lower case, in order."""
-    named = []
+    named, code = [], False
     for line in (text or "").splitlines():
-        m = re.match(r"\s*((?:@[\w-]+[\s,]*)+)", line)
+        if line.lstrip().startswith("```"):
+            code = not code
+        m = not code and re.match(r"\s*((?:@[\w-]+%s[\s,:]*)+)" % NAME_END, line)
         if m:
             for x in re.findall(r"@([\w-]+)", m.group(1)):
                 if x.lower() not in named:
@@ -979,7 +985,8 @@ def mentions(text):
 ROSTER = ("You are the AI tab @{me} in tabit, on this computer. Other AI tabs you can "
           "talk to: {others}. To send one a message, start a line of your reply with "
           "@name: tabit types your whole reply into that tab, marked [from @{me}]. A "
-          "message that starts with [from @name] came from that tab; answer it the same "
+          "message that starts with [from @name] came from that tab (another AI, not "
+          "the user); answer it the same "
           "way, with a line that starts with @name. Only do this when you need another "
           "tab. A reply with no @name stays in this tab.")
 
@@ -1187,7 +1194,7 @@ class Group(_Log):
         self.paused = False
         targets, rest = [], text
         while True:
-            m = re.match(r"[\s,]*@([\w-]+)[\s,]*", rest)      # "@a @b" or "@a, @b"
+            m = re.match(r"[\s,]*@([\w-]+)%s[\s,:]*" % NAME_END, rest)      # "@a @b" or "@a, @b"
             hit = m and next((c for c in self.members()
                               if self.alias(c).lower() == m.group(1).lower()), None)
             if not hit:
@@ -1473,7 +1480,7 @@ class ChatManager:
         tab: then the chat takes it."""
         names, called, rest = self.tab_names(), [], text
         while True:
-            m = re.match(r"[\s,]*@([\w-]+)[\s,]*", rest)
+            m = re.match(r"[\s,]*@([\w-]+)%s[\s,:]*" % NAME_END, rest)
             target = m and names.get(m.group(1).lower())
             if not target:
                 break

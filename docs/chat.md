@@ -75,12 +75,15 @@ The **Send to tab** card guards against Claude's mistakes; it is not a lock.
 A Claude that may run any command (Bypass, or a command you allowed) can
 reach tabit the way `tabit-tabs` does, and do what the phone can do. The real
 boundary is your user account on this computer, as for anything else you run.
+Tabs that talk to each other with `@name` (below) have no card at all: a tab's
+reply is typed into the other tab as it is, even into a tab in Bypass.
 
 ## Chats are tabs
 
 Every Claude tab in tabit has a chat, and every new chat is a Claude tab. The
 chat shows that tab's conversation, and what you type goes into the tab. A tab
-that is working takes your line too: Claude holds it until the turn is done.
+that is working takes your line too: Claude reads it at its next step, in the
+same turn, and the chat shows it.
 **Stop** presses Esc in the tab.
 
 - **One name, one group.** The chat has the tab's name and shows the tab's
@@ -137,6 +140,7 @@ is `@claude-lpr`; two of the same name get `-2`, `-3`).
   tabs it can call, through tabit's hooks. A tab that is alone is told
   nothing.
 - Only replies written from now on count: what a tab said before is not sent.
+  A line inside a code block, or a file name like `@tabit.py`, is no call.
 - There is no limit on how often tabs answer each other. Two tabs that keep
   replying to each other go on until you press Stop (Esc) in one of them.
 - A tab that is asking you something does not take a message; the sender's
