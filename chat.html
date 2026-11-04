@@ -241,20 +241,21 @@
   .mainbot { display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; padding: 6px 14px; border-radius: 18px; }
   .mainbot.sel { background: #262b45; } .mainbot .sub { font-size: 13px; } .mainbot .st-wait { color: var(--orange); } .mainbot .st-work { color: var(--yellow); }
   .mainbot .st-ready { color: var(--green); } .mainbot .st-bg { color: var(--purple); } .mainbot .st-gone { color: var(--dim); }
-  /* the state as a speech bubble on the picture's top right; none when idle */
-  .av .bub { position: absolute; right: -9px; top: -7px; min-width: 22px; height: 20px; padding: 0 5px; z-index: 1;
-             border-radius: 10px; border: 2px solid var(--bg); background: var(--c); color: #111; font: 700 12px/16px system-ui, sans-serif;
-             display: flex; align-items: center; justify-content: center; gap: 2px; box-sizing: border-box; }
-  .av .bub::after { content: ""; position: absolute; left: 1px; bottom: -6px; border: 4px solid transparent;
-                    border-top-color: var(--c); border-left-color: var(--c); }
+  /* the state as a speech bubble on the picture's top right; none when idle.
+     One shape, body and tail together, so its dark edge runs round both */
+  .av .bub { position: absolute; right: -11px; top: -10px; width: 28px; height: 24px; z-index: 1; }
+  .bub svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+  .bub path { fill: var(--c); stroke: var(--bg); stroke-width: 2.5; paint-order: stroke; stroke-linejoin: round; }
+  .bub b { position: absolute; left: 0; right: 0; top: 0; height: 76%; display: flex; align-items: center;
+           justify-content: center; gap: 2px; color: #111; font: 700 12px/1 system-ui, sans-serif; }
   .bub.working { --c: var(--yellow); } .bub.waiting { --c: var(--orange); } .bub.ready { --c: var(--green); }
-  .bub.background { --c: var(--purple); } .bub.exited { --c: #3b4261; color: var(--dim); }
+  .bub.background { --c: var(--purple); } .bub.exited { --c: #3b4261; } .bub.exited b { color: var(--dim); }
   .bub i { width: 3px; height: 3px; border-radius: 50%; background: #111; animation: bubdot 1.2s infinite; }
   .bub i:nth-child(2) { animation-delay: .2s; } .bub i:nth-child(3) { animation-delay: .4s; }
   @keyframes bubdot { 0%, 60%, 100% { transform: none; opacity: .5; } 30% { transform: translateY(-2px); opacity: 1; } }
-  .av.huge .bub { right: -10px; top: -6px; min-width: 30px; height: 26px; border-radius: 13px; font-size: 15px; }
+  .av.huge .bub { right: -12px; top: -8px; width: 38px; height: 33px; } .av.huge .bub b { font-size: 16px; gap: 3px; }
   .av.huge .bub i { width: 4px; height: 4px; }
-  .av.sm .bub { right: -7px; top: -6px; min-width: 16px; height: 15px; padding: 0 3px; font-size: 9px; border-width: 1.5px; }
+  .av.sm .bub { right: -8px; top: -7px; width: 20px; height: 17px; } .av.sm .bub b { font-size: 9px; gap: 1px; }
   .av.sm .bub i { width: 2px; height: 2px; }
   .av:has(.bub) .star { display: none; }
   .av .star { position: absolute; right: -2px; top: -2px; width: 24px; height: 24px; border-radius: 50%; background: var(--orange); color: #fff; font-size: 13px; display: grid; place-items: center; border: 2px solid var(--bg); }
@@ -492,7 +493,9 @@ const status = (msg, bad) => { const s = $("status"); s.textContent = msg || "";
 function bub(r) {
   const st = r.asks ? "waiting" : r.state;
   const glyph = { working: "<i></i><i></i><i></i>", waiting: "?", ready: "✓", background: "↻", exited: "×" }[st];
-  return glyph ? `<span class="bub ${st}" title="${esc(st)}">${glyph}</span>` : "";
+  // body, then the tail at its lower left, pointing down at the picture
+  return glyph ? `<span class="bub ${st}" title="${esc(st)}"><svg viewBox="0 0 30 26" aria-hidden="true"><path
+    d="M7 1 H23 A6 6 0 0 1 29 7 V13 A6 6 0 0 1 23 19 H12 L5 25 L7 19 A6 6 0 0 1 1 13 V7 A6 6 0 0 1 7 1 Z"/></svg><b>${glyph}</b></span>` : "";
 }
 // [class, words] for a chat's state under its name; null when idle: the last message shows
 function stateLine(r) {
