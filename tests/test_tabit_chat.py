@@ -1073,13 +1073,19 @@ class TabSyncTest(Base):
         self.assertEqual(self.titles(), ["MOT"])
         self.assertFalse([o for o in self.ops if o[0] == "close"])     # it is gone: nothing to close
 
-    def test_no_answer_or_no_tabs_changes_nothing(self):
+    def test_no_answer_changes_nothing(self):
         self.mgr.sync_tabs()
-        for gone in (None, []):
-            self.tabs = gone
-            for _ in range(tc.GONE_AFTER + 1):
-                self.mgr.sync_tabs()
+        self.tabs = None
+        for _ in range(tc.GONE_AFTER + 1):
+            self.mgr.sync_tabs()
         self.assertEqual(self.titles(), ["Blog", "MOT"])
+
+    def test_the_last_tab_closed_takes_its_chat_too(self):
+        self.mgr.sync_tabs()
+        self.tabs = []                   # no Claude tab at all: an answer, not tabit busy
+        for _ in range(tc.GONE_AFTER):
+            self.mgr.sync_tabs()
+        self.assertEqual(self.titles(), [])
 
     def test_a_tab_with_no_group_stays_out_of_groups(self):
         self.mgr.sync_tabs()
@@ -1570,6 +1576,22 @@ class TabTalkTest(Base):
             self.mgr.sync_tabs()
         self.assertIsNone(self.roster("ai-b"))
         self.assertIsNone(self.roster("ai-a"))                       # alone: nobody to talk to
+
+    def test_a_roster_left_from_before_a_restart_goes(self):
+        old = os.path.join(self.mgr.roster_dir, "ai-old.roster")
+        with open(old, "w") as f:
+            f.write("{}")
+        self.mgr._rosters.clear()                                    # a new tabit knows nothing
+        self.mgr.sync_tabs()
+        self.assertFalse(os.path.exists(old))
+        self.assertIsNotNone(self.roster("ai-a"))
+
+    def test_a_long_reply_reaches_the_other_tab_cut(self):
+        self.say("ta", "@beta here it is\n" + "x" * 9000)
+        [(tab, text)] = self.typed
+        self.assertEqual(tab, "tb")
+        self.assertLessEqual(len(text), 8000)
+        self.assertTrue(text.endswith("(cut)"))
 
 
 class ReplyTest(Base):

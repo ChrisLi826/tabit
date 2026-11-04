@@ -28,6 +28,7 @@ MODES = {"ask": "default", "edits": "acceptEdits", "plan": "plan",
 MODELS = ("", "opus", "sonnet", "haiku", "fable")
 
 MAX_RUNNING = 6              # claude processes alive at once
+TAB_TEXT = 8000              # the most tabit types into a tab at once
 SYNC_EVERY = 10              # seconds between looks at the list of tabs
 MOVE_TRIES = 3               # tries to move one chat into a tab before it is left alone
 GONE_AFTER = 6               # looks without its tab before an automatic mirror goes
@@ -1392,7 +1393,7 @@ class ChatManager:
         group. The chat follows the tab, and goes when the tab has been closed
         for a while."""
         tabs = self.tabs_hook()
-        if not tabs:                 # tabit busy or still starting: change nothing
+        if tabs is None:             # tabit busy: change nothing ([] is no Claude tab at all)
             return
         with self._tabs_lock:
             by_id = {t["id"]: t for t in tabs}
@@ -1467,7 +1468,7 @@ class ChatManager:
             if any(chat.id in g.meta["members"] and name in g.meta["alias"].values()
                    for g in self.groups.values()):
                 continue
-            code, out = target.mirror_send("[from @%s]: %s" % (me, ev["text"]))
+            code, out = target.mirror_send(_cut("[from @%s]: %s" % (me, ev["text"]), TAB_TEXT - 16))
             if code == 200:
                 chat.emit({"t": "relay", "from": me, "to": name})
             else:
@@ -1531,7 +1532,11 @@ class ChatManager:
                       for n, c in names.items() if n != me and c.meta["tab"]["id"] in have]
             if others:
                 want[key] = ROSTER.format(me=me, others=", ".join(others))
-        for key in set(self._rosters) - set(want):
+        try:                         # files of a tabit before this one count too
+            on_disk = {f[:-len(".roster")] for f in os.listdir(self.roster_dir) if f.endswith(".roster")}
+        except OSError:
+            on_disk = set()
+        for key in (set(self._rosters) | on_disk) - set(want):
             try:
                 os.remove(os.path.join(self.roster_dir, key + ".roster"))
             except OSError:

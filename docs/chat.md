@@ -101,7 +101,8 @@ same turn, and the chat shows it.
   groups (rooms) the old chat was in. The old chat's folder is kept as
   `~/.local/share/tabit/chats/<id>.moved`, history and all. Of the modes only
   Bypass goes along; a chat in Accept edits or Plan first becomes a tab that
-  asks each time. A chat that cannot move is tried 3 times.
+  asks each time (unless **Settings → AI → Claude bypass** is on, which makes
+  every new Claude tab bypass, this one too). A chat that cannot move is tried 3 times.
 - **Account and model.** A chat's settings show Account and Model, and each
   row shows `account · model`. Either switch restarts the tab's Claude in
   place, on the same conversation (`--resume`, with `--model` for a model),
