@@ -1411,6 +1411,103 @@ class ScreenMenuTest(Base):
         self.assertIsNone(tc.screen_prompt([" ❯ a", "   b"]))          # two rows, no number, no "Enter to confirm"
 
 
+class TabTalkTest(Base):
+    """A Claude tab's reply line that starts with @name is typed into that tab."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, tc, "MIRROR_EVERY", tc.MIRROR_EVERY)
+        tc.MIRROR_EVERY = 3600
+        self.tx = {}
+        for t in ("ta", "tb"):
+            self.tx[t] = os.path.join(self.dir, t + ".jsonl")
+            shutil.copy(os.path.join(HERE, "fixtures", "chat", "tab_transcript.jsonl"), self.tx[t])
+        self.titles = {"ta": "Alpha", "tb": "Beta"}
+        self.tabs = [{"id": "ta", "title": "Alpha", "group": "", "color": "", "key": "ai-a"},
+                     {"id": "tb", "title": "Beta", "group": "Work", "color": "blue", "key": "ai-b"}]
+        self.typed, self.refuse = [], set()
+
+        def hook(tab, text=None, key=None, queue=False):
+            if text is None and key is None:
+                return {"title": self.titles[tab], "status": "idle", "transcript": self.tx[tab], "claude": True}
+            if tab in self.refuse:
+                return 409, {"error": "that tab is asking something"}
+            self.typed.append((tab, text))
+            return 200, {"ok": True}
+        self.mgr.tab_hook = hook
+        self.mgr.tabs_hook = lambda: [dict(t) for t in self.tabs]
+        self.mgr.tab_ops = lambda op, target=None, body=None: (200, {"ok": True})
+        self.mgr.roster_dir = os.path.join(self.dir, "hooks")
+        os.makedirs(self.mgr.roster_dir)
+        self.mgr.sync_tabs()
+        self.a, self.b = (next(c for c in self.mgr.chats.values() if c.mirrored and c.meta["tab"]["id"] == t)
+                          for t in ("ta", "tb"))
+        self.a.mirror_poll()
+        self.b.mirror_poll()
+
+    def say(self, tab, text):
+        with open(self.tx[tab], "a") as f:
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": text}]}}) + "\n")
+        (self.a if tab == "ta" else self.b).mirror_poll()
+
+    def test_a_line_starting_with_at_name_goes_to_that_tab(self):
+        self.say("ta", "Let me ask.\n@beta can you check the build?")
+        self.assertEqual(self.typed, [("tb", "[from @alpha]: Let me ask.\n@beta can you check the build?")])
+        self.assertTrue(any(e["t"] == "relay" and e["to"] == "beta" for e in self.a.events))
+        self.say("tb", "@alpha it passes")                   # and back
+        self.assertEqual(self.typed[-1], ("ta", "[from @beta]: @alpha it passes"))
+
+    def test_no_mention_no_name_and_no_self_send_nothing(self):
+        self.say("ta", "all done, nobody to ask")
+        self.say("ta", "@nobody hello")
+        self.say("ta", "@alpha talking to myself")
+        self.assertEqual(self.typed, [])
+
+    def test_the_past_is_not_sent(self):
+        with open(self.tx["ta"], "a") as f:
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "@beta an old line"}]}}) + "\n")
+        self.a.meta["mirror"] = {}                            # a first look again: the past
+        self.a.mirror_poll()
+        self.assertEqual(self.typed, [])
+
+    def test_a_tab_that_cannot_take_it_says_so_in_the_sender(self):
+        self.refuse.add("tb")
+        self.say("ta", "@beta hello")
+        self.assertTrue(any(e["t"] == "error" and "beta" in e["text"] for e in self.a.events))
+
+    def test_tabs_in_one_group_leave_it_to_the_group(self):
+        code, out = self.mgr.create_group({"members": [self.a.id, self.b.id]})
+        self.assertEqual(code, 200, out)
+        self.say("ta", "@beta hello")
+        self.assertEqual(len([t for t in self.typed if t[0] == "tb"]), 1)
+
+    def roster(self, key):
+        path = os.path.join(self.mgr.roster_dir, key + ".roster")
+        if not os.path.exists(path):
+            return None
+        with open(path) as f:
+            return json.load(f)["hookSpecificOutput"]
+
+    def test_the_roster_tells_each_tab_who_is_there(self):
+        a = self.roster("ai-a")
+        self.assertEqual(a["hookEventName"], "UserPromptSubmit")
+        self.assertIn("@alpha", a["additionalContext"])
+        self.assertIn("@beta", a["additionalContext"])
+        self.assertIn("@beta", self.roster("ai-b")["additionalContext"])
+        path = os.path.join(self.mgr.roster_dir, "ai-a.roster")
+        before = os.stat(path).st_mtime_ns
+        time.sleep(0.02)
+        self.mgr.sync_tabs()
+        self.assertEqual(os.stat(path).st_mtime_ns, before)         # unchanged: not written again
+        self.tabs.pop()                                              # Beta closes
+        for _ in range(tc.GONE_AFTER + 1):
+            self.mgr.sync_tabs()
+        self.assertIsNone(self.roster("ai-b"))
+        self.assertIsNone(self.roster("ai-a"))                       # alone: nobody to talk to
+
+
 class ReplyTest(Base):
     def ask(self, chat, text, **body):
         code, out = tc.api(self.mgr, "POST", [chat.id, "send"], dict({"text": text}, **body))

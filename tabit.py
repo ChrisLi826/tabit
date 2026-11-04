@@ -1867,6 +1867,14 @@ def _claude_hooks_settings(hook_dir):
             f'printf "%s\\n%s\\n%s\\n%s\\n%s\\n" "$s" "$t" "$n" "$b" "$w" >{d}/"$k".tmp 2>/dev/null '
             f'&& mv -f {d}/"$k".tmp {d}/"$k" 2>/dev/null; exit 0')}
 
+    # each prompt brings the tab's roster (the other AI tabs it can @), as
+    # context: tabit writes <key>.roster ready to print
+    roster = {"type": "command", "command": (
+        'cat >/dev/null; k=$TABIT_AGENT; '
+        'if [ -n "$TMUX_PANE" ]; then '
+        'k=$(tmux display-message -p -t "$TMUX_PANE" "#S" 2>/dev/null); fi; '
+        f'[ -n "$k" ] && [ -f {d}/"$k".roster ] && cat {d}/"$k".roster; exit 0')}
+
     def ev(state, matcher=None):
         e = {"hooks": [put(state)]}
         if matcher is not None:
@@ -1914,7 +1922,7 @@ def _claude_hooks_settings(hook_dir):
         # not "compact": claude compacts in the middle of a turn. These two
         # start afresh: no question can be up when a prompt was typed
         "SessionStart": ev("s=idle; ", "startup|resume|clear"),
-        "UserPromptSubmit": ev("s=working; "),
+        "UserPromptSubmit": [{"hooks": [put("s=working; "), roster]}],
         "PreToolUse": ev(ask, "*"),
         "PostToolUse": ev(done, "*"),
         "PostToolUseFailure": ev(done, "*"),
@@ -2924,6 +2932,10 @@ class Tabit(Gtk.Window):
         GLib.timeout_add_seconds(self._AI_HUNT_SEC, self._ai_hunt_session_ids)
         _tmux_apply_user_conf()
         GLib.idle_add(self._check_weekly_auto_update)
+        # Tabit Chat runs from the start, not from the first /chat: it carries
+        # @name messages between AI tabs. Off the GTK thread: it asks tabit.
+        GLib.timeout_add_seconds(5, lambda: threading.Thread(
+            target=self._chat_mgr, daemon=True).start() and False)
         self._tg_start_listening()
         self._tg_watch_replies()
         # Second launcher click writes tabit.raise — present this window
@@ -13089,7 +13101,8 @@ if (data !== null) {{
                             tab_hook=self._chat_tab_hook,
                             tabs_hook=self._chat_tabs_hook,
                             tab_ops=self._chat_tab_ops,
-                            extra_env=self._chat_tool_env)
+                            extra_env=self._chat_tool_env,
+                            roster_dir=AGENT_HOOK_DIR)
                         self._chat_manager.ensure_default()
                         break
             return self._chat_manager
@@ -13113,6 +13126,7 @@ if (data !== null) {{
                     continue
                 color = getattr(row, "group_color", None) or ""
                 out.append({"id": self._tg_row_id(row),
+                            "key": self._agent_hook_key(row) or "",   # its roster file's name
                             "account": self._claude_account_of(got[0]) or "",
                             "title": getattr(row, "title_text", "") or "",
                             "group": (self._group_names.get(color) or color.capitalize()) if color else "",

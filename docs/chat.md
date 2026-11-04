@@ -125,6 +125,25 @@ that is working takes your line too: Claude holds it until the turn is done.
   away when the question is answered in the tab. While it is open, the chat
   does not type into the tab.
 
+## Tabs talk to each other
+
+A Claude tab can send a message to another Claude tab. When a line of its
+reply starts with `@name`, tabit types the whole reply into that tab, marked
+`[from @me]`; the other tab answers the same way, with a line that starts
+with `@me`. Each tab's name is its tab name made into one word (`[Claude] LPR`
+is `@claude-lpr`; two of the same name get `-2`, `-3`).
+
+- Every Claude tab is told, with each prompt, its own name and the other
+  tabs it can call, through tabit's hooks. A tab that is alone is told
+  nothing.
+- Only replies written from now on count: what a tab said before is not sent.
+- There is no limit on how often tabs answer each other. Two tabs that keep
+  replying to each other go on until you press Stop (Esc) in one of them.
+- A tab that is asking you something does not take a message; the sender's
+  chat says so.
+- Two tabs in the same group talk through the group instead (see Groups).
+- It runs from the time tabit starts, with or without the chat page open.
+
 ## Groups
 
 A group puts two or more chats in one room.

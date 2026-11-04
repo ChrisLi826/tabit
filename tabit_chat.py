@@ -951,6 +951,27 @@ BRIEF = ('You are in a group chat called "{title}" with these members: {names}. 
          'not answer just to say thanks.')
 
 
+def mentions(text):
+    """The names a reply calls by @name at the start of a line (several per
+    line allowed), lower case, in order."""
+    named = []
+    for line in (text or "").splitlines():
+        m = re.match(r"\s*((?:@[\w-]+[\s,]*)+)", line)
+        if m:
+            for x in re.findall(r"@([\w-]+)", m.group(1)):
+                if x.lower() not in named:
+                    named.append(x.lower())
+    return named
+
+
+ROSTER = ("You are the AI tab @{me} in tabit, on this computer. Other AI tabs you can "
+          "talk to: {others}. To send one a message, start a line of your reply with "
+          "@name: tabit types your whole reply into that tab, marked [from @{me}]. A "
+          "message that starts with [from @name] came from that tab; answer it the same "
+          "way, with a line that starts with @name. Only do this when you need another "
+          "tab. A reply with no @name stays in this tab.")
+
+
 def slug(text):
     out = "".join(c if c.isalnum() else "-" for c in text.lower()).strip("-")
     return "-".join(p for p in out.split("-") if p)[:40] or "chat"
@@ -1109,11 +1130,7 @@ class Group(_Log):
 
     def _mentions(self, text, skip=None):
         """Members named by @name at the start of a line, several per line allowed."""
-        named = set()
-        for line in text.splitlines():
-            m = re.match(r"\s*((?:@[\w-]+[\s,]*)+)", line)
-            if m:
-                named.update(x.lower() for x in re.findall(r"@([\w-]+)", m.group(1)))
+        named = set(mentions(text))
         return [c for c in self.members()
                 if c is not skip and self.alias(c).lower() in named]
 
@@ -1186,7 +1203,7 @@ class Group(_Log):
 
 class ChatManager:
     def __init__(self, accounts=None, env_drop=(), root=CHAT_DIR, claude=None, auth=None,
-                 tab_hook=None, extra_env=None, tabs_hook=None, tab_ops=None):
+                 tab_hook=None, extra_env=None, tabs_hook=None, tab_ops=None, roster_dir=None):
         self.accounts = accounts or (lambda: [])     # [(name, cli)]
         self.auth = auth                             # fn(cli) -> {"email", "subscriptionType"}
         self._labels = (0, [])
@@ -1197,6 +1214,8 @@ class ChatManager:
         self.tabs_hook = tabs_hook   # () -> [{"id", "title", "group"}] for the Claude tabs, or None
         self.tab_ops = tab_ops       # (op, tab id, body) -> (code, body): groups | new | close | rename
         self._tabs_lock = threading.Lock()   # a tab and its chat are made together
+        self.roster_dir = roster_dir # where each tab's roster goes for its prompt hook
+        self._rosters = {}           # hook key -> the roster text written
         self._synced = 0.0
         self._missed = {}            # chat id -> looks without its tab
         self._move_failed = {}       # chat id -> tries to move it into a tab that failed
@@ -1379,6 +1398,10 @@ class ChatManager:
                     chat.meta["tab"] = want
                     chat._save_meta()
                     chat.push()
+            for chat in have.values():
+                if self._tab_talk not in chat.listeners:
+                    chat.listeners.append(self._tab_talk)
+            self._write_rosters(tabs, have)
             for tid, chat in have.items():
                 if tid in by_id:
                     self._missed.pop(chat.id, None)
@@ -1388,6 +1411,83 @@ class ChatManager:
                         self._missed.pop(chat.id, None)
                         self.delete(chat)
             self._move_old_chats()
+
+    def tab_names(self):
+        """{name: chat} for every chat that mirrors a tab: @name is how tabs
+        call each other. One place, so the roster and the routing agree."""
+        with self.lock:
+            mirrors = sorted((c for c in self.chats.values() if c.mirrored),
+                             key=lambda c: (c.meta.get("created", 0), c.id))
+        names = {}
+        for c in mirrors:
+            base = slug(c.meta["title"])
+            name, n = base, 2
+            while name in names:
+                name, n = "%s-%d" % (base, n), n + 1
+            names[name] = c
+        return names
+
+    def _tab_talk(self, chat, ev):
+        """A tab's reply with a line that starts with @name is typed into that
+        tab, marked [from @me]. Its past (a first look) is not news. Two tabs
+        in one group leave it to the group."""
+        if not ev or ev.get("t") != "text" or ev.get("replay") or not chat.mirrored:
+            return
+        called = mentions(ev.get("text"))
+        if not called:
+            return
+        names = self.tab_names()
+        me = next((n for n, c in names.items() if c is chat), None)
+        for name in called:
+            target = names.get(name)
+            if me is None or target is None or target is chat:
+                continue
+            if any(chat.id in g.meta["members"] and name in g.meta["alias"].values()
+                   for g in self.groups.values()):
+                continue
+            code, out = target.mirror_send("[from @%s]: %s" % (me, ev["text"]))
+            if code == 200:
+                chat.emit({"t": "relay", "from": me, "to": name})
+            else:
+                chat.emit({"t": "error", "text": "could not reach @%s: %s" % (
+                    name, (out or {}).get("error", code))})
+
+    def _write_rosters(self, tabs, have):
+        """Each tab's roster, for its prompt hook: who it is, whom it can @.
+        Written only when it changed; gone when the tab, or every other tab,
+        is gone."""
+        if not self.roster_dir:
+            return
+        names = self.tab_names()
+        name_of = {c.meta["tab"]["id"]: n for n, c in names.items()}
+        want = {}
+        for tab in tabs:
+            key, me = tab.get("key"), name_of.get(tab["id"])
+            if not key or not me or not re.fullmatch(r"[\w.-]{1,80}", key):
+                continue
+            others = ["@%s" % n + (" (group %s)" % c.meta["tab"].get("group")
+                                   if c.meta["tab"].get("group") else "")
+                      for n, c in names.items() if n != me and c.meta["tab"]["id"] in have]
+            if others:
+                want[key] = ROSTER.format(me=me, others=", ".join(others))
+        for key in set(self._rosters) - set(want):
+            try:
+                os.remove(os.path.join(self.roster_dir, key + ".roster"))
+            except OSError:
+                pass
+            self._rosters.pop(key, None)
+        for key, text in want.items():
+            if self._rosters.get(key) == text:
+                continue
+            path = os.path.join(self.roster_dir, key + ".roster")
+            try:
+                with open(path + ".tmp", "w", encoding="utf-8") as f:
+                    json.dump({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                                                      "additionalContext": text}}, f)
+                os.replace(path + ".tmp", path)
+                self._rosters[key] = text
+            except OSError:
+                pass
 
     def _move_old_chats(self):
         """A chat that runs its own Claude moves into a tab, once it is idle: the
