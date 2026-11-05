@@ -928,6 +928,11 @@ REMOTE_PAGE = "remote.html"
 # flag, so its file lives where Grok loads user hooks.
 AGENT_HOOK_DIR = os.path.join(GLib.get_user_runtime_dir(), "tabit-agent")
 CLAUDE_HOOKS_FILE = os.path.expanduser("~/.local/share/tabit/claude-hooks.json")
+# Codex runs this at the end of each turn with a JSON that names its session
+# ("thread-id"). Codex 0.166 keeps every session file open in one shared
+# daemon, so the tab's own processes no longer show which session is its.
+CODEX_NOTIFY_FILE = os.path.expanduser("~/.local/share/tabit/codex-notify.sh")
+CODEX_NOTIFY_ARG = 'notify=["%s"]' % CODEX_NOTIFY_FILE
 GROK_HOOK_SCRIPT = os.path.expanduser("~/.local/share/tabit/grok_status_hook.py")
 GROK_HOOKS_FILE = os.path.expanduser("~/.grok/hooks/tabit-status.json")
 # Claude keeps each folder's sessions here, one <id>.jsonl per session
@@ -1932,6 +1937,40 @@ def _claude_hooks_settings(hook_dir):
         "Stop": ev(stop),
         "StopFailure": ev(stop),
     }}
+
+
+def _codex_notify_script(hook_dir):
+    """The script Codex runs after a turn: it keeps the session ids the tab's
+    codex named, newest last, in <hook dir>/<tab key>.codex."""
+    return ("#!/bin/sh\n"
+            "# tabit: written by tabit, which reads what it keeps\n"
+            'k=$TABIT_AGENT; if [ -n "$TMUX_PANE" ]; then '
+            'k=$(tmux display-message -p -t "$TMUX_PANE" "#S" 2>/dev/null); fi\n'
+            '[ -n "$k" ] || exit 0\n'
+            'id=$(printf %%s "$1" | sed -n \'s/.*"thread-id": *"\\([^"]*\\)".*/\\1/p\')\n'
+            '[ -n "$id" ] || exit 0\n'
+            'f=%s/"$k".codex\n'
+            '{ tail -n 9 "$f" 2>/dev/null; echo "$id"; } >"$f.tmp" && mv -f "$f.tmp" "$f"\n'
+            % shlex.quote(hook_dir))
+
+
+def _ensure_codex_notify():
+    """Write the script a codex AI tab runs after each turn, when it changed."""
+    want = _codex_notify_script(AGENT_HOOK_DIR)
+    try:
+        with open(CODEX_NOTIFY_FILE) as f:
+            if f.read() == want:
+                return
+    except OSError:
+        pass
+    try:
+        os.makedirs(AGENT_HOOK_DIR, mode=0o700, exist_ok=True)
+        os.makedirs(os.path.dirname(CODEX_NOTIFY_FILE), exist_ok=True)
+        with open(CODEX_NOTIFY_FILE, "w") as f:
+            f.write(want)
+        os.chmod(CODEX_NOTIFY_FILE, 0o755)
+    except OSError as e:
+        print(f"[tabit] cannot write {CODEX_NOTIFY_FILE}: {e}", file=sys.stderr)
 
 
 def _ensure_claude_hooks():
@@ -3459,6 +3498,8 @@ class Tabit(Gtk.Window):
         if _is_ai_icon(getattr(row, "icon_name", None)):
             if CLAUDE_HOOKS_FILE in " ".join(run):
                 _ensure_claude_hooks()
+            if CODEX_NOTIFY_FILE in " ".join(run):
+                _ensure_codex_notify()
             if self._ai_tmux_unwrap(run)[1] is None:
                 # the name its claude hooks write under (a tmux tab uses its
                 # session); TMUX is dropped since this tab is not in tmux
@@ -13193,26 +13234,62 @@ if (data !== null) {{
         return {"TABIT_SOCK": REMOTE_SOCK, "TABIT_OWNER": owner or ""}
 
     def _chat_tabs_hook(self):
-        """For a chat: every Claude AI tab as {"id", "title", "group"}, or None
-        when tabit is busy. Runs on the GTK thread through _remote_call."""
+        """For a chat: every Claude or Codex AI tab as {"id", "title", "group",
+        "cli", ...}, or None when tabit is busy. Runs on the GTK thread through
+        _remote_call."""
         def work():
             out = []
             for row in self._session_rows():
                 if not _is_ai_icon(getattr(row, "icon_name", None)):
                     continue
-                got = self._ai_cli_path_of(getattr(row, "argv", None))
-                if not (got and self._ai_is_claude(got[0])):
+                cli = self._chat_cli_of(row)
+                if not cli:
                     continue
                 color = getattr(row, "group_color", None) or ""
-                out.append({"id": self._tg_row_id(row),
+                out.append({"id": self._tg_row_id(row), "cli": cli,
                             "key": self._agent_hook_key(row) or "",   # its roster file's name
-                            "account": self._claude_account_of(got[0]) or "",
+                            "account": (self._claude_account_of(
+                                self._ai_cli_path_of(row.argv)[0]) or "") if cli == "claude" else "",
                             "title": getattr(row, "title_text", "") or "",
                             "group": (self._group_names.get(color) or color.capitalize()) if color else "",
                             "color": color})
             return out
         res = self._remote_call(work)
         return res if isinstance(res, list) else None
+
+    def _chat_cli_of(self, row):
+        """"claude" or "codex" for an AI tab a chat can show, else None."""
+        got = self._ai_cli_path_of(getattr(row, "argv", None))
+        if not got:
+            return None
+        if self._ai_is_claude(got[0]):
+            return "claude"
+        return "codex" if os.path.basename(got[0].rstrip("/")) == "codex" else None
+
+    def _codex_notified(self, row):
+        """The session ids the tab's codex named after its turns, oldest first."""
+        key = self._agent_hook_key(row)
+        try:
+            with open(os.path.join(AGENT_HOOK_DIR, key + ".codex")) as f:
+                return f.read().split()
+        except (OSError, TypeError):
+            return []
+
+    _codex_rollouts = {}         # session id: its rollout file, found once
+
+    @classmethod
+    def _codex_rollout(cls, argv):
+        """The rollout file of the last session in argv that has one, or "".
+        The ids are those in the tab's command and those its codex named."""
+        for sid in reversed(re.findall(_UUID_RE, " ".join(argv or []))):
+            path = cls._codex_rollouts.get(sid)
+            if not (path and os.path.isfile(path)):
+                found = glob.glob(os.path.expanduser(
+                    "~/.codex/sessions/*/*/*/rollout-*-%s.jsonl" % sid))
+                path = cls._codex_rollouts[sid] = max(found) if found else ""
+            if path:
+                return path
+        return ""
 
     def _chat_model(self, tab_id, model, account=None):
         """Switch a tab's model, and its login when asked: tabit restarts its
@@ -13265,7 +13342,7 @@ if (data !== null) {{
     def _chat_tab_hook(self, tab_id, text=None, key=None, queue=False):
         """For a chat: info about an AI tab; with text, type a line into it;
         with key, press one. Info is {"title", "status", "transcript",
-        "claude"} (a blocked tab adds "screen", its last lines) or {"error"}; the others give (code, body). queue: a busy tab
+        "cli"} (a blocked tab adds "screen", its last lines) or {"error"}; the others give (code, body). queue: a busy tab
         takes the line too (Claude Code holds it), only a question stops it.
         Runs on the GTK thread through _remote_call."""
         acts = text is not None or key is not None
@@ -13278,11 +13355,12 @@ if (data !== null) {{
             status = "exited" if getattr(row, "dead", False) else \
                 getattr(row, "agent_status", None) or "unknown"
             if not acts:
-                got = self._ai_cli_path_of(getattr(row, "argv", None))
+                cli = self._chat_cli_of(row)
                 info = {"title": getattr(row, "title_text", "") or tab_id,
-                        "status": status,
-                        "transcript": getattr(row, "_agent_hook_tx", "") or "",
-                        "claude": bool(got and self._ai_is_claude(got[0]))}
+                        "status": status, "cli": cli or "",
+                        "transcript": self._codex_rollout(
+                            list(row.argv or []) + self._codex_notified(row)) if cli == "codex"
+                        else getattr(row, "_agent_hook_tx", "") or ""}
                 term = getattr(row, "term", None)
                 if status == "blocked" and term is not None and self._remote_send_on:
                     # the menu the tab waits on, so the chat can show it (typing switch: as the screen)
@@ -15040,9 +15118,12 @@ if (data !== null) {{
 
     @classmethod
     def _ai_hook_tokens(cls, cli):
-        """Claude loads tabit's hooks, which report its status exactly."""
+        """Claude loads tabit's hooks, which report its status exactly. Codex
+        names its session after each turn, for the tab's chat."""
         if cls._ai_is_claude(cli):
             return ["--settings", CLAUDE_HOOKS_FILE]
+        if os.path.basename(cli.rstrip("/")) == "codex":
+            return ["-c", CODEX_NOTIFY_ARG]
         return []
 
     @classmethod
@@ -15108,6 +15189,9 @@ if (data !== null) {{
             if t == "--settings" and i + 1 < len(tokens) \
                     and tokens[i + 1] == CLAUDE_HOOKS_FILE:
                 i += 2
+                continue
+            if t == "-c" and i + 1 < len(tokens) and tokens[i + 1] == CODEX_NOTIFY_ARG:
+                i += 2           # ... and its notify to every codex
                 continue
             if t == "--model" and i + 1 < len(tokens):      # tabit adds the tab's own model
                 i += 2

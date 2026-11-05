@@ -93,6 +93,16 @@ that is working takes your line too: Claude reads it at its next step, in the
 same turn, and the chat shows it.
 **Stop** presses Esc in the tab.
 
+**Codex tabs** have a chat too. Their badge says `Codex · <model>`. The chat
+reads the Codex session's file (`~/.codex/sessions/.../rollout-*.jsonl`).
+Codex 0.166 keeps every session file open in one shared daemon, so tabit
+cannot tell from the tab's own processes which session is its. Instead
+tabit starts each Codex with `-c notify=[...]`: after each turn Codex runs
+`~/.local/share/tabit/codex-notify.sh`, which writes the session id for
+that tab. So a Codex chat fills in once its first turn ends, and a Codex
+that was started before this needs to start again. Its login and model are
+Codex's own; the chat's settings do not change them.
+
 - **One name, one group.** The chat has the tab's name and shows the tab's
   group under it, with the group's colour. Rename the chat and the tab is
   renamed. Rename or regroup the tab and the chat follows within 10 seconds.

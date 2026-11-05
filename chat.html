@@ -464,7 +464,8 @@ const modelShort = (id) => { const m = /^claude-([a-z]+)-(\d+)(?:-(\d+))?/.exec(
 // the login and the model a chat uses, as one small badge
 const usingBadge = (r) => {
   const model = r.tab ? modelShort(r.tab.model) : (r.model || "default");
-  return `<span class="badge">${esc([r.account || "Default", model].filter(Boolean).join(" · "))}</span>`;
+  const who = r.tab && r.tab.cli === "codex" ? "Codex" : r.account || "Default";
+  return `<span class="badge">${esc([who, model].filter(Boolean).join(" · "))}</span>`;
 };
 const groupBadge = (tab) => tab && tab.group ? `<span class="badge"><i class="gdot" style="background:${GROUP_CSS[tab.color] || "var(--dim)"}"></i>${esc(tab.group)}</span>` : "";
 const base = (k) => (k === "groups" ? "api/chat-groups" : "api/chats");
@@ -1255,12 +1256,13 @@ const settings = async (t = cur) => {
     $("e-save").onclick = async () => { try { await api(`api/chat-groups/${t.id}/edit`, { title: $("e-title").value }); done(); } catch (e) { $("e-err").textContent = e.message; } };
     $("e-del").onclick = async () => { if (!confirm("Delete this group? Its chats stay.")) return; await api(`api/chat-groups/${t.id}/delete`, {}); gone(); };
   } else {
+    const codex = m.tab && m.tab.cli === "codex";     // its login and model are Codex's own
     sheet(`<h2>Chat</h2><div id="e-look"></div><div class="hint">${m.tab ? "Its tab in tabit: the name is the tab’s name" : esc(tilde(m.cwd))}</div>
       <label>Name</label><input id="e-title" value="${esc(m.title)}" maxlength="80">
-      <label>Account</label><select id="e-account">${(cfg.accounts || []).map((a) => `<option value="${esc(a.name)}"${a.name === (m.account || "") ? " selected" : ""}>${esc(a.label)}</option>`).join("")}</select>
+      <div ${codex ? "hidden" : ""}><label>Account</label><select id="e-account">${(cfg.accounts || []).map((a) => `<option value="${esc(a.name)}"${a.name === (m.account || "") ? " selected" : ""}>${esc(a.label)}</option>`).join("")}</select>
       <div ${m.tab ? "hidden" : ""}><label>When Claude wants to do something</label><select id="e-mode">${opts(cfg.modes, m.mode, (x) => MODE_NAME[x])}</select>
       <div class="hint warn" id="e-warn" ${m.mode === "bypass" ? "" : "hidden"}>Bypass: no questions asked.</div></div>
-      <label>Model</label><select id="e-model">${opts(cfg.models, m.tab ? aliasOf(m.tab.model) : m.model, (x) => x || "default")}</select>
+      <label>Model</label><select id="e-model">${opts(cfg.models, m.tab ? aliasOf(m.tab.model) : m.model, (x) => x || "default")}</select></div>
       <div class="hint" ${m.tab && m.tab.model ? "" : "hidden"}>${m.tab ? "Answering as " + esc(m.tab.model) + ". A new model starts with the next message, and only when the tab is not busy." : ""}</div>
       <div ${m.tab ? "hidden" : ""}><label>Connectors</label><button type="button" id="e-reload">↻ Reload Claude</button>
       <div class="hint" id="e-reloaded">Changed a connector (Gmail, Strava…)? Tap this. The chat keeps its history.</div></div>

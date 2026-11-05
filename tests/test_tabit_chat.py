@@ -663,7 +663,7 @@ class MirrorTest(Base):
                 return (404, {"error": "no"}) if text or key else {"error": "no"}
             if text is None and key is None:
                 return {"title": "MOT", "status": self.status,
-                        "transcript": self.path, "claude": True}
+                        "transcript": self.path, "cli": "claude"}
             self.calls.append((text, key, queue))
             return 200, {"ok": True}
         self.mgr.tab_hook = hook
@@ -913,9 +913,9 @@ class MirrorTest(Base):
         tc.api(self.mgr, "POST", [chat.id, "stop"], {})
         self.assertEqual(self.calls[-1], (None, "esc", False))
 
-    def test_only_a_claude_tab(self):
+    def test_only_a_claude_or_codex_tab(self):
         old = self.mgr.tab_hook
-        self.mgr.tab_hook = lambda tab, *a, **k: dict(old(tab), claude=False)
+        self.mgr.tab_hook = lambda tab, *a, **k: dict(old(tab), cli="")
         self.assertEqual(self.mgr.create({"tab": {"id": "t1"}})[0], 400)
         self.mgr.tab_hook = old
         self.assertEqual(self.mgr.create({"tab": {"id": "zz"}})[0], 400)
@@ -956,6 +956,75 @@ class MirrorTest(Base):
 
 
 
+class CodexMirrorTest(Base):
+    """A chat that shows a Codex tab: its bubbles come from the tab's rollout file."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, tc, "MIRROR_EVERY", tc.MIRROR_EVERY)
+        tc.MIRROR_EVERY = 3600       # the tests look by hand
+        self.path = os.path.join(self.dir, "rollout.jsonl")
+        shutil.copy(os.path.join(os.path.dirname(__file__), "fixtures", "chat",
+                                 "codex_rollout.jsonl"), self.path)
+        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False: {
+            "title": "MOT", "status": "idle", "transcript": self.path, "cli": "codex"}
+        self.mgr.tabs_hook = lambda: [{"id": "t1", "title": "MOT", "cli": "codex"}]
+
+    mirror = MirrorTest.mirror
+    texts = MirrorTest.texts
+
+    def raws(self):
+        with open(self.path) as f:
+            return [json.loads(line) for line in f]
+
+    def test_the_converter_keeps_what_was_said(self):
+        got = [e for r in self.raws() for e in tc.transcript_events(r, "codex")]
+        # the context Codex adds and its response_item copies are not shown
+        self.assertEqual([(e["t"], e.get("text") or e.get("name")) for e in got],
+                         [("user", "fix the bug"), ("text", "Looking now."),
+                          ("tool", "Bash"), ("result", "a.txt\n"),
+                          ("tool", "Bash"), ("result", "cat: b.txt: No such file\n"),
+                          ("tool", "Edit"), ("text", "Fixed.")])
+        tools = [e for e in got if e["t"] in ("tool", "result")]
+        self.assertEqual(tools[0]["summary"], "ls")
+        self.assertEqual([e["error"] for e in tools if e["t"] == "result"], [False, True])
+        self.assertEqual(tools[4]["summary"], "/home/u/proj/a.txt")
+        self.assertTrue(all("ts" in e for e in got))
+
+    def test_an_interrupt_is_a_note(self):
+        raw = {"type": "event_msg", "payload": {"type": "turn_aborted", "reason": "interrupted"}}
+        self.assertEqual(tc.codex_events(raw), [{"t": "notice", "text": "Interrupted."}])
+
+    def test_the_model_comes_from_the_turn(self):
+        self.assertEqual(tc.transcript_model(self.path), "gpt-5.6-luna")
+
+    def test_first_look_shows_the_conversation_then_only_what_is_new(self):
+        chat = self.mirror()
+        chat.mirror_poll()
+        self.assertEqual(self.texts(chat)[0], ("user", "fix the bug"))
+        self.assertEqual(chat.meta["tab"].get("model"), "gpt-5.6-luna")
+        n = len(chat.events)
+        chat.mirror_poll()
+        self.assertEqual(len(chat.events), n)
+
+    def test_a_codex_tab_gets_a_chat(self):
+        self.mgr.sync_tabs()
+        chat = next(c for c in self.mgr.chats.values() if c.mirrored)
+        self.assertEqual(chat.meta["tab"]["cli"], "codex")
+
+    def test_its_login_and_model_stay_codex(self):
+        chat = self.mirror()
+        self.mgr.tab_ops = lambda *a: self.fail("a Codex tab is not restarted as Claude")
+        code, out = tc.api(self.mgr, "POST", [chat.id, "edit"], {"model": "opus"})
+        self.assertEqual(code, 400, out)
+
+    def test_another_ai_tab_gets_none(self):
+        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False: {
+            "title": "G", "status": "idle", "transcript": "", "cli": ""}
+        code, out = self.mgr.create({"tab": {"id": "t1", "title": "x"}})
+        self.assertEqual(code, 400, out)
+
+
 class TabSyncTest(Base):
     """A chat and a Claude tab are one: same name, same group, made and closed together."""
 
@@ -968,7 +1037,7 @@ class TabSyncTest(Base):
         self.ops = []
         self.reply = (200, {"ok": True})
         self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False: {
-            "title": "MOT", "status": "idle", "transcript": "", "claude": True}
+            "title": "MOT", "status": "idle", "transcript": "", "cli": "claude"}
         self.mgr.tabs_hook = lambda: [dict(t) for t in self.tabs] if self.tabs is not None else None
 
         def ops(op, target=None, body=None):
@@ -1214,7 +1283,7 @@ class TabSwitchTest(Base):
 
         def hook(tab, text=None, key=None, queue=False):
             if text is None and key is None:
-                return {"title": "MOT", "status": "idle", "transcript": self.path, "claude": True}
+                return {"title": "MOT", "status": "idle", "transcript": self.path, "cli": "claude"}
             if self.busy:
                 return 409, {"error": "that tab is busy: wait for it"}
             self.typed.append(text)
@@ -1311,7 +1380,7 @@ class ScreenMenuTest(Base):
 
         def hook(tab, text=None, key=None, queue=False):
             if text is None and key is None:
-                info = {"title": "MOT", "status": self.status, "transcript": "", "claude": True}
+                info = {"title": "MOT", "status": self.status, "transcript": "", "cli": "claude"}
                 if self.status == "blocked":
                     info["screen"] = self.screen
                 return info
@@ -1452,7 +1521,7 @@ class TabTalkTest(Base):
 
         def hook(tab, text=None, key=None, queue=False):
             if text is None and key is None:
-                return {"title": self.titles[tab], "status": "idle", "transcript": self.tx[tab], "claude": True}
+                return {"title": self.titles[tab], "status": "idle", "transcript": self.tx[tab], "cli": "claude"}
             if tab in self.refuse:
                 return 409, {"error": "that tab is asking something"}
             self.typed.append((tab, text))
