@@ -99,8 +99,10 @@ Codex 0.166 keeps every session file open in one shared daemon, so tabit
 cannot tell from the tab's own processes which session is its. Instead
 tabit starts each Codex with `-c notify=[...]`: after each turn Codex runs
 `~/.local/share/tabit/codex-notify.sh`, which writes the session id for
-that tab. So a Codex chat fills in once its first turn ends, and a Codex
-that was started before this needs to start again. Its login and model are
+that tab. So a Codex chat fills in once its first turn ends. A Codex tab
+saved before this gets the notify the next time its codex starts. tabit
+takes Codex's `notify` setting for this: a `notify` in your
+`~/.codex/config.toml` is not run in a tab. Its login and model are
 Codex's own; the chat's settings do not change them. When Codex asks to
 run a command or make an edit, the chat shows its question as a card, the
 same as a menu in a Claude tab: a tap presses that option's number in the tab.

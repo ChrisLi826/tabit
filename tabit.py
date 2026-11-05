@@ -2889,6 +2889,7 @@ class Tabit(Gtk.Window):
         # grok loads its file from ~/.grok/hooks the next time it starts
         _ensure_claude_hooks()
         _ensure_grok_hooks()
+        _ensure_codex_notify()
         # Keep collapsed_groups from settings; do not expand while replaying sessions.
         self._restoring_sessions = True
         last_row = None
@@ -3482,11 +3483,11 @@ class Tabit(Gtk.Window):
 
             GLib.timeout_add(800, _kick)
         if _is_ai_icon(icon_name):
-            # a tab saved earlier starts Grok in minimal too
-            argv = self._ai_ensure_grok_minimal(argv)
+            # a tab saved earlier starts Grok in minimal too, and Codex with tabit's notify
+            argv = self._ai_ensure_codex_notify(self._ai_ensure_grok_minimal(argv))
             row.argv = argv
             if launch_argv:
-                launch_argv = self._ai_ensure_grok_minimal(launch_argv)
+                launch_argv = self._ai_ensure_codex_notify(self._ai_ensure_grok_minimal(launch_argv))
         run = launch_argv or argv
         self._spawn_term(row, run, workdir)
         return row
@@ -15162,15 +15163,40 @@ if (data !== null) {{
 
         return head + sep + word.sub(add, rest)
 
+    @staticmethod
+    def _ai_cmd_codex_notify(cmd):
+        """Put tabit's notify on every codex in a command tabit already stored:
+        a tab saved before it was added gets it the next time it starts."""
+        head, sep, rest = cmd.partition(" || exit 1; ")
+        if not sep:
+            head, rest = "", cmd
+        word = re.compile(
+            r"(?:^|(?<=\|\| )|(?<=exec ))(?P<bin>(?:[\w./-]+/)?codex)(?=\s|$)"
+            r"(?P<args>(?:\s+(?!&&|\|\|)[^\s;|&]+)*)")
+
+        def add(match):
+            args = match.group("args")
+            if "notify=" in args:
+                return match.group(0)
+            return match.group("bin") + args + " -c " + shlex.quote(CODEX_NOTIFY_ARG)
+
+        return head + sep + word.sub(add, rest)
+
     @classmethod
-    def _ai_ensure_grok_minimal(cls, argv):
-        """Same command, with Grok's minimal flag, or argv when nothing changed."""
+    def _ai_ensure_codex_notify(cls, argv):
+        """Same command, with tabit's Codex notify, or argv when nothing changed."""
+        return cls._ai_ensure_grok_minimal(argv, cls._ai_cmd_codex_notify)
+
+    @classmethod
+    def _ai_ensure_grok_minimal(cls, argv, fix=None):
+        """Same command, with Grok's minimal flag (or what `fix` does to it),
+        or argv when nothing changed."""
         if not argv or len(argv) != 3 or argv[0] != "/bin/sh":
             return argv
         inner, sess = cls._ai_tmux_unwrap(argv)
         if len(inner) != 3 or inner[0] != "/bin/sh":
             return argv
-        new_cmd = cls._ai_cmd_grok_minimal(inner[2])
+        new_cmd = (fix or cls._ai_cmd_grok_minimal)(inner[2])
         if new_cmd == inner[2]:
             return argv
         new_inner = ["/bin/sh", "-c", new_cmd]

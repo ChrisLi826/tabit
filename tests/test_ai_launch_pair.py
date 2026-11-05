@@ -285,6 +285,18 @@ class TestGrokStartsMinimal(unittest.TestCase):
         self.assertIn("exec grok --minimal", new[2])
         self.assertEqual(Tabit._ai_ensure_grok_minimal(new), new)
 
+    def test_an_old_codex_command_gains_the_notify_once(self):
+        import tabit as T
+        old = ["/bin/sh", "-c", "cd /tmp/codex || exit 1; codex --continue || codex resume --last || exec codex"]
+        new = Tabit._ai_ensure_codex_notify(old)
+        self.assertEqual(new[2].count(T.CODEX_NOTIFY_ARG), 3)
+        self.assertTrue(new[2].startswith("cd /tmp/codex || exit 1; codex --continue -c "))
+        self.assertEqual(Tabit._ai_ensure_codex_notify(new), new)
+        built = Tabit._ai_argv("codex", "/tmp", ["resume --last"])
+        self.assertEqual(Tabit._ai_ensure_codex_notify(built), built)
+        claude = ["/bin/sh", "-c", "cd /home/u/codex || exit 1; exec claude"]
+        self.assertEqual(Tabit._ai_ensure_codex_notify(claude), claude)
+
     def test_fullscreen_is_left_as_it_was(self):
         cmd = "cd /tmp || exit 1; exec grok --fullscreen"
         self.assertEqual(Tabit._ai_cmd_grok_minimal(cmd), cmd)
