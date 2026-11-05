@@ -42,7 +42,8 @@ Screen** makes it an app of its own.
   folder** makes one inside the folder shown: one plain name, no `/`.
 - **Files and photos.** 📎, paste or drag and drop. The file goes to
   `~/.local/share/tabit/uploads/<date>/` and its path goes into your message.
-- **🔔** tells you when Claude is done while the page is hidden.
+- **🔔** tells you when Claude is done while you are not looking at the page
+  (another window or app in front counts). 🔕 means it is off; tap to turn it on.
 - **⚙** (next to ⌨ on the list) opens tabit's Settings, the same sheet as in
   the terminal view: the AI defaults for new tabs, the Claude accounts (add
   one, log in), Check for updates and Restart tabit.

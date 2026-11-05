@@ -347,7 +347,7 @@
   <button id="back" type="button" title="back" hidden>‹</button>
   <span id="hav" class="av sm" hidden></span>
   <div id="ttl"><h1 id="title">Chat</h1><div id="pill" class="pill" hidden></div></div>
-  <button id="notify" type="button" title="tell me when Claude is done" hidden>🔔</button>
+  <button id="notify" type="button" title="tell me when Claude is done" hidden>🔕</button>
   <button id="more" type="button" hidden>⋯</button>
   <button id="add" type="button" class="primary">＋</button>
   <a id="remote" href="terminal" title="the terminal view"><button type="button">⌨</button></a>
@@ -661,7 +661,7 @@ function openTalk(k, id) {
   cur = { kind: k, id, es: null, lastSeq: 0, pending: new Set(), tools: new Map(), asks: new Map(), members: {}, firstSeq: 0, state: "idle", live: {} };
   $("list").classList.remove("on"); $("talk").classList.add("on");
   $("back").hidden = false; $("more").hidden = false; $("add").hidden = true; $("remote").hidden = true; $("setbtn").hidden = true;
-  $("notify").hidden = !("Notification" in window);
+  $("notify").hidden = !("Notification" in window); bell();
   $("msgs").innerHTML = ""; $("title").textContent = "…"; status("");
   $("chips").style.display = "none"; $("atlist").hidden = true; setReply(null);
   $("text").value = localStorage.getItem("draft:" + id) || ""; grow();
@@ -726,8 +726,14 @@ function take(me, d) {
   paintLive(me);
   paintAsks(me);
   header(me);
-  if (finished && document.hidden && localStorage.getItem("notify") === "1" && Notification.permission === "granted")
-    new Notification(d.meta.title, { body: "Claude is done." });
+  // not looking: another window or app in front counts, not only a hidden page,
+  // since a desktop shows a page behind other windows as visible
+  if (finished && (document.hidden || !document.hasFocus()) && bellOn()) {
+    try {                                    // a phone's Chrome refuses a page's own notice
+      const n = new Notification(d.meta.title, { body: "Claude is done." });
+      n.onclick = () => { window.focus(); n.close(); };
+    } catch (e) { /* the rest of the page goes on */ }
+  }
   if (stick) box.scrollTop = box.scrollHeight;
   else $("jump").style.display = "block";
 }
@@ -1069,11 +1075,19 @@ $("text").addEventListener("paste", (e) => {
 document.addEventListener("dragover", (e) => e.preventDefault());
 document.addEventListener("drop", (e) => { const f = e.dataTransfer?.files[0]; if (f && cur) { e.preventDefault(); upload(f); } });
 
+// 🔔 on, 🔕 off: the button says which
+const bellOn = () => localStorage.getItem("notify") === "1" && Notification.permission === "granted";
+function bell() {
+  if (!("Notification" in window)) return;
+  $("notify").textContent = bellOn() ? "🔔" : "🔕";
+  $("notify").title = bellOn() ? "notifications on: tap to turn off" : "tell me when Claude is done";
+}
 $("notify").onclick = async () => {
-  if (localStorage.getItem("notify") === "1") { localStorage.removeItem("notify"); status("Notifications off."); return; }
+  if (bellOn()) { localStorage.removeItem("notify"); bell(); status("Notifications off."); return; }
   const p = await Notification.requestPermission();
-  if (p === "granted") { localStorage.setItem("notify", "1"); status("You will be told when Claude is done and this page is hidden."); }
+  if (p === "granted") { localStorage.setItem("notify", "1"); status("You will be told when Claude is done and you are not looking at this page."); }
   else status("Notifications are blocked in this browser.", true);
+  bell();
 };
 
 // --- sheets -----------------------------------------------------------------
