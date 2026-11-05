@@ -15,8 +15,11 @@ Screen** makes it an app of its own.
 
 - **Chats.** Each chat is one Claude working in a folder you pick, with a
   model you pick. Replies stream in as they are written. Markdown, lists and
-  code show properly; a file path in `code` opens the file (when **Allow
-  opening files** is on).
+  code show properly. Tap a file path (under your home or `/tmp`, in `code`
+  or not) and the file opens over the chat, when **Allow opening files** is
+  on: a picture fits the box, other files show as a page. Esc, ✕ or a tap
+  outside closes it; ↗ (or a Ctrl- or Cmd-click on the path) opens it in a
+  new window.
 - **The main chat.** *Tabit Chat* (the owl) is always first in the list and
   cannot be deleted. It is your main assistant: bring it anything. For a big
   job that needs its own folder, it suggests that you start a separate chat.

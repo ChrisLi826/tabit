@@ -56,7 +56,7 @@
   .pill { font-size: 12px; padding: 2px 9px; border-radius: 99px; background: var(--panel); color: var(--dim); white-space: nowrap; }
   .pill.waiting { color: var(--orange); }
   .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--dim); margin-right: 6px; }
-  .dot.working { background: var(--yellow); } .dot.waiting { background: var(--orange); }
+  .dot.working { background: var(--purple); } .dot.waiting { background: var(--orange); }
   .dot.ready { background: var(--green); } .dot.background { background: var(--purple); }
   .dot.exited { background: transparent; box-shadow: inset 0 0 0 2px var(--dim); }
   main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -79,7 +79,7 @@
   .av { position: relative; flex: none; width: 54px; height: 54px; border-radius: 50%; display: grid; place-items: center;
         font-size: 40px; line-height: 1; }
   .av .dot { position: absolute; right: -1px; bottom: -1px; width: 13px; height: 13px; margin: 0; border: 2px solid var(--bg); background: var(--dim); }
-  .av .dot.working { background: var(--yellow); } .av .dot.waiting { background: var(--orange); }
+  .av .dot.working { background: var(--purple); } .av .dot.waiting { background: var(--orange); }
   .av .dot.ready { background: var(--green); } .av .dot.background { background: var(--purple); }
   .av .dot.exited { background: var(--bg); box-shadow: inset 0 0 0 2px var(--dim); }
   .card .body { flex: 1; min-width: 0; }
@@ -91,7 +91,7 @@
   .card .meta { display: flex; gap: 5px; margin-top: 5px; flex-wrap: wrap; }
   .card .sub { color: var(--dim); font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .card .sub.last { color: #aab1d6; margin-top: 1px; }
-  .card .sub.last.st-work { color: var(--yellow); }
+  .card .sub.last.st-work { color: var(--purple); }
   .card .sub.last.st-wait { color: var(--orange); font-weight: 600; }
   .badge { font-size: 11px; padding: 1px 8px; border-radius: 99px; background: #ffffff0d; color: var(--dim); }
   .badge .gdot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
@@ -183,6 +183,17 @@
   #status.err { color: var(--red); }
 
   /* sheets */
+  /* a file opens over the chat, not in a new window; Esc, ✕ or a tap outside closes it */
+  #viewer { width: min(96vw, 1100px); height: 90dvh; max-width: none; max-height: none; padding: 0;
+            border: 1px solid var(--line); border-radius: 14px; background: var(--bg); color: var(--fg); overflow: hidden; }
+  #viewer[open] { display: flex; flex-direction: column; }
+  #viewer::backdrop { background: #000a; backdrop-filter: blur(4px); }
+  #viewer .vbar { display: flex; align-items: center; gap: 6px; padding: 6px 8px 6px 14px; border-bottom: 1px solid var(--line); }
+  #vname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 13px ui-monospace, Menlo, monospace; color: var(--dim); }
+  #viewer .vbar a, #viewer .vbar button { font-size: 18px; line-height: 1; padding: 6px 10px; color: var(--fg); text-decoration: none; background: none; border: 0; cursor: pointer; }
+  #vframe { flex: 1; width: 100%; border: 0; background: #1a1b26; }
+  #vimg { flex: 1; min-height: 0; width: 100%; object-fit: contain; background: #0a0c14; }
+  #viewer [hidden] { display: none; }
   #sheet { position: fixed; inset: 0; background: #0009; backdrop-filter: blur(4px); display: none; align-items: flex-end; justify-content: center; z-index: 5; }
   #sheet.on, #sheet2.on { display: flex; }
   #sheet2 { position: fixed; inset: 0; background: #000a; display: none; align-items: flex-end; justify-content: center; z-index: 6; }
@@ -244,19 +255,24 @@
   #acct[hidden] { display: none; }
   #hero { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 0 6px; font-size: 17px; }
   .mainbot { display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; padding: 6px 14px; border-radius: 18px; }
-  .mainbot.sel { background: #262b45; } .mainbot .sub { font-size: 13px; } .mainbot .st-wait { color: var(--orange); } .mainbot .st-work { color: var(--yellow); }
+  .mainbot.sel { background: #262b45; } .mainbot .sub { font-size: 13px; } .mainbot .st-wait { color: var(--orange); } .mainbot .st-work { color: var(--purple); }
   /* the state as a speech bubble on the picture's top right; none when idle.
-     One shape, body and tail together, so its dark edge runs round both */
+     One shape, body and tail together, so its white edge runs round both,
+     as on the favicon's bubble; the sign inside is white too */
   .av .bub { position: absolute; right: -11px; top: -10px; width: 28px; height: 24px; z-index: 1; }
   .bub svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
-  .bub path { fill: var(--c); stroke: var(--bg); stroke-width: 2.5; paint-order: stroke; stroke-linejoin: round; }
+  .bub path { fill: var(--c); stroke: #fff; stroke-width: 4; paint-order: stroke; stroke-linejoin: round; }
   .bub b { position: absolute; left: 0; right: 0; top: 0; height: 76%; display: flex; align-items: center;
-           justify-content: center; gap: 2px; color: #111; font: 700 12px/1 system-ui, sans-serif; }
-  .bub.working { --c: var(--yellow); } .bub.waiting { --c: var(--orange); } .bub.ready { --c: var(--green); }
-  .bub.background { --c: var(--purple); } .bub.exited { --c: #3b4261; } .bub.exited b { color: var(--dim); }
-  .bub i { width: 3px; height: 3px; border-radius: 50%; background: #111; animation: bubdot 1.2s infinite; }
+           justify-content: center; gap: 2px; color: #fff; font: 700 12px/1 system-ui, sans-serif; }
+  .bub.working { --c: var(--purple); } .bub.waiting { --c: var(--orange); } .bub.ready { --c: var(--green); }
+  .bub.background { --c: var(--purple); } .bub.exited { --c: #3b4261; }
+  .bub i { width: 3px; height: 3px; border-radius: 50%; background: #fff; animation: bubdot 1.2s infinite; }
+  /* background turns, so it is not taken for working, which is purple too */
+  .bub .spin { display: inline-block; animation: bubspin 1.6s linear infinite; }
+  @keyframes bubspin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .bub .spin { animation: none; } }
   .bub i:nth-child(2) { animation-delay: .2s; } .bub i:nth-child(3) { animation-delay: .4s; }
-  @keyframes bubdot { 0%, 60%, 100% { transform: none; opacity: .5; } 30% { transform: translateY(-2px); opacity: 1; } }
+  @keyframes bubdot { 0%, 60%, 100% { transform: none; opacity: .7; } 30% { transform: translateY(-2px); opacity: 1; } }
   .av.huge .bub { right: -12px; top: -8px; width: 38px; height: 33px; } .av.huge .bub b { font-size: 16px; gap: 3px; }
   .av.huge .bub i { width: 4px; height: 4px; }
   .av.sm .bub { right: -8px; top: -7px; width: 20px; height: 17px; } .av.sm .bub b { font-size: 9px; gap: 1px; }
@@ -352,6 +368,7 @@
 </main>
 <div id="sheet"><div class="in" id="sheetin"></div></div>
 <div id="sheet2"><div class="in" id="sheet2in"></div></div>
+<dialog id="viewer"><div class="vbar"><span id="vname"></span><a id="vnew" target="_blank" rel="noopener" title="open in a new window">↗</a><button id="vclose" type="button" title="close (Esc)">✕</button></div><iframe id="vframe" title="file"></iframe><img id="vimg" alt=""></dialog>
 
 <script>
 "use strict";
@@ -439,14 +456,21 @@ async function api(path, body) {
 }
 
 // --- a little Markdown: what Claude writes, never raw HTML ------------------
+const pathLink = (c) => `<a class="path" target="_blank" rel="noopener" href="api/file?path=${encodeURIComponent(c)}&amp;render=1"><code>${c}</code></a>`;
 function inline(raw) {
-  let t = esc(raw);
-  t = t.replace(/`([^`]+)`/g, (_m, c) => /^(\/|~\/)[\w.\-\/~@+]+$/.test(c)
-    ? `<a class="path" target="_blank" rel="noopener" href="api/file?path=${encodeURIComponent(c)}&amp;render=1"><code>${c}</code></a>`
-    : `<code>${c}</code>`);
-  t = t.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
-  t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-  return t;
+  // `code` first; a path in plain text opens the file too (home and /tmp:
+  // what the file view shows), without a full stop that ends the sentence
+  return String(raw).split(/(`[^`]+`)/).map((seg, i) => {
+    if (i % 2) {
+      const c = esc(seg.slice(1, -1));
+      return /^(\/|~\/)[\w.\-\/~@+]+$/.test(c) ? pathLink(c) : `<code>${c}</code>`;
+    }
+    let t = esc(seg);
+    t = t.replace(/(^|[\s(*:：，、「（])((?:\/home\/|\/tmp\/|~\/)[\w.\-\/~@+]*[\w\/~@+-])/g, (_m, pre, c) => pre + pathLink(c));
+    t = t.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+    t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    return t;
+  }).join("");
 }
 function md(text) {
   const out = [];
@@ -471,7 +495,8 @@ function md(text) {
       else if ((m = line.match(/^\s*([-*]|\d+\.)\s+(.*)/))) {
         endPara();
         const kind = /\d/.test(m[1]) ? "ol" : "ul";
-        if (list !== kind) { endList(); out.push(`<${kind}>`); list = kind; }
+        // a numbered list cut by bullets goes on from its own number, not from 1
+        if (list !== kind) { endList(); out.push(kind === "ol" ? `<ol start="${parseInt(m[1], 10)}">` : "<ul>"); list = kind; }
         out.push(`<li>${inline(m[2])}</li>`);
       }
       else if ((m = line.match(/^>\s?(.*)/))) { endPara(); endList(); out.push(`<blockquote>${inline(m[1])}</blockquote>`); }
@@ -481,6 +506,25 @@ function md(text) {
   });
   return out.join("");
 }
+
+// --- a file, over the chat ---------------------------------------------------
+// A tapped path shows here instead of in a new window. Ctrl, Cmd, Shift or
+// the middle button still open one, and so does ↗.
+document.addEventListener("click", (e) => {
+  const a = e.target.closest("a.path, a.file");
+  if (!a || e.button || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  e.preventDefault();
+  const path = new URL(a.href).searchParams.get("path") || "";
+  const pic = /\.(png|jpe?g|gif|webp|svg)$/i.test(path);     // a picture fits the box; the rest is a page
+  $("vname").textContent = tilde(path);
+  $("vnew").href = a.href;
+  $("vframe").hidden = pic; $("vimg").hidden = !pic;
+  if (pic) $("vimg").src = a.href; else $("vframe").src = a.href;
+  $("viewer").showModal();
+});
+$("vclose").onclick = () => $("viewer").close();
+$("viewer").onclick = (e) => { if (e.target === $("viewer")) $("viewer").close(); };   // the dim around it
+$("viewer").onclose = () => { $("vframe").src = "about:blank"; $("vimg").removeAttribute("src"); };
 
 // --- state ------------------------------------------------------------------
 let cfg = null;                 // {accounts, modes, models}
@@ -497,7 +541,7 @@ const status = (msg, bad) => { const s = $("status"); s.textContent = msg || "";
 // the state as a bubble on the picture: "" when idle
 function bub(r) {
   const st = r.asks ? "waiting" : r.state;
-  const glyph = { working: "<i></i><i></i><i></i>", waiting: "?", ready: "✓", background: "↻", exited: "×" }[st];
+  const glyph = { working: "<i></i><i></i><i></i>", waiting: "?", ready: "✓", background: "<span class=\"spin\">↻</span>", exited: "×" }[st];
   // body, then the tail at its lower left, pointing down at the picture
   return glyph ? `<span class="bub ${st}" title="${esc(st)}"><svg viewBox="0 0 30 26" aria-hidden="true"><path
     d="M7 1 H23 A6 6 0 0 1 29 7 V13 A6 6 0 0 1 23 19 H12 L5 25 L7 19 A6 6 0 0 1 1 13 V7 A6 6 0 0 1 7 1 Z"/></svg><b>${glyph}</b></span>` : "";
