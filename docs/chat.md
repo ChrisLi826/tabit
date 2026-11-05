@@ -43,6 +43,9 @@ Screen** makes it an app of its own.
 - **Files and photos.** 📎, paste or drag and drop. The file goes to
   `~/.local/share/tabit/uploads/<date>/` and its path goes into your message.
 - **🔔** tells you when Claude is done while the page is hidden.
+- **⚙** (next to ⌨ on the list) opens tabit's Settings, the same sheet as in
+  the terminal view: the AI defaults for new tabs, the Claude accounts (add
+  one, log in), Check for updates and Restart tabit.
 - **History.** Chats and their history stay on this computer in
   `~/.local/share/tabit/chats/`. Close the page, come back later, and it goes
   on. Each chat is a normal Claude session, so you can also `claude --resume`
@@ -52,12 +55,11 @@ Screen** makes it an app of its own.
 
 ## Claude login
 
-Every chat uses the same Claude login. When Settings → AI on the computer has
-more than one Claude account, **🔑** at the top of the list shows which one
-and lets you pick another. All the chats move to it and carry on where they
-were, because every login shares the same sessions. While a chat is working
-the switch is refused: wait, or press Stop. A chat that mirrors a tab does not
-count, since it runs no Claude of its own.
+When Settings → AI on the computer has more than one Claude account, each
+chat picks its own. **New chat** asks which account the new tab uses, and
+offers the one picked last. A chat's settings (⋯) show its Account and switch
+it later; the main *Tabit Chat* too. A switch is refused while that chat is
+working: wait, or press Stop.
 
 ## The AI tabs
 

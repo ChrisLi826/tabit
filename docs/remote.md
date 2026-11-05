@@ -58,6 +58,10 @@ console, that is a remote shell from your phone.
   tab keeps the mode you pick. In ⌨ mode the text box is hidden, and on a
   computer the key buttons too. Copy and paste as in a terminal:
   Ctrl+Shift+C / Ctrl+Shift+V (Cmd+C / Cmd+V on a Mac); Ctrl+C is ^C.
+  A computer's Page Up / Page Down, Home and End go in too, so `git log`
+  and `less` page with them, with the arrows, even in a tab you never
+  opened at the desk. While a pager runs, the screen shows only the
+  pager's page, not the lines it scrolled away above it.
 - Attach files: 📎 on a phone, or drag and drop / paste a screenshot on a
   computer. They are saved to `~/.local/share/tabit/uploads/<date>/` (never
   overwritten, at most 25 MB), and the path goes into the text box.

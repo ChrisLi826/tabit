@@ -1242,7 +1242,7 @@ class ChatManager:
         self.accounts = accounts or (lambda: [])     # [(name, cli)]
         self.auth = auth                             # fn(cli) -> {"email", "subscriptionType"}
         self._labels = (0, [])
-        self.account = ""                            # the one login every chat uses
+        self.account = ""                            # the login of a chat that picked none
         self.env_drop = tuple(env_drop)
         self.root = root
         self.tab_hook = tab_hook     # (tab id, text=None, key=None, queue=False), from tabit
@@ -1293,24 +1293,6 @@ class ChatManager:
             rows.append({"name": name, "label": (name or "Default") + (" — " + who if who else "")})
         self._labels = (time.time(), rows)
         return rows
-
-    def set_account(self, name):
-        """(status, object): every chat moves to this login. The sessions are
-        shared by all logins, so each chat goes on where it was."""
-        if name and name not in [n for n, _ in self.accounts()]:
-            return 400, {"error": "no such Claude account: %s" % name}
-        with self.lock:
-            chats = list(self.chats.values())
-        if any(c.state != "idle" for c in chats if not c.mirrored):    # a mirror runs no claude
-            return 409, {"error": "wait until every chat is done, or press Stop"}
-        for c in chats:
-            if not c.mirrored:
-                c.stop_process()     # the next message starts it with the new login
-        self.account = name
-        os.makedirs(self.root, exist_ok=True)
-        with open(os.path.join(self.root, "account.json"), "w", encoding="utf-8") as f:
-            json.dump({"account": name}, f)
-        return 200, {"account": name}
 
     def _load(self):
         try:
@@ -1612,8 +1594,11 @@ class ChatManager:
             return 400, {"error": "no tabs here"}
         cwd = os.path.expanduser((body.get("cwd") or "").strip() or "~")
         title = " ".join(str(body.get("title") or "").split())[:80]
+        account = body.get("account", self.account)         # picked in the form; else the default
+        if account not in [""] + [n for n, _ in self.accounts()]:
+            return 400, {"error": "no such Claude account"}
         want = {"kind": "ai", "cli": "claude", "cwd": cwd, "group": body.get("group") or "",
-                "account": self.account}
+                "account": account}
         if title:
             want["name"] = title
         with self._tabs_lock:
@@ -1829,10 +1814,6 @@ def api(mgr, method, parts, body):
         if method == "POST":
             return mgr.new_tab_chat(body) if body.get("kind") == "tab" else mgr.create(body)
         return 405, {"error": "GET or POST"}
-    if parts[0] == "account":
-        if method == "POST":
-            return mgr.set_account(_text(body, "account"))
-        return 200, {"account": mgr.account, "accounts": mgr.account_choices()}
     chat = mgr.get(parts[0])
     if chat is None:
         return 404, {"error": "no such chat"}

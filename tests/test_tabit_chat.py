@@ -155,33 +155,17 @@ class AccountTest(Base):
                               accounts=lambda: [("Work", FAKE)],
                               auth=lambda cli: {"loggedIn": True, "email": "a@b.c", "subscriptionType": "pro"})
 
-    def test_one_login_for_every_chat_and_it_can_change(self):
-        chat = self.new()
+    def test_the_logins_have_labels(self):
         rows = self.mgr.account_choices()
         self.assertEqual([r["name"] for r in rows], ["", "Work"])
         self.assertEqual(rows[1]["label"], "Work — a@b.c · pro")
-        self.assertEqual(tc.api(self.mgr, "POST", ["account"], {"account": "nobody"})[0], 400)
-        self.assertEqual(tc.api(self.mgr, "POST", ["account"], {"account": "Work"})[0], 200)
-        self.assertEqual(chat.summary()["account"], "Work")
-        self.assertEqual(self.make().account, "Work")           # it is remembered
 
-    def test_the_login_cannot_change_while_a_chat_works(self):
-        chat = self.new()
-        chat.send("slow")
-        self.assertTrue(wait(lambda: chat.state != "idle"))
-        self.assertEqual(tc.api(self.mgr, "POST", ["account"], {"account": "Work"})[0], 409)
-        chat.interrupt()
-
-
-class AccountMirrorTest(AccountTest):
-
-    def test_a_mirrored_tab_at_work_does_not_hold_the_login(self):
-        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False: \
-            {"title": "MOT", "status": "working", "transcript": "", "claude": True}
-        code, out = self.mgr.create({"tab": {"id": "t1", "title": "x"}})
-        mirror = self.mgr.get(out["chat"]["id"])
-        mirror.tab_state = "working"            # its tab works; this chat runs nothing
-        self.assertEqual(tc.api(self.mgr, "POST", ["account"], {"account": "Work"})[0], 200)
+    def test_a_chat_picks_its_own_login(self):
+        a, b = self.new(), self.new()
+        self.assertEqual(tc.api(self.mgr, "POST", [a.id, "edit"], {"account": "nobody"})[0], 400)
+        self.assertEqual(tc.api(self.mgr, "POST", [a.id, "edit"], {"account": "Work"})[0], 200)
+        self.assertEqual((a.summary()["account"], b.summary()["account"]), ("Work", ""))
+        self.assertEqual(tc.api(self.mgr, "POST", ["account"], {"account": "Work"})[0], 404)   # no login for all
 
 
 class SafetyTest(Base):
@@ -1188,6 +1172,17 @@ class TabSyncTest(Base):
         self.tabs.append({"id": "t9", "title": "MOT", "group": "Work", "color": "blue"})
         self.mgr.sync_tabs()
         self.assertEqual(len([c for c in self.mgr.chats.values() if c.mirrored and c.meta["tab"]["id"] == "t9"]), 1)
+
+    def test_a_new_chat_opens_its_tab_with_the_login_picked(self):
+        self.mgr.accounts = lambda: [("Work", FAKE)]
+        tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "account": "Work"})
+        self.assertEqual(next(o for o in self.ops if o[0] == "new")[2]["account"], "Work")
+        self.ops.clear()
+        tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir})      # none picked: the default
+        self.assertEqual(next(o for o in self.ops if o[0] == "new")[2]["account"], "")
+        self.ops.clear()
+        code, _ = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "account": "nobody"})
+        self.assertEqual((code, self.ops), (400, []))
 
     def test_a_new_chat_with_no_group_leaves_it_to_tabit(self):
         tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir})

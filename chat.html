@@ -205,6 +205,26 @@
   #sheet label, #sheet2 label { display: block; margin: 10px 0 4px; color: var(--dim); font-size: 13px; }
   #sheet .acts, #sheet2 .acts { display: flex; gap: 8px; margin-top: 14px; }
   #sheet .acts button, #sheet2 .acts button { flex: 1; }
+  /* the Settings sheet (settings.js, shared with the terminal view) */
+  #sheet h3 { margin: 0 0 10px; font-size: 18px; }
+  #sheet label.check { display: flex; align-items: center; gap: 8px; color: var(--fg); font-size: 14px; }
+  #sheet label.check input { width: auto; margin: 0; }
+  #sheet .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  #sheet .row button { flex: 1; padding: 10px; }
+  #sheet .go { background: var(--blue); color: #111; border: 0; font-weight: 600; }
+  #sheet .pathline { display: flex; gap: 8px; align-items: center; }
+  #sheet .pathline input { flex: 1; min-width: 0; }
+  #sheet .pathline button { flex: none; padding: 9px 12px; }
+  #sheet .acct { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 14px; }
+  #sheet .acct span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  #sheet .acct button { flex: none; padding: 7px 12px; }
+  #sheet .box { border: 1px solid var(--line); border-radius: 12px; padding: 10px; margin: 8px 0; }
+  #sheet .btnlink { display: block; text-align: center; padding: 10px; border-radius: 12px; margin: 8px 0;
+                    background: var(--blue); color: #111; text-decoration: none; font-weight: 600; }
+  #sheet .dim, #sheet .smsg { color: var(--dim); font-size: 13px; margin: 6px 0; }
+  #sheet .err { color: var(--red); font-size: 13px; margin: 6px 0; }
+  #sheet .slog { font: 11px/1.3 ui-monospace, Menlo, monospace; white-space: pre-wrap; max-height: 9em;
+                 overflow: auto; background: #0a0c14; padding: 6px; border-radius: 6px; margin: 6px 0; }
   .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
   .chips button { padding: 4px 12px; font-size: 13px; border-radius: 14px; max-width: 100%; overflow-wrap: anywhere; text-align: left; }
   .dirs { max-height: 44vh; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; margin-top: 8px; }
@@ -251,8 +271,6 @@
                     font: 12px/1.45 ui-monospace, Menlo, monospace; background: #0003; border-radius: 8px; padding: 8px 10px; }
 
   html { scrollbar-color: #2f3549 transparent; } * { scrollbar-width: thin; scrollbar-color: #2f3549 transparent; }
-  #acct { align-self: center; max-width: 92%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 99px; font-size: 13px; padding: 5px 14px; color: var(--dim); background: #ffffff0a; margin-bottom: 4px; }
-  #acct[hidden] { display: none; }
   #hero { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 0 6px; font-size: 17px; }
   .mainbot { display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; padding: 6px 14px; border-radius: 18px; }
   .mainbot.sel { background: #262b45; } .mainbot .sub { font-size: 13px; } .mainbot .st-wait { color: var(--orange); } .mainbot .st-work { color: var(--purple); }
@@ -285,6 +303,7 @@
   #q { border-radius: 99px; padding: 12px 18px; background: #1d2030; }
   body:has(#list.on) header h1 { visibility: hidden; }
   #sbhead a button, #remote button { font-size: 24px; line-height: 1; padding: 0 12px; }
+  #setbtn, #sb-set { font-size: 20px; line-height: 1; padding: 0 10px; }
   #sbhead, #pick { display: none; }
   /* a wide screen: the list stays on the left, the conversation on the right */
   @media (min-width: 900px) {
@@ -300,7 +319,7 @@
     body:has(#talk:not(.on)) header { visibility: hidden; }
     #grip { display: block; position: fixed; top: 0; bottom: 0; left: calc(var(--listw, 340px) - 4px); width: 9px; cursor: col-resize; z-index: 4; touch-action: none; }
     #grip:hover, #grip.on { background: #7aa2f744; }
-    #back, #add, #remote { display: none !important; }
+    #back, #add, #remote, #setbtn { display: none !important; }
     #hero { padding: 4px 0 2px; } #hero .av.huge { width: 60px; height: 60px; font-size: 42px; } #hero .mainbot { font-size: 15px; }
     body:has(#list.on) header h1 { visibility: visible; }
     #sbhead { display: flex; align-items: center; gap: 8px; padding: 14px 14px 4px; }
@@ -332,15 +351,15 @@
   <button id="more" type="button" hidden>⋯</button>
   <button id="add" type="button" class="primary">＋</button>
   <a id="remote" href="terminal" title="the terminal view"><button type="button">⌨</button></a>
+  <button id="setbtn" type="button" title="tabit settings: AI defaults, Claude accounts, update, restart">⚙</button>
 </header>
 <div id="conn">Reconnecting…</div>
 <main>
   <section id="list" class="view on">
-    <div id="sbhead"><h1>Chat</h1><button id="sb-add" type="button" class="primary" title="new chat">＋</button><a href="terminal" title="the terminal view"><button type="button">⌨</button></a></div>
+    <div id="sbhead"><h1>Chat</h1><button id="sb-add" type="button" class="primary" title="new chat">＋</button><a href="terminal" title="the terminal view"><button type="button">⌨</button></a><button id="sb-set" type="button" title="tabit settings: AI defaults, Claude accounts, update, restart">⚙</button></div>
     <div id="scroller">
     <div id="top">
     <div id="hero"></div>
-    <button id="acct" type="button" hidden title="the Claude login every chat uses"></button>
     <div id="tabs"><button data-k="chats" class="on">Chats</button><button data-k="groups">Groups</button></div>
     </div>
     <div id="cards"></div>
@@ -370,6 +389,7 @@
 <div id="sheet2"><div class="in" id="sheet2in"></div></div>
 <dialog id="viewer"><div class="vbar"><span id="vname"></span><a id="vnew" target="_blank" rel="noopener" title="open in a new window">↗</a><button id="vclose" type="button" title="close (Esc)">✕</button></div><iframe id="vframe" title="file"></iframe><img id="vimg" alt=""></dialog>
 
+<script src="settings.js"></script>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -564,9 +584,6 @@ async function loadList() {
   $("hero").innerHTML = main ? `<div class="mainbot${cur && cur.id === main.id ? " sel" : ""}" data-id="${esc(main.id)}">
       <div class="av huge">${emo(face(main))}<span class="star">★</span>${bub(main)}</div>
       <div>${esc(main.title)}</div>${stateLine(main) ? `<div class="sub ${stateLine(main)[0]}">${stateLine(main)[1]}</div>` : ""}</div>` : "";
-  const acc = (data.accounts || []).find((a) => a.name === data.account);
-  $("acct").hidden = (data.accounts || []).length < 2;
-  $("acct").textContent = "🔑 " + (acc ? acc.label : "Default");
   const q = $("q").value.trim().toLowerCase();
   const all = (kind === "chats" ? data.chats : data.groups).filter((r) => !r.default);
   const rows = q ? all.filter((r) => `${r.title} ${r.last}`.toLowerCase().includes(q)) : all;
@@ -588,19 +605,6 @@ async function loadList() {
   }).join("");
   listScroll().scrollTop = keep;
 }
-// one Claude login for the whole of Tabit Chat; sessions are shared, so chats go on
-$("acct").onclick = () => {
-  sheet(`<h2>Claude login</h2><div class="hint">Every chat uses this login. They carry on where they were.</div>
-    <div class="plist">${cfg.accounts.map((a) => `<div class="prow" data-a="${esc(a.name)}"><span>${a.name === cfg.account ? "●" : "○"}</span><b>${esc(a.label)}</b></div>`).join("")}</div>
-    <div class="hint" id="a-err" style="color:var(--red)"></div><div class="acts"><button type="button" class="primary" id="a-close">Close</button></div>`);
-  $("a-close").onclick = closeSheet;
-  document.querySelectorAll("#sheetin .prow[data-a]").forEach((r) => {
-    r.onclick = async () => {
-      try { await api("api/chats/account", { account: r.dataset.a }); closeSheet(); await loadList(); }
-      catch (e) { $("a-err").textContent = e.message; }
-    };
-  });
-};
 $("hero").addEventListener("click", (e) => {
   const c = e.target.closest(".mainbot");
   if (c) location.hash = "#c/" + c.dataset.id;
@@ -634,7 +638,7 @@ function showList() {
   cur = null;
   $("list").classList.add("on"); $("talk").classList.remove("on");
   $("title").textContent = "Chat"; $("back").hidden = true; $("pill").hidden = true; $("hav").hidden = true;
-  $("more").hidden = true; $("add").hidden = false; $("remote").hidden = false; $("notify").hidden = true;
+  $("more").hidden = true; $("add").hidden = false; $("remote").hidden = false; $("setbtn").hidden = false; $("notify").hidden = true;
   loadList();
   clearInterval(listTimer);
   listTimer = setInterval(() => { if (!document.hidden && (!cur || wide.matches)) loadList(); }, 5000);
@@ -643,6 +647,7 @@ window.addEventListener("hashchange", route);
 $("back").onclick = () => { location.hash = ""; };
 $("q").addEventListener("input", loadList);
 $("sb-add").onclick = () => $("add").click();
+$("setbtn").onclick = $("sb-set").onclick = () => openTabitSettings(sheet, closeSheet);    // settings.js
 
 // --- one conversation -------------------------------------------------------
 function closeStream() { if (cur && cur.es) { cur.es.close(); cur.es = null; } }
@@ -655,7 +660,7 @@ function openTalk(k, id) {
   } else { clearInterval(listTimer); listTimer = null; }
   cur = { kind: k, id, es: null, lastSeq: 0, pending: new Set(), tools: new Map(), asks: new Map(), members: {}, firstSeq: 0, state: "idle", live: {} };
   $("list").classList.remove("on"); $("talk").classList.add("on");
-  $("back").hidden = false; $("more").hidden = false; $("add").hidden = true; $("remote").hidden = true;
+  $("back").hidden = false; $("more").hidden = false; $("add").hidden = true; $("remote").hidden = true; $("setbtn").hidden = true;
   $("notify").hidden = !("Notification" in window);
   $("msgs").innerHTML = ""; $("title").textContent = "…"; status("");
   $("chips").style.display = "none"; $("atlist").hidden = true; setReply(null);
@@ -1085,11 +1090,15 @@ async function newChat() {
   const last = localStorage.getItem("lastcwd") || "~";
   const tg = cfg?.tabgroups || {};
   const others = tg.groups || [];
+  const accts = cfg?.accounts || [];          // more than one: the form asks which; the last pick comes first
+  const kept = localStorage.getItem("lastacct");
+  const lastAcct = accts.some((a) => a.name === kept) ? kept : cfg?.account || "";
   sheet(`<h2>New chat</h2>
     <div id="n-look"></div>
     <label>Name (optional)</label><input id="n-title" maxlength="80">
     <label>Group</label>
     <select id="n-group"><option value="">No group</option>${others.map((g) => `<option value="${esc(g.color)}">${esc(g.name)}</option>`).join("")}</select>
+    ${accts.length > 1 ? `<label>Account</label><select id="n-account">${accts.map((a) => `<option value="${esc(a.name)}"${a.name === lastAcct ? " selected" : ""}>${esc(a.label)}</option>`).join("")}</select>` : ""}
     <label>Folder on this computer</label>
     <input id="n-cwd" value="${esc(last)}" autocapitalize="off" autocorrect="off" spellcheck="false">
     <div class="chips"><button id="n-browse" type="button">Browse…</button>${recent.map((c) => `<button type="button" data-cwd="${esc(c)}">${esc(tilde(c))}</button>`).join("")}</div>
@@ -1103,8 +1112,10 @@ async function newChat() {
   $("n-go").onclick = async () => {
     try {
       const cwd = $("n-cwd").value.trim() || "~";
-      const { chat } = await api("api/chats", { kind: "tab", cwd, group: $("n-group").value, title: $("n-title").value, ...look.get() });
+      const account = $("n-account") ? { account: $("n-account").value } : {};
+      const { chat } = await api("api/chats", { kind: "tab", cwd, group: $("n-group").value, title: $("n-title").value, ...account, ...look.get() });
       localStorage.setItem("lastcwd", cwd);
+      if (account.account !== undefined) localStorage.setItem("lastacct", account.account);
       closeSheet(); location.hash = "#c/" + chat.id;
     } catch (e) { $("n-err").textContent = e.message; }
   };

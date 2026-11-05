@@ -92,6 +92,14 @@ class TestChatRoutes(_ServerCase):
         head, body = http_get("/manifest.webmanifest", self.sock)
         self.assertEqual(json.loads(body)["start_url"], "terminal")
 
+    def test_both_pages_share_the_settings_sheet(self):
+        head, body = http_get("/settings.js", self.sock)
+        self.assertIn("200", head.splitlines()[0])
+        self.assertIn("text/javascript", head)
+        self.assertIn(b"window.openTabitSettings", body)
+        for page in ("/", "/terminal"):
+            self.assertIn(b'<script src="settings.js"></script>', http_get(page, self.sock)[1])
+
     def test_it_is_off_until_the_phone_may_type(self):
         self.app._remote_send_on = False
         self.assertEqual(self.get("/api/chats")[0], 403)

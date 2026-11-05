@@ -975,6 +975,7 @@ REMOTE_MANIFEST = json.dumps({
 # Tabit Chat: the chat page, the one the address opens, and its own manifest
 # so it installs as its own app. The terminal view is at /terminal.
 REMOTE_CHAT_PAGE = "chat.html"
+REMOTE_SETTINGS_JS = "settings.js"             # the Settings sheet of both pages
 REMOTE_CHAT_MANIFEST = json.dumps({
     "name": "tabit chat", "short_name": "chat", "start_url": "./", "scope": "./",
     "display": "standalone", "background_color": "#1a1b26",
@@ -2168,6 +2169,12 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 self._send(200, "text/html; charset=utf-8", page)
         elif path == "/chat.webmanifest":
             self._send(200, "application/manifest+json", REMOTE_CHAT_MANIFEST)
+        elif path == "/settings.js":                       # the Settings sheet both pages share
+            page = self.app._remote_page(REMOTE_SETTINGS_JS)
+            if page is None:
+                self._send(404, "text/plain", b"settings.js not installed")
+            else:
+                self._send(200, "text/javascript; charset=utf-8", page)
         elif path == "/terminal":
             page = self.app._remote_page()
             if page is None:
@@ -12181,18 +12188,24 @@ if (data !== null) {{
                 "groups": list(groups.values()), "tabs": tabs}
 
     # Keys a phone can press: enough to answer a prompt or drive a shell.
-    _REMOTE_KEYS = {"enter": b"\r", "esc": b"\x1b", "up": b"\x1b[A",
-                    "down": b"\x1b[B", "right": b"\x1b[C", "left": b"\x1b[D",
+    _REMOTE_KEYS = {"enter": b"\r", "esc": b"\x1b", "up": b"\x1bOA",
+                    "down": b"\x1bOB", "right": b"\x1bOC", "left": b"\x1bOD",
                     "tab": b"\t", "backspace": b"\x7f", "space": b" ",
                     "ctrl-c": b"\x03", "ctrl-d": b"\x04", "ctrl-z": b"\x1a",
                     "ctrl-l": b"\x0c",
+                    "pgup": b"\x1b[5~", "pgdn": b"\x1b[6~", "home": b"\x1bOH", "end": b"\x1bOF",
                     **{str(d): str(d).encode() for d in range(1, 10)},
                     "y": b"y", "n": b"n"}
-    # Arrows depend on the terminal's mode: a pager (less, git show) asks
-    # for ESC O A and ignores ESC [ A. These go in as a real key press,
-    # so VTE sends what the program asked for.
+    # Arrows, Home and End depend on the terminal's mode: a pager (less,
+    # git show) asks for ESC O A and ignores ESC [ A. On a tab shown at the
+    # desk they go in as a real key press, so VTE sends what the program
+    # asked for. A tab not shown has no window for a key press (tabit takes
+    # its page out), so it gets the bytes above: ESC O, which a pager wants
+    # and a shell (readline, zsh), tmux and the AI CLIs take as well.
     _REMOTE_ARROWS = {"up": Gdk.KEY_Up, "down": Gdk.KEY_Down,
-                      "left": Gdk.KEY_Left, "right": Gdk.KEY_Right}
+                      "left": Gdk.KEY_Left, "right": Gdk.KEY_Right,
+                      "pgup": Gdk.KEY_Page_Up, "pgdn": Gdk.KEY_Page_Down,
+                      "home": Gdk.KEY_Home, "end": Gdk.KEY_End}
 
     @staticmethod
     def _press_key(term, keyval):
@@ -12637,6 +12650,12 @@ if (data !== null) {{
         # the height and left a blank strip down the right.
         if tmux and term is not None and _is_ai_icon(getattr(row, "icon_name", None)):
             self._remote_grow_agent(row, term, want)
+        # a pager (git log, less) draws over its own screen and scrolls back
+        # by redrawing it; the lines above are what it scrolled away, out of
+        # order once it goes back. Only its screen, then, and no scrollback.
+        pager = self._term_pager_rows(term) if not tmux else 0
+        if pager:
+            back = 0
         coloured = self._term_tail_ansi(term, 60) if color and not tmux else None
         if coloured and back > 0:
             # older lines without colours: reading them with colours cost
@@ -12648,8 +12667,14 @@ if (data !== null) {{
             nohist = self._term_history_ends(term, 60)
         if coloured:
             lines, ansi = coloured
+            ansi = ansi + [""] * (len(lines) - len(ansi))     # line for line, to cut both alike
         else:
             lines = self._term_tail_text(term, 60).rstrip().splitlines()[-60:]
+        if pager:
+            lines = lines[-pager:]
+            if coloured:
+                ansi = ansi[-pager:]
+            nohist = True
         out = {"id": rid, "title": getattr(row, "title_text", "") or "",
                "ai_status": getattr(row, "agent_status", None) or "unknown",
                "lines": lines}
@@ -12662,6 +12687,34 @@ if (data !== null) {{
             out.update(ansi="".join(a + "\n" for a in ansi), nohist=nohist,
                        cols=max(1, int(term.get_column_count())))
         return 200, out, tmux
+
+    _PAGERS = ("less", "more", "most", "man")
+
+    @classmethod
+    def _term_pager_rows(cls, term):
+        """The screen's height when a pager runs in front in this tab (git
+        log runs less as its child), else 0. Only the foreground job counts:
+        a pager stopped in the background draws nothing."""
+        try:
+            fg = os.tcgetpgrp(term.get_pty().get_fd())
+        except (AttributeError, OSError, TypeError, ValueError):
+            return 0
+        todo, looked = [fg], 0
+        while todo and looked < 16:
+            pid = todo.pop()
+            looked += 1
+            try:
+                with open("/proc/%d/stat" % pid) as f:
+                    stat = f.read()
+                if int(stat.rpartition(")")[2].split()[2]) != fg:
+                    continue
+                if stat[stat.index("(") + 1:stat.rindex(")")] in cls._PAGERS:
+                    return max(1, int(term.get_row_count()))
+                with open("/proc/%d/task/%d/children" % (pid, pid)) as f:
+                    todo += [int(c) for c in f.read().split()]
+            except (OSError, ValueError):
+                continue
+        return 0
 
     @staticmethod
     def _term_history_text(term, below, back):
