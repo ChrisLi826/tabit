@@ -178,7 +178,17 @@ def _transcript_events(raw):
     return out
 
 
+# Claude Code wraps a pasted block in these when it saves the prompt; the
+# chat shows what was pasted, as it was pasted.
+PASTED = re.compile(r'<pasted_content id="([0-9a-f]+)">\n(.*?)\n</pasted_content id="\1">', re.S)
+
+
+def _unpaste(text):
+    return PASTED.sub(lambda m: m.group(2), text).strip()
+
+
 def _typed_event(typed):
+    typed = _unpaste(typed)
     ev = {"t": "user", "text": _cut(typed, 20000)}
     said = REPLY_LINE.match(typed)
     if said:                     # a reply sent from a chat: show it as one
@@ -378,6 +388,8 @@ class _Log:
             except ValueError:
                 continue
             if isinstance(ev, dict) and isinstance(ev.get("seq"), int):
+                if ev.get("t") == "user" and isinstance(ev.get("text"), str):
+                    ev["text"] = _unpaste(ev["text"])    # saved before the tags went
                 self.events.append(ev)
                 self.seq = max(self.seq, ev["seq"])
 

@@ -1697,5 +1697,49 @@ class QueuedMessageTest(unittest.TestCase):
         self.assertEqual(tc.transcript_events({"type": "attachment", "attachment": {"type": "date"}}), [])
 
 
+class PastedTest(unittest.TestCase):
+    """Claude Code saves a paste wrapped in <pasted_content> tags; the chat
+    shows the paste without them."""
+
+    def user(self, text):
+        return {"type": "user", "message": {"role": "user", "content": text}}
+
+    def test_the_wrapper_goes(self):
+        [ev] = tc.transcript_events(self.user(
+            '\n\n<pasted_content id="6750">\ncloud team asks:\nHi FW team\n</pasted_content id="6750">\n'))
+        self.assertEqual(ev["text"], "cloud team asks:\nHi FW team")
+
+    def test_typed_text_around_it_stays(self):
+        [ev] = tc.transcript_events(self.user(
+            'look\n\n\n<pasted_content id="54c4">\na\nb\n</pasted_content id="54c4">\n\n\ntest'))
+        self.assertEqual(ev["text"], "look\n\n\na\nb\n\n\ntest")
+
+    def test_a_reply_or_a_tab_message_inside_a_paste_reads_as_one(self):
+        [ev] = tc.transcript_events(self.user(
+            '<pasted_content id="ab12">\n[In reply to Ann: "hi"]\nyes\n</pasted_content id="ab12">'))
+        self.assertEqual((ev["text"], ev["reply"]), ("yes", {"who": "Ann", "snip": "hi"}))
+
+    def test_a_tag_that_is_only_written_stays(self):
+        # the user writing about the tag is not a paste
+        [ev] = tc.transcript_events(self.user('why is <pasted_content id="6750"> there'))
+        self.assertEqual(ev["text"], 'why is <pasted_content id="6750"> there')
+        bad = '<pasted_content id="aa11">\nx\n</pasted_content id="bb22">'
+        [ev] = tc.transcript_events(self.user(bad))
+        self.assertEqual(ev["text"], bad)
+
+    def test_a_saved_message_loses_it_on_load(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = tc._Log()
+            log.dir, log.events, log.seq = d, [], 0
+            with open(os.path.join(d, "events.jsonl"), "w") as f:
+                f.write(json.dumps({"seq": 1, "t": "user",
+                                    "text": '<pasted_content id="ab12">\nhi\n</pasted_content id="ab12">'}) + "\n")
+                f.write(json.dumps({"seq": 2, "t": "text",
+                                    "text": 'see <pasted_content id="ab12">\nx\n</pasted_content id="ab12">'}) + "\n")
+            log._load_events()
+            self.assertEqual([e["text"] for e in log.events],
+                             ["hi", 'see <pasted_content id="ab12">\nx\n</pasted_content id="ab12">'])
+
+
 if __name__ == "__main__":
     unittest.main()
