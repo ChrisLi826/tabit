@@ -677,8 +677,61 @@ class TestRemoteArrows(unittest.TestCase):
         tabit.Tabit._remote_act(app, "t", "type", {"text": "hi"})
         app._tmux_unscroll.assert_called_once_with(row)
         app = unittest.mock.Mock(_tg_safe_text=lambda t: t)
-        tabit.Tabit._tg_inject(app, row, "task")
+        with unittest.mock.patch.object(tabit.GLib, "timeout_add"):
+            tabit.Tabit._tg_paste(app, row, "task")
         app._tmux_unscroll.assert_called_once_with(row)
+
+
+class TestInjectEnter(unittest.TestCase):
+    """The Enter comes a moment after the paste, one text at a time."""
+
+    def setUp(self):
+        self.app = unittest.mock.Mock(_tg_safe_text=lambda t: t, _TG_ENTER_MS=300)
+        for name in ("_tg_inject", "_tg_paste", "_tg_enter"):
+            setattr(self.app, name, getattr(tabit.Tabit, name).__get__(self.app))
+        self.row = unittest.mock.Mock(_tg_typing=None)
+        self.timers = []
+        patch = unittest.mock.patch.object(
+            tabit.GLib, "timeout_add",
+            side_effect=lambda ms, fn, *a: self.timers.append((ms, fn, a)))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def keys(self):
+        return [c.args[0] for c in self.row.term.method_calls]
+
+    def tick(self):
+        ms, fn, a = self.timers.pop(0)
+        self.assertEqual(ms, 300)
+        self.assertFalse(fn(*a))
+
+    def test_the_enter_waits_for_the_timer(self):
+        # Claude Code loses an Enter that comes with a paste ending in a path
+        self.app._tg_inject(self.row, "look\n/tmp/a.png")
+        self.assertEqual(self.keys(), ["look\n/tmp/a.png"])
+        self.tick()
+        self.assertEqual(self.keys(), ["look\n/tmp/a.png", b"\r"])
+        self.assertIsNone(self.row._tg_typing)
+        self.assertEqual(self.timers, [])
+
+    def test_a_second_text_waits_for_the_first_enter(self):
+        self.app._tg_inject(self.row, "one")
+        self.app._tg_inject(self.row, "two")
+        self.app._tg_inject(self.row, "three")
+        self.assertEqual(self.keys(), ["one"])
+        self.tick()
+        self.tick()
+        self.tick()
+        self.assertEqual(self.keys(), ["one", b"\r", "two", b"\r", "three", b"\r"])
+        self.assertIsNone(self.row._tg_typing)
+
+    def test_a_failed_paste_does_not_stop_the_next(self):
+        self.row.term.paste_text.side_effect = [RuntimeError("closing"), None]
+        with self.assertRaises(RuntimeError):
+            self.app._tg_inject(self.row, "one")
+        self.app._tg_inject(self.row, "two")
+        self.tick()
+        self.assertEqual(self.keys(), ["one", "two", b"\r"])
 
 
 class TestRemoteCursor(unittest.TestCase):
