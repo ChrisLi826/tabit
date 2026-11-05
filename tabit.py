@@ -400,7 +400,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.2.1"
+APP_VERSION = "v2.2.1.1"
 # Taiwan main dish of the major version + a fresh snack or drink, picked at
 # release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
 APP_CODENAME = "Ginger Duck + Tea Egg"
@@ -7869,10 +7869,35 @@ if (data !== null) {{
         prompt with line breaks in it lands as one paste instead of being
         submitted a line at a time. The Enter is separate, and there is
         exactly one -- two makes some programs run it twice.
+
+        The Enter comes _TG_ENTER_MS later. Claude Code first reads a
+        file path at the end of a paste (an image becomes an attachment),
+        and an Enter in the same read as the paste is lost: the text
+        waits in the box until the next message. A second text sent
+        before the Enter waits its turn, so two never become one.
         """
+        waiting = getattr(row, "_tg_typing", None)
+        if waiting is not None:             # the last one waits for its Enter
+            waiting.append(text)
+            return
+        self._tg_paste(row, text)
+        row._tg_typing = []                 # only once a timer waits: never stuck
+
+    # Measured on a Claude tab: 0.1 s after the paste is enough.
+    _TG_ENTER_MS = 300
+
+    def _tg_paste(self, row, text):
         self._tmux_unscroll(row)
         row.term.paste_text(self._tg_safe_text(text))
+        GLib.timeout_add(self._TG_ENTER_MS, self._tg_enter, row)
+
+    def _tg_enter(self, row):
+        waiting, row._tg_typing = row._tg_typing, None
         row.term.feed_child(b"\r")
+        if waiting:
+            self._tg_paste(row, waiting.pop(0))
+            row._tg_typing = waiting
+        return False
 
     # --- Telegram: getting the answer back ------------------------------
 
