@@ -1916,8 +1916,9 @@ def _claude_hooks_settings(hook_dir):
                   'else b=${cur:-background}; w=$a; fi;; '
                   '*) ' + keep + ';; esac; ')
     # the turn is over, but claude goes on by itself once its background
-    # sub-agents are done
-    stop = now + ('s=idle; case "$p" in *\'"type":"subagent","status":"running"\'*) '
+    # sub-agents, shells or monitors are done
+    run = ['*\'"type":"%s","status":"running"\'*' % t for t in ("subagent", "shell", "monitor")]
+    stop = now + ('s=idle; case "$p" in ' + "|".join(run) + ') '
                   's=background;; esac; ' + keep)
     return {"hooks": {
         # not "compact": claude compacts in the middle of a turn. These two
@@ -6477,7 +6478,7 @@ if (data !== null) {{
     _AI_AGG_TIPS = {
         "blocked": "Needs input",
         "ready": "Done — review",
-        "background": "Replied — agents still running",
+        "background": "Replied — background work still running",
         "working": "Working",
         "idle": "Idle",
     }
@@ -7431,7 +7432,7 @@ if (data !== null) {{
             "object-select-symbolic",
             "emblem-default-symbolic",
         ),
-        # replied, sub-agents still running
+        # replied, background work still running
         "background": (
             "emblem-synchronizing-symbolic",
             "view-refresh-symbolic",
@@ -7487,7 +7488,7 @@ if (data !== null) {{
     _AGENT_NOTIFY = {
         "ready": "Finished — open the tab to review.",
         "blocked": "Waiting for input or approval.",
-        "background": "Replied — sub-agents still running.",
+        "background": "Replied — background work still running.",
     }
     # The two that wait on you. Background does not: its agents finish or
     # one of them asks, and either is news.
@@ -9487,7 +9488,7 @@ if (data !== null) {{
             "idle": "⏸ Idle — waiting for prompt",
             "blocked": "? Needs input / approval",
             "ready": "✓ Done — open tab to review",
-            "background": "↻ Replied — sub-agents still running",
+            "background": "↻ Replied — background work still running",
             "exited": "✕ Process exited",
             "done": "✕ Process exited",
             "unknown": "Status unknown",
@@ -17655,7 +17656,7 @@ if (data !== null) {{
         ai_notify.set_active(bool(s.get("ai_notify", True)))
         ai_notify.set_tooltip_text(
             "A desktop popup when an AI tab goes from working to done, "
-            "to needs-input, or to replied with sub-agents still running, "
+            "to needs-input, or to replied with background work still running, "
             "with a button that switches to it. Nothing "
             "pops for the tab you are looking at. Default is on.")
         urg_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)

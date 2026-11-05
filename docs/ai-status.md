@@ -7,9 +7,12 @@ How tabit tells you an agent finished or wants you. Back to the [README](../READ
 A **Claude** tab opened by tabit runs `claude --settings
 ~/.local/share/tabit/claude-hooks.json`. Its hooks tell tabit what the agent
 does: a prompt or a tool is working, a permission, a question or a plan is
-blocked, the end of a turn is done. A turn that ends while sub-agents it
-started still run is **background** (`↻`): Claude goes on by itself once
-they finish, and is done after that.
+blocked, the end of a turn is done. A turn that ends while sub-agents,
+shells or monitors it started still run is **background** (`↻`): Claude
+goes on by itself once they finish, and is done after that. A shell that
+never ends, such as a server, keeps the tab at `↻`, as Claude's own
+footer keeps saying `1 shell`. Claude reads these hooks when it starts, so a Claude that
+was already running keeps the old ones until it starts again.
 
 Esc, Ctrl+C and No run no hook. For those tabit reads the session's
 transcript for the interrupt, and after an Esc or Ctrl+C pressed in the
@@ -49,7 +52,7 @@ Open a new Claude tab, or start that Grok again, to give it the hooks.
 ## The popup
 
 When an AI tab stops working — it finished, it replied while its
-sub-agents still run, or it wants input — a popup
+background work still runs, or it wants input — a popup
 inside tabit says so, **at the foot of the tab list**, shaped like the tab
 row it is about: the group's colour bar, the same status glyph, the group
 and tab names, and the time. Click anywhere on it to switch to that tab.

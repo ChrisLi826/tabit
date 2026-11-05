@@ -122,9 +122,17 @@ class TestHookCommand(unittest.TestCase):
                                   "background_tasks": self.RUNNING})
             self.assertEqual(self.state()[0], "background", event)
 
-    def test_stop_with_no_subagent_running_is_idle(self):
-        shell = [{"id": "b1", "type": "shell", "status": "running"}]
-        for tasks in ([], shell):
+    def test_stop_with_a_shell_or_monitor_running_is_background(self):
+        # Claude Code 2.1.318: a shell or a monitor it started wakes it again too
+        for kind in ("shell", "monitor"):
+            tasks = [{"id": "b1", "type": kind, "status": "running", "description": "x"}]
+            self.run_hook("Stop", {"transcript_path": self.tx, "background_tasks": tasks})
+            self.assertEqual(self.state()[0], "background", kind)
+
+    def test_stop_with_nothing_running_is_idle(self):
+        done = [{"id": "b1", "type": "shell", "status": "completed"}]
+        other = [{"id": "d1", "type": "dream", "status": "running"}]
+        for tasks in ([], done, other):
             self.run_hook("Stop", {"transcript_path": self.tx, "background_tasks": tasks})
             self.assertEqual(self.state()[0], "idle", tasks)
 

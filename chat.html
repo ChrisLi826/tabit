@@ -818,6 +818,7 @@ function paintLive(me) {
     html += `<div class="b ai">${who ? `<div class="who" style="color:${colorOf(who)}">${esc(who)}</div>` : ""}${md(text)}</div>`;
   }
   if (!html && me.state === "working") html = '<div class="b ai"><span class="dots"><span></span><span></span><span></span></span></div>';
+  if (!html && me.state === "background") html = '<div class="note">↻ Background work still running</div>';
   l.innerHTML = html;
 }
 
