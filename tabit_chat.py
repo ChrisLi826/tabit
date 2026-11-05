@@ -271,24 +271,34 @@ SCREEN_ROWS = 40             # the lines of a waiting tab's screen tabit hands o
 def screen_prompt(lines):
     """The menu a tab waits on, read from its screen: {"id", "question",
     "options", "numbers", "selected"}, or None. A menu is two rows or more, the
-    chosen one marked with ❯ and the others indented two more spaces; a numbered
-    one (a permission question) or one that says "Enter to confirm" (the trust
-    question) counts, so the box where one types does not."""
+    chosen one marked with ❯ (Claude) or › (Codex) and the others indented two
+    more spaces; a row too long for the screen goes on, indented more. A
+    numbered one (a permission question) or one that says "Enter to confirm"
+    (the trust question) counts, so the box where one types does not."""
     if not isinstance(lines, list):
         return None
     rows = [x if isinstance(x, str) else "" for x in lines]
-    sel = next((i for i in range(len(rows) - 1, -1, -1) if re.match(r"^\s*❯\s+\S", rows[i])), None)
+    marked = [i for i in range(len(rows) - 1, -1, -1) if re.match(r"^\s*[❯›]\s+\S", rows[i])]
+    # Codex marks its box with › too: a numbered row is the menu
+    sel = next((i for i in marked if re.match(r"^\s*[❯›]\s+\d+\.\s", rows[i])),
+               next((i for i in marked if "❯" in rows[i]), None))
     if sel is None:
         return None
     ind = len(rows[sel]) - len(rows[sel].lstrip())
     # a numbered menu has only numbered rows: a hint under it is not one more choice
-    other = re.compile(r"^ {%d}%s\S" % (ind + 2, r"\d+\.\s+" if re.match(r"^\s*❯\s+\d+\.\s", rows[sel]) else ""))
+    other = re.compile(r"^ {%d}%s\S" % (ind + 2, r"\d+\.\s+" if re.match(r"^\s*[❯›]\s+\d+\.\s", rows[sel]) else ""))
+    more = re.compile(r"^ {%d,}\S" % (ind + 3))          # the rest of a long row
     top = bot = sel
     while top > 0 and other.match(rows[top - 1]):
         top -= 1
-    while bot + 1 < len(rows) and other.match(rows[bot + 1]):
+    while bot + 1 < len(rows) and (other.match(rows[bot + 1]) or more.match(rows[bot + 1])):
         bot += 1
-    picks = [re.sub(r"^\s*❯?\s*", "", r).rstrip() for r in rows[top:bot + 1]]
+    picks = []
+    for r in rows[top:bot + 1]:
+        if picks and not other.match(r) and not re.match(r"^\s*[❯›]\s", r) and more.match(r):
+            picks[-1] += " " + r.strip()
+        else:
+            picks.append(re.sub(r"^\s*[❯›]?\s*", "", r).rstrip())
     numbers = []
     for i, p in enumerate(picks):
         m = re.match(r"(\d+)\.\s+(.*)", p)
@@ -301,7 +311,7 @@ def screen_prompt(lines):
     # the whole prompt above it, up to the box line: a long command is what
     # the person says yes to, so all of it goes on the card
     above, i = [], top - 1
-    while i >= 0 and "─" not in rows[i]:
+    while i >= 0 and "─" not in rows[i] and not rows[i].startswith("•"):   # Codex: the talk above
         if rows[i].strip():
             above.append(rows[i].rstrip())
         i -= 1
@@ -309,7 +319,8 @@ def screen_prompt(lines):
     detail = textwrap.dedent("\n".join(above))[:6000]
     if i < 0 and len(rows) >= SCREEN_ROWS:       # it starts above what tabit gave
         detail = "… (the top is cut: open the tab to see all of it)\n" + detail
-    question = (above[-1].strip() if above else "The tab asks you to choose")[:200]
+    asks = [a.strip() for a in above if re.match(r"\s*(Do you want|Would you like)", a)]
+    question = (asks[-1] if asks else above[-1].strip() if above else "The tab asks you to choose")[:200]
     key = hashlib.md5((detail + "|".join(picks)).encode()).hexdigest()[:10]
     return {"id": "scr-" + key, "question": question, "detail": detail, "options": picks,
             "numbers": numbers, "selected": sel - top}

@@ -101,7 +101,9 @@ tabit starts each Codex with `-c notify=[...]`: after each turn Codex runs
 `~/.local/share/tabit/codex-notify.sh`, which writes the session id for
 that tab. So a Codex chat fills in once its first turn ends, and a Codex
 that was started before this needs to start again. Its login and model are
-Codex's own; the chat's settings do not change them.
+Codex's own; the chat's settings do not change them. When Codex asks to
+run a command or make an edit, the chat shows its question as a card, the
+same as a menu in a Claude tab: a tap presses that option's number in the tab.
 
 - **One name, one group.** The chat has the tab's name and shows the tab's
   group under it, with the group's colour. Rename the chat and the tab is

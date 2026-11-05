@@ -1394,6 +1394,43 @@ class ScreenMenuTest(Base):
         self.chat.mirror_poll()
         return next(iter(self.chat.view()["pending"]), None)
 
+    def codex_screen(self):
+        with open(os.path.join(os.path.dirname(__file__), "fixtures", "chat",
+                               "codex_approval_screen.txt")) as f:
+            return f.read().splitlines()
+
+    def test_a_codex_approval_is_read(self):
+        menu = tc.screen_prompt(self.codex_screen())
+        self.assertEqual(menu["question"], "Would you like to run the following command?")
+        self.assertEqual(menu["numbers"], [1, 2, 3])
+        self.assertEqual(menu["options"], [
+            "Yes, proceed (y)",
+            "Yes, and don't ask again for commands that start with `echo hi > note.txt` (p)",
+            "No, and tell Codex what to do differently (esc)"])
+        self.assertEqual(menu["selected"], 0)
+        # the prompt from its question down; the talk above it is not part of it
+        self.assertTrue(menu["detail"].startswith("Would you like"), menu["detail"])
+        self.assertIn("$ echo hi > note.txt", menu["detail"])
+        self.assertNotIn("AGENTS.md", menu["detail"])
+
+    def test_the_codex_box_is_no_menu(self):
+        self.assertIsNone(tc.screen_prompt(["› 1. fix it", "", "  gpt-5.6 medium · ~/p"]))
+        self.assertIsNone(tc.screen_prompt(["• Done", "", "› Ask Codex to do anything", ""]))
+
+    def test_a_codex_approval_is_answered_with_its_number(self):
+        self.screen = self.codex_screen()
+        ev = self.card()
+        q = ev["questions"][0]["question"]
+        self.assertTrue(self.chat.answer(ev["rid"], True, answers={q: "Yes, proceed (y)"}))
+        self.assertEqual(self.keys, ["1"])
+        self.keys.clear()
+        self.status = "working"                          # it ran; then the same question again
+        self.chat.mirror_poll()
+        self.status = "blocked"
+        ev = self.card()
+        self.chat.answer(ev["rid"], False)
+        self.assertEqual(self.keys, ["3"])               # its No
+
     def test_the_trust_question_is_a_card(self):
         ev = self.card()
         self.assertEqual([o["label"] for o in ev["questions"][0]["options"]],
