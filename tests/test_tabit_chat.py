@@ -1254,6 +1254,22 @@ class TabSyncTest(Base):
         code, _ = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "account": "nobody"})
         self.assertEqual((code, self.ops), (400, []))
 
+    def test_a_new_chat_can_open_a_codex_tab(self):
+        self.mgr.accounts = lambda: [("Work", FAKE)]
+        code, out = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "cli": "codex",
+                                                  "account": "Work"})
+        self.assertEqual(code, 200, out)
+        body = next(o for o in self.ops if o[0] == "new")[2]
+        self.assertEqual(body["cli"], "codex")
+        self.assertNotIn("account", body)              # Codex has its own login
+        self.ops.clear()
+        code, _ = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "cli": "grok"})
+        self.assertEqual((code, self.ops), (400, []))
+
+    def test_the_page_is_told_which_ais_there_are(self):
+        code, out = tc.api(self.mgr, "GET", [], None)
+        self.assertEqual(out["clis"][0], "claude")
+
     def test_a_new_chat_with_no_group_leaves_it_to_tabit(self):
         tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir})
         body = next(o for o in self.ops if o[0] == "new")[2]

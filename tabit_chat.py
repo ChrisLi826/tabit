@@ -1662,17 +1662,21 @@ class ChatManager:
             self._retire(chat)
 
     def new_tab_chat(self, body):
-        """(status, object): open a Claude tab in tabit, in the group asked for
-        (none: no group), and a chat that mirrors it."""
+        """(status, object): open a Claude or Codex tab in tabit, in the group
+        asked for (none: no group), and a chat that mirrors it."""
         if not self.tab_ops:
             return 400, {"error": "no tabs here"}
         cwd = os.path.expanduser((body.get("cwd") or "").strip() or "~")
         title = " ".join(str(body.get("title") or "").split())[:80]
-        account = body.get("account", self.account)         # picked in the form; else the default
-        if account not in [""] + [n for n, _ in self.accounts()]:
-            return 400, {"error": "no such Claude account"}
-        want = {"kind": "ai", "cli": "claude", "cwd": cwd, "group": body.get("group") or "",
-                "account": account}
+        cli = body.get("cli") or "claude"
+        if cli not in CHAT_CLIS:
+            return 400, {"error": "the AI is one of: " + ", ".join(CHAT_CLIS)}
+        want = {"kind": "ai", "cli": cli, "cwd": cwd, "group": body.get("group") or ""}
+        if cli == "claude":                                  # Codex has its own login
+            account = body.get("account", self.account)     # picked in the form; else the default
+            if account not in [""] + [n for n, _ in self.accounts()]:
+                return 400, {"error": "no such Claude account"}
+            want["account"] = account
         if title:
             want["name"] = title
         with self._tabs_lock:
@@ -1884,7 +1888,8 @@ def api(mgr, method, parts, body):
                          "groups": [g.summary() for g in mgr.groups.values()],
                          "tabgroups": tabgroups,
                          "accounts": mgr.account_choices(), "account": mgr.account,
-                         "modes": list(MODES), "models": list(MODELS)}
+                         "modes": list(MODES), "models": list(MODELS),
+                         "clis": [c for c in CHAT_CLIS if c == "claude" or shutil.which(c)]}
         if method == "POST":
             return mgr.new_tab_chat(body) if body.get("kind") == "tab" else mgr.create(body)
         return 405, {"error": "GET or POST"}

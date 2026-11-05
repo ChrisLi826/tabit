@@ -43,7 +43,7 @@ Screen** makes it an app of its own.
   folder** makes one inside the folder shown: one plain name, no `/`.
 - **Files and photos.** 📎, paste or drag and drop. The file goes to
   `~/.local/share/tabit/uploads/<date>/` and its path goes into your message.
-- **🔔** tells you when Claude is done while you are not looking at the page
+- **🔔** tells you when the AI is done while you are not looking at the page
   (another window or app in front counts). 🔕 means it is off; tap to turn it on.
 - **⚙** (next to ⌨ on the list) opens tabit's Settings, the same sheet as in
   the terminal view: the AI defaults for new tabs, the Claude accounts (add
@@ -109,7 +109,9 @@ same as a menu in a Claude tab: a tap presses that option's number in the tab.
   group under it, with the group's colour. Rename the chat and the tab is
   renamed. Rename or regroup the tab and the chat follows within 10 seconds.
 - **New chat** opens a Claude tab in the group you pick, in the folder you
-  pick. With no group picked, the tab is in no group.
+  pick. With no group picked, the tab is in no group. When Codex is
+  installed, the form asks which AI: Claude or Codex. It remembers the last
+  pick.
 - **Delete.** Deleting a chat closes its tab. The chat asks first. The last
   tab in tabit cannot be closed from the phone, so that chat stays. Closing a
   tab removes its chat after about a minute.

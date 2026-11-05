@@ -348,7 +348,7 @@
   <button id="back" type="button" title="back" hidden>‹</button>
   <span id="hav" class="av sm" hidden></span>
   <div id="ttl"><h1 id="title">Chat</h1><div id="pill" class="pill" hidden></div></div>
-  <button id="notify" type="button" title="tell me when Claude is done" hidden>🔕</button>
+  <button id="notify" type="button" title="tell me when the AI is done" hidden>🔕</button>
   <button id="more" type="button" hidden>⋯</button>
   <button id="add" type="button" class="primary">＋</button>
   <a id="remote" href="terminal" title="the terminal view"><button type="button">⌨</button></a>
@@ -454,6 +454,8 @@ function picker(host, r) {
 }
 // "Mirror a tab" chooser: the Claude tabs open in tabit; get() is null or {id, title}
 // opus, sonnet, haiku or fable for a model id such as claude-opus-4-5; "" (default) otherwise
+// who answers in a chat: a Codex tab's chat is Codex, every other chat is Claude
+const aiName = (meta) => (meta && meta.tab && meta.tab.cli === "codex" ? "Codex" : "Claude");
 const aliasOf = (id) => (cfg?.models || []).find((a) => a && String(id || "").includes(a)) || "";
 // the colours tabit gives its tab groups
 const GROUP_CSS = { red: "#f7768e", orange: "#ff9e64", yellow: "#e0af68", green: "#9ece6a", teal: "#73daca", cyan: "#7dcfff", blue: "#7aa2f7",
@@ -732,7 +734,7 @@ function take(me, d) {
   // since a desktop shows a page behind other windows as visible
   if (finished && (document.hidden || !document.hasFocus()) && bellOn()) {
     try {                                    // a phone's Chrome refuses a page's own notice
-      const n = new Notification(d.meta.title, { body: "Claude is done." });
+      const n = new Notification(d.meta.title, { body: aiName(d.meta) + " is done." });
       n.onclick = () => { window.focus(); n.close(); };
     } catch (e) { /* the rest of the page goes on */ }
   }
@@ -834,7 +836,7 @@ function draw(me, ev) {
   if (el && ev.ts && el.classList.contains("b")) el.insertAdjacentHTML("beforeend", `<div class="ts">${clock(ev.ts)}</div>`);
   if (el && REPLYABLE.has(ev.t) && ev.text) {
     el.dataset.seq = ev.seq;
-    el.dataset.who = ev.t === "user" ? "You" : ev.name || "Claude";
+    el.dataset.who = ev.t === "user" ? "You" : ev.name || aiName(me.meta);
     el.dataset.snip = ev.text.replace(/\s+/g, " ").trim().slice(0, 140);
     el.insertAdjacentHTML("beforeend", '<button type="button" class="rp">↩ Reply</button>');
   }
@@ -911,7 +913,7 @@ function paintAsks(me) {
         (ev.can_remember ? '<button data-act="always">Allow &amp; don’t ask again</button>' : "") +
         '<button class="danger" data-act="deny">Deny</button></div>';
     }
-    card.innerHTML = `<h3>${open ? "" : "✓ "}Claude wants to ${ev.questions ? "ask you" : ev.plan ? "start the plan" : "use " + esc(ev.tool)}${who}</h3>${body}` +
+    card.innerHTML = `<h3>${open ? "" : "✓ "}${aiName(me.meta)} wants to ${ev.questions ? "ask you" : ev.plan ? "start the plan" : "use " + esc(ev.tool)}${who}</h3>${body}` +
       (open ? "" : `<div class="verdict">${esc(card.dataset.verdict || "answered")}</div>`);
   });
 }
@@ -1085,12 +1087,12 @@ const bellOn = () => localStorage.getItem("notify") === "1" && Notification.perm
 function bell() {
   if (!("Notification" in window)) return;
   $("notify").textContent = bellOn() ? "🔔" : "🔕";
-  $("notify").title = bellOn() ? "notifications on: tap to turn off" : "tell me when Claude is done";
+  $("notify").title = bellOn() ? "notifications on: tap to turn off" : "tell me when the AI is done";
 }
 $("notify").onclick = async () => {
   if (bellOn()) { localStorage.removeItem("notify"); bell(); status("Notifications off."); return; }
   const p = await Notification.requestPermission();
-  if (p === "granted") { localStorage.setItem("notify", "1"); status("You will be told when Claude is done and you are not looking at this page."); }
+  if (p === "granted") { localStorage.setItem("notify", "1"); status("You will be told when the AI is done and you are not looking at this page."); }
   else status("Notifications are blocked in this browser.", true);
   bell();
 };
@@ -1112,28 +1114,37 @@ async function newChat() {
   const accts = cfg?.accounts || [];          // more than one: the form asks which; the last pick comes first
   const kept = localStorage.getItem("lastacct");
   const lastAcct = accts.some((a) => a.name === kept) ? kept : cfg?.account || "";
+  const clis = cfg?.clis || ["claude"];       // Codex too, when it is installed
+  const lastCli = clis.includes(localStorage.getItem("lastcli")) ? localStorage.getItem("lastcli") : "claude";
   sheet(`<h2>New chat</h2>
     <div id="n-look"></div>
     <label>Name (optional)</label><input id="n-title" maxlength="80">
     <label>Group</label>
     <select id="n-group"><option value="">No group</option>${others.map((g) => `<option value="${esc(g.color)}">${esc(g.name)}</option>`).join("")}</select>
-    ${accts.length > 1 ? `<label>Account</label><select id="n-account">${accts.map((a) => `<option value="${esc(a.name)}"${a.name === lastAcct ? " selected" : ""}>${esc(a.label)}</option>`).join("")}</select>` : ""}
+    ${clis.length > 1 ? `<label>AI</label><select id="n-cli">${clis.map((c) => `<option value="${c}"${c === lastCli ? " selected" : ""}>${c === "codex" ? "Codex" : "Claude"}</option>`).join("")}</select>` : ""}
+    ${accts.length > 1 ? `<div id="n-acctbox"><label>Account</label><select id="n-account">${accts.map((a) => `<option value="${esc(a.name)}"${a.name === lastAcct ? " selected" : ""}>${esc(a.label)}</option>`).join("")}</select></div>` : ""}
     <label>Folder on this computer</label>
     <input id="n-cwd" value="${esc(last)}" autocapitalize="off" autocorrect="off" spellcheck="false">
     <div class="chips"><button id="n-browse" type="button">Browse…</button>${recent.map((c) => `<button type="button" data-cwd="${esc(c)}">${esc(tilde(c))}</button>`).join("")}</div>
-    <div class="hint">This opens a Claude tab in tabit, in that group. The chat is that tab.</div>
+    <div class="hint">This opens an AI tab in tabit, in that group. The chat is that tab.</div>
     <div class="hint" id="n-err" style="color:var(--red)"></div>
     <div class="acts"><button type="button" id="n-cancel">Cancel</button><button type="button" class="primary" id="n-go">Start</button></div>`);
   const look = picker($("n-look"), { id: String(Math.random()), roll: true });
+  const cliOf = () => ($("n-cli") ? $("n-cli").value : "claude");
+  const acctShown = () => { if ($("n-acctbox")) $("n-acctbox").hidden = cliOf() !== "claude"; };   // Codex has its own login
+  if ($("n-cli")) $("n-cli").onchange = acctShown;
+  acctShown();
   $("n-cancel").onclick = closeSheet;
   $("n-browse").onclick = () => browse($("n-cwd").value, (p) => { $("n-cwd").value = p; });
   $("sheetin").querySelectorAll("[data-cwd]").forEach((b) => { b.onclick = () => { $("n-cwd").value = b.dataset.cwd; }; });
   $("n-go").onclick = async () => {
     try {
       const cwd = $("n-cwd").value.trim() || "~";
-      const account = $("n-account") ? { account: $("n-account").value } : {};
-      const { chat } = await api("api/chats", { kind: "tab", cwd, group: $("n-group").value, title: $("n-title").value, ...account, ...look.get() });
+      const cli = cliOf();
+      const account = $("n-account") && cli === "claude" ? { account: $("n-account").value } : {};
+      const { chat } = await api("api/chats", { kind: "tab", cli, cwd, group: $("n-group").value, title: $("n-title").value, ...account, ...look.get() });
       localStorage.setItem("lastcwd", cwd);
+      localStorage.setItem("lastcli", cli);
       if (account.account !== undefined) localStorage.setItem("lastacct", account.account);
       closeSheet(); location.hash = "#c/" + chat.id;
     } catch (e) { $("n-err").textContent = e.message; }
