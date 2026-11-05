@@ -26,7 +26,8 @@ Screen** makes it an app of its own.
 - **Questions.** When Claude wants to run a command or change a file, the chat
   shows a card with **Allow** and **Deny**, and **Allow & don't ask again**
   when Claude offers a rule to remember. When
-  Claude asks you a choice, the options are buttons. **Stop** ends the turn.
+  Claude asks you a choice, the options are buttons. After you answer, the
+  card keeps your picks lit. **Stop** ends the turn.
 - **Modes**, per chat: *Ask each time* (the default), *Accept edits*, *Plan
   first*, and *Bypass*, which asks nothing. Bypass is only there when you pick
   it, and the list marks the chat in red.

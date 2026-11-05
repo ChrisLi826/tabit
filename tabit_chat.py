@@ -945,7 +945,7 @@ class Chat(_Log):
                 with self.cond:
                     self.pending[rid] = held     # still open: the user may try again
                 raise
-            self.emit({"t": "answered", "rid": rid, "allow": bool(allow)})
+            self.emit(self._answered(rid, allow, answers))
             return True
         if held.get("local"):                # a tool of ours asked, not claude
             held["allow"] = bool(allow)
@@ -965,8 +965,16 @@ class Chat(_Log):
         if self.running:
             self._write({"type": "control_response", "response": {
                 "subtype": "success", "request_id": rid, "response": resp}})
-        self.emit({"t": "answered", "rid": rid, "allow": bool(allow)})
+        self.emit(self._answered(rid, allow, answers))
         return True
+
+    @staticmethod
+    def _answered(rid, allow, answers):
+        """The "answered" event; it keeps what was picked, so the card still shows it."""
+        ev = {"t": "answered", "rid": rid, "allow": bool(allow)}
+        if allow and isinstance(answers, dict):
+            ev["answers"] = answers
+        return ev
 
 
 # --- a group: several chats in one room -------------------------------------

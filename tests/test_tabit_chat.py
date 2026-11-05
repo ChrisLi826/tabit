@@ -828,6 +828,7 @@ class MirrorTest(Base):
         self.assertEqual([k for _t, k, _q in self.calls], ["2", "1", "1"])    # Blue, Small, submit
         self.assertEqual(chat.pending, {})
         self.assertEqual(chat.events[-1]["t"], "answered")
+        self.assertEqual(chat.events[-1]["answers"], {"Pick a color": "Blue", "Pick a size": "Small"})
         chat.mirror_poll()                        # the transcript is not caught up: no second card
         self.assertEqual(chat.pending, {})
         self.assertEqual(len([e for e in chat.events if e["t"] == "ask"]), 1)

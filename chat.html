@@ -152,6 +152,7 @@
   .ask .q { font-weight: 600; margin-top: 6px; white-space: pre-line; }
   .ask.closed { border-color: var(--line); background: none; opacity: .7; }
   .ask.closed h3 { color: var(--dim); }
+  .ask.closed .opts button:not(.on) { opacity: .5; }
   .ask .verdict { color: var(--dim); font-size: 13px; }
   .note { align-self: center; font-size: 12.5px; color: var(--dim); text-align: center; max-width: 90%; }
   .note.err { color: var(--red); }
@@ -867,6 +868,8 @@ function drawOne(me, ev) {
     }
     case "answered": {
       const card = document.querySelector(`#msgs .ask[data-rid="${CSS.escape(ev.rid)}"]`);
+      const asked = me.asks.get(ev.rid);
+      if (asked && ev.answers) asked.answers = ev.answers;             // a closed card still shows the picks
       if (card) { card.dataset.verdict = ev.allow ? "Allowed" : ev.why === "answered in the tab" ? "Answered in the tab" : ev.why === "cancelled" ? "Cancelled" : ev.why === "stopped" ? "Stopped" : "Denied"; }
       return null;
     }
@@ -897,7 +900,7 @@ function paintAsks(me) {
     if (ev.questions) {
       // a menu read off a tab's screen brings the whole prompt: a long command is what you say yes to
       body = (ev.detail ? `<pre class="prompt">${esc(ev.detail)}</pre>` : "") + ev.questions.map((q, i) => `<div class="q">${esc(q.question)}</div><div class="opts" data-q="${i}">${(q.options || []).map((o) =>
-        `<button type="button" data-l="${esc(o.label)}" title="${esc(o.description || "")}">${esc(o.label)}</button>`).join("")}</div>`).join("");
+        `<button type="button" data-l="${esc(o.label)}" title="${esc(o.description || "")}"${!open && (ev.answers || {})[q.question] === o.label ? ' class="on"' : ""}>${esc(o.label)}</button>`).join("")}</div>`).join("");
       body += open ? '<div class="row"><button class="primary" data-act="answerq" disabled>Answer</button><button data-act="deny">Skip</button></div>' : "";
     } else {
       body = (ev.plan ? `<div class="what">${md(ev.plan)}</div>` : `<div class="what">${esc(ev.summary || "")}</div>`) +
@@ -925,7 +928,7 @@ $("msgs").addEventListener("click", async (e) => {
     document.querySelectorAll("#msgs .b.sel").forEach((x) => { if (x !== bubble) x.classList.remove("sel"); });
     bubble.classList.toggle("sel");
   }
-  const opt = e.target.closest(".ask .opts button");
+  const opt = e.target.closest(".ask:not(.closed) .opts button");      // a closed card only shows the picks
   if (opt) {
     opt.parentElement.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b === opt));
     const card = opt.closest(".ask");
