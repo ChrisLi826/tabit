@@ -9,6 +9,7 @@ No GTK in this file. tabit.py serves the routes; this file owns the chats.
 """
 import collections
 import datetime
+import glob
 import hashlib
 import json
 import os
@@ -159,6 +160,8 @@ def _transcript_events(raw):
                 and typed.strip() and not typed.strip().startswith(NOT_TYPED)):
             return [_typed_event(typed.strip())]
         return []
+    if raw.get("type") == "system" and raw.get("subtype") == "local_command":
+        return _command_events(raw.get("content"))
     if raw.get("type") != "user":
         return translate(raw)
     content = (raw.get("message") or {}).get("content")
@@ -169,9 +172,108 @@ def _transcript_events(raw):
     typed = "\n".join(b.get("text", "") for b in content
                       if isinstance(b, dict) and b.get("type") == "text").strip()
     out = translate(raw)
+    if typed.startswith(("<command-message>", "<command-name>")):
+        return _command_events(typed) + out          # a skill run with /name
     if typed and not typed.startswith(NOT_TYPED):
         out.insert(0, _typed_event(typed))
     return out
+
+
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def _command_events(text):
+    """A slash command the tab ran (/context, /grilling args): the command as
+    the user's line, and what it printed as an output block."""
+    if not isinstance(text, str):
+        return []
+    text = text.strip()
+    out = re.match(r"<local-command-stdout>(.*?)</local-command-stdout>", text, re.S)
+    if out:
+        said = ANSI.sub("", out.group(1)).strip()
+        return [{"t": "cmdout", "text": _cut(said)}] if said else []
+    name = re.search(r"<command-name>(/[^<]+)</command-name>", text)
+    if not text.startswith(("<command-message>", "<command-name>")) or not name:
+        return []
+    args = re.search(r"<command-args>(.*?)</command-args>", text, re.S)
+    line = (name.group(1) + " " + (args.group(1).strip() if args else "")).strip()
+    return [{"t": "user", "text": _cut(line, 20000)}]
+
+
+# The built-in slash commands the chat lists: (name, what it does, where its
+# answer shows). "chat": the transcript has it, so the chat shows it; "tab":
+# it opens a screen in the tab. Model, effort and account are the chat's own
+# switches (per tab); quitting and logging out are left to the tab.
+BUILTINS = {
+    "claude": (
+        ("compact", "Free up context by summarizing the conversation so far", "chat"),
+        ("clear", "Start a new conversation", "chat"),
+        ("context", "Show what fills the context window", "chat"),
+        ("init", "Write a CLAUDE.md with notes about this project", "chat"),
+        ("btw", "Ask a side question without stopping the work", "tab"),
+        ("usage", "Show plan usage and cost", "tab"),
+        ("status", "Show version, model, account and connections", "tab"),
+        ("diff", "View uncommitted changes", "tab"),
+        ("tasks", "View what runs in the background", "tab"),
+        ("mcp", "Manage MCP servers", "tab"),
+        ("skills", "List the skills", "tab"),
+        ("plan", "Turn on plan mode", "tab"),
+        ("rename", "Rename the conversation", "tab"),
+        ("help", "Show help and the commands", "tab"),
+    ),
+    "codex": (
+        ("review", "Review my current changes and find issues", "chat"),
+        ("init", "Write an AGENTS.md with notes for Codex", "chat"),
+        ("new", "Start a new conversation", "chat"),
+        ("compact", "Summarize the conversation to free up context", "tab"),
+        ("status", "Show the session's settings and token use", "tab"),
+        ("diff", "Show the git diff, untracked files too", "tab"),
+        ("usage", "Show account usage", "tab"),
+        ("plan", "Switch to plan mode", "tab"),
+        ("ps", "List background terminals", "tab"),
+        ("stop", "Stop all background terminals", "tab"),
+        ("skills", "Pick a skill", "tab"),
+    ),
+}
+SKILL_LINE = re.compile(r"^- ([^\s:][^:\n]*?): (.*)$", re.M)
+
+
+def transcript_skills(path, cli):
+    """[{"name", "description"}]: the skills the tab's AI was told it has.
+    Claude: its skill_listing attachments (the last full one, then the ones
+    added after). Codex: the Available skills list in its instructions."""
+    want = b"skill_listing" if cli == "claude" else b"### Available skills"
+    skills = {}
+    try:
+        with open(path, "rb") as f:
+            for line in f:
+                if want not in line:
+                    continue
+                try:
+                    raw = json.loads(line)
+                except ValueError:
+                    continue
+                if cli == "claude":
+                    a = raw.get("attachment") or {}
+                    if a.get("type") != "skill_listing":
+                        continue
+                    if a.get("isInitial"):
+                        skills = {}
+                    said = dict(SKILL_LINE.findall(a.get("content") or ""))
+                    for name in a.get("names") or said:
+                        skills[name] = said.get(name, "")
+                else:
+                    for block in ((raw.get("payload") or {}).get("content") or []):
+                        body = (block.get("text") or "") if isinstance(block, dict) else ""
+                        heads = list(re.finditer(r"^### Available skills[ \t]*$", body, re.M))
+                        if not heads:
+                            continue
+                        part = body[heads[-1].end():].split("\n### ", 1)[0]
+                        skills = {n: re.sub(r"\s*\(file: [^)]*\)\s*$", "", d)
+                                  for n, d in SKILL_LINE.findall(part)}
+    except OSError:
+        return []
+    return [{"name": n, "description": d[:300]} for n, d in skills.items()]
 
 
 # Claude Code wraps a pasted block in these when it saves the prompt; the
@@ -218,6 +320,18 @@ def queue_step(queue, raw):
     elif op in ("remove", "popAll") and text in queue:
         queue.remove(text)
     return True
+
+
+def screen_dialog_open(lines):
+    """True when a Claude tab shows one of its own screens (/usage, /status,
+    a settings tab): its message box (a line of ─, then ❯) is hidden then.
+    The screens end in different lines, so the box is what counts."""
+    end = list(lines or [])[-40:]        # all the tab gives: a long draft pushes the box up
+    if not any(l.strip() for l in end):
+        return False
+    # the line above the box may carry the conversation's name: ──── name ─
+    return not any(re.match(r"^\s*─{10,}", l) and re.match(r"^\s*❯", end[i + 1])
+                   for i, l in enumerate(end[:-1]))
 
 
 def _queue_key(text):
@@ -595,6 +709,7 @@ class Chat(_Log):
         self.live_ver = 0
         self.pending = {}            # request id -> {"ev", "input", "suggest"}
         self.tab_state = "idle"      # a mirrored chat: what its tab is doing
+        self.held = []               # lines sent while the tab showed a screen: (key, text)
         self._tab_answered = set()   # tool ids of the tab's questions answered from here
         self._model_looked = False   # the tab's model was looked for in its transcript
         self.inflight = 0            # messages sent that have no "done" yet
@@ -660,6 +775,36 @@ class Chat(_Log):
                 "asks": len(self.pending), "default": bool(self.meta.get("default")),
                 "emoji": self.meta.get("emoji", ""), "hue": self.meta.get("hue"),
                 "tab": self.meta.get("tab")}
+
+    def commands(self):
+        """What typing / in the chat lists: the AI's built-in commands and the
+        skills its tab was given. A skill runs as /name (Claude) or $name (Codex)."""
+        if not self.mirrored:
+            return {"cli": "claude", "builtins": [], "skills": []}
+        cli = self.meta["tab"].get("cli") or "claude"
+        path = (self.meta.get("mirror") or {}).get("path") or ""
+        if not path and self.mgr.tab_hook:       # a new tab: its file may not be there yet
+            path = self.mgr.tab_hook(self.meta["tab"]["id"]).get("transcript") or ""
+        try:
+            stamp = (path, os.path.getsize(path))
+        except OSError:
+            stamp = (path, -1) if path else None
+        if stamp is None or getattr(self, "_skills_at", None) != stamp:
+            self._skills = transcript_skills(path, cli) if stamp else []
+            self._skills_at = stamp
+            if stamp and not self._skills and cli == "claude":
+                # Claude lists its skills with the first prompt: until then,
+                # the last conversation in the same project folder has them
+                near = sorted(glob.glob(os.path.join(os.path.dirname(path), "*.jsonl")),
+                              key=lambda f: -os.path.getmtime(f))
+                for other in [f for f in near if f != path][:8]:
+                    self._skills = transcript_skills(other, cli)
+                    if self._skills:
+                        break
+        return {"cli": cli,
+                "builtins": [{"name": n, "description": d, "shows": w}
+                             for n, d, w in BUILTINS.get(cli, ())],
+                "skills": self._skills}
 
     def library(self):
         """Files Claude wrote or edited in this chat (newest first) and the totals."""
@@ -867,6 +1012,8 @@ class Chat(_Log):
                     self.push()
             self._mirror_read(info["transcript"])
         self._sync_question(info)
+        if self.held:
+            self._send_held()
 
     def _sync_question(self, info):
         """While the tab waits on a question, the chat holds it as a card with
@@ -1051,7 +1198,33 @@ class Chat(_Log):
             return 404, {"error": "no tabs here"}
         if any(p.get("tab") for p in self.pending.values()):
             return 409, {"error": "That tab asks a question: tap an answer on the card above."}
+        if self.held or self._screen_open():
+            # typed now, it would close that screen and go in at once: it
+            # waits here (behind any that wait already), and goes in when
+            # the screen closes
+            with self.cond:
+                self.held.append(("held-%x" % int(time.time() * 1000 + len(self.held)), text))
+            self.push()
+            return 200, {"ok": True, "held": True}
         return self.mgr.tab_hook(self.meta["tab"]["id"], text, queue=True)
+
+    def _screen_open(self):
+        """The tab's Claude shows one of its own screens (/usage, /status)."""
+        if (self.meta["tab"].get("cli") or "claude") != "claude":
+            return False
+        info = self.mgr.tab_hook(self.meta["tab"]["id"], screen=True)
+        return info.get("status") in ("ready", "idle", "background") and \
+            screen_dialog_open(info.get("screen"))
+
+    def _send_held(self):
+        """The screen closed: the lines that waited go in, in order."""
+        if not self.held or self._screen_open():
+            return
+        with self.cond:
+            held, self.held = self.held, []
+        for _key, text in held:
+            self.mgr.tab_hook(self.meta["tab"]["id"], text, queue=True)
+        self.push()
 
     def queued(self):
         """The user's lines the tab's Claude holds while it works: shown as
@@ -1063,6 +1236,8 @@ class Chat(_Log):
         for text in (self.meta.get("mirror") or {}).get("queue") or []:
             if text.strip() and not text.lstrip().startswith(NOT_TYPED + ("[from @",)):
                 out.append(dict(_typed_event(text), key=_queue_key(text)))
+        for key, text in list(self.held):
+            out.append(dict(_typed_event(text), key=key, held=True))
         return out
 
     def _live_queue(self, path):
@@ -1093,6 +1268,13 @@ class Chat(_Log):
         others are typed again. -> (code, body); body has the line's text."""
         if not self.mirrored or (self.meta["tab"].get("cli") or "claude") != "claude":
             return 400, {"error": "only a Claude tab's chat holds lines"}
+        with self.cond:
+            mine = next((h for h in self.held if h[0] == key), None)
+            if mine:
+                self.held.remove(mine)
+        if mine:
+            self.push()
+            return 200, {"ok": True, "text": _typed_event(mine[1])["text"]}
         tab = self.meta["tab"]["id"]
         info = self.mgr.tab_hook(tab, screen=True)
         path = info.get("transcript")
@@ -2139,6 +2321,8 @@ def api(mgr, method, parts, body):
         return 200, chat.view()
     if method == "GET" and op == "library":
         return 200, chat.library()
+    if method == "GET" and op == "commands":
+        return 200, chat.commands()
     if op == "tabs":
         return tab_send(mgr, chat, method, parts[2:], body)
     if method != "POST":
