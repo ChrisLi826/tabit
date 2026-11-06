@@ -1203,7 +1203,7 @@ function screenLines(b) {
 }
 function dialogOpen(lines, cli) {
   if (cli === "codex") return lines.filter((l) => l.trim()).slice(-4).some((l) => SCR_OPEN.test(l));
-  const end = lines.slice(-14);
+  const end = lines.slice(-40);                 // a long draft pushes the box up
   // the line above the box may carry the conversation's name: ──── name ─
   return !end.some((l, i) => /^\s*─{10,}/.test(l) && /^\s*❯/.test(end[i + 1] || ""));
 }

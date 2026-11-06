@@ -326,7 +326,7 @@ def screen_dialog_open(lines):
     """True when a Claude tab shows one of its own screens (/usage, /status,
     a settings tab): its message box (a line of ─, then ❯) is hidden then.
     The screens end in different lines, so the box is what counts."""
-    end = [l for l in (lines or [])][-14:]
+    end = list(lines or [])[-40:]        # all the tab gives: a long draft pushes the box up
     if not any(l.strip() for l in end):
         return False
     # the line above the box may carry the conversation's name: ──── name ─

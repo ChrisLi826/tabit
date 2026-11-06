@@ -2218,6 +2218,8 @@ class HeldWhileScreenTest(Base):
         self.assertFalse(tc.screen_dialog_open(["  some reply"] + self.BOX))
         named = ["\u2500" * 40 + " \u30ec\u30d3\u30e5\u30fc \u2500", "\u276f\xa0", "\u2500" * 40]
         self.assertFalse(tc.screen_dialog_open(named))      # a named conversation's box
+        draft = ["\u2500" * 40, "\u276f line 1"] + ["  line %d" % i for i in range(2, 16)] + self.BOX[2:] + ["  a", "  b"]
+        self.assertFalse(tc.screen_dialog_open(draft))      # a long draft in the box
         self.assertFalse(tc.screen_dialog_open([]))
 
     def test_lines_wait_for_the_screen_then_go_in_order(self):
