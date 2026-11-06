@@ -55,6 +55,7 @@ CHAT_CLIS = ("claude", "codex")    # the AI tabs a chat can show
 MIRROR_TAIL = 1 << 20        # the first look reads this many bytes from the end
 MIRROR_FIRST = 300           # ... and keeps at most this many events of them
 MIRROR_STEP = 4 << 20        # one look reads at most this much
+UNQUEUE_WAIT = 2.0           # seconds for Up to bring the held lines back
 ANSWER_STEP = 0.7            # seconds between the keys of one answer: the tab redraws
 ASK_WAIT = 540               # seconds the user has to answer a question from a tool
 
@@ -190,6 +191,37 @@ def _typed_event(typed):
         ev["text"] = _cut(typed[said.end():], 20000)
         ev["reply"] = {"who": said.group(1), "snip": said.group(2)}
     return ev
+
+
+QUEUE_HINT = "Press up to edit queued messages"   # Claude Code, when lines wait and its box is empty
+
+
+def _queue_text(content):
+    """The text of a line Claude Code holds (a queue-operation's content)."""
+    if isinstance(content, list):
+        content = "\n".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return content if isinstance(content, str) else ""
+
+
+def queue_step(queue, raw):
+    """Follow Claude Code's queue of lines typed while it works, one
+    transcript line at a time: enqueue adds, dequeue takes the first (a new
+    turn), remove (taken in mid-turn) and popAll (Up: back into the box) take
+    that line. True when the line was a queue step."""
+    if not isinstance(raw, dict) or raw.get("type") != "queue-operation":
+        return False
+    op, text = raw.get("operation"), _queue_text(raw.get("content"))
+    if op == "enqueue":
+        queue.append(text)
+    elif op == "dequeue":
+        del queue[:1]
+    elif op in ("remove", "popAll") and text in queue:
+        queue.remove(text)
+    return True
+
+
+def _queue_key(text):
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
 
 
 def codex_events(raw):
@@ -654,7 +686,7 @@ class Chat(_Log):
         with self.cond:
             return {"state": self.state, "live": self.live, "seq": self.seq,
                     "pending": [p["ev"] for p in self.pending.values()],
-                    "meta": self.summary()}
+                    "queued": self.queued(), "meta": self.summary()}
 
     # -- the claude process
     def _argv(self):
@@ -970,10 +1002,13 @@ class Chat(_Log):
         if fresh and start > 0:
             data = data[data.find(b"\n") + 1:]      # the first line is cut in half
         events, model, limits = [], None, None
+        queue = [] if fresh else list(have.get("queue") or [])
         for line in data.splitlines():
             try:
                 raw = json.loads(line)
             except ValueError:
+                continue
+            if queue_step(queue, raw):
                 continue
             events += transcript_events(raw, self.meta["tab"].get("cli") or "claude")
             model = raw_model(raw) or model      # the model that answered last
@@ -991,8 +1026,10 @@ class Chat(_Log):
             events = events[-MIRROR_FIRST:]
             for ev in events:
                 ev["replay"] = True  # the past: a group does not pass it on
-        self.meta["mirror"] = {"path": path, "offset": start + end + 1}
+        self.meta["mirror"] = {"path": path, "offset": start + end + 1, "queue": queue}
         self._save_meta()            # first: a stop between the two must not pass a line on twice
+        if queue != (have.get("queue") or []):
+            self.push()
         for ev in events:
             if ev.get("reply"):
                 ev["reply"]["seq"] = self._seq_of(ev["reply"]["snip"])
@@ -1015,6 +1052,78 @@ class Chat(_Log):
         if any(p.get("tab") for p in self.pending.values()):
             return 409, {"error": "That tab asks a question: tap an answer on the card above."}
         return self.mgr.tab_hook(self.meta["tab"]["id"], text, queue=True)
+
+    def queued(self):
+        """The user's lines the tab's Claude holds while it works: shown as
+        waiting, and each can be taken back. Not its own notes, nor lines
+        another tab passed on."""
+        if not self.mirrored or (self.meta["tab"].get("cli") or "claude") != "claude":
+            return []
+        out = []
+        for text in (self.meta.get("mirror") or {}).get("queue") or []:
+            if text.strip() and not text.lstrip().startswith(NOT_TYPED + ("[from @",)):
+                out.append(dict(_typed_event(text), key=_queue_key(text)))
+        return out
+
+    def _live_queue(self, path):
+        """(the queue as the transcript has it this moment, the queue steps
+        past the last look as (operation, text)), or (None, [])."""
+        have = self.meta.get("mirror") or {}
+        queue, steps = list(have.get("queue") or []), []
+        if os.path.realpath(have.get("path") or "") != os.path.realpath(path):
+            return None, []
+        try:
+            with open(path, "rb") as f:
+                f.seek(have.get("offset", 0))
+                data = f.read()
+        except OSError:
+            return None, []
+        for line in data.splitlines():
+            try:
+                raw = json.loads(line)
+            except ValueError:
+                continue
+            if queue_step(queue, raw):
+                steps.append((raw.get("operation"), _queue_text(raw.get("content"))))
+        return queue, steps
+
+    def unqueue(self, key):
+        """Take back one line the tab's Claude still holds, as a person would:
+        Up brings every held line back into its box, the box is emptied, the
+        others are typed again. -> (code, body); body has the line's text."""
+        if not self.mirrored or (self.meta["tab"].get("cli") or "claude") != "claude":
+            return 400, {"error": "only a Claude tab's chat holds lines"}
+        tab = self.meta["tab"]["id"]
+        info = self.mgr.tab_hook(tab, screen=True)
+        path = info.get("transcript")
+        before, steps = self._live_queue(path) if path else (None, [])
+        if not before or key not in [_queue_key(t) for t in before]:
+            return 409, {"error": "Claude has already read it"}
+        if not any(QUEUE_HINT in line for line in info.get("screen") or []):
+            return 409, {"error": "the tab's message box has text in it: take it back in the tab"}
+        code, out = self.mgr.tab_hook(tab, key="up")
+        if code != 200:
+            return code, out
+        popped = []
+        for _ in range(int(UNQUEUE_WAIT / 0.1)):
+            time.sleep(0.1)
+            now, after = self._live_queue(path)
+            new = after[len(steps):]
+            popped = [t for op, t in new if op == "popAll"]
+            if now is not None and not now:
+                break
+        lines = sum(len(_unpaste(t).split("\n")) for t in before) + 2
+        for k in ["ctrl-u", "backspace"] * lines + ["ctrl-u"]:   # empty the box, line by line
+            self.mgr.tab_hook(tab, key=k)
+        # Only what Up brought back is in the box; a line Claude read just
+        # then was not, and is not typed again.
+        gone = next((i for i, t in enumerate(popped) if _queue_key(t) == key), None)
+        for i, t in enumerate(popped):
+            if i != gone:
+                self.mgr.tab_hook(tab, _unpaste(t), queue=True)
+        if gone is None:
+            return 409, {"error": "Claude has just read it"}
+        return 200, {"ok": True, "text": _typed_event(popped[gone])["text"]}
 
     def interrupt(self):
         if self.mirrored:
@@ -1261,7 +1370,8 @@ class Group(_Log):
                 else self.meta.get("created") or self.meta.get("updated", 0),
                 "members": [{"id": c.id, "alias": self.alias(c), "title": c.meta["title"],
                              "state": c.state, "default": bool(c.meta.get("default")),
-                             "emoji": c.meta.get("emoji", ""), "hue": c.meta.get("hue")}
+                             "emoji": c.meta.get("emoji", ""), "hue": c.meta.get("hue"),
+                             "cli": (c.meta.get("tab") or {}).get("cli") or "claude"}
                             for c in self.members()],
                 "last": (last["text"][:120] if last else ""),
                 "asks": sum(len(c.pending) for c in self.members())}
@@ -2055,6 +2165,8 @@ def api(mgr, method, parts, body):
         return 200, {"ok": True}
     if op == "stop":
         return 200, {"ok": chat.interrupt()}
+    if op == "unqueue":
+        return chat.unqueue(_text(body, "key"))
     if op == "answer":
         rid = _text(body, "rid")
         try:

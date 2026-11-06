@@ -499,6 +499,12 @@ class TestGroup(Base):
         self.assertTrue(any("bob was deleted" in e["text"] for e in group.events if e["t"] == "notice"))
         self.assertEqual(len(group.summary()["members"]), 2)
 
+    def test_a_member_says_which_ai_it_is(self):
+        # the page colors a Codex member's words like Codex's terminal
+        group, (a, b) = self.group(2)
+        b.meta["tab"] = {"cli": "codex"}
+        self.assertEqual([m["cli"] for m in group.summary()["members"]], ["claude", "codex"])
+
     def test_a_chat_can_pass_a_message_to_another(self):
         group, (a, b) = self.group()
         # bob is told to say a line that starts with @alice: it reaches alice
@@ -1949,6 +1955,133 @@ class QueuedMessageTest(unittest.TestCase):
         self.assertEqual(tc.transcript_events(self.line("x", mode="task-notification")), [])
         self.assertEqual(tc.transcript_events(self.line("x", kind="task")), [])
         self.assertEqual(tc.transcript_events({"type": "attachment", "attachment": {"type": "date"}}), [])
+
+
+class HeldLineTest(Base):
+    """A line sent while the tab's Claude works waits in Claude Code's queue:
+    the chat shows it as queued, and it can be taken back until Claude reads it."""
+
+    HINT = "❯ Press up to edit queued messages"
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, tc, "MIRROR_EVERY", tc.MIRROR_EVERY)
+        tc.MIRROR_EVERY = 3600
+        self.path = os.path.join(self.dir, "tx.jsonl")
+        open(self.path, "w").close()
+        self.screen = ["─" * 20, self.HINT, "─" * 20]
+        self.keys, self.typed = [], []
+        self.pops = True             # Up brings the held lines back
+
+        def hook(tab, text=None, key=None, queue=False, screen=False):
+            if text is None and key is None:
+                info = {"title": "MOT", "status": "working", "transcript": self.path, "cli": "claude"}
+                if screen:
+                    info["screen"] = self.screen
+                return info
+            if key:
+                self.keys.append(key)
+                if key == "up" and self.pops:
+                    for t in self.held():
+                        self.op("popAll", t)
+            else:
+                self.typed.append(text)
+                self.op("enqueue", text)
+            return 200, {"ok": True}
+        self.mgr.tab_hook = hook
+        code, out = self.mgr.create({"tab": {"id": "t1", "title": "x"}})
+        self.chat = self.mgr.get(out["chat"]["id"])
+        self.chat.mirror_poll()
+
+    def op(self, operation, text=None):
+        line = {"type": "queue-operation", "operation": operation, "sessionId": "s"}
+        if text is not None:
+            line["content"] = text
+        with open(self.path, "a") as f:
+            f.write(json.dumps(line) + "\n")
+
+    def held(self):
+        return self.chat._live_queue(self.path)[0]
+
+    def shown(self):
+        self.chat.mirror_poll()
+        return [q["text"] for q in self.chat.view()["queued"]]
+
+    def test_the_queue_follows_claude_code(self):
+        q = []
+        for op, text in (("enqueue", "a"), ("enqueue", "b"), ("enqueue", "c"),
+                         ("dequeue", None), ("remove", "c")):
+            tc.queue_step(q, {"type": "queue-operation", "operation": op, "content": text})
+        self.assertEqual(q, ["b"])
+        tc.queue_step(q, {"type": "queue-operation", "operation": "popAll", "content": "b"})
+        self.assertEqual(q, [])
+        self.assertFalse(tc.queue_step(q, {"type": "user"}))
+
+    def test_held_lines_show_until_claude_reads_them(self):
+        self.op("enqueue", "first")
+        self.op("enqueue", "<task-notification>x")       # Claude's own note
+        self.op("enqueue", "[from @lpr] hi")              # another tab's
+        self.assertEqual(self.shown(), ["first"])
+        self.op("remove", "first")                        # read mid-turn
+        self.assertEqual(self.shown(), [])
+
+    def test_a_held_line_is_taken_back_and_the_others_typed_again(self):
+        self.op("enqueue", "keep one")
+        self.op("enqueue", "take me back")
+        self.op("enqueue", "keep two")
+        self.chat.mirror_poll()
+        key = [q["key"] for q in self.chat.view()["queued"] if q["text"] == "take me back"][0]
+        code, out = self.chat.unqueue(key)
+        self.assertEqual((code, out.get("text")), (200, "take me back"))
+        self.assertEqual(self.keys[0], "up")
+        self.assertEqual(self.keys[-1], "ctrl-u")         # the box is emptied before typing
+        self.assertEqual(self.typed, ["keep one", "keep two"])
+        self.assertEqual(self.shown(), ["keep one", "keep two"])
+
+    def test_a_line_already_read_is_not_taken_back(self):
+        self.op("enqueue", "late")
+        self.chat.mirror_poll()
+        key = self.chat.view()["queued"][0]["key"]
+        self.op("remove", "late")
+        self.assertEqual(self.chat.unqueue(key)[0], 409)
+        self.assertEqual(self.keys, [])
+
+    def test_text_in_the_box_stops_it(self):
+        # Up would move in the person's own draft: leave it to the tab
+        self.op("enqueue", "x")
+        self.chat.mirror_poll()
+        self.screen = ["─" * 20, "❯ my draft", "─" * 20]
+        self.assertEqual(self.chat.unqueue(self.chat.view()["queued"][0]["key"])[0], 409)
+        self.assertEqual(self.keys, [])
+
+    def test_read_just_before_up_types_nothing_again(self):
+        self.op("enqueue", "x")
+        self.chat.mirror_poll()
+        self.pops = False            # Claude took it in: Up only shows an old line
+        self.addCleanup(setattr, tc, "UNQUEUE_WAIT", tc.UNQUEUE_WAIT)
+        tc.UNQUEUE_WAIT = 0.3
+        self.assertEqual(self.chat.unqueue(self.chat.view()["queued"][0]["key"])[0], 409)
+        self.assertEqual(self.keys[-1], "ctrl-u")         # the old line is cleared away
+        self.assertEqual(self.typed, [])
+
+    def test_read_as_up_is_pressed_is_not_typed_again(self):
+        # Claude takes the lines in at that moment: they leave its queue as
+        # "remove", not "popAll", and must not be sent twice
+        self.op("enqueue", "x")
+        self.op("enqueue", "y")
+        self.chat.mirror_poll()
+        self.pops = False
+        real = self.mgr.tab_hook
+
+        def hook(tab, text=None, key=None, queue=False, screen=False):
+            if key == "up":
+                self.op("remove", "x")
+                self.op("remove", "y")
+            return real(tab, text, key, queue, screen)
+        self.mgr.tab_hook = hook
+        key = self.chat.view()["queued"][0]["key"]
+        self.assertEqual(self.chat.unqueue(key)[0], 409)
+        self.assertEqual(self.typed, [])
 
 
 class PastedTest(unittest.TestCase):

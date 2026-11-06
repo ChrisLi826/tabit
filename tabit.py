@@ -401,10 +401,10 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.2.2"
+APP_VERSION = "v2.2.3"
 # Taiwan main dish of the major version + a fresh snack or drink, picked at
 # release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
-APP_CODENAME = "Ginger Duck + Twin Doughnut"
+APP_CODENAME = "Ginger Duck + Pepper Bun"
 _VERSION_CODENAME_SEP = " · "
 
 
@@ -12326,7 +12326,7 @@ if (data !== null) {{
                     "down": b"\x1bOB", "right": b"\x1bOC", "left": b"\x1bOD",
                     "tab": b"\t", "backspace": b"\x7f", "space": b" ",
                     "ctrl-c": b"\x03", "ctrl-d": b"\x04", "ctrl-z": b"\x1a",
-                    "ctrl-l": b"\x0c",
+                    "ctrl-l": b"\x0c", "ctrl-u": b"\x15",
                     "pgup": b"\x1b[5~", "pgdn": b"\x1b[6~", "home": b"\x1bOH", "end": b"\x1bOF",
                     **{str(d): str(d).encode() for d in range(1, 10)},
                     "y": b"y", "n": b"n"}
@@ -13459,11 +13459,12 @@ if (data !== null) {{
             return 500, res
         return res
 
-    def _chat_tab_hook(self, tab_id, text=None, key=None, queue=False):
+    def _chat_tab_hook(self, tab_id, text=None, key=None, queue=False, screen=False):
         """For a chat: info about an AI tab; with text, type a line into it;
         with key, press one. Info is {"title", "status", "transcript",
         "cli"} (a blocked tab adds "screen", its last lines) or {"error"}; the others give (code, body). queue: a busy tab
         takes the line too (Claude Code holds it), only a question stops it.
+        screen: the info has the last lines in any status.
         Runs on the GTK thread through _remote_call."""
         acts = text is not None or key is not None
 
@@ -13482,7 +13483,7 @@ if (data !== null) {{
                             list(row.argv or []) + self._codex_notified(row)) if cli == "codex"
                         else getattr(row, "_agent_hook_tx", "") or ""}
                 term = getattr(row, "term", None)
-                if status == "blocked" and term is not None and self._remote_send_on:
+                if (status == "blocked" or screen) and term is not None and self._remote_send_on:
                     # the menu the tab waits on, so the chat can show it (typing switch: as the screen)
                     info["screen"] = self._term_tail_text(term, 60).rstrip().splitlines()[-40:]
                 return info

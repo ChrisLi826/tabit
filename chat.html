@@ -111,6 +111,9 @@
   #grip { display: none; }
   .b .ts { margin-top: 4px; font-size: 11px; opacity: .55; text-align: right; }
   .b .rp { display: none; margin-top: 6px; padding: 3px 12px; font-size: 12px; border-radius: 12px; border: 0; background: #ffffff22; color: inherit; }
+  .b.queued { opacity: .6; border: 1px dashed #ffffff88; }
+  .b.queued .qn { margin-top: 6px; font-size: 12px; opacity: .9; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; white-space: normal; }
+  .b.queued .unq { padding: 3px 12px; font-size: 12px; border-radius: 12px; border: 0; background: #ffffff33; color: inherit; }
   .b.sel .rp { display: block; } .b:hover .rp { display: block; }
   .quote { border-left: 3px solid #ffffffb0; background: #00000026; border-radius: 8px; padding: 4px 8px; margin-bottom: 6px; font-size: 13px;
            overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; opacity: .92; }
@@ -132,6 +135,24 @@
            overflow-x: auto; font: 13px/1.4 ui-monospace, "SF Mono", Menlo, monospace; }
   .b pre code { background: none; padding: 0; }
   .b a.path code { color: var(--cyan); }
+  /* the colors Claude's terminal gives `code` and **bold** */
+  .b.ai code { color: #b1b9f9; } .b.ai pre code { color: inherit; }
+  .b.ai b { color: #fff; }
+  /* Codex's terminal: pink bold, green code */
+  /* (its default theme, catppuccin-mocha) */
+  .b.ai.cx b, .b.ai.cx i { color: #f38ba8; } .b.ai.cx code { color: #a6e3a1; } .b.ai.cx pre code { color: inherit; }
+  .b.ai.cx .h1 { color: #f38ba8; text-decoration: underline; } .b.ai.cx .h2 { color: #fab387; }
+  .b.ai.cx .h3 { color: #f9e2af; font-style: italic; } .b.ai.cx .h4 { color: #a6e3a1; font-style: italic; }
+  .b.ai.cx .h5 { color: #74c7ec; font-style: italic; } .b.ai.cx .h6 { color: #b4befe; font-style: italic; }
+  .b.ai.cx ul li::marker { color: #94e2d5; } .b.ai.cx ol li::marker { color: #89dceb; }
+  .b.ai.cx blockquote { color: #f5c2e7; } .b.ai.cx a:not(.path) { color: #89b4fa; text-decoration: underline; }
+  .da { color: var(--green); } .dd { color: var(--red); } .dh { color: var(--cyan); }
+  .b .tbl { overflow-x: auto; margin: 0 0 .55em; }
+  .b table { border-collapse: collapse; font-size: .95em; }
+  .b th, .b td { border: 1px solid #3a3f5a; padding: 6px 14px; text-align: left; vertical-align: top; }
+  .b th { text-align: center; background: #ffffff08; }
+  .hk { color: var(--cyan); } .hs { color: var(--red); } .hn { color: var(--purple); }
+  .hw { color: var(--pink); } .hc { color: var(--dim); font-style: italic; }
   .tool { align-self: flex-start; max-width: 94%; font-size: 13.5px; color: var(--dim); }
   .tool summary { cursor: pointer; list-style: none; padding: 5px 12px; background: #ffffff0a; border: 1px solid var(--line); border-radius: 99px;
                   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -485,25 +506,57 @@ async function api(path, body) {
 // --- a little Markdown: what Claude writes, never raw HTML ------------------
 const pathLink = (c) => `<a class="path" target="_blank" rel="noopener" href="api/file?path=${encodeURIComponent(c)}&amp;render=1"><code>${c}</code></a>`;
 function inline(raw) {
-  // `code` first; a path in plain text opens the file too (home and /tmp:
-  // what the file view shows), without a full stop that ends the sentence
-  return String(raw).split(/(`[^`]+`)/).map((seg, i) => {
-    if (i % 2) {
-      const c = esc(seg.slice(1, -1));
-      return /^(\/|~\/)[\w.\-\/~@+]+$/.test(c) ? pathLink(c) : `<code>${c}</code>`;
-    }
-    let t = esc(seg);
-    t = t.replace(/(^|[\s(*:：，、「（])((?:\/home\/|\/tmp\/|~\/)[\w.\-\/~@+]*[\w\/~@+-])/g, (_m, pre, c) => pre + pathLink(c));
-    t = t.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
-    t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-    return t;
-  }).join("");
+  // `code` is set aside first, so **bold** may hold it; a path in plain text
+  // opens the file too (home and /tmp: what the file view shows), without a
+  // full stop that ends the sentence
+  const codes = [];
+  let t = esc(String(raw).replace(/\0/g, "").replace(/`([^`]+)`/g, (_m, c) => `\0${codes.push(c) - 1}\0`));
+  t = t.replace(/(^|[\s(*:：，、「（])((?:\/home\/|\/tmp\/|~\/)[\w.\-\/~@+]*[\w\/~@+-])/g, (_m, pre, c) => pre + pathLink(c));
+  t = t.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+  t = t.replace(/(^|[^\w*])\*([^*\s](?:[^*]*[^*\s])?)\*(?![\w*])/g, "$1<i>$2</i>");
+  t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  return t.replace(/\0(\d+)\0/g, (_m, i) => {
+    const c = esc(codes[i]);
+    return /^(\/|~\/)[\w.\-\/~@+]+$/.test(c) ? pathLink(c) : `<code>${c}</code>`;
+  });
+}
+// colors in a code block, like the terminal shows them: keys, strings,
+// numbers, words of the language, comments
+const HL_WORDS = new Set(("if else elif for while do return function const let var def class import from export as " +
+  "try catch except finally raise throw new await async break continue switch case default struct static void int char " +
+  "unsigned long bool true false null None True False nil fn pub use mut local then fi esac done in echo sizeof typedef enum").split(" "));
+const HL_HASH = /^(sh|bash|zsh|shell|console|py|python|yaml|yml|toml|ini|conf|cfg|make|makefile|dockerfile|perl|ruby|rb)$/i;
+function hl(code, lang) {
+  const note = HL_HASH.test(lang) ? "#[^\\n]*" : "(?<!:)\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?\\*\\/";
+  const re = new RegExp(`(${note})|("(?:\\\\.|[^"\\\\\\n])*"|'(?:\\\\.|[^'\\\\\\n])*')(\\s*:)?|\\b(0x[\\da-fA-F]+|\\d+(?:\\.\\d+)?)\\b|\\b([A-Za-z_]\\w*)\\b`, "g");
+  let out = "", at = 0, m;
+  while ((m = re.exec(code))) {
+    out += esc(code.slice(at, m.index)); at = re.lastIndex;
+    if (m[1]) out += `<span class="hc">${esc(m[1])}</span>`;
+    else if (m[2]) out += m[3] ? `<span class="hk">${esc(m[2])}</span>${esc(m[3])}` : `<span class="hs">${esc(m[2])}</span>`;
+    else if (m[4]) out += `<span class="hn">${m[4]}</span>`;
+    else out += HL_WORDS.has(m[5]) ? `<span class="hw">${m[5]}</span>` : m[5];
+  }
+  return out + esc(code.slice(at));
+}
+// a change to a file: added lines green, taken out red, like the terminal
+function diffHtml(text) {
+  if (!/^@@ /m.test(text || "")) return esc(text);
+  return String(text).split("\n").map((l) => {
+    const cls = /^(\+\+\+|---) /.test(l) ? "" : l[0] === "+" ? "da" : l[0] === "-" ? "dd" : l.startsWith("@@") ? "dh" : "";
+    return cls ? `<span class="${cls}">${esc(l)}</span>` : esc(l);
+  }).join("\n");
 }
 function md(text) {
   const out = [];
-  const parts = String(text).split(/^```[^\n]*\n([\s\S]*?)^```[ \t]*$/m);
+  // a fence may be indented, under a list item; its indent comes off each line
+  const parts = String(text).split(/^([ \t]*)```(\S*)[^\n]*\n([\s\S]*?)^[ \t]*```[ \t]*$/m);
   parts.forEach((part, i) => {
-    if (i % 2) { out.push(`<pre><code>${esc(part.replace(/\n$/, ""))}</code></pre>`); return; }
+    if (i % 4 === 1 || i % 4 === 2) return;
+    if (i % 4 === 3) {
+      const pad = parts[i - 2], body = part.replace(/\n$/, "").split("\n").map((l) => l.startsWith(pad) ? l.slice(pad.length) : l.trimStart()).join("\n");
+      out.push(`<pre><code>${hl(body, parts[i - 1])}</code></pre>`); return;
+    }
     let list = null, para = [];
     const endPara = () => { if (para.length) out.push(`<p>${para.join("<br>")}</p>`); para = []; };
     const endList = () => { if (list) out.push(`</${list}>`); list = null; };
@@ -516,9 +569,13 @@ function md(text) {
         endPara(); endList();
         const rows = [line];
         while (n + 1 < lines.length && lines[n + 1].trim().startsWith("|")) rows.push(lines[++n]);
-        out.push(`<pre>${esc(rows.join("\n"))}</pre>`);
+        const cells = (r) => r.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => inline(c.trim()));
+        const body = rows.filter((r) => !/^[\s|:-]+$/.test(r)).map(cells);
+        const head = rows.length > 1 && /^[\s|:-]+$/.test(rows[1]) ? body.shift() : null;
+        out.push(`<div class="tbl"><table>${head ? `<tr>${head.map((c) => `<th>${c}</th>`).join("")}</tr>` : ""}` +
+          body.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("") + "</table></div>");
       }
-      else if ((m = line.match(/^(#{1,6})\s+(.*)/))) { endPara(); endList(); out.push(`<h3>${inline(m[2])}</h3>`); }
+      else if ((m = line.match(/^(#{1,6})\s+(.*)/))) { endPara(); endList(); out.push(`<h3 class="h${m[1].length}">${inline(m[2])}</h3>`); }
       else if ((m = line.match(/^\s*([-*]|\d+\.)\s+(.*)/))) {
         endPara();
         const kind = /\d/.test(m[1]) ? "ol" : "ul";
@@ -673,7 +730,7 @@ function openTalk(k, id) {
     if (!listTimer) listTimer = setInterval(() => { if (!document.hidden) loadList(); }, 5000);
     loadList();
   } else { clearInterval(listTimer); listTimer = null; }
-  cur = { kind: k, id, es: null, lastSeq: 0, pending: new Set(), tools: new Map(), asks: new Map(), members: {}, firstSeq: 0, state: "idle", live: {} };
+  cur = { kind: k, id, es: null, lastSeq: 0, pending: new Set(), tools: new Map(), asks: new Map(), members: {}, codex: new Set(), firstSeq: 0, state: "idle", live: {} };
   $("list").classList.remove("on"); $("talk").classList.add("on");
   $("back").hidden = false; $("more").hidden = false; $("add").hidden = true; $("remote").hidden = true; $("setbtn").hidden = true;
   $("notify").hidden = !("Notification" in window); bell();
@@ -721,7 +778,8 @@ function take(me, d) {
   me.meta = d.meta;
   if (d.state === "ready" && d.meta.tab && !document.hidden)
     api(`api/tabs/${encodeURIComponent(d.meta.tab.id)}/ack`, {}).catch(() => {});
-  if (me.kind === "groups") d.meta.members.forEach((m) => { me.members[m.id] = m.alias; });
+  if (me.kind === "groups") d.meta.members.forEach((m) => { me.members[m.id] = m.alias; if (m.cli === "codex") me.codex.add(m.id); });
+  else if (aiName(d.meta) === "Codex") me.codex.add("");
   me.pending = new Set(d.pending.map((p) => p.rid));
   d.pending.forEach((p) => me.asks.set(p.rid, p));
   const fresh = d.events.filter((ev) => ev.seq > me.lastSeq);
@@ -738,6 +796,7 @@ function take(me, d) {
   }
   me.lastSeq = Math.max(me.lastSeq, d.seq);
   me.live = d.live;
+  me.queued = d.queued || [];
   paintLive(me);
   paintAsks(me);
   header(me);
@@ -829,10 +888,14 @@ function paintLive(me) {
   let html = "";
   for (const [cid, text] of Object.entries(items)) {
     const who = me.kind === "groups" ? me.members[cid] || "" : "";
-    html += `<div class="b ai">${who ? `<div class="who" style="color:${colorOf(who)}">${esc(who)}</div>` : ""}${md(text)}</div>`;
+    html += `<div class="b ai${me.codex.has(cid) ? " cx" : ""}">${who ? `<div class="who" style="color:${colorOf(who)}">${esc(who)}</div>` : ""}${md(text)}</div>`;
   }
   if (!html && me.state === "working") html = '<div class="b ai"><span class="dots"><span></span><span></span><span></span></span></div>';
   if (!html && me.state === "background") html = '<div class="note">↻ Background work still running</div>';
+  // what the tab's Claude holds while it works: it reads it after its current step
+  for (const q of me.queued || [])
+    html += `<div class="b me queued">${esc(q.text)}<div class="qn">Queued: Claude reads it after its current step` +
+      `<button type="button" class="unq" data-key="${esc(q.key)}">Take back</button></div></div>`;
   l.innerHTML = html;
 }
 
@@ -859,13 +922,13 @@ function drawOne(me, ev) {
     case "user":
       return div("b me", `${ev.reply ? `<div class="quote"${ev.reply.seq ? ` data-go="${+ev.reply.seq}"` : ""}><b>${esc(ev.reply.who)}</b>${esc(ev.reply.snip)}</div>` : ""}${esc(ev.text)}${ev.to ? `<div class="to">to ${ev.to.map((x) => "@" + esc(x)).join(" ")}</div>` : ""}`);
     case "text":
-      return div("b ai", md(ev.text));
+      return div(me.codex.has("") ? "b ai cx" : "b ai", md(ev.text));
     case "say":
-      return div("b ai", `<div class="who" style="color:${colorOf(ev.name)}">${esc(ev.name)}</div>${md(ev.text)}`);
+      return div(me.codex.has(ev.chat) ? "b ai cx" : "b ai", `<div class="who" style="color:${colorOf(ev.name)}">${esc(ev.name)}</div>${md(ev.text)}`);
     case "tool": {
       const d = document.createElement("details");
       d.className = "tool";
-      d.innerHTML = `<summary>${esc(plain(ev))}</summary><pre>${esc(ev.detail)}</pre>`;
+      d.innerHTML = `<summary>${esc(plain(ev))}</summary><pre>${diffHtml(ev.detail)}</pre>`;
       me.tools.set(ev.id, d);
       return d;
     }
@@ -931,6 +994,19 @@ function paintAsks(me) {
 $("msgs").addEventListener("click", async (e) => {
   const quote = e.target.closest(".quote[data-go]");
   if (quote) { jumpTo(+quote.dataset.go); return; }
+  const unq = e.target.closest(".unq");
+  if (unq) {
+    unq.disabled = true; unq.textContent = "Taking back…";
+    try {
+      const out = await api(`${base(cur.kind)}/${cur.id}/unqueue`, { key: unq.dataset.key });
+      const t = $("text");                     // back in the box, to change or delete
+      if (!t.value.trim()) { t.value = out.text; t.dispatchEvent(new Event("input")); }
+      const i = (cur.queued || []).findIndex((q) => q.key === unq.dataset.key);
+      if (i >= 0) cur.queued.splice(i, 1);    // a repaint before the next look keeps it gone
+      unq.closest(".b").remove();
+    } catch (err) { status(err.message, true); unq.disabled = false; unq.textContent = "Take back"; }
+    return;
+  }
   const rp = e.target.closest(".rp");
   if (rp) {
     const b = rp.closest(".b");
