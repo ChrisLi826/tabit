@@ -275,6 +275,17 @@
 
   html { scrollbar-color: #2f3549 transparent; } * { scrollbar-width: thin; scrollbar-color: #2f3549 transparent; }
   #hero { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 0 6px; font-size: 17px; }
+  /* how much of each login's limits is used: one row per AI login the chats use */
+  #usage { margin: 4px 14px 0; padding: 6px 10px; background: var(--panel); border-radius: 12px; font-size: 12px; flex: none; }
+  #usage:empty { display: none; }
+  #usage .u { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; padding: 3px 0; }
+  #usage .u + .u { border-top: 1px solid var(--line); }
+  #usage .who { flex: 1 0 9em; font-weight: 600; }
+  #usage .w { display: inline-flex; align-items: center; gap: 4px; color: var(--dim); white-space: nowrap; }
+  #usage .bar { width: 34px; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
+  #usage .bar i { display: block; height: 100%; background: var(--green); }
+  #usage .w.mid .bar i { background: var(--yellow); } #usage .w.hot .bar i { background: var(--red); }
+  #usage .w.hot { color: var(--red); }
   .mainbot { display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; padding: 6px 14px; border-radius: 18px; }
   .mainbot.sel { background: #262b45; } .mainbot .sub { font-size: 13px; } .mainbot .st-wait { color: var(--orange); } .mainbot .st-work { color: var(--purple); }
   /* the state as a speech bubble on the picture's top right; none when idle.
@@ -363,6 +374,7 @@
     <div id="scroller">
     <div id="top">
     <div id="hero"></div>
+    <div id="usage"></div>
     <div id="tabs"><button data-k="chats" class="on">Chats</button><button data-k="groups">Groups</button></div>
     </div>
     <div id="cards"></div>
@@ -577,6 +589,20 @@ function bub(r) {
 function stateLine(r) {
   return r.asks || r.state === "waiting" ? ["st-wait", "needs your OK"] : null;
 }
+// "Claude · Personal  5h ▬ 13% ↺9m  7d ▬ 36% ↺3d": a row per AI login the chats use
+const untilT = (t) => { const s = t - Date.now() / 1000; return s < 3600 ? Math.max(1, Math.round(s / 60)) + "m" : s < 86400 ? Math.round(s / 3600) + "h" : Math.round(s / 86400) + "d"; };
+function usageHtml(list) {
+  return (list || []).map((u) => {
+    const who = `${u.cli === "codex" ? "Codex" : "Claude"} · ${esc(u.account || "Default")}`;
+    const now = Date.now() / 1000;
+    const ws = (u.windows || []).map((w) => {
+      if (w.resets && w.resets < now) return `<span class="w" title="this window has started again">${esc(w.name)} reset</span>`;
+      const pct = Math.max(0, Math.min(100, w.pct));
+      return `<span class="w${pct >= 80 ? " hot" : pct >= 50 ? " mid" : ""}" title="${esc(w.name)} limit: ${pct}% used${w.resets ? ", starts again in " + untilT(w.resets) : ""}">${esc(w.name)} <span class="bar"><i style="width:${pct}%"></i></span> ${pct}%${w.resets ? " ↺" + untilT(w.resets) : ""}</span>`;
+    }).join("");
+    return `<div class="u" title="${u.ts ? "as of " + (timeAgo(u.ts) === "now" ? "now" : timeAgo(u.ts) + " ago") : ""}"><span class="who">${who}</span>${ws || '<span class="w">— shows after its next reply</span>'}</div>`;
+  }).join("");
+}
 async function loadList() {
   let data;
   const keep = listScroll().scrollTop;
@@ -586,6 +612,7 @@ async function loadList() {
     $("cards").innerHTML = `<div class="empty">${esc(e.message)}<br><br><a href="terminal">Open the terminal view</a></div>`; return;
   }
   cfg = data;
+  $("usage").innerHTML = usageHtml(data.usage);
   const main = data.chats.find((c) => c.default);
   $("hero").innerHTML = main ? `<div class="mainbot${cur && cur.id === main.id ? " sel" : ""}" data-id="${esc(main.id)}">
       <div class="av huge">${emo(face(main))}<span class="star">★</span>${bub(main)}</div>

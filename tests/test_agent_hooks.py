@@ -581,3 +581,45 @@ class TestClaudeSessionEnv(unittest.TestCase):
         tabit._drop_claude_session_env(env)
         self.assertEqual(env, {"CLAUDE_CONFIG_DIR": "/home/u/.claude",
                                "CLAUDE_CODE_USE_BEDROCK": "1", "HOME": "/home/u"})
+
+
+class TestClaudeStatusLine(unittest.TestCase):
+    """A Claude tab's status line keeps its usage, then shows the user's own."""
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.dir = d.name
+        self.script = os.path.join(self.dir, "claude-statusline.py")
+        with open(self.script, "w") as f:
+            f.write(tabit._claude_statusline_script(self.dir))
+        os.chmod(self.script, 0o755)
+        self.cfg = os.path.join(self.dir, "cfg")
+        os.makedirs(self.cfg)
+
+    def run_it(self, payload, own=None):
+        if own is not None:
+            with open(os.path.join(self.cfg, "settings.json"), "w") as f:
+                json.dump({"statusLine": {"type": "command", "command": own}}, f)
+        env = {"PATH": os.environ["PATH"], "TABIT_AGENT": "ai-x", "CLAUDE_CONFIG_DIR": self.cfg}
+        return subprocess.run([self.script], input=json.dumps(payload), env=env,
+                              capture_output=True, text=True, timeout=10).stdout
+
+    def test_the_settings_name_it(self):
+        self.assertEqual(tabit._claude_hooks_settings(self.dir)["statusLine"]["command"],
+                         tabit.CLAUDE_STATUSLINE_FILE)
+
+    def test_it_keeps_the_usage_and_shows_the_users_own_line(self):
+        limits = {"five_hour": {"used_percentage": 13, "resets_at": 1}}
+        out = self.run_it({"rate_limits": limits, "model": {"id": "x"}},
+                          own="python3 -c 'import sys,json; print(\"MINE\", json.load(sys.stdin)[\"model\"][\"id\"])'")
+        self.assertEqual(out, "MINE x\n")
+        with open(os.path.join(self.dir, "ai-x.usage")) as f:
+            self.assertEqual(json.load(f)["rate_limits"], limits)
+
+    def test_no_line_of_the_users_own_shows_nothing(self):
+        self.assertEqual(self.run_it({"model": {}}), "")
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "ai-x.usage")))   # no usage yet
+
+    def test_it_never_runs_itself(self):
+        self.assertEqual(self.run_it({}, own=self.script), "")

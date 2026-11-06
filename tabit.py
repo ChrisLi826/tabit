@@ -933,6 +933,10 @@ CLAUDE_HOOKS_FILE = os.path.expanduser("~/.local/share/tabit/claude-hooks.json")
 # daemon, so the tab's own processes no longer show which session is its.
 CODEX_NOTIFY_FILE = os.path.expanduser("~/.local/share/tabit/codex-notify.sh")
 CODEX_NOTIFY_ARG = 'notify=["%s"]' % CODEX_NOTIFY_FILE
+# Claude hands its status line program the account's usage (rate_limits).
+# tabit's settings name this one: it keeps the usage per tab, then runs the
+# status line the user set in their own settings.json.
+CLAUDE_STATUSLINE_FILE = os.path.expanduser("~/.local/share/tabit/claude-statusline.py")
 GROK_HOOK_SCRIPT = os.path.expanduser("~/.local/share/tabit/grok_status_hook.py")
 GROK_HOOKS_FILE = os.path.expanduser("~/.grok/hooks/tabit-status.json")
 # Claude keeps each folder's sessions here, one <id>.jsonl per session
@@ -1946,7 +1950,67 @@ def _claude_hooks_settings(hook_dir):
         "PermissionRequest": ev(asks, "*"),
         "Stop": ev(stop),
         "StopFailure": ev(stop),
-    }}
+    }, "statusLine": {"type": "command", "command": shlex.quote(CLAUDE_STATUSLINE_FILE)}}
+
+
+def _claude_statusline_script(hook_dir):
+    """The status line program of a Claude tab: it keeps the usage Claude
+    hands it in <hook dir>/<tab key>.usage, then runs the user's own status
+    line (from that account's settings.json) and passes its lines on."""
+    return """#!/usr/bin/env python3
+# tabit: written by tabit, which reads the usage it keeps
+import json, os, subprocess, sys, time
+HOOK_DIR = %r
+raw = sys.stdin.read()
+try:
+    data = json.loads(raw)
+except ValueError:
+    data = {}
+key = os.environ.get("TABIT_AGENT", "")
+if os.environ.get("TMUX_PANE"):
+    try:
+        key = subprocess.run(["tmux", "display-message", "-p", "-t", os.environ["TMUX_PANE"], "#S"],
+                             capture_output=True, text=True, timeout=2).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+limits = data.get("rate_limits") if isinstance(data, dict) else None
+if key and "/" not in key and isinstance(limits, dict):
+    try:
+        path = os.path.join(HOOK_DIR, key + ".usage")
+        with open(path + ".tmp", "w") as f:
+            json.dump({"rate_limits": limits, "ts": time.time()}, f)
+        os.replace(path + ".tmp", path)
+    except OSError:
+        pass
+cmd = ""
+try:
+    with open(os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
+                           "settings.json")) as f:
+        cmd = (json.load(f).get("statusLine") or {}).get("command") or ""
+except (OSError, ValueError, AttributeError):
+    pass
+if cmd and os.path.basename(__file__) not in cmd:
+    sys.stdout.flush()
+    subprocess.run(cmd, shell=True, input=raw, text=True)
+""" % hook_dir
+
+
+def _ensure_claude_statusline():
+    """Write the status line program a claude AI tab runs, when it changed."""
+    want = _claude_statusline_script(AGENT_HOOK_DIR)
+    try:
+        with open(CLAUDE_STATUSLINE_FILE) as f:
+            if f.read() == want:
+                return
+    except OSError:
+        pass
+    try:
+        os.makedirs(os.path.dirname(CLAUDE_STATUSLINE_FILE), exist_ok=True)
+        with open(CLAUDE_STATUSLINE_FILE, "w") as f:
+            f.write(want)
+        os.chmod(CLAUDE_STATUSLINE_FILE, 0o755)
+    except OSError as e:
+        print(f"[tabit] cannot write {CLAUDE_STATUSLINE_FILE}: {e}", file=sys.stderr)
 
 
 def _codex_notify_script(hook_dir):
@@ -2898,6 +2962,7 @@ class Tabit(Gtk.Window):
         # claude AI tabs load this file; without it they would not start.
         # grok loads its file from ~/.grok/hooks the next time it starts
         _ensure_claude_hooks()
+        _ensure_claude_statusline()
         _ensure_grok_hooks()
         _ensure_codex_notify()
         # Keep collapsed_groups from settings; do not expand while replaying sessions.
@@ -3509,6 +3574,7 @@ class Tabit(Gtk.Window):
         if _is_ai_icon(getattr(row, "icon_name", None)):
             if CLAUDE_HOOKS_FILE in " ".join(run):
                 _ensure_claude_hooks()
+                _ensure_claude_statusline()
             if CODEX_NOTIFY_FILE in " ".join(run):
                 _ensure_codex_notify()
             if self._ai_tmux_unwrap(run)[1] is None:

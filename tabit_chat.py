@@ -240,6 +240,48 @@ def codex_events(raw):
     return []
 
 
+def _window_name(minutes):
+    """5h, 7d, 30d: what a usage window is called."""
+    if not isinstance(minutes, (int, float)) or minutes <= 0:
+        return "?"
+    return "%dd" % round(minutes / 1440) if minutes >= 1440 else "%dh" % round(minutes / 60)
+
+
+def claude_limits(limits):
+    """[{"name", "pct", "resets"}] from the rate_limits Claude hands its
+    status line: five_hour and seven_day."""
+    out = []
+    for key, name in (("five_hour", "5h"), ("seven_day", "7d")):
+        w = (limits or {}).get(key) if isinstance(limits, dict) else None
+        if isinstance(w, dict) and isinstance(w.get("used_percentage"), (int, float)):
+            out.append({"name": name, "pct": round(w["used_percentage"]),
+                        "resets": w.get("resets_at") or 0})
+    return out
+
+
+def codex_limits(raw):
+    """The same from a Codex rollout line (event_msg token_count), or []."""
+    pay = raw.get("payload") if isinstance(raw, dict) and raw.get("type") == "event_msg" else None
+    if not isinstance(pay, dict) or pay.get("type") != "token_count":
+        return []
+    limits = pay.get("rate_limits") if isinstance(pay.get("rate_limits"), dict) else {}
+    out = []
+    for key in ("primary", "secondary"):     # free plans have one window, paid ones two
+        w = limits.get(key)
+        if isinstance(w, dict) and isinstance(w.get("used_percent"), (int, float)):
+            out.append({"name": _window_name(w.get("window_minutes")),
+                        "pct": round(w["used_percent"]), "resets": w.get("resets_at") or 0})
+    return out
+
+
+def _raw_time(raw):
+    """A transcript line's own time, as epoch seconds; now if it has none."""
+    try:
+        return datetime.datetime.fromisoformat(str(raw["timestamp"]).replace("Z", "+00:00")).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return time.time()
+
+
 def raw_model(raw):
     """The model a transcript line names: a Claude reply, or a Codex turn."""
     if not isinstance(raw, dict):
@@ -933,7 +975,7 @@ class Chat(_Log):
         data = data[:end + 1]
         if fresh and start > 0:
             data = data[data.find(b"\n") + 1:]      # the first line is cut in half
-        events, model = [], None
+        events, model, limits = [], None, None
         for line in data.splitlines():
             try:
                 raw = json.loads(line)
@@ -941,6 +983,11 @@ class Chat(_Log):
                 continue
             events += transcript_events(raw, self.meta["tab"].get("cli") or "claude")
             model = raw_model(raw) or model      # the model that answered last
+            if self.meta["tab"].get("cli") == "codex":
+                got = codex_limits(raw)          # Codex writes its usage after each turn
+                limits = (got, _raw_time(raw)) if got else limits
+        if limits:
+            self.mgr.note_usage("codex", self.meta["tab"].get("account") or "", *limits)
         if model and self.meta["tab"].get("model") != model:
             self.meta["tab"] = dict(self.meta["tab"], model=model)
             self.push()
@@ -1342,6 +1389,14 @@ class ChatManager:
         self._synced = 0.0
         self._missed = {}            # chat id -> looks without its tab
         self._move_failed = {}       # chat id -> tries to move it into a tab that failed
+        self._tab_keys = {}          # tab id -> its hook key, where its usage file is
+        self._usage = {}             # "cli/account" -> {"windows", "ts"}, kept in usage.json
+        try:
+            with open(os.path.join(root, "usage.json"), encoding="utf-8") as f:
+                got = json.load(f)
+            self._usage = got if isinstance(got, dict) else {}
+        except (OSError, ValueError):
+            pass
         self._mirrorer = None
         self._mirror_off = threading.Event()
         self.extra_env = extra_env   # () -> env the chats' tools need
@@ -1513,6 +1568,7 @@ class ChatManager:
             for chat in have.values():
                 if self._tab_talk not in chat.listeners:
                     chat.listeners.append(self._tab_talk)
+            self._tab_keys = {t["id"]: t.get("key") or "" for t in tabs}
             self._write_rosters(tabs, have)
             for tid, chat in have.items():
                 if tid in by_id:
@@ -1605,6 +1661,48 @@ class ChatManager:
         if failed:
             chat.emit({"t": "error", "text": "could not reach " + "; ".join(failed)})
         return 200, {"ok": True}
+
+    def note_usage(self, cli, account, windows, ts):
+        """Keep the newest usage seen for one login of one AI."""
+        key = "%s/%s" % (cli, account)
+        with self.lock:
+            old = self._usage.get(key) or {}
+            if ts < old.get("ts", 0) or (old.get("windows") == windows and ts - old.get("ts", 0) < 60):
+                return
+            self._usage[key] = {"windows": windows, "ts": ts}
+            try:
+                os.makedirs(self.root, exist_ok=True)
+                path = os.path.join(self.root, "usage.json")
+                with open(path + ".tmp", "w", encoding="utf-8") as f:
+                    json.dump(self._usage, f)
+                os.replace(path + ".tmp", path)
+            except OSError:
+                pass
+
+    def usage(self):
+        """[{"cli", "account", "windows", "ts"}] for each AI login the chats
+        use now, Claude first. A Claude tab's usage comes from its status
+        line (<roster dir>/<tab key>.usage), a Codex tab's from its rollout."""
+        inuse = []
+        for c in list(self.chats.values()):
+            tab = c.meta.get("tab") or {}
+            pair = (tab.get("cli") or "claude", tab.get("account") or "") if c.mirrored \
+                else ("claude", c.login())
+            if pair not in inuse:
+                inuse.append(pair)
+            key = self._tab_keys.get(tab.get("id")) if c.mirrored and pair[0] == "claude" else ""
+            if key and self.roster_dir and re.fullmatch(r"[\w.-]{1,80}", key):
+                try:
+                    with open(os.path.join(self.roster_dir, key + ".usage"), encoding="utf-8") as f:
+                        got = json.load(f)
+                    windows = claude_limits(got.get("rate_limits"))
+                    if windows:
+                        self.note_usage("claude", pair[1], windows, float(got.get("ts") or 0))
+                except (OSError, ValueError, AttributeError, TypeError):
+                    pass
+        inuse.sort(key=lambda p: (p[0] != "claude", p[0], p[1] != "", p[1]))
+        return [dict({"cli": cli, "account": acct, "windows": [], "ts": 0},
+                     **self._usage.get("%s/%s" % (cli, acct), {})) for cli, acct in inuse]
 
     def _write_rosters(self, tabs, have):
         """Each tab's roster, for its prompt hook: who it is, whom it can @.
@@ -1911,7 +2009,7 @@ def api(mgr, method, parts, body):
                               "tabgroups": tabgroups,
                               "accounts": mgr.account_choices(), "account": mgr.account,
                               "modes": list(MODES), "models": list(MODELS),
-                              "efforts": list(EFFORTS), "clis": clis},
+                              "efforts": list(EFFORTS), "clis": clis, "usage": mgr.usage()},
                              **({"codex_accounts": mgr.account_choices("codex"),
                                  "codex_models": codex_models()} if "codex" in clis else {}))
         if method == "POST":

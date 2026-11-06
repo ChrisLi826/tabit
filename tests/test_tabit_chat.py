@@ -1022,6 +1022,27 @@ class CodexMirrorTest(Base):
         chat = next(c for c in self.mgr.chats.values() if c.mirrored)
         self.assertEqual(chat.meta["tab"]["cli"], "codex")
 
+    def test_its_usage_comes_from_the_rollout(self):
+        line = {"timestamp": "2026-11-05T09:31:11.000Z", "type": "event_msg",
+                "payload": {"type": "token_count", "rate_limits": {
+                    "primary": {"used_percent": 12.4, "window_minutes": 300, "resets_at": 1900000000},
+                    "secondary": {"used_percent": 40, "window_minutes": 10080, "resets_at": 1900500000}}}}
+        self.assertEqual(tc.codex_limits(line), [{"name": "5h", "pct": 12, "resets": 1900000000},
+                                                 {"name": "7d", "pct": 40, "resets": 1900500000}])
+        free = {"type": "event_msg", "payload": {"type": "token_count", "rate_limits": {
+            "primary": {"used_percent": 6, "window_minutes": 43200}, "secondary": None}}}
+        self.assertEqual([w["name"] for w in tc.codex_limits(free)], ["30d"])   # a free plan: one window
+        with open(self.path, "a") as f:
+            f.write(json.dumps(line) + "\n")
+        chat = self.mirror()
+        chat.mirror_poll()
+        self.assertEqual(self.mgr.usage(), [{"cli": "codex", "account": "",
+                                             "windows": tc.codex_limits(line), "ts": tc._raw_time(line)}])
+        # kept over a restart: the mirror reads only new lines then
+        again = self.make()
+        self.addCleanup(again.stop_mirrors)
+        self.assertEqual(again.usage()[0]["windows"], tc.codex_limits(line))
+
     def codex_home(self):
         home = os.path.join(self.dir, "codex-home")
         os.makedirs(home)
@@ -1357,6 +1378,35 @@ class TabSyncTest(Base):
     def test_the_list_says_which_groups_a_tab_can_go_in(self):
         code, out = tc.api(self.mgr, "GET", [], {})
         self.assertEqual(out["tabgroups"]["groups"][0]["name"], "Work")
+
+
+class UsageTest(Base):
+    """Each AI login the chats use, with how much of its limits is gone."""
+
+    def test_a_claude_tab_s_usage_comes_from_its_status_line(self):
+        self.mgr.roster_dir = os.path.join(self.dir, "hooks")
+        os.makedirs(self.mgr.roster_dir)
+        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False: {
+            "title": "A", "status": "idle", "transcript": "", "cli": "claude"}
+        self.mgr.tabs_hook = lambda: [{"id": "t1", "title": "A", "cli": "claude",
+                                       "account": "Personal", "key": "ai-claude-a"}]
+        self.mgr.tab_ops = lambda *a, **k: (200, {"ok": True})
+        self.mgr.sync_tabs()
+        with open(os.path.join(self.mgr.roster_dir, "ai-claude-a.usage"), "w") as f:
+            json.dump({"rate_limits": {"five_hour": {"used_percentage": 13, "resets_at": 1900000000},
+                                       "seven_day": {"used_percentage": 36.6, "resets_at": 1900500000}},
+                       "ts": 1800000000}, f)
+        self.mgr.create({"cwd": self.dir, "title": "own"})       # a chat with its own claude: Default
+        got = {(u["cli"], u["account"]): u["windows"] for u in tc.api(self.mgr, "GET", [], None)[1]["usage"]}
+        self.assertEqual(list(got), [("claude", ""), ("claude", "Personal")])   # Default first
+        self.assertEqual(got[("claude", "Personal")], [{"name": "5h", "pct": 13, "resets": 1900000000},
+                                                       {"name": "7d", "pct": 37, "resets": 1900500000}])
+        self.assertEqual(got[("claude", "")], [])                # not known yet
+
+    def test_an_older_reading_does_not_win(self):
+        self.mgr.note_usage("codex", "", [{"name": "5h", "pct": 50, "resets": 0}], 200)
+        self.mgr.note_usage("codex", "", [{"name": "5h", "pct": 10, "resets": 0}], 100)
+        self.assertEqual(self.mgr._usage["codex/"]["windows"][0]["pct"], 50)
 
 
 class TabSwitchTest(Base):

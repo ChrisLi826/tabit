@@ -63,6 +63,29 @@ offers the one picked last. A chat's settings (⋯) show its Account and switch
 it later; the main *Tabit Chat* too. A switch is refused while that chat is
 working: wait, or press Stop.
 
+## Usage
+
+The top of the chat list shows how much of each login's limits is used:
+one row per AI and account that a chat uses now (`Claude · Personal`,
+`Codex · Default`). Each row shows the limit windows the service reports,
+for example `5h 13% ↺9m` and `7d 36% ↺3d`: the share used and when that
+window starts again. A bar turns yellow at 50% and red at 80%. "reset"
+means the window has started again since the last reading.
+
+- **Claude** hands its usage to the status line program. tabit's settings
+  for a Claude tab name its own one (`~/.local/share/tabit/claude-statusline.py`),
+  which keeps the usage for that tab and then runs the status line set in
+  that account's `settings.json`, so your status line still shows. A status
+  line set in a project's `.claude/settings.json` is not run in tabit tabs.
+  A running claude keeps the settings it started with: a tab reports usage
+  after its claude starts again. A chat that runs its own claude (`-p`) has
+  no status line, so its account shows "—" until one of its tabs reports.
+- **Codex** writes its usage into the session file after each turn; the
+  chat reads it from there. A free plan has one 30-day window; paid plans
+  have 5h and 7d.
+- The last reading of each login is kept in
+  `~/.local/share/tabit/chats/usage.json`, so it shows again after a restart.
+
 ## The AI tabs
 
 Every chat can use the AI tabs of tabit (terminal tabs running an AI) with
