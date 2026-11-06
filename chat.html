@@ -1001,6 +1001,8 @@ $("msgs").addEventListener("click", async (e) => {
       const out = await api(`${base(cur.kind)}/${cur.id}/unqueue`, { key: unq.dataset.key });
       const t = $("text");                     // back in the box, to change or delete
       if (!t.value.trim()) { t.value = out.text; t.dispatchEvent(new Event("input")); }
+      const i = (cur.queued || []).findIndex((q) => q.key === unq.dataset.key);
+      if (i >= 0) cur.queued.splice(i, 1);    // a repaint before the next look keeps it gone
       unq.closest(".b").remove();
     } catch (err) { status(err.message, true); unq.disabled = false; unq.textContent = "Take back"; }
     return;
