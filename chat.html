@@ -121,6 +121,18 @@
   .quote b { margin-right: 4px; }
   .flash { animation: flash 1.6s ease-out; }
   @keyframes flash { 0%, 40% { box-shadow: 0 0 0 3px #7aa2f7cc; } 100% { box-shadow: 0 0 0 3px transparent; } }
+  #scr { margin-bottom: 6px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px; }
+  #scr[hidden] { display: none; }
+  #scr .sh { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+  #scr .sh b { font-family: ui-monospace, Menlo, monospace; color: var(--cyan); }
+  #scr .keys { display: flex; gap: 4px; flex-wrap: wrap; margin-left: auto; }
+  #scr .sz { display: flex; gap: 4px; }
+  #scr button { padding: 3px 9px; font-size: 12px; border-radius: 8px; }
+  #scr pre:focus { outline: 2px solid var(--blue); outline-offset: 1px; }
+  #scr-grip { height: 14px; margin: -6px -10px 2px; cursor: ns-resize; touch-action: none; display: flex; align-items: center; justify-content: center; }
+  #scr-grip::before { content: ""; width: 44px; height: 4px; border-radius: 2px; background: #ffffff40; }
+  #scr-grip:hover::before, #scr-grip.on::before { background: var(--blue); }
+  #scr pre { margin: 6px 0 0; height: 45vh; min-height: 80px; max-height: 85vh; overflow: auto; font: 12px/1.35 ui-monospace, Menlo, monospace; background: #0a0c14; border-radius: 8px; padding: 8px; }
   #replybar { display: none; align-items: center; gap: 8px; margin-bottom: 6px; padding: 6px 6px 6px 10px; border-left: 3px solid #7aa2f7; background: var(--panel); border-radius: 10px; font-size: 13px; }
   #replybar .rq { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); }
   #replybar .rq b { color: #cfd6f6; margin-right: 4px; }
@@ -194,6 +206,8 @@
   #atlist[hidden] { display: none; }
   #atlist button { display: flex; align-items: center; gap: 8px; border: 0; background: none; border-radius: 10px; padding: 6px 10px; text-align: left; min-width: 0; }
   #atlist button.on { background: #7aa2f733; }
+  #atlist .cmd b { font: 600 13.5px ui-monospace, Menlo, monospace; color: var(--cyan); flex: none; }
+  #atlist .ctag { flex: none; font-size: 11px; padding: 1px 7px; border-radius: 99px; background: #ffffff14; color: var(--dim); }
   #atlist .hint { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #row { display: flex; gap: 6px; align-items: flex-end; }
   #text { scrollbar-width: none; flex: 1; min-height: 44px; max-height: 40vh; resize: none; font-size: 16px; border-radius: 22px; padding: 11px 16px; }
@@ -395,6 +409,10 @@
     <div id="msgs"></div>
     <button id="jump" type="button">↓</button>
     <div id="composer">
+      <div id="scr" hidden><div id="scr-grip" title="drag up or down to resize"></div><div class="sh"><b id="scr-t"></b><span class="hint">the tab's screen</span>
+        <span class="keys"><button type="button" data-k="up">↑</button><button type="button" data-k="down">↓</button><button type="button" data-k="left">←</button><button type="button" data-k="right">→</button><button type="button" data-k="tab">Tab</button><button type="button" data-k="enter">Enter</button><button type="button" data-k="esc">Esc</button></span>
+        <span class="sz"><button type="button" id="scr-less" title="smaller">−</button><button type="button" id="scr-more" title="bigger">＋</button></span>
+        <button type="button" id="scr-x" title="closes the tab's screen too (Esc)">Close</button></div><pre id="scr-p" tabindex="0" title="click here, then type: the keys go to the tab"></pre></div>
       <div id="replybar"><div class="rq"></div><button id="rcancel" type="button" title="cancel the reply">✕</button></div>
       <div id="atlist" hidden></div>
       <div id="chips"></div>
@@ -702,7 +720,7 @@ $("tabs").addEventListener("click", (e) => {
 // --- routing: #c/<id>, #g/<id>, or the list ---------------------------------
 function route() {
   const m = location.hash.match(/^#([cg])\/(\w+)$/);
-  closeStream();
+  closeStream(); screenClose();
   if (!m) { showList(); return; }
   openTalk(m[1] === "c" ? "chats" : "groups", m[2]);
 }
@@ -798,6 +816,9 @@ function take(me, d) {
   me.live = d.live;
   me.queued = d.queued || [];
   paintLive(me);
+  // a message waits for a screen open in the tab: show that screen, so it
+  // can be seen and closed (it may have been opened at the desk, or left)
+  if (me.kind === "chats" && me.queued.some((q) => q.held) && $("scr").hidden) screenOpen("the tab's screen", false);
   paintAsks(me);
   header(me);
   // not looking: another window or app in front counts, not only a hidden page,
@@ -894,7 +915,7 @@ function paintLive(me) {
   if (!html && me.state === "background") html = '<div class="note">↻ Background work still running</div>';
   // what the tab's Claude holds while it works: it reads it after its current step
   for (const q of me.queued || [])
-    html += `<div class="b me queued">${esc(q.text)}<div class="qn">Queued: Claude reads it after its current step` +
+    html += `<div class="b me queued">${esc(q.text)}<div class="qn">${q.held ? "Queued: the tab shows a screen (below); sent when it closes" : "Queued: Claude reads it after its current step"}` +
       `<button type="button" class="unq" data-key="${esc(q.key)}">Take back</button></div></div>`;
   l.innerHTML = html;
 }
@@ -955,6 +976,12 @@ function drawOne(me, ev) {
       return div("note", `${esc(ev.from)} → ${esc(ev.to)}`);
     case "notice":
       return div("note", esc(ev.text));
+    case "cmdout": {                     // what a slash command printed
+      const d = document.createElement("details");
+      d.className = "tool"; d.open = true;
+      d.innerHTML = `<summary>⌘ output</summary><pre>${esc(ev.text)}</pre>`;
+      return d;
+    }
     case "error":
       return div("note err", `${ev.name ? esc(ev.name) + ": " : ""}${esc(ev.text)}`);
     case "done":
@@ -1084,7 +1111,7 @@ function grow() { const t = $("text"); t.style.height = "auto"; t.style.height =
 $("text").addEventListener("input", () => { grow(); if (cur) localStorage.setItem("draft:" + cur.id, $("text").value); });
 $("text").addEventListener("keydown", (e) => {
   if (atHit && !e.isComposing) {
-    const n = Math.min(atHit.list.length, AT_MAX);
+    const n = Math.min(atHit.list.length, atHit.list[0].put ? AT_MAX * 3 : AT_MAX);
     if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); atPick = (atPick + (e.key === "ArrowDown" ? 1 : n - 1)) % n; atShow(); return; }
     if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); atPut(atPick); return; }
     if (e.key === "Escape") { e.preventDefault(); atHit = null; $("atlist").hidden = true; return; }
@@ -1105,8 +1132,38 @@ function atNames() {
   // in a chat: the other tabs, by the names tabs call each other by
   return (cfg?.chats || []).filter((c) => c.at && c.id !== cur.id).map((c) => ({ name: c.at, title: c.title, r: c }));
 }
+// /: the AI's own commands and the skills its tab has (Codex runs a skill
+// as $name); loaded when first asked for, once per chat
+let cmdsFor = null, cmds = null;
+function cmdItems(lead, q) {
+  if (cmdsFor !== cur.id) {
+    const id = cmdsFor = cur.id; cmds = null;
+    api(`api/chats/${id}/commands`).then((d) => { if (cmdsFor === id) { cmds = d; atShow(); } }).catch(() => { if (cmdsFor === id) cmdsFor = null; });
+    return [];
+  }
+  if (!cmds) return [];
+  const cx = cmds.cli === "codex", out = [];
+  if (lead === "/") for (const c of cmds.builtins)
+    out.push({ put: "/" + c.name, title: c.description, tag: c.shows === "tab" ? "shows in the tab" : "" });
+  if (lead === "/" || cx) for (const k of cmds.skills)
+    out.push({ put: (cx ? "$" : "/") + k.name, title: k.description, tag: "skill" });
+  return out.filter((x) => x.put.slice(1).toLowerCase().includes(q))
+    .sort((a, b) => b.put.slice(1).toLowerCase().startsWith(q) - a.put.slice(1).toLowerCase().startsWith(q));
+}
 function atShow() {
   const t = $("text"), box = $("atlist");
+  const c = cur && cur.kind === "chats" && t.selectionStart === t.selectionEnd && t.value.slice(0, t.selectionStart).match(/^([\/$])([\w:.-]*)$/);
+  if (c) {
+    const q = c[2].toLowerCase(), list = cmdItems(c[1], q);
+    if (!list.length) { atHit = null; box.hidden = true; return; }
+    if (!atHit || atHit.q !== c[0]) atPick = 0;
+    atHit = { s: 0, f: t.selectionStart, q: c[0], list };
+    box.innerHTML = list.slice(0, AT_MAX * 3).map((x, i) => `<button type="button" data-i="${i}" class="cmd ${i === atPick ? "on" : ""}"><b>${esc(x.put)}</b>` +
+      `${x.tag ? `<span class="ctag">${esc(x.tag)}</span>` : ""}<span class="hint">${esc(x.title)}</span></button>`).join("");
+    box.hidden = false;
+    box.querySelector(".on")?.scrollIntoView({ block: "nearest" });
+    return;
+  }
   const m = cur && t.selectionStart === t.selectionEnd && t.value.slice(0, t.selectionStart).match(/(?:^|\s)@([\p{L}\p{N}_-]*)$/u);     // a name may be 台中火車站
   const q = m ? m[1].toLowerCase() : "";
   const list = m ? atNames().filter((x) => x.name.toLowerCase().includes(q))
@@ -1120,7 +1177,7 @@ function atShow() {
 }
 function atPut(i) {
   const t = $("text"), after = t.value.slice(atHit.f);
-  const ins = "@" + atHit.list[i].name + (/^\s/.test(after) ? "" : " ");
+  const ins = (atHit.list[i].put || "@" + atHit.list[i].name) + (/^\s/.test(after) ? "" : " ");
   t.value = t.value.slice(0, atHit.s) + ins + after;
   const at = atHit.s + ins.length; t.setSelectionRange(at, at);
   t.dispatchEvent(new Event("input")); t.focus();
@@ -1131,13 +1188,111 @@ $("text").addEventListener("click", atShow);
 $("text").addEventListener("blur", () => setTimeout(() => { if (document.activeElement !== $("text")) { atHit = null; $("atlist").hidden = true; } }, 250));
 $("atlist").addEventListener("mousedown", (e) => e.preventDefault());       // keep the keyboard up
 $("atlist").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b && atHit) atPut(+b.dataset.i); });
+// a command that opens a screen in the tab (/usage, /status): the chat
+// shows that screen, with the keys to work it, until Done
+const SCR_FOR = 5 * 60 * 1000;
+// Is the tab's screen still open? In Claude, its message box (a line of ─,
+// then ❯) is hidden while a screen is open; the screens' last lines differ
+// (Esc to cancel, Esc to close, ↓ stats), so the box is what counts. Codex
+// draws its box under a menu too: there, its "esc to cancel" line counts.
+const SCR_OPEN = /\besc to (cancel|close|exit|go back)\b|\besc back\b/i;
+function screenLines(b) {
+  const lines = b.ansi !== undefined ? b.ansi.replace(/\x1b\[[0-9;:?]*[A-Za-z]/g, "").split("\n") : b.lines || [];
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+  return lines;
+}
+function dialogOpen(lines, cli) {
+  if (cli === "codex") return lines.filter((l) => l.trim()).slice(-4).some((l) => SCR_OPEN.test(l));
+  const end = lines.slice(-14);
+  // the line above the box may carry the conversation's name: ──── name ─
+  return !end.some((l, i) => /^\s*─{10,}/.test(l) && /^\s*❯/.test(end[i + 1] || ""));
+}
+let scrTimer = null, scrTab = null, scrCli = "claude", scrUntil = 0, scrSeen = false, scrGone = 0;
+function screenOpen(title, focus = true) {
+  scrTab = cur && cur.meta && cur.meta.tab ? cur.meta.tab.id : null;
+  if (!scrTab) return;
+  scrCli = cur.meta.tab.cli || "claude";
+  $("scr-t").textContent = title; $("scr-p").textContent = "…"; $("scr").hidden = false;
+  scrUntil = Date.now() + SCR_FOR; scrSeen = false; scrGone = 0;
+  clearInterval(scrTimer); scrTimer = setInterval(screenLoad, 1500); screenLoad();
+  if (focus && !matchMedia("(pointer: coarse)").matches) $("scr-p").focus();     // type straight into it
+}
+function screenClose() { $("scr").hidden = true; clearInterval(scrTimer); scrTimer = scrTab = null; }
+async function screenLoad() {
+  if (!scrTab || Date.now() > scrUntil) return screenClose();
+  try {
+    const res = await fetch(`api/tabs/${encodeURIComponent(scrTab)}/screen`, { cache: "no-store" });
+    const b = await res.json();
+    if (!res.ok) throw new Error(b.error || `HTTP ${res.status}`);
+    const lines = screenLines(b);
+    if (dialogOpen(lines, scrCli)) { scrSeen = true; scrGone = 0; scrUntil = Date.now() + SCR_FOR; }   // open: keep showing it
+    else if (scrSeen && ++scrGone >= 2) return screenClose();      // closed in the tab
+    const pre = $("scr-p"), end = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 20;
+    pre.textContent = lines.slice(-40).join("\n");
+    if (end) pre.scrollTop = pre.scrollHeight;
+  } catch (e) { $("scr-p").textContent = e.message; }
+}
+async function screenUp(tab) {               // the tab's screen is open this moment
+  const res = await fetch(`api/tabs/${encodeURIComponent(tab)}/screen`, { cache: "no-store" });
+  const b = await res.json();
+  return res.ok && dialogOpen(screenLines(b), scrCli);
+}
+// its height: drag the bar on top (up: taller) or − / ＋; kept for next time
+function screenHeight(px) {
+  const pre = $("scr-p"), h = Math.max(80, Math.min(innerHeight * 0.85, px));
+  pre.style.height = h + "px";
+  try { localStorage.setItem("scr-height", String(Math.round(h))); } catch (e) {}
+}
+try { const h = +localStorage.getItem("scr-height"); if (h) $("scr-p").style.height = h + "px"; } catch (e) {}
+$("scr-less").onclick = () => screenHeight($("scr-p").offsetHeight - innerHeight * 0.15);
+$("scr-more").onclick = () => screenHeight($("scr-p").offsetHeight + innerHeight * 0.15);
+$("scr-grip").addEventListener("pointerdown", (e) => {
+  const grip = e.currentTarget, y0 = e.clientY, h0 = $("scr-p").offsetHeight;
+  grip.setPointerCapture(e.pointerId); grip.classList.add("on"); e.preventDefault();
+  const move = (ev) => screenHeight(h0 + (y0 - ev.clientY));
+  const up = () => { grip.classList.remove("on"); grip.removeEventListener("pointermove", move); grip.removeEventListener("pointerup", up); grip.removeEventListener("pointercancel", up); };
+  grip.addEventListener("pointermove", move); grip.addEventListener("pointerup", up); grip.addEventListener("pointercancel", up);
+});
+$("scr-x").onclick = async () => {           // close the tab's screen, then the box
+  const tab = scrTab;
+  screenClose();
+  // Esc in a Claude that works stops it: only while its screen still shows
+  try { if (tab && await screenUp(tab)) await api(`api/tabs/${encodeURIComponent(tab)}/key`, { key: "esc" }); }
+  catch (e) { status(e.message, true); }
+};
+// with the screen focused, the keyboard works the tab's screen: named keys
+// as keys, letters as typed; one after another, in order
+const SCR_KEYS = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right", Enter: "enter",
+  Tab: "tab", Backspace: "backspace", PageUp: "pgup", PageDown: "pgdn", Home: "home", End: "end", " ": "space" };
+let scrChain = Promise.resolve();
+$("scr-p").addEventListener("keydown", (e) => {
+  if (!scrTab || e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return;
+  const tab = scrTab, key = e.key === "Escape" ? "esc" : SCR_KEYS[e.key];
+  const text = !key && e.key.length === 1 ? e.key : null;
+  if (!key && !text) return;
+  e.preventDefault();
+  scrChain = scrChain.then(async () => {
+    // Esc in a Claude that works stops it: only while its screen still shows
+    if (key === "esc" && !(await screenUp(tab))) return;
+    await api(`api/tabs/${encodeURIComponent(tab)}/${key ? "key" : "type"}`, key ? { key } : { text });
+  }).catch((err) => status(err.message, true)).then(() => setTimeout(screenLoad, 250));
+});
+$("scr").querySelector(".keys").addEventListener("click", async (e) => {
+  const k = e.target.closest("button")?.dataset.k;
+  if (!k || !scrTab) return;
+  try { await api(`api/tabs/${encodeURIComponent(scrTab)}/key`, { key: k }); } catch (err) { status(err.message, true); }
+  setTimeout(screenLoad, 300);
+});
 async function send() {
   if (!cur) return;
   const t = $("text"), text = t.value.trim();
   if (!text) return;
   $("send").disabled = true; status("");
+  const word = text.match(/^\/([\w:-]+)/), opens = word && cur.kind === "chats" && cmdsFor === cur.id && cmds &&
+    cmds.builtins.some((c) => c.name === word[1] && c.shows === "tab");
   try {
     await api(`${base(cur.kind)}/${cur.id}/send`, { text, reply: replyTo ? replyTo.seq : undefined });
+    if (opens) setTimeout(() => screenOpen(word[0]), 800);
     setReply(null);
     t.value = ""; localStorage.removeItem("draft:" + cur.id); grow(); markChips();
     const b = $("msgs"); b.scrollTop = b.scrollHeight;

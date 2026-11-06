@@ -662,7 +662,7 @@ class MirrorTest(Base):
         shutil.copy(os.path.join(os.path.dirname(__file__), "fixtures", "chat",
                                  "tab_transcript.jsonl"), self.path)
 
-        def hook(tab, text=None, key=None, queue=False):
+        def hook(tab, text=None, key=None, queue=False, screen=False):
             if tab != "t1":
                 return (404, {"error": "no"}) if text or key else {"error": "no"}
             if text is None and key is None:
@@ -686,7 +686,8 @@ class MirrorTest(Base):
         got = [e for r in raws for e in tc.transcript_events(r)]
         self.assertEqual([(e["t"], e.get("text") or e.get("name")) for e in got],
                          [("user", "fix the bug"), ("text", "Looking now."),
-                          ("tool", "Bash"), ("result", "a.txt"), ("text", "Fixed.")])
+                          ("tool", "Bash"), ("result", "a.txt"), ("user", "/clear"),
+                          ("text", "Fixed.")])
 
     def test_it_is_named_after_the_tab_and_does_not_run_claude(self):
         chat = self.mirror()
@@ -970,7 +971,7 @@ class CodexMirrorTest(Base):
         self.path = os.path.join(self.dir, "rollout.jsonl")
         shutil.copy(os.path.join(os.path.dirname(__file__), "fixtures", "chat",
                                  "codex_rollout.jsonl"), self.path)
-        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False: {
+        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False, screen=False: {
             "title": "MOT", "status": "idle", "transcript": self.path, "cli": "codex"}
         self.mgr.tabs_hook = lambda: [{"id": "t1", "title": "MOT", "cli": "codex"}]
 
@@ -1101,7 +1102,7 @@ class CodexMirrorTest(Base):
         self.assertEqual(out["efforts"], list(tc.EFFORTS))
 
     def test_another_ai_tab_gets_none(self):
-        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False: {
+        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False, screen=False: {
             "title": "G", "status": "idle", "transcript": "", "cli": ""}
         code, out = self.mgr.create({"tab": {"id": "t1", "title": "x"}})
         self.assertEqual(code, 400, out)
@@ -1118,7 +1119,7 @@ class TabSyncTest(Base):
                      {"id": "t2", "title": "Blog", "group": "", "color": ""}]
         self.ops = []
         self.reply = (200, {"ok": True})
-        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False: {
+        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False, screen=False: {
             "title": "MOT", "status": "idle", "transcript": "", "cli": "claude"}
         self.mgr.tabs_hook = lambda: [dict(t) for t in self.tabs] if self.tabs is not None else None
 
@@ -1380,7 +1381,7 @@ class UsageTest(Base):
     def test_a_claude_tab_s_usage_comes_from_its_status_line(self):
         self.mgr.roster_dir = os.path.join(self.dir, "hooks")
         os.makedirs(self.mgr.roster_dir)
-        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False: {
+        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False, screen=False: {
             "title": "A", "status": "idle", "transcript": "", "cli": "claude"}
         self.mgr.tabs_hook = lambda: [{"id": "t1", "title": "A", "cli": "claude",
                                        "account": "Personal", "key": "ai-claude-a"}]
@@ -1403,6 +1404,8 @@ class UsageTest(Base):
         self.mgr.create({"cwd": self.dir, "title": "own"})
         self.mgr.usage()
         self.assertTrue(wait(lambda: self.mgr._usage.get("claude/")))
+        with self.mgr.lock:          # its file is written under the lock: done when it is free
+            pass
         self.assertEqual(self.mgr.usage()[0]["windows"], [{"name": "5h", "pct": 1, "resets": 0}])
         self.assertEqual(asked, [""])                  # once: the reading is fresh now
 
@@ -1423,7 +1426,7 @@ class TabSwitchTest(Base):
         self.path = os.path.join(self.dir, "tx.jsonl")
         self.mgr.accounts = lambda: [("Personal", FAKE)]
 
-        def hook(tab, text=None, key=None, queue=False):
+        def hook(tab, text=None, key=None, queue=False, screen=False):
             if text is None and key is None:
                 return {"title": "MOT", "status": "idle", "transcript": self.path, "cli": "claude"}
             if self.busy:
@@ -1528,7 +1531,7 @@ class ScreenMenuTest(Base):
         tc.ANSWER_STEP = 0
         self.screen, self.status, self.keys = TRUST_SCREEN, "blocked", []
 
-        def hook(tab, text=None, key=None, queue=False):
+        def hook(tab, text=None, key=None, queue=False, screen=False):
             if text is None and key is None:
                 info = {"title": "MOT", "status": self.status, "transcript": "", "cli": "claude"}
                 if self.status == "blocked":
@@ -1714,7 +1717,7 @@ class TabTalkTest(Base):
                      {"id": "tb", "title": "Beta", "group": "Work", "color": "blue", "key": "ai-b"}]
         self.typed, self.refuse = [], set()
 
-        def hook(tab, text=None, key=None, queue=False):
+        def hook(tab, text=None, key=None, queue=False, screen=False):
             if text is None and key is None:
                 return {"title": self.titles[tab], "status": "idle", "transcript": self.tx[tab], "cli": "claude"}
             if tab in self.refuse:
@@ -2082,6 +2085,163 @@ class HeldLineTest(Base):
         key = self.chat.view()["queued"][0]["key"]
         self.assertEqual(self.chat.unqueue(key)[0], 409)
         self.assertEqual(self.typed, [])
+
+
+class SlashCommandTest(Base):
+    """Typing / in a tab's chat lists the AI's commands and skills; a command
+    the tab ran shows as the user's line, with what it printed."""
+
+    def test_a_command_and_its_output_show(self):
+        name = {"type": "system", "subtype": "local_command",
+                "content": "<command-name>/context</command-name>\n  <command-message>context"
+                           "</command-message>\n  <command-args></command-args>"}
+        out = {"type": "system", "subtype": "local_command",
+               "content": "<local-command-stdout> \x1b[1mContext Usage\x1b[22m\n12k tokens</local-command-stdout>"}
+        self.assertEqual(tc.transcript_events(name), [{"t": "user", "text": "/context"}])
+        self.assertEqual(tc.transcript_events(out), [{"t": "cmdout", "text": "Context Usage\n12k tokens"}])
+        caveat = {"type": "user", "isMeta": True, "message": {"content": "<local-command-caveat>x</local-command-caveat>"}}
+        self.assertEqual(tc.transcript_events(caveat), [])
+        other = {"type": "system", "subtype": "turn_duration", "content": None}
+        self.assertEqual(tc.transcript_events(other), [])
+
+    def test_a_skill_run_by_name_shows_with_its_words(self):
+        line = {"type": "user", "message": {"content": "<command-message>grilling</command-message>\n"
+                "<command-name>/grilling</command-name>\n<command-args>my plan</command-args>"}}
+        self.assertEqual(tc.transcript_events(line), [{"t": "user", "text": "/grilling my plan"}])
+        # a skill's own text quotes the tags further in: that is no command
+        body = {"type": "user", "message": {"content": "See <command-name>/x</command-name> above"}}
+        self.assertEqual([e["text"] for e in tc.transcript_events(body)],
+                         ["See <command-name>/x</command-name> above"])
+
+    def write(self, lines):
+        path = os.path.join(self.dir, "t.jsonl")
+        with open(path, "w") as f:
+            for line in lines:
+                f.write(json.dumps(line) + "\n")
+        return path
+
+    def test_claude_skills_come_from_its_listing(self):
+        def listing(names, initial):
+            return {"type": "attachment", "attachment": {
+                "type": "skill_listing", "isInitial": initial, "names": names,
+                "content": "\n".join("- %s: does %s" % (n, n) for n in names)}}
+        path = self.write([listing(["old"], True), listing(["tdd", "grilling"], True),
+                           listing(["pdf"], False)])
+        got = tc.transcript_skills(path, "claude")
+        self.assertEqual([(k["name"], k["description"]) for k in got],
+                         [("tdd", "does tdd"), ("grilling", "does grilling"), ("pdf", "does pdf")])
+
+    def test_codex_skills_come_from_its_instructions(self):
+        text = ("# Using skills\nThe skills are under ### Available skills.\n## Skills\n### Available skills\n"
+                "- imagegen: Make images. (file: r1/imagegen/SKILL.md)\n"
+                "- chrome-remote-debugging: Drive Chrome: tabs, pages. (file: /h/s/SKILL.md)\n"
+                "### Skill roots\n- r1: /home/x\n")
+        path = self.write([{"type": "response_item", "payload": {"type": "message", "role": "developer",
+                            "content": [{"type": "input_text", "text": text}]}}])
+        got = tc.transcript_skills(path, "codex")
+        self.assertEqual([(k["name"], k["description"]) for k in got],
+                         [("imagegen", "Make images."), ("chrome-remote-debugging", "Drive Chrome: tabs, pages.")])
+
+    def test_the_chat_lists_commands_for_its_ai(self):
+        path = self.write([{"type": "attachment", "attachment": {
+            "type": "skill_listing", "isInitial": True, "names": ["tdd"], "content": "- tdd: tests first"}}])
+        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False, screen=False: \
+            {"title": "x", "status": "idle", "transcript": path, "cli": "claude"}
+        code, out = self.mgr.create({"tab": {"id": "t1", "title": "x"}})
+        chat = self.mgr.get(out["chat"]["id"])
+        chat.mirror_poll()
+        code, got = tc.api(self.mgr, "GET", [chat.id, "commands"], {})
+        self.assertEqual(code, 200)
+        self.assertEqual(got["cli"], "claude")
+        self.assertIn("compact", [c["name"] for c in got["builtins"]])
+        self.assertNotIn("model", [c["name"] for c in got["builtins"]])     # the chat's own switch
+        self.assertEqual(got["skills"], [{"name": "tdd", "description": "tests first"}])
+
+    def test_a_new_conversation_borrows_the_last_ones_skills(self):
+        # Claude writes its skill list with the first prompt
+        old = self.write([{"type": "attachment", "attachment": {
+            "type": "skill_listing", "isInitial": True, "names": ["tdd"], "content": "- tdd: tests first"}}])
+        new = os.path.join(self.dir, "new.jsonl")
+        with open(new, "w") as f:
+            f.write(json.dumps({"type": "system", "subtype": "local_command", "content": "x"}) + "\n")
+        os.utime(old, (1, 1))
+        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False, screen=False: \
+            {"title": "x", "status": "idle", "transcript": new, "cli": "claude"}
+        code, out = self.mgr.create({"tab": {"id": "t1", "title": "x"}})
+        chat = self.mgr.get(out["chat"]["id"])
+        chat.mirror_poll()
+        self.assertEqual([k["name"] for k in chat.commands()["skills"]], ["tdd"])
+
+    def test_a_tab_with_no_file_yet_borrows_too(self):
+        self.write([{"type": "attachment", "attachment": {
+            "type": "skill_listing", "isInitial": True, "names": ["tdd"], "content": "- tdd: tests first"}}])
+        new = os.path.join(self.dir, "not-yet.jsonl")
+        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False, screen=False: \
+            {"title": "x", "status": "idle", "transcript": new, "cli": "claude"}
+        code, out = self.mgr.create({"tab": {"id": "t1", "title": "x"}})
+        chat = self.mgr.get(out["chat"]["id"])
+        chat.mirror_poll()
+        self.assertEqual([k["name"] for k in chat.commands()["skills"]], ["tdd"])
+
+
+class HeldWhileScreenTest(Base):
+    """A line sent while the tab's Claude shows one of its screens (/usage)
+    waits in tabit: typed then, it would close the screen and go in at once."""
+
+    BOX = ["\u2500" * 40, "\u276f\xa0", "\u2500" * 40, "  status line"]
+    USAGE = ["  Settings  Status   Config   Usage   Stats", "  Current week", "  Esc to cancel"]
+    STATS = ["  Mon \u2592\u2593", "  Active days: 170/193", "    \u2193 stats"]
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, tc, "MIRROR_EVERY", tc.MIRROR_EVERY)
+        tc.MIRROR_EVERY = 3600
+        self.path = os.path.join(self.dir, "tx.jsonl")
+        open(self.path, "w").close()
+        self.screen, self.typed = self.USAGE, []
+
+        def hook(tab, text=None, key=None, queue=False, screen=False):
+            if text is None and key is None:
+                info = {"title": "x", "status": "ready", "transcript": self.path, "cli": "claude"}
+                if screen:
+                    info["screen"] = self.screen
+                return info
+            self.typed.append(text)
+            return 200, {"ok": True}
+        self.mgr.tab_hook = hook
+        code, out = self.mgr.create({"tab": {"id": "t1", "title": "x"}})
+        self.chat = self.mgr.get(out["chat"]["id"])
+
+    def test_a_screen_shows_while_the_message_box_is_hidden(self):
+        self.assertTrue(tc.screen_dialog_open(self.USAGE))
+        self.assertTrue(tc.screen_dialog_open(self.STATS))       # its last line differs
+        self.assertFalse(tc.screen_dialog_open(["  some reply"] + self.BOX))
+        named = ["\u2500" * 40 + " \u30ec\u30d3\u30e5\u30fc \u2500", "\u276f\xa0", "\u2500" * 40]
+        self.assertFalse(tc.screen_dialog_open(named))      # a named conversation's box
+        self.assertFalse(tc.screen_dialog_open([]))
+
+    def test_lines_wait_for_the_screen_then_go_in_order(self):
+        self.assertEqual(self.chat.mirror_send("one")[1].get("held"), True)
+        self.screen = self.BOX       # closed, but "one" still waits: "two" goes behind it
+        self.chat.mirror_send("two")
+        self.assertEqual(self.typed, [])
+        self.assertEqual([q["text"] for q in self.chat.view()["queued"]], ["one", "two"])
+        self.chat.mirror_poll()
+        self.assertEqual(self.typed, ["one", "two"])
+        self.assertEqual(self.chat.view()["queued"], [])
+
+    def test_a_waiting_line_is_taken_back(self):
+        self.chat.mirror_send("oops")
+        key = self.chat.view()["queued"][0]["key"]
+        self.assertEqual(self.chat.unqueue(key), (200, {"ok": True, "text": "oops"}))
+        self.screen = self.BOX
+        self.chat.mirror_poll()
+        self.assertEqual(self.typed, [])
+
+    def test_with_no_screen_open_it_goes_at_once(self):
+        self.screen = self.BOX
+        self.chat.mirror_send("hi")
+        self.assertEqual(self.typed, ["hi"])
 
 
 class PastedTest(unittest.TestCase):

@@ -130,6 +130,49 @@ Code shows "Press up to edit queued messages"); with your own text in it,
 take the line back in the tab. Lines another tab passed on (`[from @name]`)
 are not shown. A Codex tab reads a line at once, so nothing waits there.
 
+**Slash commands and skills.** Typing `/` at the start of the message box
+lists the AI's commands and skills; type more to filter, tap one (or Enter,
+Tab) and it goes into the box, ready for its words. Sending types it into
+the tab, as if typed there.
+
+- **Skills** are the ones the tab's AI was told it has: Claude's
+  `skill_listing` lines in its transcript, Codex's "Available skills" list in
+  its instructions. A Claude skill runs as `/name`, a Codex skill as `$name`
+  (in a Codex chat, `$` lists the skills too). Claude's list also has skills
+  only Claude may start; picking one of those, Claude Code says so. Claude
+  writes its list with the first prompt, so a new Claude tab borrows the
+  list of the last conversation in the same project folder until then. A
+  new Codex tab lists its skills after its first turn.
+- **Built-in commands** are a short list per AI (`BUILTINS` in
+  `tabit_chat.py`). Model, effort and account are left out: the chat's own
+  settings switch them for that tab only. A command marked *shows in the
+  tab* opens a screen in the tab, so its answer is not in the transcript.
+  Sent from the chat, it opens a box over the message box with the tab's
+  screen (read again every 1.5 s, for up to 5 minutes) and the keys to work
+  it: arrows, Tab, Enter, Esc. **Close** closes the tab's screen (it
+  presses Esc, after reading the screen again: only while the screen is
+  still open, since Esc stops a Claude that works) and then the box. A
+  Claude screen counts as open while Claude's message box (a line of ─,
+  then ❯) is hidden; its tabs end in different lines (Esc to cancel, Esc
+  to close, ↓ stats). A Codex screen counts as open while its last lines
+  say "esc to cancel" (or close, back). When the screen is closed at the desk, the box goes by
+  itself. To see it again, send the command again. Make the box taller or
+  shorter by dragging the bar on its top (up: taller) or with − and ＋; the height
+  is kept for next time.
+- A message sent while a Claude tab shows one of its screens (opened from
+  the chat or at the desk) would close that screen if typed. It waits in
+  tabit instead, as a **Queued** bubble ("sent when the tab's screen
+  closes") that can be taken back, and goes in, in order, within 2 seconds
+  of the screen closing. Messages sent after it wait behind it. It waits in
+  tabit's memory: a restart of tabit drops it. On a computer the
+  screen in the box takes the focus (click it to give it back): then the
+  keyboard works the tab's screen. Arrows, Enter, Tab, Backspace, Page
+  Up/Down, Home and End go as keys, letters as typed, and Esc only while
+  the screen still shows.
+- A command the tab ran (also one typed at the desk) shows as your line,
+  `/context` or `/grilling my plan`, and what it printed shows under it as
+  **⌘ output**.
+
 **Codex tabs** have a chat too. Their badge says `Codex · <model>`. The chat
 reads the Codex session's file (`~/.codex/sessions/.../rollout-*.jsonl`).
 Codex 0.166 keeps every session file open in one shared daemon, so tabit
