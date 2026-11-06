@@ -274,7 +274,6 @@
                     font: 12px/1.45 ui-monospace, Menlo, monospace; background: #0003; border-radius: 8px; padding: 8px 10px; }
 
   html { scrollbar-color: #2f3549 transparent; } * { scrollbar-width: thin; scrollbar-color: #2f3549 transparent; }
-  #hero { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 0 6px; font-size: 17px; }
   /* how much of each login's limits is used: one row per AI login the chats use */
   #usage { margin: 4px 14px 0; padding: 6px 10px; background: var(--panel); border-radius: 12px; font-size: 12px; flex: none; }
   #usage:empty { display: none; }
@@ -286,8 +285,6 @@
   #usage .bar i { display: block; height: 100%; background: var(--green); }
   #usage .w.mid .bar i { background: var(--yellow); } #usage .w.hot .bar i { background: var(--red); }
   #usage .w.hot { color: var(--red); }
-  .mainbot { display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; padding: 6px 14px; border-radius: 18px; }
-  .mainbot.sel { background: #262b45; } .mainbot .sub { font-size: 13px; } .mainbot .st-wait { color: var(--orange); } .mainbot .st-work { color: var(--purple); }
   /* the state as a speech bubble on the picture's top right; none when idle.
      One shape, body and tail together, so its white edge runs round both,
      as on the favicon's bubble; the sign inside is white too */
@@ -305,14 +302,8 @@
   @media (prefers-reduced-motion: reduce) { .bub .spin { animation: none; } }
   .bub i:nth-child(2) { animation-delay: .2s; } .bub i:nth-child(3) { animation-delay: .4s; }
   @keyframes bubdot { 0%, 60%, 100% { transform: none; opacity: .7; } 30% { transform: translateY(-2px); opacity: 1; } }
-  .av.huge .bub { right: -12px; top: -8px; width: 38px; height: 33px; } .av.huge .bub b { font-size: 16px; gap: 3px; }
-  .av.huge .bub i { width: 4px; height: 4px; }
   .av.sm .bub { right: -8px; top: -7px; width: 20px; height: 17px; } .av.sm .bub b { font-size: 9px; gap: 1px; }
   .av.sm .bub i { width: 2px; height: 2px; }
-  .av:has(.bub) .star { display: none; }
-  .av .star { position: absolute; right: -2px; top: -2px; width: 24px; height: 24px; border-radius: 50%; background: var(--orange); color: #fff; font-size: 13px; display: grid; place-items: center; border: 2px solid var(--bg); }
-  .av.huge .dot { right: 4px; bottom: 4px; width: 16px; height: 16px; }
-  .av.huge { width: 84px; height: 84px; font-size: 58px; }
   #searchbar { flex: none; padding: 6px 14px calc(10px + env(safe-area-inset-bottom)); }
   #q { border-radius: 99px; padding: 12px 18px; background: #1d2030; }
   body:has(#list.on) header h1 { visibility: hidden; }
@@ -334,7 +325,6 @@
     #grip { display: block; position: fixed; top: 0; bottom: 0; left: calc(var(--listw, 340px) - 4px); width: 9px; cursor: col-resize; z-index: 4; touch-action: none; }
     #grip:hover, #grip.on { background: #7aa2f744; }
     #back, #add, #remote, #setbtn { display: none !important; }
-    #hero { padding: 4px 0 2px; } #hero .av.huge { width: 60px; height: 60px; font-size: 42px; } #hero .mainbot { font-size: 15px; }
     body:has(#list.on) header h1 { visibility: visible; }
     #sbhead { display: flex; align-items: center; gap: 8px; padding: 14px 14px 4px; }
     #sbhead h1 { flex: 1; margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -.01em; }
@@ -373,7 +363,6 @@
     <div id="sbhead"><h1>Chat</h1><button id="sb-add" type="button" class="primary" title="new chat">＋</button><a href="terminal" title="the terminal view"><button type="button">⌨</button></a><button id="sb-set" type="button" title="tabit settings: AI defaults, Claude accounts, update, restart">⚙</button></div>
     <div id="scroller">
     <div id="top">
-    <div id="hero"></div>
     <div id="usage"></div>
     <div id="tabs"><button data-k="chats" class="on">Chats</button><button data-k="groups">Groups</button></div>
     </div>
@@ -614,10 +603,6 @@ async function loadList() {
   }
   cfg = data;
   $("usage").innerHTML = usageHtml(data.usage);
-  const main = data.chats.find((c) => c.default);
-  $("hero").innerHTML = main ? `<div class="mainbot${cur && cur.id === main.id ? " sel" : ""}" data-id="${esc(main.id)}">
-      <div class="av huge">${emo(face(main))}<span class="star">★</span>${bub(main)}</div>
-      <div>${esc(main.title)}</div>${stateLine(main) ? `<div class="sub ${stateLine(main)[0]}">${stateLine(main)[1]}</div>` : ""}</div>` : "";
   const q = $("q").value.trim().toLowerCase();
   const all = (kind === "chats" ? data.chats : data.groups).filter((r) => !r.default);
   const rows = q ? all.filter((r) => `${r.title} ${r.last}`.toLowerCase().includes(q)) : all;
@@ -639,10 +624,6 @@ async function loadList() {
   }).join("");
   listScroll().scrollTop = keep;
 }
-$("hero").addEventListener("click", (e) => {
-  const c = e.target.closest(".mainbot");
-  if (c) location.hash = "#c/" + c.dataset.id;
-});
 // what scrolls the list: the cards alone on a wide screen, all of it on a phone
 const listScroll = () => (getComputedStyle($("scroller")).display === "contents" ? $("cards") : $("scroller"));
 $("scroller").addEventListener("scroll", () => {

@@ -13340,7 +13340,7 @@ if (data !== null) {{
                             tab_ops=self._chat_tab_ops,
                             extra_env=self._chat_tool_env,
                             roster_dir=AGENT_HOOK_DIR)
-                        self._chat_manager.ensure_default()
+                        self._chat_manager.retire_default()
                         break
             return self._chat_manager
 

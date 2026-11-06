@@ -123,30 +123,18 @@ class LibraryTest(Base):
 
 
 class DefaultChatTest(Base):
-    def test_main_chat_is_made_once_listed_first_and_not_deletable(self):
-        self.mgr.ensure_default()
+    def test_the_old_main_chat_leaves_with_its_history_kept(self):
+        main = self.new(title="Tabit Chat")
+        main.meta["default"] = True
+        main._save_meta()
         mine = self.new(title="Later")
-        self.mgr.ensure_default()
-        rows = self.mgr.listing()
-        self.assertEqual([r["default"] for r in rows], [True, False])
-        self.assertEqual(rows[0]["title"], tc.DEFAULT_TITLE)
-        main = self.mgr.get(rows[0]["id"])
-        code, out = tc.api(self.mgr, "POST", [main.id, "delete"], {})
-        self.assertEqual(code, 400)
-        self.assertIn(main.id, self.mgr.chats)
-        self.assertEqual(tc.api(self.mgr, "POST", [mine.id, "delete"], {})[0], 200)
-
-    def test_main_chat_survives_a_restart_and_has_its_role(self):
-        self.mgr.ensure_default()
-        main = next(c for c in self.mgr.chats.values() if c.meta.get("default"))
-        main.send("hello")
-        self.assertTrue(wait(lambda: any(e["t"] == "done" for e in main.events)))
-        with open(self.log) as f:
-            self.assertIn("main assistant", f.read())
+        self.mgr.retire_default()
+        self.assertEqual([r["title"] for r in self.mgr.listing()], ["Later"])
+        self.assertTrue(os.path.isdir(main.dir + ".retired"))
         self.stop_all()
-        again = self.make()
-        again.ensure_default()
-        self.assertEqual(sum(1 for c in again.chats.values() if c.meta.get("default")), 1)
+        again = self.make()                       # not back after a restart
+        self.assertEqual(list(again.chats), [mine.id])
+        again.stop_mirrors()
 
 
 class AccountTest(Base):

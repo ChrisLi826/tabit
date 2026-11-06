@@ -20,9 +20,9 @@ Screen** makes it an app of its own.
   on: a picture fits the box, other files show as a page. Esc, ✕ or a tap
   outside closes it; ↗ (or a Ctrl- or Cmd-click on the path) opens it in a
   new window.
-- **The main chat.** *Tabit Chat* (the owl) is always first in the list and
-  cannot be deleted. It is your main assistant: bring it anything. For a big
-  job that needs its own folder, it suggests that you start a separate chat.
+- **No main chat.** Older versions kept a main chat, *Tabit Chat* (the owl),
+  at the top of the list. It is gone: its folder stays as
+  `~/.local/share/tabit/chats/<id>.retired`, history and all.
 - **Questions.** When Claude wants to run a command or change a file, the chat
   shows a card with **Allow** and **Deny**, and **Allow & don't ask again**
   when Claude offers a rule to remember. When
@@ -60,7 +60,7 @@ Screen** makes it an app of its own.
 When Settings → AI on the computer has more than one Claude account, each
 chat picks its own. **New chat** asks which account the new tab uses, and
 offers the one picked last. A chat's settings (⋯) show its Account and switch
-it later; the main *Tabit Chat* too. A switch is refused while that chat is
+it later. A switch is refused while that chat is
 working: wait, or press Stop.
 
 ## Usage
@@ -147,8 +147,8 @@ same as a menu in a Claude tab: a tap presses that option's number in the tab.
 - **Delete.** Deleting a chat closes its tab. The chat asks first. The last
   tab in tabit cannot be closed from the phone, so that chat stays. Closing a
   tab removes its chat after about a minute.
-- **Old chats move into tabs.** A chat that ran its own Claude (not the main
-  Tabit Chat) moves into a tab when it is idle: the tab goes on with the same
+- **Old chats move into tabs.** A chat that ran its own Claude moves into a
+  tab when it is idle: the tab goes on with the same
   conversation (`--resume`), keeps the login and bypass, and the chat that
   mirrors it takes the old one's picture and name, and its place in the
   groups (rooms) the old chat was in. The old chat's folder is kept as

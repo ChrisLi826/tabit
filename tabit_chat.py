@@ -58,14 +58,6 @@ MIRROR_STEP = 4 << 20        # one look reads at most this much
 ANSWER_STEP = 0.7            # seconds between the keys of one answer: the tab redraws
 ASK_WAIT = 540               # seconds the user has to answer a question from a tool
 
-DEFAULT_TITLE = "Tabit Chat"
-STEWARD = ("You are Tabit Chat, the user's main assistant on this computer. You "
-           "are the default chat: it is always there and cannot be deleted. Be "
-           "the first place the user brings anything. Answer, or do the work "
-           "yourself with your tools. When a job is big or needs its own folder, "
-           "suggest that the user starts a separate chat for it. You cannot "
-           "control the other chats, so never say that you did. You can look at "
-           "the AI tabs and, with the user's yes, type into them.")
 
 
 # --- raw claude events -> chat events (pure) --------------------------------
@@ -672,7 +664,7 @@ class Chat(_Log):
                 "--permission-prompt-tool", "stdio",
                 "--permission-mode", MODES[self.meta["mode"]],
                 "--append-system-prompt",
-                HINT + (" " + STEWARD if self.meta.get("default") else "")]
+                HINT]
         argv += ["--allowedTools", "Bash(%s:*)" % TABS_TOOL]
         if self.meta["mode"] == "bypass":
             argv.append("--allow-dangerously-skip-permissions")
@@ -1862,16 +1854,11 @@ class ChatManager:
         rows.sort(key=lambda r: (not r["default"], -r["updated"]))
         return rows
 
-    def ensure_default(self):
-        """The main chat: made once, first in the list, never deleted."""
-        with self.lock:
-            if any(c.meta.get("default") for c in self.chats.values()):
-                return
-        code, out = self.create({"title": DEFAULT_TITLE})
-        if code == 200:
-            chat = self.chats[out["chat"]["id"]]
-            chat.meta["default"] = True
-            chat._save_meta()
+    def retire_default(self):
+        """The main chat older tabits made (the owl) is gone from the list:
+        its folder stays as <id>.retired, history and all."""
+        for chat in [c for c in list(self.chats.values()) if c.meta.get("default")]:
+            self._retire(chat, ".retired")
 
     def get(self, cid):
         return self.chats.get(cid)
@@ -1953,7 +1940,7 @@ class ChatManager:
         except OSError:
             pass
 
-    def _retire(self, chat):
+    def _retire(self, chat, suffix=".moved"):
         """A chat that moved into a tab leaves the list, but its folder stays
         on disk as <id>.moved: its history is kept, and it does not load as a
         chat again (the folder name is not its id)."""
@@ -1962,9 +1949,9 @@ class ChatManager:
             self.chats.pop(chat.id, None)
             for group in list(self.groups.values()):
                 group.member_deleted(chat)
-        kept, n = chat.dir + ".moved", 2
+        kept, n = chat.dir + suffix, 2
         while os.path.exists(kept):
-            kept, n = "%s.moved-%d" % (chat.dir, n), n + 1
+            kept, n = "%s%s-%d" % (chat.dir, suffix, n), n + 1
         try:
             os.replace(chat.dir, kept)
         except OSError:
