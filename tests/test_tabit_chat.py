@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -122,30 +123,18 @@ class LibraryTest(Base):
 
 
 class DefaultChatTest(Base):
-    def test_main_chat_is_made_once_listed_first_and_not_deletable(self):
-        self.mgr.ensure_default()
+    def test_the_old_main_chat_leaves_with_its_history_kept(self):
+        main = self.new(title="Tabit Chat")
+        main.meta["default"] = True
+        main._save_meta()
         mine = self.new(title="Later")
-        self.mgr.ensure_default()
-        rows = self.mgr.listing()
-        self.assertEqual([r["default"] for r in rows], [True, False])
-        self.assertEqual(rows[0]["title"], tc.DEFAULT_TITLE)
-        main = self.mgr.get(rows[0]["id"])
-        code, out = tc.api(self.mgr, "POST", [main.id, "delete"], {})
-        self.assertEqual(code, 400)
-        self.assertIn(main.id, self.mgr.chats)
-        self.assertEqual(tc.api(self.mgr, "POST", [mine.id, "delete"], {})[0], 200)
-
-    def test_main_chat_survives_a_restart_and_has_its_role(self):
-        self.mgr.ensure_default()
-        main = next(c for c in self.mgr.chats.values() if c.meta.get("default"))
-        main.send("hello")
-        self.assertTrue(wait(lambda: any(e["t"] == "done" for e in main.events)))
-        with open(self.log) as f:
-            self.assertIn("main assistant", f.read())
+        self.mgr.retire_default()
+        self.assertEqual([r["title"] for r in self.mgr.listing()], ["Later"])
+        self.assertTrue(os.path.isdir(main.dir + ".retired"))
         self.stop_all()
-        again = self.make()
-        again.ensure_default()
-        self.assertEqual(sum(1 for c in again.chats.values() if c.meta.get("default")), 1)
+        again = self.make()                       # not back after a restart
+        self.assertEqual(list(again.chats), [mine.id])
+        again.stop_mirrors()
 
 
 class AccountTest(Base):
@@ -155,33 +144,17 @@ class AccountTest(Base):
                               accounts=lambda: [("Work", FAKE)],
                               auth=lambda cli: {"loggedIn": True, "email": "a@b.c", "subscriptionType": "pro"})
 
-    def test_one_login_for_every_chat_and_it_can_change(self):
-        chat = self.new()
+    def test_the_logins_have_labels(self):
         rows = self.mgr.account_choices()
         self.assertEqual([r["name"] for r in rows], ["", "Work"])
         self.assertEqual(rows[1]["label"], "Work — a@b.c · pro")
-        self.assertEqual(tc.api(self.mgr, "POST", ["account"], {"account": "nobody"})[0], 400)
-        self.assertEqual(tc.api(self.mgr, "POST", ["account"], {"account": "Work"})[0], 200)
-        self.assertEqual(chat.summary()["account"], "Work")
-        self.assertEqual(self.make().account, "Work")           # it is remembered
 
-    def test_the_login_cannot_change_while_a_chat_works(self):
-        chat = self.new()
-        chat.send("slow")
-        self.assertTrue(wait(lambda: chat.state != "idle"))
-        self.assertEqual(tc.api(self.mgr, "POST", ["account"], {"account": "Work"})[0], 409)
-        chat.interrupt()
-
-
-class AccountMirrorTest(AccountTest):
-
-    def test_a_mirrored_tab_at_work_does_not_hold_the_login(self):
-        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False: \
-            {"title": "MOT", "status": "working", "transcript": "", "claude": True}
-        code, out = self.mgr.create({"tab": {"id": "t1", "title": "x"}})
-        mirror = self.mgr.get(out["chat"]["id"])
-        mirror.tab_state = "working"            # its tab works; this chat runs nothing
-        self.assertEqual(tc.api(self.mgr, "POST", ["account"], {"account": "Work"})[0], 200)
+    def test_a_chat_picks_its_own_login(self):
+        a, b = self.new(), self.new()
+        self.assertEqual(tc.api(self.mgr, "POST", [a.id, "edit"], {"account": "nobody"})[0], 400)
+        self.assertEqual(tc.api(self.mgr, "POST", [a.id, "edit"], {"account": "Work"})[0], 200)
+        self.assertEqual((a.summary()["account"], b.summary()["account"]), ("Work", ""))
+        self.assertEqual(tc.api(self.mgr, "POST", ["account"], {"account": "Work"})[0], 404)   # no login for all
 
 
 class SafetyTest(Base):
@@ -258,6 +231,15 @@ class TestChat(Base):
         self.assertEqual(argv[argv.index("--permission-prompt-tool") + 1], "stdio")
         self.assertIn("--session-id", argv)
         self.assertNotIn("--allow-dangerously-skip-permissions", argv)
+
+    def test_a_picked_effort_goes_on_the_command(self):
+        chat = self.new()
+        self.assertNotIn("--effort", chat._argv())
+        self.assertEqual(tc.api(self.mgr, "POST", [chat.id, "edit"], {"effort": "ultra"})[0], 400)
+        self.assertEqual(tc.api(self.mgr, "POST", [chat.id, "edit"], {"effort": "high"})[0], 200)
+        argv = chat._argv()
+        self.assertEqual(argv[argv.index("--effort") + 1], "high")
+        self.assertEqual(chat.summary()["effort"], "high")
 
     def test_allow_and_deny(self):
         chat = self.new()
@@ -679,7 +661,7 @@ class MirrorTest(Base):
                 return (404, {"error": "no"}) if text or key else {"error": "no"}
             if text is None and key is None:
                 return {"title": "MOT", "status": self.status,
-                        "transcript": self.path, "claude": True}
+                        "transcript": self.path, "cli": "claude"}
             self.calls.append((text, key, queue))
             return 200, {"ok": True}
         self.mgr.tab_hook = hook
@@ -844,6 +826,7 @@ class MirrorTest(Base):
         self.assertEqual([k for _t, k, _q in self.calls], ["2", "1", "1"])    # Blue, Small, submit
         self.assertEqual(chat.pending, {})
         self.assertEqual(chat.events[-1]["t"], "answered")
+        self.assertEqual(chat.events[-1]["answers"], {"Pick a color": "Blue", "Pick a size": "Small"})
         chat.mirror_poll()                        # the transcript is not caught up: no second card
         self.assertEqual(chat.pending, {})
         self.assertEqual(len([e for e in chat.events if e["t"] == "ask"]), 1)
@@ -928,9 +911,9 @@ class MirrorTest(Base):
         tc.api(self.mgr, "POST", [chat.id, "stop"], {})
         self.assertEqual(self.calls[-1], (None, "esc", False))
 
-    def test_only_a_claude_tab(self):
+    def test_only_a_claude_or_codex_tab(self):
         old = self.mgr.tab_hook
-        self.mgr.tab_hook = lambda tab, *a, **k: dict(old(tab), claude=False)
+        self.mgr.tab_hook = lambda tab, *a, **k: dict(old(tab), cli="")
         self.assertEqual(self.mgr.create({"tab": {"id": "t1"}})[0], 400)
         self.mgr.tab_hook = old
         self.assertEqual(self.mgr.create({"tab": {"id": "zz"}})[0], 400)
@@ -971,6 +954,153 @@ class MirrorTest(Base):
 
 
 
+class CodexMirrorTest(Base):
+    """A chat that shows a Codex tab: its bubbles come from the tab's rollout file."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, tc, "MIRROR_EVERY", tc.MIRROR_EVERY)
+        tc.MIRROR_EVERY = 3600       # the tests look by hand
+        self.path = os.path.join(self.dir, "rollout.jsonl")
+        shutil.copy(os.path.join(os.path.dirname(__file__), "fixtures", "chat",
+                                 "codex_rollout.jsonl"), self.path)
+        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False: {
+            "title": "MOT", "status": "idle", "transcript": self.path, "cli": "codex"}
+        self.mgr.tabs_hook = lambda: [{"id": "t1", "title": "MOT", "cli": "codex"}]
+
+    mirror = MirrorTest.mirror
+    texts = MirrorTest.texts
+
+    def raws(self):
+        with open(self.path) as f:
+            return [json.loads(line) for line in f]
+
+    def test_the_converter_keeps_what_was_said(self):
+        got = [e for r in self.raws() for e in tc.transcript_events(r, "codex")]
+        # the context Codex adds and its response_item copies are not shown
+        self.assertEqual([(e["t"], e.get("text") or e.get("name")) for e in got],
+                         [("user", "fix the bug"), ("text", "Looking now."),
+                          ("tool", "Bash"), ("result", "a.txt\n"),
+                          ("tool", "Bash"), ("result", "cat: b.txt: No such file\n"),
+                          ("tool", "Edit"), ("text", "Fixed.")])
+        tools = [e for e in got if e["t"] in ("tool", "result")]
+        self.assertEqual(tools[0]["summary"], "ls")
+        self.assertEqual([e["error"] for e in tools if e["t"] == "result"], [False, True])
+        self.assertEqual(tools[4]["summary"], "/home/u/proj/a.txt")
+        self.assertTrue(all("ts" in e for e in got))
+
+    def test_an_interrupt_is_a_note(self):
+        raw = {"type": "event_msg", "payload": {"type": "turn_aborted", "reason": "interrupted"}}
+        self.assertEqual(tc.codex_events(raw), [{"t": "notice", "text": "Interrupted."}])
+
+    def test_the_model_comes_from_the_turn(self):
+        self.assertEqual(tc.transcript_model(self.path), "gpt-5.6-luna")
+
+    def test_first_look_shows_the_conversation_then_only_what_is_new(self):
+        chat = self.mirror()
+        chat.mirror_poll()
+        self.assertEqual(self.texts(chat)[0], ("user", "fix the bug"))
+        self.assertEqual(chat.meta["tab"].get("model"), "gpt-5.6-luna")
+        n = len(chat.events)
+        chat.mirror_poll()
+        self.assertEqual(len(chat.events), n)
+
+    def test_a_codex_tab_gets_a_chat(self):
+        self.mgr.sync_tabs()
+        chat = next(c for c in self.mgr.chats.values() if c.mirrored)
+        self.assertEqual(chat.meta["tab"]["cli"], "codex")
+
+    def test_its_usage_comes_from_the_rollout(self):
+        line = {"timestamp": "2026-11-05T09:31:11.000Z", "type": "event_msg",
+                "payload": {"type": "token_count", "rate_limits": {
+                    "primary": {"used_percent": 12.4, "window_minutes": 300, "resets_at": 1900000000},
+                    "secondary": {"used_percent": 40, "window_minutes": 10080, "resets_at": 1900500000}}}}
+        self.assertEqual(tc.codex_limits(line), [{"name": "5h", "pct": 12, "resets": 1900000000},
+                                                 {"name": "7d", "pct": 40, "resets": 1900500000}])
+        free = {"type": "event_msg", "payload": {"type": "token_count", "rate_limits": {
+            "primary": {"used_percent": 6, "window_minutes": 43200}, "secondary": None}}}
+        self.assertEqual([w["name"] for w in tc.codex_limits(free)], ["30d"])   # a free plan: one window
+        with open(self.path, "a") as f:
+            f.write(json.dumps(line) + "\n")
+        chat = self.mirror()
+        chat.mirror_poll()
+        self.assertEqual(self.mgr.usage(), [{"cli": "codex", "account": "",
+                                             "windows": tc.codex_limits(line), "ts": tc._raw_time(line)}])
+        # kept over a restart: the mirror reads only new lines then
+        again = self.make()
+        self.addCleanup(again.stop_mirrors)
+        self.assertEqual(again.usage()[0]["windows"], tc.codex_limits(line))
+
+    def codex_home(self):
+        home = os.path.join(self.dir, "codex-home")
+        os.makedirs(home)
+        with open(os.path.join(home, "models_cache.json"), "w") as f:
+            lv = lambda *e: [{"effort": x} for x in e]
+            json.dump({"models": [{"slug": "gpt-a", "display_name": "GPT-A", "visibility": "list",
+                                   "supported_reasoning_levels": lv("low", "high", "ultra")},
+                                  {"slug": "gpt-b", "display_name": "GPT-B", "visibility": "list",
+                                   "supported_reasoning_levels": lv("low", "high")},
+                                  {"slug": "gpt-hidden", "visibility": "hide"}]}, f)
+        p = mock.patch.dict(os.environ, {"CODEX_HOME": home})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_the_models_are_those_codex_lists(self):
+        self.codex_home()
+        self.assertEqual(tc.codex_models(), [
+            {"name": "", "label": "default", "efforts": ["", "low", "high"]},   # what all take
+            {"name": "gpt-a", "label": "GPT-A", "efforts": ["", "low", "high", "ultra"]},
+            {"name": "gpt-b", "label": "GPT-B", "efforts": ["", "low", "high"]}])
+
+    def test_the_effort_is_one_the_model_takes(self):
+        self.codex_home()
+        chat = self.mirror()
+        chat.mirror_poll()
+        ops = []
+        self.mgr.tab_ops = lambda op, target=None, body=None: ops.append((op, body)) or (200, {"ok": True})
+        edit = lambda body: tc.api(self.mgr, "POST", [chat.id, "edit"], body)[0]
+        self.assertEqual(edit({"model": "gpt-b", "effort": "ultra"}), 400)    # gpt-b has no ultra
+        self.assertEqual(edit({"effort": "nope"}), 400)
+        self.assertEqual(ops, [])
+        self.assertEqual(edit({"model": "gpt-a", "effort": "ultra"}), 200)
+        self.assertEqual(edit({"effort": "low"}), 200)                         # the effort alone
+        self.assertEqual(ops, [("model", {"model": "gpt-a", "effort": "ultra"}),
+                               ("model", {"effort": "low"})])
+        self.assertEqual(chat.meta["tab"]["effort"], "low")
+
+    def test_its_login_and_model_switch_as_codex(self):
+        self.codex_home()
+        chat = self.mirror()
+        chat.mirror_poll()                              # it answers as gpt-5.6-luna
+        ops = []
+        self.mgr.tab_ops = lambda op, target=None, body=None: ops.append((op, body)) or (200, {"ok": True})
+        self.mgr.accounts = lambda: [("Work", FAKE)]
+        self.mgr.codex_accounts = lambda: [("Home", FAKE)]
+        edit = lambda body: tc.api(self.mgr, "POST", [chat.id, "edit"], body)[0]
+        self.assertEqual(edit({"model": "opus"}), 400)          # a Claude model
+        self.assertEqual(edit({"account": "Work"}), 400)        # a Claude login
+        self.assertEqual(edit({"model": "gpt-5.6-luna"}), 200)  # the one it has: nothing to do
+        self.assertEqual(ops, [])
+        self.assertEqual(edit({"model": "gpt-a", "account": "Home"}), 200)
+        self.assertEqual(ops, [("model", {"model": "gpt-a", "account": "Home"})])
+        self.assertEqual((chat.meta["tab"]["model"], chat.summary()["account"]), ("gpt-a", "Home"))
+
+    def test_the_page_gets_the_codex_logins_and_models(self):
+        self.codex_home()
+        self.mgr.codex_accounts = lambda: [("Home", FAKE)]
+        with mock.patch.object(tc.shutil, "which", lambda c: "/usr/bin/" + c):
+            out = tc.api(self.mgr, "GET", [], None)[1]
+        self.assertEqual([a["name"] for a in out["codex_accounts"]], ["", "Home"])
+        self.assertEqual([m["name"] for m in out["codex_models"]], ["", "gpt-a", "gpt-b"])
+        self.assertEqual(out["efforts"], list(tc.EFFORTS))
+
+    def test_another_ai_tab_gets_none(self):
+        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False: {
+            "title": "G", "status": "idle", "transcript": "", "cli": ""}
+        code, out = self.mgr.create({"tab": {"id": "t1", "title": "x"}})
+        self.assertEqual(code, 400, out)
+
+
 class TabSyncTest(Base):
     """A chat and a Claude tab are one: same name, same group, made and closed together."""
 
@@ -983,7 +1113,7 @@ class TabSyncTest(Base):
         self.ops = []
         self.reply = (200, {"ok": True})
         self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False: {
-            "title": "MOT", "status": "idle", "transcript": "", "claude": True}
+            "title": "MOT", "status": "idle", "transcript": "", "cli": "claude"}
         self.mgr.tabs_hook = lambda: [dict(t) for t in self.tabs] if self.tabs is not None else None
 
         def ops(op, target=None, body=None):
@@ -1189,6 +1319,39 @@ class TabSyncTest(Base):
         self.mgr.sync_tabs()
         self.assertEqual(len([c for c in self.mgr.chats.values() if c.mirrored and c.meta["tab"]["id"] == "t9"]), 1)
 
+    def test_a_new_chat_opens_its_tab_with_the_login_picked(self):
+        self.mgr.accounts = lambda: [("Work", FAKE)]
+        tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "account": "Work"})
+        self.assertEqual(next(o for o in self.ops if o[0] == "new")[2]["account"], "Work")
+        self.ops.clear()
+        tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir})      # none picked: the default
+        self.assertEqual(next(o for o in self.ops if o[0] == "new")[2]["account"], "")
+        self.ops.clear()
+        code, _ = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "account": "nobody"})
+        self.assertEqual((code, self.ops), (400, []))
+
+    def test_a_new_chat_can_open_a_codex_tab(self):
+        self.mgr.accounts = lambda: [("Work", FAKE)]
+        self.mgr.codex_accounts = lambda: [("Home", FAKE)]
+        code, out = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "cli": "codex",
+                                                  "account": "Work"})
+        self.assertEqual(code, 400, out)               # a Claude login is no Codex login
+        code, out = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "cli": "codex",
+                                                  "account": "Home"})
+        self.assertEqual(code, 200, out)
+        body = next(o for o in self.ops if o[0] == "new")[2]
+        self.assertEqual((body["cli"], body["account"]), ("codex", "Home"))
+        self.ops.clear()
+        tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "cli": "codex"})
+        self.assertEqual(next(o for o in self.ops if o[0] == "new")[2]["account"], "")
+        self.ops.clear()
+        code, _ = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "cli": "grok"})
+        self.assertEqual((code, self.ops), (400, []))
+
+    def test_the_page_is_told_which_ais_there_are(self):
+        code, out = tc.api(self.mgr, "GET", [], None)
+        self.assertEqual(out["clis"][0], "claude")
+
     def test_a_new_chat_with_no_group_leaves_it_to_tabit(self):
         tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir})
         body = next(o for o in self.ops if o[0] == "new")[2]
@@ -1205,6 +1368,44 @@ class TabSyncTest(Base):
         self.assertEqual(out["tabgroups"]["groups"][0]["name"], "Work")
 
 
+class UsageTest(Base):
+    """Each AI login the chats use, with how much of its limits is gone."""
+
+    def test_a_claude_tab_s_usage_comes_from_its_status_line(self):
+        self.mgr.roster_dir = os.path.join(self.dir, "hooks")
+        os.makedirs(self.mgr.roster_dir)
+        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False: {
+            "title": "A", "status": "idle", "transcript": "", "cli": "claude"}
+        self.mgr.tabs_hook = lambda: [{"id": "t1", "title": "A", "cli": "claude",
+                                       "account": "Personal", "key": "ai-claude-a"}]
+        self.mgr.tab_ops = lambda *a, **k: (200, {"ok": True})
+        self.mgr.sync_tabs()
+        with open(os.path.join(self.mgr.roster_dir, "ai-claude-a.usage"), "w") as f:
+            json.dump({"rate_limits": {"five_hour": {"used_percentage": 13, "resets_at": 1900000000},
+                                       "seven_day": {"used_percentage": 36.6, "resets_at": 1900500000}},
+                       "ts": 1800000000}, f)
+        self.mgr.create({"cwd": self.dir, "title": "own"})       # a chat with its own claude: Default
+        got = {(u["cli"], u["account"]): u["windows"] for u in tc.api(self.mgr, "GET", [], None)[1]["usage"]}
+        self.assertEqual(list(got), [("claude", ""), ("claude", "Personal")])   # Default first
+        self.assertEqual(got[("claude", "Personal")], [{"name": "5h", "pct": 13, "resets": 1900000000},
+                                                       {"name": "7d", "pct": 37, "resets": 1900500000}])
+        self.assertEqual(got[("claude", "")], [])                # not known yet
+
+    def test_a_claude_login_with_no_fresh_reading_is_asked(self):
+        asked = []
+        self.mgr.claude_usage = lambda acct: asked.append(acct) or [{"name": "5h", "pct": 1, "resets": 0}]
+        self.mgr.create({"cwd": self.dir, "title": "own"})
+        self.mgr.usage()
+        self.assertTrue(wait(lambda: self.mgr._usage.get("claude/")))
+        self.assertEqual(self.mgr.usage()[0]["windows"], [{"name": "5h", "pct": 1, "resets": 0}])
+        self.assertEqual(asked, [""])                  # once: the reading is fresh now
+
+    def test_an_older_reading_does_not_win(self):
+        self.mgr.note_usage("codex", "", [{"name": "5h", "pct": 50, "resets": 0}], 200)
+        self.mgr.note_usage("codex", "", [{"name": "5h", "pct": 10, "resets": 0}], 100)
+        self.assertEqual(self.mgr._usage["codex/"]["windows"][0]["pct"], 50)
+
+
 class TabSwitchTest(Base):
     """The login and the model of a chat, from its page."""
 
@@ -1218,7 +1419,7 @@ class TabSwitchTest(Base):
 
         def hook(tab, text=None, key=None, queue=False):
             if text is None and key is None:
-                return {"title": "MOT", "status": "idle", "transcript": self.path, "claude": True}
+                return {"title": "MOT", "status": "idle", "transcript": self.path, "cli": "claude"}
             if self.busy:
                 return 409, {"error": "that tab is busy: wait for it"}
             self.typed.append(text)
@@ -1257,6 +1458,14 @@ class TabSwitchTest(Base):
     def test_a_model_nobody_knows(self):
         self.assertEqual(self.edit({"model": "gpt"})[0], 400)
         self.assertEqual(self.ops, [])
+
+    def test_the_effort_is_switched_by_tabit(self):
+        self.assertEqual(self.edit({"effort": "ultra"})[0], 400)    # not a Claude effort
+        self.assertEqual(self.edit({"effort": "max"})[0], 200)
+        self.assertEqual(self.ops, [("model", "t1", {"effort": "max"})])
+        self.assertEqual(self.chat.summary()["tab"]["effort"], "max")
+        self.edit({"effort": "max"})
+        self.assertEqual(len(self.ops), 1)          # no change: nothing asked
 
     def test_login_and_model_change_in_one_restart(self):
         self.assertEqual(self.edit({"account": "Personal", "model": "haiku"})[0], 200)
@@ -1315,7 +1524,7 @@ class ScreenMenuTest(Base):
 
         def hook(tab, text=None, key=None, queue=False):
             if text is None and key is None:
-                info = {"title": "MOT", "status": self.status, "transcript": "", "claude": True}
+                info = {"title": "MOT", "status": self.status, "transcript": "", "cli": "claude"}
                 if self.status == "blocked":
                     info["screen"] = self.screen
                 return info
@@ -1328,6 +1537,51 @@ class ScreenMenuTest(Base):
     def card(self):
         self.chat.mirror_poll()
         return next(iter(self.chat.view()["pending"]), None)
+
+    def codex_screen(self):
+        with open(os.path.join(os.path.dirname(__file__), "fixtures", "chat",
+                               "codex_approval_screen.txt")) as f:
+            return f.read().splitlines()
+
+    def test_the_last_choice_picked_under_a_long_one(self):
+        rows = [("  " + r[2:]) if r.startswith("› 1.") else
+                ("› " + r.lstrip()) if r.lstrip().startswith("3. No") else r
+                for r in self.codex_screen()]
+        menu = tc.screen_prompt(rows)
+        self.assertEqual(menu["numbers"], [1, 2, 3])        # the long 2nd one does not cut the menu
+        self.assertEqual(menu["selected"], 2)               # the 3rd choice, not the 4th row
+
+    def test_a_codex_approval_is_read(self):
+        menu = tc.screen_prompt(self.codex_screen())
+        self.assertEqual(menu["question"], "Would you like to run the following command?")
+        self.assertEqual(menu["numbers"], [1, 2, 3])
+        self.assertEqual(menu["options"], [
+            "Yes, proceed (y)",
+            "Yes, and don't ask again for commands that start with `echo hi > note.txt` (p)",
+            "No, and tell Codex what to do differently (esc)"])
+        self.assertEqual(menu["selected"], 0)
+        # the prompt from its question down; the talk above it is not part of it
+        self.assertTrue(menu["detail"].startswith("Would you like"), menu["detail"])
+        self.assertIn("$ echo hi > note.txt", menu["detail"])
+        self.assertNotIn("AGENTS.md", menu["detail"])
+
+    def test_the_codex_box_is_no_menu(self):
+        self.assertIsNone(tc.screen_prompt(["› 1. fix it", "", "  gpt-5.6 medium · ~/p"]))
+        self.assertIsNone(tc.screen_prompt(["• Done", "", "› Ask Codex to do anything", ""]))
+
+    def test_a_codex_approval_is_answered_with_its_number(self):
+        self.screen = self.codex_screen()
+        ev = self.card()
+        q = ev["questions"][0]["question"]
+        self.assertTrue(self.chat.answer(ev["rid"], True, answers={q: "Yes, proceed (y)"}))
+        self.assertEqual(self.keys, ["1"])
+        self.keys.clear()
+        self.status = "working"                          # it ran; then the same question again
+        self.chat.mirror_poll()
+        self.status = "blocked"
+        ev = self.card()
+        self.chat.answer(ev["rid"], False)
+        self.assertEqual(self.keys, ["3"])               # its No
 
     def test_the_trust_question_is_a_card(self):
         ev = self.card()
@@ -1456,7 +1710,7 @@ class TabTalkTest(Base):
 
         def hook(tab, text=None, key=None, queue=False):
             if text is None and key is None:
-                return {"title": self.titles[tab], "status": "idle", "transcript": self.tx[tab], "claude": True}
+                return {"title": self.titles[tab], "status": "idle", "transcript": self.tx[tab], "cli": "claude"}
             if tab in self.refuse:
                 return 409, {"error": "that tab is asking something"}
             self.typed.append((tab, text))
@@ -1695,6 +1949,50 @@ class QueuedMessageTest(unittest.TestCase):
         self.assertEqual(tc.transcript_events(self.line("x", mode="task-notification")), [])
         self.assertEqual(tc.transcript_events(self.line("x", kind="task")), [])
         self.assertEqual(tc.transcript_events({"type": "attachment", "attachment": {"type": "date"}}), [])
+
+
+class PastedTest(unittest.TestCase):
+    """Claude Code saves a paste wrapped in <pasted_content> tags; the chat
+    shows the paste without them."""
+
+    def user(self, text):
+        return {"type": "user", "message": {"role": "user", "content": text}}
+
+    def test_the_wrapper_goes(self):
+        [ev] = tc.transcript_events(self.user(
+            '\n\n<pasted_content id="6750">\ncloud team asks:\nHi FW team\n</pasted_content id="6750">\n'))
+        self.assertEqual(ev["text"], "cloud team asks:\nHi FW team")
+
+    def test_typed_text_around_it_stays(self):
+        [ev] = tc.transcript_events(self.user(
+            'look\n\n\n<pasted_content id="54c4">\na\nb\n</pasted_content id="54c4">\n\n\ntest'))
+        self.assertEqual(ev["text"], "look\n\n\na\nb\n\n\ntest")
+
+    def test_a_reply_or_a_tab_message_inside_a_paste_reads_as_one(self):
+        [ev] = tc.transcript_events(self.user(
+            '<pasted_content id="ab12">\n[In reply to Ann: "hi"]\nyes\n</pasted_content id="ab12">'))
+        self.assertEqual((ev["text"], ev["reply"]), ("yes", {"who": "Ann", "snip": "hi"}))
+
+    def test_a_tag_that_is_only_written_stays(self):
+        # the user writing about the tag is not a paste
+        [ev] = tc.transcript_events(self.user('why is <pasted_content id="6750"> there'))
+        self.assertEqual(ev["text"], 'why is <pasted_content id="6750"> there')
+        bad = '<pasted_content id="aa11">\nx\n</pasted_content id="bb22">'
+        [ev] = tc.transcript_events(self.user(bad))
+        self.assertEqual(ev["text"], bad)
+
+    def test_a_saved_message_loses_it_on_load(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = tc._Log()
+            log.dir, log.events, log.seq = d, [], 0
+            with open(os.path.join(d, "events.jsonl"), "w") as f:
+                f.write(json.dumps({"seq": 1, "t": "user",
+                                    "text": '<pasted_content id="ab12">\nhi\n</pasted_content id="ab12">'}) + "\n")
+                f.write(json.dumps({"seq": 2, "t": "text",
+                                    "text": 'see <pasted_content id="ab12">\nx\n</pasted_content id="ab12">'}) + "\n")
+            log._load_events()
+            self.assertEqual([e["text"] for e in log.events],
+                             ["hi", 'see <pasted_content id="ab12">\nx\n</pasted_content id="ab12">'])
 
 
 if __name__ == "__main__":

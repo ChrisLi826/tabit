@@ -48,6 +48,7 @@ install -m 644 tabit_chrome.toml "$HOME/.local/share/tabit/tabit_chrome.toml"
 install -m 644 remote.html "$HOME/.local/share/tabit/remote.html"
 # Tabit Chat: the chat page and the code behind it
 install -m 644 chat.html "$HOME/.local/share/tabit/chat.html"
+install -m 644 settings.js "$HOME/.local/share/tabit/settings.js"
 install -m 644 tabit_chat.py "$HOME/.local/share/tabit/tabit_chat.py"
 install -m 755 tabit-tabs "$HOME/.local/bin/tabit-tabs"
 install -m 644 tabit.svg tabit-app.svg tabit-remote.svg tabit-remote-app.svg "$HOME/.local/share/tabit/"

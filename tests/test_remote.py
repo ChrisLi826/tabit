@@ -9,6 +9,7 @@ import urllib.parse
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 import unittest.mock
@@ -651,7 +652,27 @@ class TestRemoteArrows(unittest.TestCase):
 
     def test_no_window_falls_back_to_bytes(self):
         _, _, row = self._press("down", False)
-        row.term.feed_child.assert_called_once_with(b"\x1b[B")
+        row.term.feed_child.assert_called_once_with(b"\x1bOB")
+
+    def test_page_keys_are_key_presses_too(self):
+        # less and git diff page with them
+        for name, keyval, raw in (("pgup", tabit.Gdk.KEY_Page_Up, b"\x1b[5~"),
+                                  ("pgdn", tabit.Gdk.KEY_Page_Down, b"\x1b[6~"),
+                                  ("home", tabit.Gdk.KEY_Home, b"\x1bOH"),
+                                  ("end", tabit.Gdk.KEY_End, b"\x1bOF")):
+            code, app, row = self._press(name, True)
+            self.assertEqual(code, 200)
+            app._press_key.assert_called_once_with(row.term, keyval)
+            _, _, row = self._press(name, False)
+            row.term.feed_child.assert_called_once_with(raw)
+
+    def test_a_tab_not_shown_gets_the_keys_a_pager_wants(self):
+        # no window: tabit took its page out. less only takes ESC O for
+        # arrows, Home and End; a shell takes it too
+        for name, raw in (("up", b"\x1bOA"), ("down", b"\x1bOB"), ("right", b"\x1bOC"),
+                          ("left", b"\x1bOD"), ("home", b"\x1bOH"), ("end", b"\x1bOF")):
+            _, _, row = self._press(name, False)
+            row.term.feed_child.assert_called_once_with(raw)
 
     def test_other_keys_stay_bytes(self):
         _, app, row = self._press("enter", True)
@@ -732,6 +753,36 @@ class TestInjectEnter(unittest.TestCase):
         self.app._tg_inject(self.row, "two")
         self.tick()
         self.assertEqual(self.keys(), ["one", "two", b"\r"])
+
+
+class TestRemotePager(unittest.TestCase):
+    """A pager in front shows only its own screen: the scrollback above it is
+    out of order once it scrolls back."""
+
+    def _tab_running(self, argv):
+        import pty, signal
+        pid, fd = pty.fork()
+        if pid == 0:                                   # a session of its own, in front on its tty
+            os.environ["TERM"] = "dumb"
+            os.execvp(argv[0], argv)
+        self.addCleanup(os.close, fd)
+        self.addCleanup(lambda: (os.kill(pid, signal.SIGKILL), os.waitpid(pid, 0)))
+        term = unittest.mock.Mock()
+        term.get_pty.return_value.get_fd.return_value = fd
+        term.get_row_count.return_value = 24
+        time.sleep(0.5)
+        return term
+
+    def test_git_log_runs_less_in_front(self):
+        # the job's leader is git (here sh); less is its child
+        term = self._tab_running(["sh", "-c", "less /etc/hostname; sleep 5"])
+        self.assertEqual(tabit.Tabit._term_pager_rows(term), 24)
+
+    def test_anything_else_is_no_pager(self):
+        term = self._tab_running(["sleep", "5"])
+        self.assertEqual(tabit.Tabit._term_pager_rows(term), 0)
+        term.get_pty.return_value = None               # a tab whose program has ended
+        self.assertEqual(tabit.Tabit._term_pager_rows(term), 0)
 
 
 class TestRemoteCursor(unittest.TestCase):
@@ -1109,9 +1160,10 @@ class TestChatModelSwitch(unittest.TestCase):
             _tg_row_by_id = lambda _s, tid: test.row if tid == "t1" else None
             _ai_cli_path_of = staticmethod(tabit.Tabit._ai_cli_path_of)
             _claude_account_of = staticmethod(tabit.Tabit._claude_account_of)
+            _ai_account_of = staticmethod(tabit.Tabit._ai_account_of)
 
-            def _ai_switch_account(self, row, name, model=None):
-                test.asked.append((row, name, model))
+            def _ai_switch_account(self, row, name, model=None, effort=None):
+                test.asked.append((row, name, model, effort))
                 return test.why
         App._chat_model = tabit.Tabit._chat_model
         self.app = App()
@@ -1122,11 +1174,15 @@ class TestChatModelSwitch(unittest.TestCase):
 
     def test_the_tab_restarts_with_the_model_and_keeps_its_login(self):
         self.assertEqual(self.ops({"model": "haiku"}), (200, {"ok": True}))
-        self.assertEqual(self.asked, [(self.row, "", "haiku")])
+        self.assertEqual(self.asked, [(self.row, "", "haiku", None)])
 
     def test_a_login_can_change_in_the_same_restart(self):
         self.ops({"model": "", "account": "Personal"})
-        self.assertEqual(self.asked, [(self.row, "Personal", "")])
+        self.assertEqual(self.asked, [(self.row, "Personal", "", None)])
+
+    def test_the_effort_alone_keeps_the_model(self):
+        self.ops({"effort": "high"})
+        self.assertEqual(self.asked, [(self.row, "", None, "high")])
 
     def test_a_tab_that_will_not_switch_says_why(self):
         self.why = "Claude is working: switch when it stops"
@@ -1297,7 +1353,7 @@ class TestPlainTabHistory(unittest.TestCase):
             while Gtk.events_pending():
                 Gtk.main_iteration()
 
-    def screen(self, back):
+    def screen(self, back, pager=None):
         row = types.SimpleNamespace(kind="term", term=self.term, title_text="t",
                                     agent_status="idle")
         T = tabit.Tabit
@@ -1306,7 +1362,8 @@ class TestPlainTabHistory(unittest.TestCase):
             _row_tmux_session=lambda r: None, _term_tail_ansi=T._term_tail_ansi,
             _term_tail_text=T._term_tail_text, _remote_cursor=T._remote_cursor,
             _term_history_text=T._term_history_text,
-            _term_history_ends=T._term_history_ends)
+            _term_history_ends=T._term_history_ends,
+            _term_pager_rows=pager or T._term_pager_rows)
         code, out, _ = T._remote_screen(app, "t", True, back)
         self.assertEqual(code, 200)
         nums = [int(x) for x in re.findall(r"line (\d+)", re.sub(r"\x1b\[[0-9;]*m", "", out["ansi"]))]
@@ -1323,6 +1380,13 @@ class TestPlainTabHistory(unittest.TestCase):
     def test_top_of_the_scrollback(self):
         nums, out = self.screen(3000)
         self.assertEqual(nums[0], 0)
+        self.assertTrue(out["nohist"])
+
+    def test_a_pager_shows_only_its_screen(self):
+        # what it scrolled away is out of order once it goes back
+        nums, out = self.screen(200, pager=lambda term: 30)
+        self.assertLessEqual(len(nums), 30)
+        self.assertEqual(nums[-1], 999)
         self.assertTrue(out["nohist"])
 
     def test_the_screen_keeps_its_colours(self):

@@ -56,7 +56,7 @@
   .pill { font-size: 12px; padding: 2px 9px; border-radius: 99px; background: var(--panel); color: var(--dim); white-space: nowrap; }
   .pill.waiting { color: var(--orange); }
   .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--dim); margin-right: 6px; }
-  .dot.working { background: var(--yellow); } .dot.waiting { background: var(--orange); }
+  .dot.working { background: var(--purple); } .dot.waiting { background: var(--orange); }
   .dot.ready { background: var(--green); } .dot.background { background: var(--purple); }
   .dot.exited { background: transparent; box-shadow: inset 0 0 0 2px var(--dim); }
   main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -79,7 +79,7 @@
   .av { position: relative; flex: none; width: 54px; height: 54px; border-radius: 50%; display: grid; place-items: center;
         font-size: 40px; line-height: 1; }
   .av .dot { position: absolute; right: -1px; bottom: -1px; width: 13px; height: 13px; margin: 0; border: 2px solid var(--bg); background: var(--dim); }
-  .av .dot.working { background: var(--yellow); } .av .dot.waiting { background: var(--orange); }
+  .av .dot.working { background: var(--purple); } .av .dot.waiting { background: var(--orange); }
   .av .dot.ready { background: var(--green); } .av .dot.background { background: var(--purple); }
   .av .dot.exited { background: var(--bg); box-shadow: inset 0 0 0 2px var(--dim); }
   .card .body { flex: 1; min-width: 0; }
@@ -91,7 +91,7 @@
   .card .meta { display: flex; gap: 5px; margin-top: 5px; flex-wrap: wrap; }
   .card .sub { color: var(--dim); font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .card .sub.last { color: #aab1d6; margin-top: 1px; }
-  .card .sub.last.st-work { color: var(--yellow); }
+  .card .sub.last.st-work { color: var(--purple); }
   .card .sub.last.st-wait { color: var(--orange); font-weight: 600; }
   .badge { font-size: 11px; padding: 1px 8px; border-radius: 99px; background: #ffffff0d; color: var(--dim); }
   .badge .gdot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
@@ -152,6 +152,7 @@
   .ask .q { font-weight: 600; margin-top: 6px; white-space: pre-line; }
   .ask.closed { border-color: var(--line); background: none; opacity: .7; }
   .ask.closed h3 { color: var(--dim); }
+  .ask.closed .opts button:not(.on) { opacity: .5; }
   .ask .verdict { color: var(--dim); font-size: 13px; }
   .note { align-self: center; font-size: 12.5px; color: var(--dim); text-align: center; max-width: 90%; }
   .note.err { color: var(--red); }
@@ -183,6 +184,17 @@
   #status.err { color: var(--red); }
 
   /* sheets */
+  /* a file opens over the chat, not in a new window; Esc, ✕ or a tap outside closes it */
+  #viewer { width: min(96vw, 1100px); height: 90dvh; max-width: none; max-height: none; padding: 0;
+            border: 1px solid var(--line); border-radius: 14px; background: var(--bg); color: var(--fg); overflow: hidden; }
+  #viewer[open] { display: flex; flex-direction: column; }
+  #viewer::backdrop { background: #000a; backdrop-filter: blur(4px); }
+  #viewer .vbar { display: flex; align-items: center; gap: 6px; padding: 6px 8px 6px 14px; border-bottom: 1px solid var(--line); }
+  #vname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 13px ui-monospace, Menlo, monospace; color: var(--dim); }
+  #viewer .vbar a, #viewer .vbar button { font-size: 18px; line-height: 1; padding: 6px 10px; color: var(--fg); text-decoration: none; background: none; border: 0; cursor: pointer; }
+  #vframe { flex: 1; width: 100%; border: 0; background: #1a1b26; }
+  #vimg { flex: 1; min-height: 0; width: 100%; object-fit: contain; background: #0a0c14; }
+  #viewer [hidden] { display: none; }
   #sheet { position: fixed; inset: 0; background: #0009; backdrop-filter: blur(4px); display: none; align-items: flex-end; justify-content: center; z-index: 5; }
   #sheet.on, #sheet2.on { display: flex; }
   #sheet2 { position: fixed; inset: 0; background: #000a; display: none; align-items: flex-end; justify-content: center; z-index: 6; }
@@ -194,6 +206,28 @@
   #sheet label, #sheet2 label { display: block; margin: 10px 0 4px; color: var(--dim); font-size: 13px; }
   #sheet .acts, #sheet2 .acts { display: flex; gap: 8px; margin-top: 14px; }
   #sheet .acts button, #sheet2 .acts button { flex: 1; }
+  /* the Settings sheet (settings.js, shared with the terminal view) */
+  #sheet h3 { margin: 0 0 10px; font-size: 18px; }
+  #sheet label.check { display: flex; align-items: center; gap: 8px; color: var(--fg); font-size: 14px; }
+  #sheet label.check input { width: auto; margin: 0; }
+  #sheet .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  #sheet .row button { flex: 1; padding: 10px; }
+  #sheet .go { background: var(--blue); color: #111; border: 0; font-weight: 600; }
+  #sheet .pathline { display: flex; gap: 8px; align-items: center; }
+  #sheet .pathline input { flex: 1; min-width: 0; }
+  #sheet .pathline select { flex: none; width: auto; }
+  #sheet .pathline button { flex: none; padding: 9px 12px; }
+  #sheet .acct { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 14px; }
+  #sheet .acct span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  #sheet .acct button { flex: none; padding: 7px 12px; }
+  #sheet .scodeshow { font: 600 22px/1.4 ui-monospace, Menlo, monospace; letter-spacing: 2px; margin: 4px 0 8px; user-select: all; }
+  #sheet .box { border: 1px solid var(--line); border-radius: 12px; padding: 10px; margin: 8px 0; }
+  #sheet .btnlink { display: block; text-align: center; padding: 10px; border-radius: 12px; margin: 8px 0;
+                    background: var(--blue); color: #111; text-decoration: none; font-weight: 600; }
+  #sheet .dim, #sheet .smsg { color: var(--dim); font-size: 13px; margin: 6px 0; }
+  #sheet .err { color: var(--red); font-size: 13px; margin: 6px 0; }
+  #sheet .slog { font: 11px/1.3 ui-monospace, Menlo, monospace; white-space: pre-wrap; max-height: 9em;
+                 overflow: auto; background: #0a0c14; padding: 6px; border-radius: 6px; margin: 6px 0; }
   .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
   .chips button { padding: 4px 12px; font-size: 13px; border-radius: 14px; max-width: 100%; overflow-wrap: anywhere; text-align: left; }
   .dirs { max-height: 44vh; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; margin-top: 8px; }
@@ -240,35 +274,41 @@
                     font: 12px/1.45 ui-monospace, Menlo, monospace; background: #0003; border-radius: 8px; padding: 8px 10px; }
 
   html { scrollbar-color: #2f3549 transparent; } * { scrollbar-width: thin; scrollbar-color: #2f3549 transparent; }
-  #acct { align-self: center; max-width: 92%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 99px; font-size: 13px; padding: 5px 14px; color: var(--dim); background: #ffffff0a; margin-bottom: 4px; }
-  #acct[hidden] { display: none; }
-  #hero { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 0 6px; font-size: 17px; }
-  .mainbot { display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; padding: 6px 14px; border-radius: 18px; }
-  .mainbot.sel { background: #262b45; } .mainbot .sub { font-size: 13px; } .mainbot .st-wait { color: var(--orange); } .mainbot .st-work { color: var(--yellow); }
+  /* how much of each login's limits is used: one row per AI login the chats use */
+  #usage { margin: 4px 14px 0; padding: 6px 10px; background: var(--panel); border-radius: 12px; font-size: 12px; flex: none; }
+  #usage:empty { display: none; }
+  #usage .u { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; padding: 3px 0; }
+  #usage .u + .u { border-top: 1px solid var(--line); }
+  #usage .who { flex: 1 0 9em; font-weight: 600; }
+  #usage .w { display: inline-flex; align-items: center; gap: 4px; color: var(--dim); white-space: nowrap; }
+  #usage .bar { width: 34px; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
+  #usage .bar i { display: block; height: 100%; background: var(--green); }
+  #usage .w.mid .bar i { background: var(--yellow); } #usage .w.hot .bar i { background: var(--red); }
+  #usage .w.hot { color: var(--red); }
   /* the state as a speech bubble on the picture's top right; none when idle.
-     One shape, body and tail together, so its dark edge runs round both */
+     One shape, body and tail together, so its white edge runs round both,
+     as on the favicon's bubble; the sign inside is white too */
   .av .bub { position: absolute; right: -11px; top: -10px; width: 28px; height: 24px; z-index: 1; }
   .bub svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
-  .bub path { fill: var(--c); stroke: var(--bg); stroke-width: 2.5; paint-order: stroke; stroke-linejoin: round; }
+  .bub path { fill: var(--c); stroke: #fff; stroke-width: 4; paint-order: stroke; stroke-linejoin: round; }
   .bub b { position: absolute; left: 0; right: 0; top: 0; height: 76%; display: flex; align-items: center;
-           justify-content: center; gap: 2px; color: #111; font: 700 12px/1 system-ui, sans-serif; }
-  .bub.working { --c: var(--yellow); } .bub.waiting { --c: var(--orange); } .bub.ready { --c: var(--green); }
-  .bub.background { --c: var(--purple); } .bub.exited { --c: #3b4261; } .bub.exited b { color: var(--dim); }
-  .bub i { width: 3px; height: 3px; border-radius: 50%; background: #111; animation: bubdot 1.2s infinite; }
+           justify-content: center; gap: 2px; color: #fff; font: 700 12px/1 system-ui, sans-serif; }
+  .bub.working { --c: var(--purple); } .bub.waiting { --c: var(--orange); } .bub.ready { --c: var(--green); }
+  .bub.background { --c: var(--purple); } .bub.exited { --c: #3b4261; }
+  .bub i { width: 3px; height: 3px; border-radius: 50%; background: #fff; animation: bubdot 1.2s infinite; }
+  /* background turns, so it is not taken for working, which is purple too */
+  .bub .spin { display: inline-block; animation: bubspin 1.6s linear infinite; }
+  @keyframes bubspin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .bub .spin { animation: none; } }
   .bub i:nth-child(2) { animation-delay: .2s; } .bub i:nth-child(3) { animation-delay: .4s; }
-  @keyframes bubdot { 0%, 60%, 100% { transform: none; opacity: .5; } 30% { transform: translateY(-2px); opacity: 1; } }
-  .av.huge .bub { right: -12px; top: -8px; width: 38px; height: 33px; } .av.huge .bub b { font-size: 16px; gap: 3px; }
-  .av.huge .bub i { width: 4px; height: 4px; }
+  @keyframes bubdot { 0%, 60%, 100% { transform: none; opacity: .7; } 30% { transform: translateY(-2px); opacity: 1; } }
   .av.sm .bub { right: -8px; top: -7px; width: 20px; height: 17px; } .av.sm .bub b { font-size: 9px; gap: 1px; }
   .av.sm .bub i { width: 2px; height: 2px; }
-  .av:has(.bub) .star { display: none; }
-  .av .star { position: absolute; right: -2px; top: -2px; width: 24px; height: 24px; border-radius: 50%; background: var(--orange); color: #fff; font-size: 13px; display: grid; place-items: center; border: 2px solid var(--bg); }
-  .av.huge .dot { right: 4px; bottom: 4px; width: 16px; height: 16px; }
-  .av.huge { width: 84px; height: 84px; font-size: 58px; }
   #searchbar { flex: none; padding: 6px 14px calc(10px + env(safe-area-inset-bottom)); }
   #q { border-radius: 99px; padding: 12px 18px; background: #1d2030; }
   body:has(#list.on) header h1 { visibility: hidden; }
   #sbhead a button, #remote button { font-size: 24px; line-height: 1; padding: 0 12px; }
+  #setbtn, #sb-set { font-size: 20px; line-height: 1; padding: 0 10px; }
   #sbhead, #pick { display: none; }
   /* a wide screen: the list stays on the left, the conversation on the right */
   @media (min-width: 900px) {
@@ -284,8 +324,7 @@
     body:has(#talk:not(.on)) header { visibility: hidden; }
     #grip { display: block; position: fixed; top: 0; bottom: 0; left: calc(var(--listw, 340px) - 4px); width: 9px; cursor: col-resize; z-index: 4; touch-action: none; }
     #grip:hover, #grip.on { background: #7aa2f744; }
-    #back, #add, #remote { display: none !important; }
-    #hero { padding: 4px 0 2px; } #hero .av.huge { width: 60px; height: 60px; font-size: 42px; } #hero .mainbot { font-size: 15px; }
+    #back, #add, #remote, #setbtn { display: none !important; }
     body:has(#list.on) header h1 { visibility: visible; }
     #sbhead { display: flex; align-items: center; gap: 8px; padding: 14px 14px 4px; }
     #sbhead h1 { flex: 1; margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -.01em; }
@@ -298,8 +337,8 @@
     .card:hover { background: #ffffff0a; } .card.sel { background: #262b45; }
     .card .sub.path { display: none; }
     .card .av .dot { border-color: #0c0e17; } .card.sel .av .dot { border-color: #262b45; }
-    #msgs { padding: 24px max(28px, calc((100% - 820px) / 2)) 10px; gap: 14px; }
-    #composer { padding: 6px max(28px, calc((100% - 820px) / 2)) 18px; }
+    #msgs { padding: 24px max(28px, calc((100% - 1200px) / 2)) 10px; gap: 14px; }
+    #composer { padding: 6px max(28px, calc((100% - 1200px) / 2)) 18px; }
     .b { font-size: 16px; } .b.ai { max-width: 100%; padding: 14px 18px; } .b.me { max-width: 75%; }
     .tool { max-width: 100%; }
     #jump { right: 40px; }
@@ -312,19 +351,19 @@
   <button id="back" type="button" title="back" hidden>‹</button>
   <span id="hav" class="av sm" hidden></span>
   <div id="ttl"><h1 id="title">Chat</h1><div id="pill" class="pill" hidden></div></div>
-  <button id="notify" type="button" title="tell me when Claude is done" hidden>🔔</button>
+  <button id="notify" type="button" title="tell me when the AI is done" hidden>🔕</button>
   <button id="more" type="button" hidden>⋯</button>
   <button id="add" type="button" class="primary">＋</button>
   <a id="remote" href="terminal" title="the terminal view"><button type="button">⌨</button></a>
+  <button id="setbtn" type="button" title="tabit settings: AI defaults, Claude accounts, update, restart">⚙</button>
 </header>
 <div id="conn">Reconnecting…</div>
 <main>
   <section id="list" class="view on">
-    <div id="sbhead"><h1>Chat</h1><button id="sb-add" type="button" class="primary" title="new chat">＋</button><a href="terminal" title="the terminal view"><button type="button">⌨</button></a></div>
+    <div id="sbhead"><h1>Chat</h1><button id="sb-add" type="button" class="primary" title="new chat">＋</button><a href="terminal" title="the terminal view"><button type="button">⌨</button></a><button id="sb-set" type="button" title="tabit settings: AI defaults, Claude accounts, update, restart">⚙</button></div>
     <div id="scroller">
     <div id="top">
-    <div id="hero"></div>
-    <button id="acct" type="button" hidden title="the Claude login every chat uses"></button>
+    <div id="usage"></div>
     <div id="tabs"><button data-k="chats" class="on">Chats</button><button data-k="groups">Groups</button></div>
     </div>
     <div id="cards"></div>
@@ -352,7 +391,9 @@
 </main>
 <div id="sheet"><div class="in" id="sheetin"></div></div>
 <div id="sheet2"><div class="in" id="sheet2in"></div></div>
+<dialog id="viewer"><div class="vbar"><span id="vname"></span><a id="vnew" target="_blank" rel="noopener" title="open in a new window">↗</a><button id="vclose" type="button" title="close (Esc)">✕</button></div><iframe id="vframe" title="file"></iframe><img id="vimg" alt=""></dialog>
 
+<script src="settings.js"></script>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -416,6 +457,8 @@ function picker(host, r) {
 }
 // "Mirror a tab" chooser: the Claude tabs open in tabit; get() is null or {id, title}
 // opus, sonnet, haiku or fable for a model id such as claude-opus-4-5; "" (default) otherwise
+// who answers in a chat: a Codex tab's chat is Codex, every other chat is Claude
+const aiName = (meta) => (meta && meta.tab && meta.tab.cli === "codex" ? "Codex" : "Claude");
 const aliasOf = (id) => (cfg?.models || []).find((a) => a && String(id || "").includes(a)) || "";
 // the colours tabit gives its tab groups
 const GROUP_CSS = { red: "#f7768e", orange: "#ff9e64", yellow: "#e0af68", green: "#9ece6a", teal: "#73daca", cyan: "#7dcfff", blue: "#7aa2f7",
@@ -425,8 +468,9 @@ const GROUP_CSS = { red: "#f7768e", orange: "#ff9e64", yellow: "#e0af68", green:
 const modelShort = (id) => { const m = /^claude-([a-z]+)-(\d+)(?:-(\d+))?/.exec(id || ""); return m ? `${m[1]} ${m[2]}${m[3] ? "." + m[3] : ""}` : (id || ""); };
 // the login and the model a chat uses, as one small badge
 const usingBadge = (r) => {
-  const model = r.tab ? modelShort(r.tab.model) : (r.model || "default");
-  return `<span class="badge">${esc([r.account || "Default", model].filter(Boolean).join(" · "))}</span>`;
+  const model = (r.tab ? modelShort(r.tab.model) : (r.model || "default")) + ((r.tab ? r.tab.effort : r.effort) ? " " + (r.tab ? r.tab.effort : r.effort) : "");
+  const who = r.tab && r.tab.cli === "codex" ? ["Codex", r.account].filter(Boolean).join(" · ") : r.account || "Default";
+  return `<span class="badge">${esc([who, model].filter(Boolean).join(" · "))}</span>`;
 };
 const groupBadge = (tab) => tab && tab.group ? `<span class="badge"><i class="gdot" style="background:${GROUP_CSS[tab.color] || "var(--dim)"}"></i>${esc(tab.group)}</span>` : "";
 const base = (k) => (k === "groups" ? "api/chat-groups" : "api/chats");
@@ -439,14 +483,21 @@ async function api(path, body) {
 }
 
 // --- a little Markdown: what Claude writes, never raw HTML ------------------
+const pathLink = (c) => `<a class="path" target="_blank" rel="noopener" href="api/file?path=${encodeURIComponent(c)}&amp;render=1"><code>${c}</code></a>`;
 function inline(raw) {
-  let t = esc(raw);
-  t = t.replace(/`([^`]+)`/g, (_m, c) => /^(\/|~\/)[\w.\-\/~@+]+$/.test(c)
-    ? `<a class="path" target="_blank" rel="noopener" href="api/file?path=${encodeURIComponent(c)}&amp;render=1"><code>${c}</code></a>`
-    : `<code>${c}</code>`);
-  t = t.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
-  t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-  return t;
+  // `code` first; a path in plain text opens the file too (home and /tmp:
+  // what the file view shows), without a full stop that ends the sentence
+  return String(raw).split(/(`[^`]+`)/).map((seg, i) => {
+    if (i % 2) {
+      const c = esc(seg.slice(1, -1));
+      return /^(\/|~\/)[\w.\-\/~@+]+$/.test(c) ? pathLink(c) : `<code>${c}</code>`;
+    }
+    let t = esc(seg);
+    t = t.replace(/(^|[\s(*:：，、「（])((?:\/home\/|\/tmp\/|~\/)[\w.\-\/~@+]*[\w\/~@+-])/g, (_m, pre, c) => pre + pathLink(c));
+    t = t.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+    t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    return t;
+  }).join("");
 }
 function md(text) {
   const out = [];
@@ -471,7 +522,8 @@ function md(text) {
       else if ((m = line.match(/^\s*([-*]|\d+\.)\s+(.*)/))) {
         endPara();
         const kind = /\d/.test(m[1]) ? "ol" : "ul";
-        if (list !== kind) { endList(); out.push(`<${kind}>`); list = kind; }
+        // a numbered list cut by bullets goes on from its own number, not from 1
+        if (list !== kind) { endList(); out.push(kind === "ol" ? `<ol start="${parseInt(m[1], 10)}">` : "<ul>"); list = kind; }
         out.push(`<li>${inline(m[2])}</li>`);
       }
       else if ((m = line.match(/^>\s?(.*)/))) { endPara(); endList(); out.push(`<blockquote>${inline(m[1])}</blockquote>`); }
@@ -481,6 +533,25 @@ function md(text) {
   });
   return out.join("");
 }
+
+// --- a file, over the chat ---------------------------------------------------
+// A tapped path shows here instead of in a new window. Ctrl, Cmd, Shift or
+// the middle button still open one, and so does ↗.
+document.addEventListener("click", (e) => {
+  const a = e.target.closest("a.path, a.file");
+  if (!a || e.button || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  e.preventDefault();
+  const path = new URL(a.href).searchParams.get("path") || "";
+  const pic = /\.(png|jpe?g|gif|webp|svg)$/i.test(path);     // a picture fits the box; the rest is a page
+  $("vname").textContent = tilde(path);
+  $("vnew").href = a.href;
+  $("vframe").hidden = pic; $("vimg").hidden = !pic;
+  if (pic) $("vimg").src = a.href; else $("vframe").src = a.href;
+  $("viewer").showModal();
+});
+$("vclose").onclick = () => $("viewer").close();
+$("viewer").onclick = (e) => { if (e.target === $("viewer")) $("viewer").close(); };   // the dim around it
+$("viewer").onclose = () => { $("vframe").src = "about:blank"; $("vimg").removeAttribute("src"); };
 
 // --- state ------------------------------------------------------------------
 let cfg = null;                 // {accounts, modes, models}
@@ -497,7 +568,7 @@ const status = (msg, bad) => { const s = $("status"); s.textContent = msg || "";
 // the state as a bubble on the picture: "" when idle
 function bub(r) {
   const st = r.asks ? "waiting" : r.state;
-  const glyph = { working: "<i></i><i></i><i></i>", waiting: "?", ready: "✓", background: "↻", exited: "×" }[st];
+  const glyph = { working: "<i></i><i></i><i></i>", waiting: "?", ready: "✓", background: "<span class=\"spin\">↻</span>", exited: "×" }[st];
   // body, then the tail at its lower left, pointing down at the picture
   return glyph ? `<span class="bub ${st}" title="${esc(st)}"><svg viewBox="0 0 30 26" aria-hidden="true"><path
     d="M7 1 H23 A6 6 0 0 1 29 7 V13 A6 6 0 0 1 23 19 H12 L5 25 L7 19 A6 6 0 0 1 1 13 V7 A6 6 0 0 1 7 1 Z"/></svg><b>${glyph}</b></span>` : "";
@@ -506,6 +577,21 @@ function bub(r) {
 // bubble on the picture says the state, and the last message shows here
 function stateLine(r) {
   return r.asks || r.state === "waiting" ? ["st-wait", "needs your OK"] : null;
+}
+// "Claude · Personal  5h ▬ 13% ↺9m  7d ▬ 36% ↺3d": a row per AI login the chats use
+const untilT = (t) => { const s = t - Date.now() / 1000; return s < 3600 ? Math.max(1, Math.round(s / 60)) + "m" : s < 86400 ? Math.round(s / 3600) + "h" : Math.round(s / 86400) + "d"; };
+function usageHtml(list) {
+  return (list || []).map((u) => {
+    const who = `${u.cli === "codex" ? "Codex" : "Claude"} · ${esc(u.account || "Default")}`;
+    const now = Date.now() / 1000;
+    const ws = (u.windows || []).map((w) => {
+      const fresh = w.resets && w.resets < now;      // the window started again since this reading
+      const pct = fresh ? 0 : Math.max(0, Math.min(100, w.pct));
+      if (fresh) return `<span class="w" title="${esc(w.name)} limit: started again">${esc(w.name)} <span class="bar"><i style="width:0"></i></span> 0%</span>`;
+      return `<span class="w${pct >= 80 ? " hot" : pct >= 50 ? " mid" : ""}" title="${esc(w.name)} limit: ${pct}% used${w.resets ? ", starts again in " + untilT(w.resets) : ""}">${esc(w.name)} <span class="bar"><i style="width:${pct}%"></i></span> ${pct}%${w.resets ? " ↺" + untilT(w.resets) : ""}</span>`;
+    }).join("");
+    return `<div class="u" title="${u.ts ? "as of " + (timeAgo(u.ts) === "now" ? "now" : timeAgo(u.ts) + " ago") : ""}"><span class="who">${who}</span>${ws || '<span class="w">— shows after its next reply</span>'}</div>`;
+  }).join("");
 }
 async function loadList() {
   let data;
@@ -516,13 +602,7 @@ async function loadList() {
     $("cards").innerHTML = `<div class="empty">${esc(e.message)}<br><br><a href="terminal">Open the terminal view</a></div>`; return;
   }
   cfg = data;
-  const main = data.chats.find((c) => c.default);
-  $("hero").innerHTML = main ? `<div class="mainbot${cur && cur.id === main.id ? " sel" : ""}" data-id="${esc(main.id)}">
-      <div class="av huge">${emo(face(main))}<span class="star">★</span>${bub(main)}</div>
-      <div>${esc(main.title)}</div>${stateLine(main) ? `<div class="sub ${stateLine(main)[0]}">${stateLine(main)[1]}</div>` : ""}</div>` : "";
-  const acc = (data.accounts || []).find((a) => a.name === data.account);
-  $("acct").hidden = (data.accounts || []).length < 2;
-  $("acct").textContent = "🔑 " + (acc ? acc.label : "Default");
+  $("usage").innerHTML = usageHtml(data.usage);
   const q = $("q").value.trim().toLowerCase();
   const all = (kind === "chats" ? data.chats : data.groups).filter((r) => !r.default);
   const rows = q ? all.filter((r) => `${r.title} ${r.last}`.toLowerCase().includes(q)) : all;
@@ -544,23 +624,6 @@ async function loadList() {
   }).join("");
   listScroll().scrollTop = keep;
 }
-// one Claude login for the whole of Tabit Chat; sessions are shared, so chats go on
-$("acct").onclick = () => {
-  sheet(`<h2>Claude login</h2><div class="hint">Every chat uses this login. They carry on where they were.</div>
-    <div class="plist">${cfg.accounts.map((a) => `<div class="prow" data-a="${esc(a.name)}"><span>${a.name === cfg.account ? "●" : "○"}</span><b>${esc(a.label)}</b></div>`).join("")}</div>
-    <div class="hint" id="a-err" style="color:var(--red)"></div><div class="acts"><button type="button" class="primary" id="a-close">Close</button></div>`);
-  $("a-close").onclick = closeSheet;
-  document.querySelectorAll("#sheetin .prow[data-a]").forEach((r) => {
-    r.onclick = async () => {
-      try { await api("api/chats/account", { account: r.dataset.a }); closeSheet(); await loadList(); }
-      catch (e) { $("a-err").textContent = e.message; }
-    };
-  });
-};
-$("hero").addEventListener("click", (e) => {
-  const c = e.target.closest(".mainbot");
-  if (c) location.hash = "#c/" + c.dataset.id;
-});
 // what scrolls the list: the cards alone on a wide screen, all of it on a phone
 const listScroll = () => (getComputedStyle($("scroller")).display === "contents" ? $("cards") : $("scroller"));
 $("scroller").addEventListener("scroll", () => {
@@ -590,7 +653,7 @@ function showList() {
   cur = null;
   $("list").classList.add("on"); $("talk").classList.remove("on");
   $("title").textContent = "Chat"; $("back").hidden = true; $("pill").hidden = true; $("hav").hidden = true;
-  $("more").hidden = true; $("add").hidden = false; $("remote").hidden = false; $("notify").hidden = true;
+  $("more").hidden = true; $("add").hidden = false; $("remote").hidden = false; $("setbtn").hidden = false; $("notify").hidden = true;
   loadList();
   clearInterval(listTimer);
   listTimer = setInterval(() => { if (!document.hidden && (!cur || wide.matches)) loadList(); }, 5000);
@@ -599,6 +662,7 @@ window.addEventListener("hashchange", route);
 $("back").onclick = () => { location.hash = ""; };
 $("q").addEventListener("input", loadList);
 $("sb-add").onclick = () => $("add").click();
+$("setbtn").onclick = $("sb-set").onclick = () => openTabitSettings(sheet, closeSheet);    // settings.js
 
 // --- one conversation -------------------------------------------------------
 function closeStream() { if (cur && cur.es) { cur.es.close(); cur.es = null; } }
@@ -611,8 +675,8 @@ function openTalk(k, id) {
   } else { clearInterval(listTimer); listTimer = null; }
   cur = { kind: k, id, es: null, lastSeq: 0, pending: new Set(), tools: new Map(), asks: new Map(), members: {}, firstSeq: 0, state: "idle", live: {} };
   $("list").classList.remove("on"); $("talk").classList.add("on");
-  $("back").hidden = false; $("more").hidden = false; $("add").hidden = true; $("remote").hidden = true;
-  $("notify").hidden = !("Notification" in window);
+  $("back").hidden = false; $("more").hidden = false; $("add").hidden = true; $("remote").hidden = true; $("setbtn").hidden = true;
+  $("notify").hidden = !("Notification" in window); bell();
   $("msgs").innerHTML = ""; $("title").textContent = "…"; status("");
   $("chips").style.display = "none"; $("atlist").hidden = true; setReply(null);
   $("text").value = localStorage.getItem("draft:" + id) || ""; grow();
@@ -677,8 +741,14 @@ function take(me, d) {
   paintLive(me);
   paintAsks(me);
   header(me);
-  if (finished && document.hidden && localStorage.getItem("notify") === "1" && Notification.permission === "granted")
-    new Notification(d.meta.title, { body: "Claude is done." });
+  // not looking: another window or app in front counts, not only a hidden page,
+  // since a desktop shows a page behind other windows as visible
+  if (finished && (document.hidden || !document.hasFocus()) && bellOn()) {
+    try {                                    // a phone's Chrome refuses a page's own notice
+      const n = new Notification(d.meta.title, { body: aiName(d.meta) + " is done." });
+      n.onclick = () => { window.focus(); n.close(); };
+    } catch (e) { /* the rest of the page goes on */ }
+  }
   if (stick) box.scrollTop = box.scrollHeight;
   else $("jump").style.display = "block";
 }
@@ -762,6 +832,7 @@ function paintLive(me) {
     html += `<div class="b ai">${who ? `<div class="who" style="color:${colorOf(who)}">${esc(who)}</div>` : ""}${md(text)}</div>`;
   }
   if (!html && me.state === "working") html = '<div class="b ai"><span class="dots"><span></span><span></span><span></span></span></div>';
+  if (!html && me.state === "background") html = '<div class="note">↻ Background work still running</div>';
   l.innerHTML = html;
 }
 
@@ -776,7 +847,7 @@ function draw(me, ev) {
   if (el && ev.ts && el.classList.contains("b")) el.insertAdjacentHTML("beforeend", `<div class="ts">${clock(ev.ts)}</div>`);
   if (el && REPLYABLE.has(ev.t) && ev.text) {
     el.dataset.seq = ev.seq;
-    el.dataset.who = ev.t === "user" ? "You" : ev.name || "Claude";
+    el.dataset.who = ev.t === "user" ? "You" : ev.name || aiName(me.meta);
     el.dataset.snip = ev.text.replace(/\s+/g, " ").trim().slice(0, 140);
     el.insertAdjacentHTML("beforeend", '<button type="button" class="rp">↩ Reply</button>');
   }
@@ -812,6 +883,8 @@ function drawOne(me, ev) {
     }
     case "answered": {
       const card = document.querySelector(`#msgs .ask[data-rid="${CSS.escape(ev.rid)}"]`);
+      const asked = me.asks.get(ev.rid);
+      if (asked && ev.answers) asked.answers = ev.answers;             // a closed card still shows the picks
       if (card) { card.dataset.verdict = ev.allow ? "Allowed" : ev.why === "answered in the tab" ? "Answered in the tab" : ev.why === "cancelled" ? "Cancelled" : ev.why === "stopped" ? "Stopped" : "Denied"; }
       return null;
     }
@@ -842,7 +915,7 @@ function paintAsks(me) {
     if (ev.questions) {
       // a menu read off a tab's screen brings the whole prompt: a long command is what you say yes to
       body = (ev.detail ? `<pre class="prompt">${esc(ev.detail)}</pre>` : "") + ev.questions.map((q, i) => `<div class="q">${esc(q.question)}</div><div class="opts" data-q="${i}">${(q.options || []).map((o) =>
-        `<button type="button" data-l="${esc(o.label)}" title="${esc(o.description || "")}">${esc(o.label)}</button>`).join("")}</div>`).join("");
+        `<button type="button" data-l="${esc(o.label)}" title="${esc(o.description || "")}"${!open && (ev.answers || {})[q.question] === o.label ? ' class="on"' : ""}>${esc(o.label)}</button>`).join("")}</div>`).join("");
       body += open ? '<div class="row"><button class="primary" data-act="answerq" disabled>Answer</button><button data-act="deny">Skip</button></div>' : "";
     } else {
       body = (ev.plan ? `<div class="what">${md(ev.plan)}</div>` : `<div class="what">${esc(ev.summary || "")}</div>`) +
@@ -851,7 +924,7 @@ function paintAsks(me) {
         (ev.can_remember ? '<button data-act="always">Allow &amp; don’t ask again</button>' : "") +
         '<button class="danger" data-act="deny">Deny</button></div>';
     }
-    card.innerHTML = `<h3>${open ? "" : "✓ "}Claude wants to ${ev.questions ? "ask you" : ev.plan ? "start the plan" : "use " + esc(ev.tool)}${who}</h3>${body}` +
+    card.innerHTML = `<h3>${open ? "" : "✓ "}${aiName(me.meta)} wants to ${ev.questions ? "ask you" : ev.plan ? "start the plan" : "use " + esc(ev.tool)}${who}</h3>${body}` +
       (open ? "" : `<div class="verdict">${esc(card.dataset.verdict || "answered")}</div>`);
   });
 }
@@ -870,7 +943,7 @@ $("msgs").addEventListener("click", async (e) => {
     document.querySelectorAll("#msgs .b.sel").forEach((x) => { if (x !== bubble) x.classList.remove("sel"); });
     bubble.classList.toggle("sel");
   }
-  const opt = e.target.closest(".ask .opts button");
+  const opt = e.target.closest(".ask:not(.closed) .opts button");      // a closed card only shows the picks
   if (opt) {
     opt.parentElement.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b === opt));
     const card = opt.closest(".ask");
@@ -1020,11 +1093,19 @@ $("text").addEventListener("paste", (e) => {
 document.addEventListener("dragover", (e) => e.preventDefault());
 document.addEventListener("drop", (e) => { const f = e.dataTransfer?.files[0]; if (f && cur) { e.preventDefault(); upload(f); } });
 
+// 🔔 on, 🔕 off: the button says which
+const bellOn = () => localStorage.getItem("notify") === "1" && Notification.permission === "granted";
+function bell() {
+  if (!("Notification" in window)) return;
+  $("notify").textContent = bellOn() ? "🔔" : "🔕";
+  $("notify").title = bellOn() ? "notifications on: tap to turn off" : "tell me when the AI is done";
+}
 $("notify").onclick = async () => {
-  if (localStorage.getItem("notify") === "1") { localStorage.removeItem("notify"); status("Notifications off."); return; }
+  if (bellOn()) { localStorage.removeItem("notify"); bell(); status("Notifications off."); return; }
   const p = await Notification.requestPermission();
-  if (p === "granted") { localStorage.setItem("notify", "1"); status("You will be told when Claude is done and this page is hidden."); }
+  if (p === "granted") { localStorage.setItem("notify", "1"); status("You will be told when the AI is done and you are not looking at this page."); }
   else status("Notifications are blocked in this browser.", true);
+  bell();
 };
 
 // --- sheets -----------------------------------------------------------------
@@ -1041,26 +1122,47 @@ async function newChat() {
   const last = localStorage.getItem("lastcwd") || "~";
   const tg = cfg?.tabgroups || {};
   const others = tg.groups || [];
+  // each AI's logins: more than one, and the form asks which; the last pick comes first
+  const acctsOf = (cli) => (cli === "codex" ? cfg?.codex_accounts : cfg?.accounts) || [];
+  const acctKey = (cli) => (cli === "codex" ? "lastacct-codex" : "lastacct");
+  const lastAcctOf = (cli) => { const kept = localStorage.getItem(acctKey(cli));
+    return acctsOf(cli).some((a) => a.name === kept) ? kept : cli === "claude" ? cfg?.account || "" : ""; };
+  const clis = cfg?.clis || ["claude"];       // Codex too, when it is installed
+  const lastCli = clis.includes(localStorage.getItem("lastcli")) ? localStorage.getItem("lastcli") : "claude";
   sheet(`<h2>New chat</h2>
     <div id="n-look"></div>
     <label>Name (optional)</label><input id="n-title" maxlength="80">
     <label>Group</label>
     <select id="n-group"><option value="">No group</option>${others.map((g) => `<option value="${esc(g.color)}">${esc(g.name)}</option>`).join("")}</select>
+    ${clis.length > 1 ? `<label>AI</label><select id="n-cli">${clis.map((c) => `<option value="${c}"${c === lastCli ? " selected" : ""}>${c === "codex" ? "Codex" : "Claude"}</option>`).join("")}</select>` : ""}
+    <div id="n-acctbox" hidden><label>Account</label><select id="n-account"></select></div>
     <label>Folder on this computer</label>
     <input id="n-cwd" value="${esc(last)}" autocapitalize="off" autocorrect="off" spellcheck="false">
     <div class="chips"><button id="n-browse" type="button">Browse…</button>${recent.map((c) => `<button type="button" data-cwd="${esc(c)}">${esc(tilde(c))}</button>`).join("")}</div>
-    <div class="hint">This opens a Claude tab in tabit, in that group. The chat is that tab.</div>
+    <div class="hint">This opens an AI tab in tabit, in that group. The chat is that tab.</div>
     <div class="hint" id="n-err" style="color:var(--red)"></div>
     <div class="acts"><button type="button" id="n-cancel">Cancel</button><button type="button" class="primary" id="n-go">Start</button></div>`);
   const look = picker($("n-look"), { id: String(Math.random()), roll: true });
+  const cliOf = () => ($("n-cli") ? $("n-cli").value : "claude");
+  const acctShown = () => {       // the logins of the AI picked
+    const cli = cliOf(), list = acctsOf(cli), last = lastAcctOf(cli);
+    $("n-acctbox").hidden = list.length < 2;
+    $("n-account").innerHTML = list.map((a) => `<option value="${esc(a.name)}"${a.name === last ? " selected" : ""}>${esc(a.label)}</option>`).join("");
+  };
+  if ($("n-cli")) $("n-cli").onchange = acctShown;
+  acctShown();
   $("n-cancel").onclick = closeSheet;
   $("n-browse").onclick = () => browse($("n-cwd").value, (p) => { $("n-cwd").value = p; });
   $("sheetin").querySelectorAll("[data-cwd]").forEach((b) => { b.onclick = () => { $("n-cwd").value = b.dataset.cwd; }; });
   $("n-go").onclick = async () => {
     try {
       const cwd = $("n-cwd").value.trim() || "~";
-      const { chat } = await api("api/chats", { kind: "tab", cwd, group: $("n-group").value, title: $("n-title").value, ...look.get() });
+      const cli = cliOf();
+      const account = acctsOf(cli).length > 1 ? { account: $("n-account").value } : {};
+      const { chat } = await api("api/chats", { kind: "tab", cli, cwd, group: $("n-group").value, title: $("n-title").value, ...account, ...look.get() });
       localStorage.setItem("lastcwd", cwd);
+      localStorage.setItem("lastcli", cli);
+      if (account.account !== undefined) localStorage.setItem(acctKey(cli), account.account);
       closeSheet(); location.hash = "#c/" + chat.id;
     } catch (e) { $("n-err").textContent = e.message; }
   };
@@ -1154,6 +1256,7 @@ const settings = async (t = cur) => {
     try { t = { kind: t.kind, id: t.id, meta: (await api(`${base(t.kind)}/${t.id}`)).meta }; } catch (e) { return; }
   }
   const m = t.meta;
+  if (!cfg) { try { cfg = await api("api/chats"); } catch (e) { return; } }   // a chat opened straight from a link
   const done = () => { closeSheet(); if (!cur || cur.id !== t.id) loadList(); };
   const gone = () => { closeSheet(); if (cur && cur.id === t.id) location.hash = ""; else loadList(); };
   if (t.kind === "groups") {
@@ -1182,12 +1285,19 @@ const settings = async (t = cur) => {
     $("e-save").onclick = async () => { try { await api(`api/chat-groups/${t.id}/edit`, { title: $("e-title").value }); done(); } catch (e) { $("e-err").textContent = e.message; } };
     $("e-del").onclick = async () => { if (!confirm("Delete this group? Its chats stay.")) return; await api(`api/chat-groups/${t.id}/delete`, {}); gone(); };
   } else {
+    const codex = m.tab && m.tab.cli === "codex";     // Codex's own logins and models
+    const accts = (codex ? cfg.codex_accounts : cfg.accounts) || [];
+    const cmodels = (cfg.codex_models || []).slice();
+    if (codex && m.tab.model && !cmodels.some((x) => x.name === m.tab.model)) cmodels.push({ name: m.tab.model, label: m.tab.model });
     sheet(`<h2>Chat</h2><div id="e-look"></div><div class="hint">${m.tab ? "Its tab in tabit: the name is the tab’s name" : esc(tilde(m.cwd))}</div>
       <label>Name</label><input id="e-title" value="${esc(m.title)}" maxlength="80">
-      <label>Account</label><select id="e-account">${(cfg.accounts || []).map((a) => `<option value="${esc(a.name)}"${a.name === (m.account || "") ? " selected" : ""}>${esc(a.label)}</option>`).join("")}</select>
+      <div><label>Account</label><select id="e-account">${accts.map((a) => `<option value="${esc(a.name)}"${a.name === (m.account || "") ? " selected" : ""}>${esc(a.label)}</option>`).join("")}</select>
       <div ${m.tab ? "hidden" : ""}><label>When Claude wants to do something</label><select id="e-mode">${opts(cfg.modes, m.mode, (x) => MODE_NAME[x])}</select>
       <div class="hint warn" id="e-warn" ${m.mode === "bypass" ? "" : "hidden"}>Bypass: no questions asked.</div></div>
-      <label>Model</label><select id="e-model">${opts(cfg.models, m.tab ? aliasOf(m.tab.model) : m.model, (x) => x || "default")}</select>
+      <label>Model</label><select id="e-model">${codex
+        ? cmodels.map((x) => `<option value="${esc(x.name)}"${x.name === (m.tab.model || "") ? " selected" : ""}>${esc(x.label)}</option>`).join("")
+        : opts(cfg.models, m.tab ? aliasOf(m.tab.model) : m.model, (x) => x || "default")}</select>
+      <label>Thinking effort</label><select id="e-effort"></select></div>
       <div class="hint" ${m.tab && m.tab.model ? "" : "hidden"}>${m.tab ? "Answering as " + esc(m.tab.model) + ". A new model starts with the next message, and only when the tab is not busy." : ""}</div>
       <div ${m.tab ? "hidden" : ""}><label>Connectors</label><button type="button" id="e-reload">↻ Reload Claude</button>
       <div class="hint" id="e-reloaded">Changed a connector (Gmail, Strava…)? Tap this. The chat keeps its history.</div></div>
@@ -1199,7 +1309,17 @@ const settings = async (t = cur) => {
     };
     const look = picker($("e-look"), m);
     $("e-mode").onchange = () => { $("e-warn").hidden = $("e-mode").value !== "bypass"; };
-    $("e-save").onclick = async () => { try { await api(`api/chats/${t.id}/edit`, { title: $("e-title").value, mode: $("e-mode").value, model: $("e-model").value, ...($("e-account").value !== (m.account || "") ? { account: $("e-account").value } : {}), ...look.get() }); done(); } catch (e) { $("e-err").textContent = e.message; } };
+    // the efforts the model picked takes: Codex says so per model, Claude takes them all
+    const effortNow = (m.tab ? m.tab.effort : m.effort) || "";
+    const effortsFill = (first) => {
+      const list = codex ? ((cmodels.find((x) => x.name === $("e-model").value) || {}).efforts || [""]) : (cfg.efforts || [""]);
+      let want = first ? effortNow : $("e-effort").value;
+      if (!first && !list.includes(want)) want = "";      // another model: one it takes
+      $("e-effort").innerHTML = opts(list.includes(want) ? list : [...list, want], want, (x) => x || "default");
+    };
+    effortsFill(true);
+    $("e-model").onchange = () => effortsFill(false);
+    $("e-save").onclick = async () => { try { await api(`api/chats/${t.id}/edit`, { title: $("e-title").value, mode: $("e-mode").value, model: $("e-model").value, effort: $("e-effort").value, ...($("e-account").value !== (m.account || "") ? { account: $("e-account").value } : {}), ...look.get() }); done(); } catch (e) { $("e-err").textContent = e.message; } };
     if ($("e-del")) $("e-del").onclick = async () => { if (!confirm(m.tab ? "Delete this chat? Its tab in tabit closes too." : "Delete this chat and its history?")) return; try { await api(`api/chats/${t.id}/delete`, {}); gone(); } catch (e) { $("e-err").textContent = e.message; } };
   }
   $("e-cancel").onclick = closeSheet;

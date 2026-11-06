@@ -15,15 +15,19 @@ Screen** makes it an app of its own.
 
 - **Chats.** Each chat is one Claude working in a folder you pick, with a
   model you pick. Replies stream in as they are written. Markdown, lists and
-  code show properly; a file path in `code` opens the file (when **Allow
-  opening files** is on).
-- **The main chat.** *Tabit Chat* (the owl) is always first in the list and
-  cannot be deleted. It is your main assistant: bring it anything. For a big
-  job that needs its own folder, it suggests that you start a separate chat.
+  code show properly. Tap a file path (under your home or `/tmp`, in `code`
+  or not) and the file opens over the chat, when **Allow opening files** is
+  on: a picture fits the box, other files show as a page. Esc, ✕ or a tap
+  outside closes it; ↗ (or a Ctrl- or Cmd-click on the path) opens it in a
+  new window.
+- **No main chat.** Older versions kept a main chat, *Tabit Chat* (the owl),
+  at the top of the list. It is gone: its folder stays as
+  `~/.local/share/tabit/chats/<id>.retired`, history and all.
 - **Questions.** When Claude wants to run a command or change a file, the chat
   shows a card with **Allow** and **Deny**, and **Allow & don't ask again**
   when Claude offers a rule to remember. When
-  Claude asks you a choice, the options are buttons. **Stop** ends the turn.
+  Claude asks you a choice, the options are buttons. After you answer, the
+  card keeps your picks lit. **Stop** ends the turn.
 - **Modes**, per chat: *Ask each time* (the default), *Accept edits*, *Plan
   first*, and *Bypass*, which asks nothing. Bypass is only there when you pick
   it, and the list marks the chat in red.
@@ -39,7 +43,11 @@ Screen** makes it an app of its own.
   folder** makes one inside the folder shown: one plain name, no `/`.
 - **Files and photos.** 📎, paste or drag and drop. The file goes to
   `~/.local/share/tabit/uploads/<date>/` and its path goes into your message.
-- **🔔** tells you when Claude is done while the page is hidden.
+- **🔔** tells you when the AI is done while you are not looking at the page
+  (another window or app in front counts). 🔕 means it is off; tap to turn it on.
+- **⚙** (next to ⌨ on the list) opens tabit's Settings, the same sheet as in
+  the terminal view: the AI defaults for new tabs, the Claude accounts (add
+  one, log in), Check for updates and Restart tabit.
 - **History.** Chats and their history stay on this computer in
   `~/.local/share/tabit/chats/`. Close the page, come back later, and it goes
   on. Each chat is a normal Claude session, so you can also `claude --resume`
@@ -49,12 +57,37 @@ Screen** makes it an app of its own.
 
 ## Claude login
 
-Every chat uses the same Claude login. When Settings → AI on the computer has
-more than one Claude account, **🔑** at the top of the list shows which one
-and lets you pick another. All the chats move to it and carry on where they
-were, because every login shares the same sessions. While a chat is working
-the switch is refused: wait, or press Stop. A chat that mirrors a tab does not
-count, since it runs no Claude of its own.
+When Settings → AI on the computer has more than one Claude account, each
+chat picks its own. **New chat** asks which account the new tab uses, and
+offers the one picked last. A chat's settings (⋯) show its Account and switch
+it later. A switch is refused while that chat is
+working: wait, or press Stop.
+
+## Usage
+
+The top of the chat list shows how much of each login's limits is used:
+one row per AI and account that a chat uses now (`Claude · Personal`,
+`Codex · Default`). Each row shows the limit windows the service reports,
+for example `5h 13% ↺9m` and `7d 36% ↺3d`: the share used and when that
+window starts again. A bar turns yellow at 50% and red at 80%. A window
+that has started again since the last reading shows 0%.
+
+- **Claude**: tabit asks Anthropic every 3 minutes for each Claude login a
+  chat uses, the way Claude's own `/usage` does, with that login's token
+  from its `.credentials.json`. A token past its time is not renewed by
+  tabit: that login shows its last reading until its claude runs again.
+- Claude also hands its usage to the status line program. tabit's settings
+  for a Claude tab name its own one (`~/.local/share/tabit/claude-statusline.py`),
+  which keeps the usage for that tab and then runs the status line set in
+  that account's `settings.json`, so your status line still shows. A status
+  line set in a project's `.claude/settings.json` is not run in tabit tabs.
+  A running claude keeps the settings it started with: its tab reports this
+  way after its claude starts again. The newest reading of the two wins.
+- **Codex** writes its usage into the session file after each turn; the
+  chat reads it from there. A free plan has one 30-day window; paid plans
+  have 5h and 7d.
+- The last reading of each login is kept in
+  `~/.local/share/tabit/chats/usage.json`, so it shows again after a restart.
 
 ## The AI tabs
 
@@ -86,16 +119,36 @@ that is working takes your line too: Claude reads it at its next step, in the
 same turn, and the chat shows it.
 **Stop** presses Esc in the tab.
 
+**Codex tabs** have a chat too. Their badge says `Codex · <model>`. The chat
+reads the Codex session's file (`~/.codex/sessions/.../rollout-*.jsonl`).
+Codex 0.166 keeps every session file open in one shared daemon, so tabit
+cannot tell from the tab's own processes which session is its. Instead
+tabit starts each Codex with `-c notify=[...]`: after each turn Codex runs
+`~/.local/share/tabit/codex-notify.sh`, which writes the session id for
+that tab. So a Codex chat fills in once its first turn ends. A Codex tab
+saved before this gets the notify the next time its codex starts. tabit
+takes Codex's `notify` setting for this: a `notify` in your
+`~/.codex/config.toml` is not run in a tab. Account and model switch as
+for Claude (below): tabit restarts the tab's codex with `resume <id>`,
+under the account's own `codex`, with `--model` for a model. The models are
+the ones Codex lists in its own `/model` picker (`~/.codex/models_cache.json`).
+A Codex tab can switch only after its first turn: before that tabit does not
+know its session. When Codex asks to
+run a command or make an edit, the chat shows its question as a card, the
+same as a menu in a Claude tab: a tap presses that option's number in the tab.
+
 - **One name, one group.** The chat has the tab's name and shows the tab's
   group under it, with the group's colour. Rename the chat and the tab is
   renamed. Rename or regroup the tab and the chat follows within 10 seconds.
 - **New chat** opens a Claude tab in the group you pick, in the folder you
-  pick. With no group picked, the tab is in no group.
+  pick. With no group picked, the tab is in no group. When Codex is
+  installed, the form asks which AI: Claude or Codex. It remembers the last
+  pick. With more than one login for that AI, it also asks which account.
 - **Delete.** Deleting a chat closes its tab. The chat asks first. The last
   tab in tabit cannot be closed from the phone, so that chat stays. Closing a
   tab removes its chat after about a minute.
-- **Old chats move into tabs.** A chat that ran its own Claude (not the main
-  Tabit Chat) moves into a tab when it is idle: the tab goes on with the same
+- **Old chats move into tabs.** A chat that ran its own Claude moves into a
+  tab when it is idle: the tab goes on with the same
   conversation (`--resume`), keeps the login and bypass, and the chat that
   mirrors it takes the old one's picture and name, and its place in the
   groups (rooms) the old chat was in. The old chat's folder is kept as
@@ -103,14 +156,18 @@ same turn, and the chat shows it.
   Bypass goes along; a chat in Accept edits or Plan first becomes a tab that
   asks each time (unless **Settings → AI → Claude bypass** is on, which makes
   every new Claude tab bypass, this one too). A chat that cannot move is tried 3 times.
-- **Account and model.** A chat's settings show Account and Model, and each
-  row shows `account · model`. Either switch restarts the tab's Claude in
-  place, on the same conversation (`--resume`, with `--model` for a model),
-  and both together are one restart. Not while Claude works, asks something
+- **Account, model and thinking effort.** A chat's settings show Account,
+  Model and Thinking effort, and each row shows `account · model effort`.
+  Any switch restarts the tab's Claude in place, on the same conversation
+  (`--resume`, with `--model` for a model and `--effort` for an effort), and
+  all together are one restart. Claude's efforts are low, medium, high,
+  xhigh and max; a Codex tab gets `-c model_reasoning_effort=<effort>` and
+  the efforts its model lists (Terra also has ultra). "default" leaves it to
+  the program's own setting. Not while Claude works, asks something
   or still runs agents. Claude's own settings are not touched. The tab shows
   the model that answered last, read from its transcript.
-- Tabs of other tools (Codex, Grok) have no chat: only Claude's transcript is
-  read.
+- Tabs of other tools (Grok, agy) have no chat: only Claude's and Codex's
+  sessions are read.
 - When the tab starts a new conversation, the chat says so and goes on with
   the new one.
 - **Menus on the tab's screen.** A tab that waits on a menu (the trust
@@ -140,6 +197,9 @@ is `@claude-lpr`; two of the same name get `-2`, `-3`).
 - Every Claude tab is told, with each prompt, its own name and the other
   tabs it can call, through tabit's hooks. A tab that is alone is told
   nothing.
+- A Codex tab can be called too, and a line of its reply that starts with
+  `@name` is passed on the same way. Codex is not told the names (it has no
+  such hook), so it calls only when a message asks it to.
 - Only replies written from now on count: what a tab said before is not sent.
   A line inside a code block, or a file name like `@tabit.py`, is no call.
 - There is no limit on how often tabs answer each other. Two tabs that keep

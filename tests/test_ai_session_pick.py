@@ -7,6 +7,7 @@ import tempfile
 import time
 import types
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -288,3 +289,93 @@ class TestOpenElsewhere(unittest.TestCase):
 
     def test_not_open(self):
         self.assertIsNone(self.check([{"sessionId": B, "kind": "interactive"}]))
+
+
+class CodexChatTest(unittest.TestCase):
+    """The chat page shows a Codex tab: tabit finds its rollout file."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, self.home)
+        old = os.environ.get("HOME")
+        os.environ["HOME"] = self.home
+        self.addCleanup(os.environ.__setitem__, "HOME", old)
+        p = mock.patch.object(tabit, "CODEX_DEFAULT_DIR", os.path.join(self.home, ".codex"))
+        p.start()
+        self.addCleanup(p.stop)
+        T._codex_rollouts.clear()
+
+    def rollout(self, sid):
+        day = os.path.join(self.home, ".codex", "sessions", "2026", "11", "05")
+        os.makedirs(day, exist_ok=True)
+        path = os.path.join(day, "rollout-2026-11-05T17-30-59-%s.jsonl" % sid)
+        open(path, "w").close()
+        return path
+
+    def test_the_session_in_the_command_names_the_file(self):
+        path = self.rollout(A)
+        self.assertEqual(T._codex_rollout(["codex", "resume", A]), path)
+        self.assertEqual(T._codex_rollout(["tmux", "new", "-s", "x", "codex resume %s" % A]), path)
+
+    def test_no_session_yet_is_no_file(self):
+        self.assertEqual(T._codex_rollout(["codex"]), "")
+        self.assertEqual(T._codex_rollout(["codex", "resume", B]), "")
+        path = self.rollout(B)                     # the first message makes it
+        self.assertEqual(T._codex_rollout(["codex", "resume", B]), path)
+
+    def test_which_tabs_a_chat_shows(self):
+        app = types.SimpleNamespace(_ai_cli_path_of=T._ai_cli_path_of, _ai_is_claude=T._ai_is_claude)
+        cli = lambda run: T._chat_cli_of(app, types.SimpleNamespace(
+            argv=["/bin/bash", "-c", "cd /p || exit 1; exec " + run] if run else ["bash"]))
+        self.assertEqual(cli("/usr/bin/claude --continue"), "claude")
+        self.assertEqual(cli("/home/u/.nvm/bin/codex resume " + A), "codex")
+        self.assertIsNone(cli("grok --continue"))
+        self.assertIsNone(cli(""))
+
+
+class CodexNotifyTest(unittest.TestCase):
+    """Codex names its session after each turn; tabit keeps it for the chat."""
+
+    def test_every_codex_runs_the_notify(self):
+        argv = T._ai_argv("codex", "/p", ["resume --last"])
+        self.assertIn(tabit.CODEX_NOTIFY_ARG, argv[2])
+        self.assertNotIn("notify", T._ai_argv("grok", "/p", [])[2])
+
+    def test_the_notify_is_not_kept_as_a_try(self):
+        self.assertEqual(T._ai_strip_bypass_tokens(["resume", "-c", tabit.CODEX_NOTIFY_ARG]),
+                         ["resume"])
+        self.assertEqual(T._ai_strip_bypass_tokens(["-c", "model=x"]), ["-c", "model=x"])
+
+    def test_the_script_keeps_the_ids_newest_last(self):
+        import subprocess
+        d = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, d)
+        script = os.path.join(d, "n.sh")
+        with open(script, "w") as f:
+            f.write(tabit._codex_notify_script(d))
+        env = {"PATH": os.environ["PATH"], "TABIT_AGENT": "k1"}
+        for n in range(12):
+            msg = json.dumps({"type": "agent-turn-complete", "thread-id": "id-%d" % n, "cwd": "/p"})
+            subprocess.run(["sh", script, msg], env=env, check=True)
+        with open(os.path.join(d, "k1.codex")) as f:
+            self.assertEqual(f.read().split(), ["id-%d" % n for n in range(2, 12)])
+        subprocess.run(["sh", script, "{}"], env={"PATH": os.environ["PATH"]}, check=True)   # no tab: nothing
+        self.assertEqual(sorted(os.listdir(d)), ["k1.codex", "n.sh"])
+
+    def test_the_named_session_wins(self):
+        home = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, home)
+        old = os.environ.get("HOME")
+        os.environ["HOME"] = home
+        self.addCleanup(os.environ.__setitem__, "HOME", old)
+        p = mock.patch.object(tabit, "CODEX_DEFAULT_DIR", os.path.join(home, ".codex"))
+        p.start()
+        self.addCleanup(p.stop)
+        T._codex_rollouts.clear()
+        day = os.path.join(home, ".codex", "sessions", "2026", "11", "05")
+        os.makedirs(day)
+        for sid in (A, B):
+            open(os.path.join(day, "rollout-x-%s.jsonl" % sid), "w").close()
+        # resumed A, then said B; C (a title it made on the side) has no file
+        got = T._codex_rollout(["codex", "resume", A, B, C])
+        self.assertTrue(got.endswith(B + ".jsonl"))

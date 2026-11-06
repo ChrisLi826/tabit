@@ -15,6 +15,7 @@ Keyboard shortcuts are user-editable (sidebar → Shortcuts…, stored in
 """
 
 import base64
+import datetime
 import fcntl
 import hashlib
 import glob
@@ -400,10 +401,10 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.2.1.1"
+APP_VERSION = "v2.2.2"
 # Taiwan main dish of the major version + a fresh snack or drink, picked at
 # release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
-APP_CODENAME = "Ginger Duck + Tea Egg"
+APP_CODENAME = "Ginger Duck + Twin Doughnut"
 _VERSION_CODENAME_SEP = " · "
 
 
@@ -928,6 +929,15 @@ REMOTE_PAGE = "remote.html"
 # flag, so its file lives where Grok loads user hooks.
 AGENT_HOOK_DIR = os.path.join(GLib.get_user_runtime_dir(), "tabit-agent")
 CLAUDE_HOOKS_FILE = os.path.expanduser("~/.local/share/tabit/claude-hooks.json")
+# Codex runs this at the end of each turn with a JSON that names its session
+# ("thread-id"). Codex 0.166 keeps every session file open in one shared
+# daemon, so the tab's own processes no longer show which session is its.
+CODEX_NOTIFY_FILE = os.path.expanduser("~/.local/share/tabit/codex-notify.sh")
+CODEX_NOTIFY_ARG = 'notify=["%s"]' % CODEX_NOTIFY_FILE
+# Claude hands its status line program the account's usage (rate_limits).
+# tabit's settings name this one: it keeps the usage per tab, then runs the
+# status line the user set in their own settings.json.
+CLAUDE_STATUSLINE_FILE = os.path.expanduser("~/.local/share/tabit/claude-statusline.py")
 GROK_HOOK_SCRIPT = os.path.expanduser("~/.local/share/tabit/grok_status_hook.py")
 GROK_HOOKS_FILE = os.path.expanduser("~/.grok/hooks/tabit-status.json")
 # Claude keeps each folder's sessions here, one <id>.jsonl per session
@@ -953,6 +963,16 @@ CLAUDE_SHARED = ("settings.json", "settings.local.json", "CLAUDE.md", "agents",
 # first-run answers a new account takes over; never the login
 CLAUDE_SEED_KEYS = ("hasCompletedOnboarding", "lastOnboardingVersion", "theme",
                     "bypassPermissionsModeAccepted")
+# Extra Codex accounts, laid out the same way: <name>/home is that account's
+# CODEX_HOME and <name>/bin/codex runs codex with it.
+CODEX_DEFAULT_DIR = os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex")
+CODEX_ACCOUNTS_DIR = os.path.expanduser("~/.local/share/tabit/codex-accounts")
+# What a Codex account shares with the default home: settings, instructions,
+# add-ons, the program Codex installs for itself (over 400 MB) and the
+# sessions, which a tab's chat reads and another account resumes. The login
+# and Codex's own databases stay per account.
+CODEX_SHARED = ("config.toml", "AGENTS.md", "sessions", "skills", "plugins",
+                "packages", "prompts", "rules", "memories", "history.jsonl")
 # the page's icons: tab favicon (SVG, and a PNG for Safari), iPhone home
 # screen, and the installed app (Chrome, Edge, Android)
 # The phone's tabit wears a chat bubble on the corner, so its icon is told
@@ -975,6 +995,7 @@ REMOTE_MANIFEST = json.dumps({
 # Tabit Chat: the chat page, the one the address opens, and its own manifest
 # so it installs as its own app. The terminal view is at /terminal.
 REMOTE_CHAT_PAGE = "chat.html"
+REMOTE_SETTINGS_JS = "settings.js"             # the Settings sheet of both pages
 REMOTE_CHAT_MANIFEST = json.dumps({
     "name": "tabit chat", "short_name": "chat", "start_url": "./", "scope": "./",
     "display": "standalone", "background_color": "#1a1b26",
@@ -1915,8 +1936,9 @@ def _claude_hooks_settings(hook_dir):
                   'else b=${cur:-background}; w=$a; fi;; '
                   '*) ' + keep + ';; esac; ')
     # the turn is over, but claude goes on by itself once its background
-    # sub-agents are done
-    stop = now + ('s=idle; case "$p" in *\'"type":"subagent","status":"running"\'*) '
+    # sub-agents, shells or monitors are done
+    run = ['*\'"type":"%s","status":"running"\'*' % t for t in ("subagent", "shell", "monitor")]
+    stop = now + ('s=idle; case "$p" in ' + "|".join(run) + ') '
                   's=background;; esac; ' + keep)
     return {"hooks": {
         # not "compact": claude compacts in the middle of a turn. These two
@@ -1929,7 +1951,101 @@ def _claude_hooks_settings(hook_dir):
         "PermissionRequest": ev(asks, "*"),
         "Stop": ev(stop),
         "StopFailure": ev(stop),
-    }}
+    }, "statusLine": {"type": "command", "command": shlex.quote(CLAUDE_STATUSLINE_FILE)}}
+
+
+def _claude_statusline_script(hook_dir):
+    """The status line program of a Claude tab: it keeps the usage Claude
+    hands it in <hook dir>/<tab key>.usage, then runs the user's own status
+    line (from that account's settings.json) and passes its lines on."""
+    return """#!/usr/bin/env python3
+# tabit: written by tabit, which reads the usage it keeps
+import json, os, subprocess, sys, time
+HOOK_DIR = %r
+raw = sys.stdin.read()
+try:
+    data = json.loads(raw)
+except ValueError:
+    data = {}
+key = os.environ.get("TABIT_AGENT", "")
+if os.environ.get("TMUX_PANE"):
+    try:
+        key = subprocess.run(["tmux", "display-message", "-p", "-t", os.environ["TMUX_PANE"], "#S"],
+                             capture_output=True, text=True, timeout=2).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+limits = data.get("rate_limits") if isinstance(data, dict) else None
+if key and "/" not in key and isinstance(limits, dict):
+    try:
+        path = os.path.join(HOOK_DIR, key + ".usage")
+        with open(path + ".tmp", "w") as f:
+            json.dump({"rate_limits": limits, "ts": time.time()}, f)
+        os.replace(path + ".tmp", path)
+    except OSError:
+        pass
+cmd = ""
+try:
+    with open(os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
+                           "settings.json")) as f:
+        cmd = (json.load(f).get("statusLine") or {}).get("command") or ""
+except (OSError, ValueError, AttributeError):
+    pass
+if cmd and os.path.basename(__file__) not in cmd:
+    sys.stdout.flush()
+    subprocess.run(cmd, shell=True, input=raw, text=True)
+""" % hook_dir
+
+
+def _ensure_claude_statusline():
+    """Write the status line program a claude AI tab runs, when it changed."""
+    want = _claude_statusline_script(AGENT_HOOK_DIR)
+    try:
+        with open(CLAUDE_STATUSLINE_FILE) as f:
+            if f.read() == want:
+                return
+    except OSError:
+        pass
+    try:
+        os.makedirs(os.path.dirname(CLAUDE_STATUSLINE_FILE), exist_ok=True)
+        with open(CLAUDE_STATUSLINE_FILE, "w") as f:
+            f.write(want)
+        os.chmod(CLAUDE_STATUSLINE_FILE, 0o755)
+    except OSError as e:
+        print(f"[tabit] cannot write {CLAUDE_STATUSLINE_FILE}: {e}", file=sys.stderr)
+
+
+def _codex_notify_script(hook_dir):
+    """The script Codex runs after a turn: it keeps the session ids the tab's
+    codex named, newest last, in <hook dir>/<tab key>.codex."""
+    return ("#!/bin/sh\n"
+            "# tabit: written by tabit, which reads what it keeps\n"
+            'k=$TABIT_AGENT; if [ -n "$TMUX_PANE" ]; then '
+            'k=$(tmux display-message -p -t "$TMUX_PANE" "#S" 2>/dev/null); fi\n'
+            '[ -n "$k" ] || exit 0\n'
+            'id=$(printf %%s "$1" | sed -n \'s/.*"thread-id": *"\\([^"]*\\)".*/\\1/p\')\n'
+            '[ -n "$id" ] || exit 0\n'
+            'f=%s/"$k".codex\n'
+            '{ tail -n 9 "$f" 2>/dev/null; echo "$id"; } >"$f.tmp" && mv -f "$f.tmp" "$f"\n'
+            % shlex.quote(hook_dir))
+
+
+def _ensure_codex_notify():
+    """Write the script a codex AI tab runs after each turn, when it changed."""
+    want = _codex_notify_script(AGENT_HOOK_DIR)
+    try:
+        os.makedirs(AGENT_HOOK_DIR, mode=0o700, exist_ok=True)   # gone after a reboot
+        with open(CODEX_NOTIFY_FILE) as f:
+            if f.read() == want:
+                return
+    except OSError:
+        pass
+    try:
+        os.makedirs(os.path.dirname(CODEX_NOTIFY_FILE), exist_ok=True)
+        with open(CODEX_NOTIFY_FILE, "w") as f:
+            f.write(want)
+        os.chmod(CODEX_NOTIFY_FILE, 0o755)
+    except OSError as e:
+        print(f"[tabit] cannot write {CODEX_NOTIFY_FILE}: {e}", file=sys.stderr)
 
 
 def _ensure_claude_hooks():
@@ -2168,6 +2284,12 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 self._send(200, "text/html; charset=utf-8", page)
         elif path == "/chat.webmanifest":
             self._send(200, "application/manifest+json", REMOTE_CHAT_MANIFEST)
+        elif path == "/settings.js":                       # the Settings sheet both pages share
+            page = self.app._remote_page(REMOTE_SETTINGS_JS)
+            if page is None:
+                self._send(404, "text/plain", b"settings.js not installed")
+            else:
+                self._send(200, "text/javascript; charset=utf-8", page)
         elif path == "/terminal":
             page = self.app._remote_page()
             if page is None:
@@ -2841,7 +2963,9 @@ class Tabit(Gtk.Window):
         # claude AI tabs load this file; without it they would not start.
         # grok loads its file from ~/.grok/hooks the next time it starts
         _ensure_claude_hooks()
+        _ensure_claude_statusline()
         _ensure_grok_hooks()
+        _ensure_codex_notify()
         # Keep collapsed_groups from settings; do not expand while replaying sessions.
         self._restoring_sessions = True
         last_row = None
@@ -3435,11 +3559,11 @@ class Tabit(Gtk.Window):
 
             GLib.timeout_add(800, _kick)
         if _is_ai_icon(icon_name):
-            # a tab saved earlier starts Grok in minimal too
-            argv = self._ai_ensure_grok_minimal(argv)
+            # a tab saved earlier starts Grok in minimal too, and Codex with tabit's notify
+            argv = self._ai_ensure_codex_notify(self._ai_ensure_grok_minimal(argv))
             row.argv = argv
             if launch_argv:
-                launch_argv = self._ai_ensure_grok_minimal(launch_argv)
+                launch_argv = self._ai_ensure_codex_notify(self._ai_ensure_grok_minimal(launch_argv))
         run = launch_argv or argv
         self._spawn_term(row, run, workdir)
         return row
@@ -3451,6 +3575,9 @@ class Tabit(Gtk.Window):
         if _is_ai_icon(getattr(row, "icon_name", None)):
             if CLAUDE_HOOKS_FILE in " ".join(run):
                 _ensure_claude_hooks()
+                _ensure_claude_statusline()
+            if CODEX_NOTIFY_FILE in " ".join(run):
+                _ensure_codex_notify()
             if self._ai_tmux_unwrap(run)[1] is None:
                 # the name its claude hooks write under (a tmux tab uses its
                 # session); TMUX is dropped since this tab is not in tmux
@@ -6409,6 +6536,18 @@ if (data !== null) {{
         if getattr(self, "_ai_hunting", False):
             return True
         jobs = self._ai_hunt_jobs()
+        # Codex 0.166 holds every session file open in one shared daemon,
+        # so the tab's own processes do not tell which is its. Its notify
+        # names the session after each turn: the newest one with a file.
+        named = {}
+        for j in [j for j in jobs if os.path.basename(j[1].rstrip("/")) == "codex"]:
+            jobs.remove(j)
+            tx = self._codex_rollout(self._codex_notified(j[0]))
+            sid = (re.findall(_UUID_RE, os.path.basename(tx)) or [None])[-1]
+            if sid:
+                named[j[0]] = sid
+        if named:
+            self._ai_hunt_apply(named, {r: r.argv for r in named})
         if not jobs:
             return True
         self._ai_hunting = True
@@ -6470,7 +6609,7 @@ if (data !== null) {{
     _AI_AGG_TIPS = {
         "blocked": "Needs input",
         "ready": "Done — review",
-        "background": "Replied — agents still running",
+        "background": "Replied — background work still running",
         "working": "Working",
         "idle": "Idle",
     }
@@ -7424,7 +7563,7 @@ if (data !== null) {{
             "object-select-symbolic",
             "emblem-default-symbolic",
         ),
-        # replied, sub-agents still running
+        # replied, background work still running
         "background": (
             "emblem-synchronizing-symbolic",
             "view-refresh-symbolic",
@@ -7480,7 +7619,7 @@ if (data !== null) {{
     _AGENT_NOTIFY = {
         "ready": "Finished — open the tab to review.",
         "blocked": "Waiting for input or approval.",
-        "background": "Replied — sub-agents still running.",
+        "background": "Replied — background work still running.",
     }
     # The two that wait on you. Background does not: its agents finish or
     # one of them asks, and either is news.
@@ -9480,7 +9619,7 @@ if (data !== null) {{
             "idle": "⏸ Idle — waiting for prompt",
             "blocked": "? Needs input / approval",
             "ready": "✓ Done — open tab to review",
-            "background": "↻ Replied — sub-agents still running",
+            "background": "↻ Replied — background work still running",
             "exited": "✕ Process exited",
             "done": "✕ Process exited",
             "unknown": "Status unknown",
@@ -11125,19 +11264,20 @@ if (data !== null) {{
                 "Unticking leaves an existing tmux session running; close it "
                 "from + tmux.")
             vbox.pack_start(tmux_chk, False, False, 0)
-            # a Claude tab: go on with the same conversation under another login
+            # a Claude or Codex tab: go on with the same conversation under another login
             got_cli = self._ai_cli_path_of(getattr(row, "argv", None) or [])
-            accounts = self._claude_accounts()
-            if got_cli and self._ai_is_claude(got_cli[0]) and accounts:
+            prog = os.path.basename(got_cli[0].rstrip("/")) if got_cli else ""
+            accounts = self._ai_accounts(prog) if prog in ("claude", "codex") else []
+            if accounts:
                 acct_combo = Gtk.ComboBoxText()
                 acct_combo.append("", "Account: Default")
                 for acct_name, _c in accounts:
                     acct_combo.append(acct_name, f"Account: {acct_name}")
-                acct_combo.set_active_id(self._claude_account_of(got_cli[0]) or "")
+                acct_combo.set_active_id(self._ai_account_of(got_cli[0]) or "")
                 acct_combo.set_tooltip_text(
-                    "Another account goes on with this conversation in this "
-                    "tab, now: claude restarts and resumes the same session.\n"
-                    "Not while Claude is working or asking something.")
+                    f"Another account goes on with this conversation in this "
+                    f"tab, now: {prog} restarts and resumes the same session.\n"
+                    f"Not while {prog.capitalize()} is working or asking something.")
                 vbox.pack_start(acct_combo, False, False, 0)
 
         # Group assignment inside Rename Popover
@@ -11191,7 +11331,8 @@ if (data !== null) {{
                     new_argv = self._ai_argv(
                         cli_val, path_val, tries,
                         bypass=self._ai_has_bypass(row.argv),
-                        model=self._ai_model_of(row.argv))
+                        model=self._ai_model_of(row.argv),
+                        effort=self._ai_effort_of(row.argv))
                     if want_tmux:
                         new_argv = self._ai_tmux_argv(
                             new_argv,
@@ -11213,7 +11354,7 @@ if (data !== null) {{
             if acct_combo is not None:
                 want = acct_combo.get_active_id() or ""
                 now_cli = (self._ai_cli_path_of(row.argv) or ("",))[0]
-                if want != (self._claude_account_of(now_cli) or ""):
+                if want != (self._ai_account_of(now_cli) or ""):
                     why = self._ai_switch_account(row, want)
                     if why:
                         self._note_msg(Gtk.MessageType.WARNING,
@@ -12181,18 +12322,24 @@ if (data !== null) {{
                 "groups": list(groups.values()), "tabs": tabs}
 
     # Keys a phone can press: enough to answer a prompt or drive a shell.
-    _REMOTE_KEYS = {"enter": b"\r", "esc": b"\x1b", "up": b"\x1b[A",
-                    "down": b"\x1b[B", "right": b"\x1b[C", "left": b"\x1b[D",
+    _REMOTE_KEYS = {"enter": b"\r", "esc": b"\x1b", "up": b"\x1bOA",
+                    "down": b"\x1bOB", "right": b"\x1bOC", "left": b"\x1bOD",
                     "tab": b"\t", "backspace": b"\x7f", "space": b" ",
                     "ctrl-c": b"\x03", "ctrl-d": b"\x04", "ctrl-z": b"\x1a",
                     "ctrl-l": b"\x0c",
+                    "pgup": b"\x1b[5~", "pgdn": b"\x1b[6~", "home": b"\x1bOH", "end": b"\x1bOF",
                     **{str(d): str(d).encode() for d in range(1, 10)},
                     "y": b"y", "n": b"n"}
-    # Arrows depend on the terminal's mode: a pager (less, git show) asks
-    # for ESC O A and ignores ESC [ A. These go in as a real key press,
-    # so VTE sends what the program asked for.
+    # Arrows, Home and End depend on the terminal's mode: a pager (less,
+    # git show) asks for ESC O A and ignores ESC [ A. On a tab shown at the
+    # desk they go in as a real key press, so VTE sends what the program
+    # asked for. A tab not shown has no window for a key press (tabit takes
+    # its page out), so it gets the bytes above: ESC O, which a pager wants
+    # and a shell (readline, zsh), tmux and the AI CLIs take as well.
     _REMOTE_ARROWS = {"up": Gdk.KEY_Up, "down": Gdk.KEY_Down,
-                      "left": Gdk.KEY_Left, "right": Gdk.KEY_Right}
+                      "left": Gdk.KEY_Left, "right": Gdk.KEY_Right,
+                      "pgup": Gdk.KEY_Page_Up, "pgdn": Gdk.KEY_Page_Down,
+                      "home": Gdk.KEY_Home, "end": Gdk.KEY_End}
 
     @staticmethod
     def _press_key(term, keyval):
@@ -12339,8 +12486,9 @@ if (data !== null) {{
                 entry = next((e for e in self._load_ai_clis() if e["cli"] == tool), None)
                 if entry is None:
                     return 400, {"error": "pick an AI from tabit's list"}
-                # a Claude account runs as its own claude, as in +AI
-                account = body.get("account") if self._ai_is_claude(tool) else None
+                # a Claude or Codex account runs as its own program, as in +AI
+                prog = os.path.basename(str(tool).rstrip("/"))
+                account = body.get("account") if prog in ("claude", "codex") else None
                 # one exact conversation to go on with (a Tabit Chat moving to a tab)
                 resume = body.get("resume") if self._ai_is_claude(tool) else None
                 if resume is not None and not (isinstance(resume, str)
@@ -12350,9 +12498,9 @@ if (data !== null) {{
                     return 409, {"error": "that conversation is open in another Claude"}
                 run = tool
                 if account:
-                    run = dict(self._claude_accounts()).get(account)
+                    run = dict(self._ai_accounts(prog)).get(account)
                     if run is None:
-                        return 400, {"error": f"no Claude account “{account}”"}
+                        return 400, {"error": f"no {prog.capitalize()} account “{account}”"}
                 launch, argv, icon = self._ai_launch_pair(
                     run, cwd, list(entry.get("try") or []),
                     bypass=(bool(self._load_settings().get("ai_claude_bypass"))
@@ -12637,7 +12785,14 @@ if (data !== null) {{
         # the height and left a blank strip down the right.
         if tmux and term is not None and _is_ai_icon(getattr(row, "icon_name", None)):
             self._remote_grow_agent(row, term, want)
-        coloured = self._term_tail_ansi(term, 60) if color and not tmux else None
+        # a pager (git log, less) draws over its own screen and scrolls back
+        # by redrawing it; the lines above are what it scrolled away, out of
+        # order once it goes back. Only its screen, then, and no scrollback.
+        pager = self._term_pager_rows(term) if not tmux else 0
+        if pager:
+            back = 0
+        tail = max(60, pager)       # a pager's whole screen, on a tall tab too
+        coloured = self._term_tail_ansi(term, tail) if color and not tmux else None
         if coloured and back > 0:
             # older lines without colours: reading them with colours cost
             # about a second per 3000 lines on the GTK thread, while the
@@ -12648,8 +12803,14 @@ if (data !== null) {{
             nohist = self._term_history_ends(term, 60)
         if coloured:
             lines, ansi = coloured
+            ansi = ansi + [""] * (len(lines) - len(ansi))     # line for line, to cut both alike
         else:
-            lines = self._term_tail_text(term, 60).rstrip().splitlines()[-60:]
+            lines = self._term_tail_text(term, tail).rstrip().splitlines()[-tail:]
+        if pager:
+            lines = lines[-pager:]
+            if coloured:
+                ansi = ansi[-pager:]
+            nohist = True
         out = {"id": rid, "title": getattr(row, "title_text", "") or "",
                "ai_status": getattr(row, "agent_status", None) or "unknown",
                "lines": lines}
@@ -12662,6 +12823,41 @@ if (data !== null) {{
             out.update(ansi="".join(a + "\n" for a in ansi), nohist=nohist,
                        cols=max(1, int(term.get_column_count())))
         return 200, out, tmux
+
+    _PAGERS = ("less", "more", "most", "man")
+
+    @classmethod
+    def _term_pager_rows(cls, term):
+        """The screen's height when a pager runs in front in this tab (git
+        log runs less as its child), else 0. Only the foreground job counts:
+        a pager stopped in the background draws nothing."""
+        try:
+            fg = os.tcgetpgrp(term.get_pty().get_fd())
+        except (AttributeError, OSError, TypeError, ValueError):
+            return 0
+        todo, looked = [fg], 0
+        try:        # `cat f | less`: the pager is the leader's sibling, a child of the shell
+            with open("/proc/%d/stat" % fg) as f:
+                ppid = int(f.read().rpartition(")")[2].split()[1])
+            with open("/proc/%d/task/%d/children" % (ppid, ppid)) as f:
+                todo += [int(c) for c in f.read().split() if int(c) != fg]
+        except (OSError, ValueError, IndexError):
+            pass
+        while todo and looked < 16:
+            pid = todo.pop()
+            looked += 1
+            try:
+                with open("/proc/%d/stat" % pid) as f:
+                    stat = f.read()
+                if int(stat.rpartition(")")[2].split()[2]) != fg:
+                    continue
+                if stat[stat.index("(") + 1:stat.rindex(")")] in cls._PAGERS:
+                    return max(1, int(term.get_row_count()))
+                with open("/proc/%d/task/%d/children" % (pid, pid)) as f:
+                    todo += [int(c) for c in f.read().split()]
+            except (OSError, ValueError):
+                continue
+        return 0
 
     @staticmethod
     def _term_history_text(term, below, back):
@@ -12893,18 +13089,21 @@ if (data !== null) {{
                 return 400, {"error": "only the AI defaults, true or false"}
             self._save_settings(dict(body))
             return 200, {"ok": True}
+        prog = body.get("cli") if isinstance(body, dict) and body.get("cli") == "codex" else "claude"
+        if op in ("account-add", "login-start") and not isinstance(body.get("name", ""), str):
+            return 400, {"error": "name is text"}
         if op == "account-add":
             try:
-                run = self._claude_account_add((body.get("name") or "").strip())
+                run = self._ai_account_add(prog, (body.get("name") or "").strip())
             except (ValueError, OSError) as e:
                 return 400, {"error": str(e)}
             self._remote_login_start(body["name"].strip(), run)
             return 200, {"ok": True}
         if op == "login-start":
             name = body.get("name") or ""
-            run = "claude" if not name else dict(self._claude_accounts()).get(name)
+            run = prog if not name else dict(self._ai_accounts(prog)).get(name)
             if run is None:
-                return 400, {"error": f"no Claude account “{name}”"}
+                return 400, {"error": f"no {prog.capitalize()} account “{name}”"}
             self._remote_login_start(name, run)
             return 200, {"ok": True}
         if op == "login-code":
@@ -12925,16 +13124,19 @@ if (data !== null) {{
     def _remote_admin_state(self):
         s = self._load_settings()
         accounts = []
-        for name, run in [("", "claude")] + self._claude_accounts():
-            st = self._claude_auth_status(run)
-            accounts.append({"name": name, "loggedIn": bool(st.get("loggedIn")),
-                             "email": st.get("email") or "",
-                             "plan": st.get("subscriptionType") or ""})
+        progs = ["claude"] + (["codex"] if shutil.which("codex") else [])
+        for prog in progs:
+            for name, run in [("", prog)] + self._ai_accounts(prog):
+                st = self._ai_auth_status(run)
+                accounts.append({"cli": prog, "name": name,
+                                 "loggedIn": bool(st.get("loggedIn")),
+                                 "email": st.get("email") or "",
+                                 "plan": st.get("subscriptionType") or ""})
         login = self._remote_login or {}
         return {"version": _get_version_display(),
                 "settings": {k: bool(s.get(k)) for k in self._REMOTE_SETTINGS},
                 "accounts": accounts,
-                "login": {k: login.get(k) for k in ("account", "state", "url", "msg")}
+                "login": {k: login.get(k) for k in ("cli", "account", "state", "url", "code", "msg")}
                 if login else None,
                 "update": dict(self._remote_update) if self._remote_update else None}
 
@@ -13013,7 +13215,9 @@ if (data !== null) {{
     def _remote_login_start(self, name, run):
         """Run `claude auth login` for an account under a pty of tabit's own:
         the page gets the link, and the code comes back through it. A pipe
-        will not do: claude takes the code only from a terminal."""
+        will not do: claude takes the code only from a terminal. Codex logs
+        in with a device code instead: the page shows the link and a code
+        to type on that page, and nothing comes back."""
         old = self._remote_login
         if old and old.get("proc") and old["proc"].poll() is None:
             old["proc"].kill()
@@ -13023,11 +13227,13 @@ if (data !== null) {{
         env = {k: v for k, v in os.environ.items()
                if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
         env.update(BROWSER="true", TERM="xterm-256color")   # no browser on the desk
-        proc = subprocess.Popen([run, "auth", "login"], stdin=sfd, stdout=sfd,
+        prog = os.path.basename(run.rstrip("/"))
+        args = ["login", "--device-auth"] if prog == "codex" else ["auth", "login"]
+        proc = subprocess.Popen([run] + args, stdin=sfd, stdout=sfd,
                                 stderr=sfd, env=env, start_new_session=True)
         os.close(sfd)
-        job = {"account": name, "state": "starting", "url": "", "msg": "",
-               "proc": proc, "fd": mfd}
+        job = {"cli": prog, "account": name, "state": "starting", "url": "", "code": "",
+               "msg": "", "proc": proc, "fd": mfd}
         self._remote_login = job
         threading.Thread(target=Tabit._remote_login_read, args=(job,),
                          daemon=True).start()
@@ -13053,6 +13259,10 @@ if (data !== null) {{
             m = re.search(r"https://\S+", out)
             if m and not job["url"]:
                 job.update(url=m.group(0), state="waiting")
+            # codex's one-time code, alone on its line: typed on the login page
+            m = re.search(r"^[ \t]*([A-Z0-9]{4,}-[A-Z0-9]{4,})[ \t]*\n", out, re.M)
+            if m and not job.get("code"):
+                job["code"] = m.group(1)
             for line in text.splitlines():
                 if line.strip() and "http" not in line and "Paste code" not in line:
                     job["msg"] = line.strip()[:200]
@@ -13121,14 +13331,16 @@ if (data !== null) {{
                         import tabit_chat
                         self._chat_manager = tabit_chat.ChatManager(
                             accounts=Tabit._claude_accounts,
+                            codex_accounts=Tabit._codex_accounts,
+                            claude_usage=Tabit._claude_usage,
                             env_drop=CLAUDE_SESSION_ENV,
-                            auth=Tabit._claude_auth_status,
+                            auth=Tabit._ai_auth_status,
                             tab_hook=self._chat_tab_hook,
                             tabs_hook=self._chat_tabs_hook,
                             tab_ops=self._chat_tab_ops,
                             extra_env=self._chat_tool_env,
                             roster_dir=AGENT_HOOK_DIR)
-                        self._chat_manager.ensure_default()
+                        self._chat_manager.retire_default()
                         break
             return self._chat_manager
 
@@ -13139,20 +13351,23 @@ if (data !== null) {{
         return {"TABIT_SOCK": REMOTE_SOCK, "TABIT_OWNER": owner or ""}
 
     def _chat_tabs_hook(self):
-        """For a chat: every Claude AI tab as {"id", "title", "group"}, or None
-        when tabit is busy. Runs on the GTK thread through _remote_call."""
+        """For a chat: every Claude or Codex AI tab as {"id", "title", "group",
+        "cli", ...}, or None when tabit is busy. Runs on the GTK thread through
+        _remote_call."""
         def work():
             out = []
             for row in self._session_rows():
                 if not _is_ai_icon(getattr(row, "icon_name", None)):
                     continue
-                got = self._ai_cli_path_of(getattr(row, "argv", None))
-                if not (got and self._ai_is_claude(got[0])):
+                cli = self._chat_cli_of(row)
+                if not cli:
                     continue
                 color = getattr(row, "group_color", None) or ""
-                out.append({"id": self._tg_row_id(row),
+                out.append({"id": self._tg_row_id(row), "cli": cli,
                             "key": self._agent_hook_key(row) or "",   # its roster file's name
-                            "account": self._claude_account_of(got[0]) or "",
+                            "account": self._ai_account_of(
+                                self._ai_cli_path_of(row.argv)[0]) or "",
+                            "effort": self._ai_effort_of(row.argv),
                             "title": getattr(row, "title_text", "") or "",
                             "group": (self._group_names.get(color) or color.capitalize()) if color else "",
                             "color": color})
@@ -13160,16 +13375,51 @@ if (data !== null) {{
         res = self._remote_call(work)
         return res if isinstance(res, list) else None
 
-    def _chat_model(self, tab_id, model, account=None):
-        """Switch a tab's model, and its login when asked: tabit restarts its
-        claude with --model, on the same conversation, as for a login."""
+    def _chat_cli_of(self, row):
+        """"claude" or "codex" for an AI tab a chat can show, else None."""
+        got = self._ai_cli_path_of(getattr(row, "argv", None))
+        if not got:
+            return None
+        if self._ai_is_claude(got[0]):
+            return "claude"
+        return "codex" if os.path.basename(got[0].rstrip("/")) == "codex" else None
+
+    def _codex_notified(self, row):
+        """The session ids the tab's codex named after its turns, oldest first."""
+        key = self._agent_hook_key(row)
+        try:
+            with open(os.path.join(AGENT_HOOK_DIR, key + ".codex")) as f:
+                return f.read().split()
+        except (OSError, TypeError):
+            return []
+
+    _codex_rollouts = {}         # session id: its rollout file, found once
+
+    @classmethod
+    def _codex_rollout(cls, argv):
+        """The rollout file of the last session in argv that has one, or "".
+        The ids are those in the tab's command and those its codex named."""
+        for sid in reversed(re.findall(_UUID_RE, " ".join(argv or []))):
+            path = cls._codex_rollouts.get(sid)
+            if not (path and os.path.isfile(path)):
+                found = glob.glob(os.path.join(
+                    CODEX_DEFAULT_DIR, "sessions/*/*/*/rollout-*-%s.jsonl" % sid))
+                path = cls._codex_rollouts[sid] = max(found) if found else ""
+            if path:
+                return path
+        return ""
+
+    def _chat_model(self, tab_id, model, account=None, effort=None):
+        """Switch a tab's model and effort, and its login when asked: tabit
+        restarts its claude or codex with --model and the effort, on the
+        same conversation, as for a login. None keeps what it has."""
         def work():
             row = self._tg_row_by_id(tab_id)
             got = self._ai_cli_path_of(getattr(row, "argv", None)) if row is not None else None
             if not got:
                 return 404, {"error": "that is not an AI tab"}
-            name = (self._claude_account_of(got[0]) or "") if account is None else account
-            why = self._ai_switch_account(row, name, model or "")
+            name = (self._ai_account_of(got[0]) or "") if account is None else account
+            why = self._ai_switch_account(row, name, model, effort)
             return (409, {"error": why}) if why else (200, {"ok": True})
         res = self._remote_call(work, timeout=10)
         if res is None:
@@ -13182,7 +13432,8 @@ if (data !== null) {{
         no group asked for stays out of groups."""
         body = dict(body or {})
         if op == "model":
-            return self._chat_model(target, body.get("model"), body.get("account"))
+            return self._chat_model(target, body.get("model"), body.get("account"),
+                                    body.get("effort"))
 
         def work():
             if op == "groups":
@@ -13211,7 +13462,7 @@ if (data !== null) {{
     def _chat_tab_hook(self, tab_id, text=None, key=None, queue=False):
         """For a chat: info about an AI tab; with text, type a line into it;
         with key, press one. Info is {"title", "status", "transcript",
-        "claude"} (a blocked tab adds "screen", its last lines) or {"error"}; the others give (code, body). queue: a busy tab
+        "cli"} (a blocked tab adds "screen", its last lines) or {"error"}; the others give (code, body). queue: a busy tab
         takes the line too (Claude Code holds it), only a question stops it.
         Runs on the GTK thread through _remote_call."""
         acts = text is not None or key is not None
@@ -13224,11 +13475,12 @@ if (data !== null) {{
             status = "exited" if getattr(row, "dead", False) else \
                 getattr(row, "agent_status", None) or "unknown"
             if not acts:
-                got = self._ai_cli_path_of(getattr(row, "argv", None))
+                cli = self._chat_cli_of(row)
                 info = {"title": getattr(row, "title_text", "") or tab_id,
-                        "status": status,
-                        "transcript": getattr(row, "_agent_hook_tx", "") or "",
-                        "claude": bool(got and self._ai_is_claude(got[0]))}
+                        "status": status, "cli": cli or "",
+                        "transcript": self._codex_rollout(
+                            list(row.argv or []) + self._codex_notified(row)) if cli == "codex"
+                        else getattr(row, "_agent_hook_tx", "") or ""}
                 term = getattr(row, "term", None)
                 if status == "blocked" and term is not None and self._remote_send_on:
                     # the menu the tab waits on, so the chat can show it (typing switch: as the screen)
@@ -14652,42 +14904,95 @@ if (data !== null) {{
         return found
 
     @staticmethod
-    def _claude_accounts():
-        """(name, cli) of each extra Claude account, by name."""
+    def _ai_accounts_dir(cli):
+        """Where the extra accounts of claude or codex live; None for others."""
+        return {"claude": CLAUDE_ACCOUNTS_DIR, "codex": CODEX_ACCOUNTS_DIR}.get(
+            os.path.basename((cli or "").rstrip("/")))
+
+    @staticmethod
+    def _ai_accounts(prog="claude"):
+        """(name, cli) of each extra account of claude or codex, by name."""
+        root = Tabit._ai_accounts_dir(prog)
         try:
-            names = sorted(os.listdir(CLAUDE_ACCOUNTS_DIR))
+            names = sorted(os.listdir(root)) if root else []
         except OSError:
             return []
         out = []
         for name in names:
-            cli = os.path.join(CLAUDE_ACCOUNTS_DIR, name, "bin", "claude")
+            cli = os.path.join(root, name, "bin", prog)
             if os.access(cli, os.X_OK):
                 out.append((name, cli))
         return out
 
     @staticmethod
-    def _claude_account_of(cli):
-        """The account a CLI path runs, or None for claude itself."""
+    def _claude_accounts():
+        """(name, cli) of each extra Claude account, by name."""
+        return Tabit._ai_accounts("claude")
+
+    @staticmethod
+    def _codex_accounts():
+        """(name, cli) of each extra Codex account, by name."""
+        return Tabit._ai_accounts("codex")
+
+    @staticmethod
+    def _ai_account_of(cli):
+        """The account a claude or codex CLI path runs, or None for the
+        program itself."""
         cli = os.path.expanduser(cli or "")
+        root = Tabit._ai_accounts_dir(cli)
         home = os.path.dirname(os.path.dirname(cli))
-        if (os.path.basename(cli) == "claude"
-                and os.path.dirname(home) == CLAUDE_ACCOUNTS_DIR):
+        if root and os.path.dirname(home) == root:
             return os.path.basename(home)
         return None
+
+    @staticmethod
+    def _claude_account_of(cli):
+        """The account a CLI path runs, or None for claude itself."""
+        return Tabit._ai_account_of(cli) if Tabit._ai_is_claude(cli or "") else None
+
+    @staticmethod
+    def _ai_account_home(root, name):
+        """The folder for a new account `name` under root. ValueError for a
+        bad or taken name."""
+        if (not re.fullmatch(r"[A-Za-z0-9_-]{1,24}", name or "")
+                or name.lower() == "default"):
+            raise ValueError("use 1-24 letters, digits, - or _")
+        home = os.path.join(root, name)
+        if os.path.lexists(home):
+            raise ValueError(f"“{name}” is there already")
+        return home
+
+    @staticmethod
+    def _ai_account_wrapper(home, prog, label, env, cfg, default_dir, shared):
+        """Write <home>/bin/<prog>: link what the account shares with the
+        default folder, set env to its own folder cfg, run prog. Linked on
+        every start, so what the default one gains later reaches this one
+        too. A file the account made itself stays its own."""
+        os.makedirs(os.path.join(home, "bin"))
+        q = shlex.quote
+        script = (
+            "#!/bin/sh\n"
+            f"# tabit: {label} account \"{os.path.basename(home)}\". Remove it in Settings > AI.\n"
+            f"c={q(cfg)}\n"
+            f"h={q(default_dir)}\n"
+            f"for n in {' '.join(q(n) for n in shared)}; do\n"
+            '  [ -e "$h/$n" ] && [ ! -e "$c/$n" ] && [ ! -L "$c/$n" ] && ln -s "$h/$n" "$c/$n"\n'
+            "done\n"
+            f'export {env}="$c"\n'
+            f'exec {prog} "$@"\n')
+        cli = os.path.join(home, "bin", prog)
+        with open(cli, "w") as f:
+            f.write(script)
+        os.chmod(cli, 0o755)
+        return cli
 
     @staticmethod
     def _claude_account_add(name):
         """Make account `name`; its CLI path. ValueError for a bad or taken
         name. Logged out until it logs in once."""
-        if (not re.fullmatch(r"[A-Za-z0-9_-]{1,24}", name or "")
-                or name.lower() == "default"):
-            raise ValueError("use 1-24 letters, digits, - or _")
-        home = os.path.join(CLAUDE_ACCOUNTS_DIR, name)
-        if os.path.lexists(home):
-            raise ValueError(f"“{name}” is there already")
+        home = Tabit._ai_account_home(CLAUDE_ACCOUNTS_DIR, name)
         cfg = os.path.join(home, "config")
         os.makedirs(cfg, mode=0o700)
-        os.makedirs(os.path.join(home, "bin"))
         try:
             with open(CLAUDE_DEFAULT_JSON) as f:
                 known = json.load(f)
@@ -14697,25 +15002,28 @@ if (data !== null) {{
                 if isinstance(known, dict) and k in known}
         with open(os.path.join(cfg, ".claude.json"), "w") as f:
             json.dump(seed, f, indent=2)
-        q = shlex.quote
-        # Linked on every start, so what the default account gains later
-        # (a first agents/ folder) reaches this one too. A file the account
-        # made itself stays its own.
-        script = (
-            "#!/bin/sh\n"
-            f"# tabit: Claude account \"{name}\". Remove it in Settings > AI.\n"
-            f"c={q(cfg)}\n"
-            f"h={q(CLAUDE_DEFAULT_DIR)}\n"
-            f"for n in {' '.join(q(n) for n in CLAUDE_SHARED)}; do\n"
-            '  [ -e "$h/$n" ] && [ ! -e "$c/$n" ] && [ ! -L "$c/$n" ] && ln -s "$h/$n" "$c/$n"\n'
-            "done\n"
-            'export CLAUDE_CONFIG_DIR="$c"\n'
-            'exec claude "$@"\n')
-        cli = os.path.join(home, "bin", "claude")
-        with open(cli, "w") as f:
-            f.write(script)
-        os.chmod(cli, 0o755)
-        return cli
+        return Tabit._ai_account_wrapper(home, "claude", "Claude", "CLAUDE_CONFIG_DIR",
+                                         cfg, CLAUDE_DEFAULT_DIR, CLAUDE_SHARED)
+
+    @staticmethod
+    def _codex_account_add(name):
+        """Make Codex account `name`; its CLI path. ValueError for a bad or
+        taken name. Logged out until it logs in once."""
+        home = Tabit._ai_account_home(CODEX_ACCOUNTS_DIR, name)
+        cfg = os.path.join(home, "home")
+        os.makedirs(cfg, mode=0o700)
+        # a default home that never ran a session has no sessions folder:
+        # the account would make its own, unshared, and lose it on removal
+        os.makedirs(os.path.join(CODEX_DEFAULT_DIR, "sessions"), exist_ok=True)
+        return Tabit._ai_account_wrapper(home, "codex", "Codex", "CODEX_HOME",
+                                         cfg, CODEX_DEFAULT_DIR, CODEX_SHARED)
+
+    @staticmethod
+    def _ai_account_add(prog, name):
+        """Make a Claude or Codex account; its CLI path."""
+        if prog == "codex":
+            return Tabit._codex_account_add(name)
+        return Tabit._claude_account_add(name)
 
     def _ai_session_of(self, row):
         """The claude session a tab is in: its hooks' transcript, else the
@@ -14726,50 +15034,62 @@ if (data !== null) {{
         got = re.findall(_UUID_RE, " ".join(getattr(row, "argv", None) or []))
         return got[-1] if got else None
 
-    def _ai_switch_account(self, row, name, model=None):
-        """GTK thread: go on with this Claude tab's conversation under
-        account `name` ("" = Default), and `model` ("" = Claude's default,
-        None = the one it has), in the same tab. None when it is under way,
-        else why not. The old claude stops; the new one resumes the same
-        session, which every account shares. Claude's own settings are not
-        touched."""
+    def _ai_switch_account(self, row, name, model=None, effort=None):
+        """GTK thread: go on with this Claude or Codex tab's conversation
+        under account `name` ("" = Default), `model` ("" = the program's
+        default, None = the one it has) and thinking `effort` (the same
+        way), in the same tab. None when it is
+        under way, else why not. The old program stops; the new one resumes
+        the same session, which every account shares. The program's own
+        settings are not touched."""
         argv = getattr(row, "argv", None) or []
         got = self._ai_cli_path_of(argv)
-        if (getattr(row, "kind", None) != "term" or not got
-                or not self._ai_is_claude(got[0])):
-            return "only a Claude tab has an account"
+        prog = os.path.basename(got[0].rstrip("/")) if got else ""
+        if getattr(row, "kind", None) != "term" or prog not in ("claude", "codex"):
+            return "only a Claude or Codex tab has an account"
+        who = prog.capitalize()
         if getattr(row, "dead", False):
             return "that tab has exited"
-        old = self._claude_account_of(got[0]) or ""
+        old = self._ai_account_of(got[0]) or ""
         old_model = self._ai_model_of(argv)
         new_model = old_model if model is None else model
-        if (name or "") == old and new_model == old_model:
-            return (f"it is on {old or 'Default'} already" if model is None
-                    else f"it uses {old_model or 'the default model'} already")
+        old_effort = self._ai_effort_of(argv)
+        new_effort = old_effort if effort is None else effort
+        if (name or "") == old and new_model == old_model and new_effort == old_effort:
+            if model is None and effort is None:
+                return f"it is on {old or 'Default'} already"
+            if model is None:
+                return f"it thinks at {old_effort or 'the default effort'} already"
+            return f"it uses {old_model or 'the default model'} already"
         if getattr(row, "_respawn", None):
             return "it is switching already: wait a moment"
-        new_cli = "claude" if not name else dict(self._claude_accounts()).get(name)
+        new_cli = prog if not name else dict(self._ai_accounts(prog)).get(name)
         if new_cli is None:
-            return f"no Claude account “{name}”"
+            return f"no {who} account “{name}”"
         status = getattr(row, "agent_status", None)
         if status == "working":
-            return "Claude is working: switch when it stops"
+            return f"{who} is working: switch when it stops"
         if status == "blocked":
-            return "Claude is asking something: answer it first"
+            return f"{who} is asking something: answer it first"
         if status == "background":
-            return "agents still run in the background: switch when they are done"
-        sid = self._ai_session_of(row)
+            return "background work still runs: switch when it is done"
+        if prog == "codex":
+            # its session is named after a turn; one with a file has spoken
+            tx = self._codex_rollout(list(argv) + self._codex_notified(row))
+            sid = (re.findall(_UUID_RE, os.path.basename(tx)) or [None])[-1]
+        else:
+            sid = self._ai_session_of(row)
         if not sid:
             return "no conversation yet: send one message first"
         old_tmux = getattr(row, "_live_tmux", None)   # what runs, not what argv says
         # A tab that never spoke has no transcript: --resume would fail. It
         # starts that same session afresh instead, and resumes it later.
-        spoke = self._claude_session_saved(got[1], sid)
+        spoke = prog == "codex" or self._claude_session_saved(got[1], sid)
         launch, stored, _icon = self._ai_launch_pair(
             new_cli, got[1], [], resume_id=sid if spoke else None,
             tmux=self._ai_tmux_unwrap(argv)[1] is not None,
             continue_now=spoke, resume_later=True, bypass=self._ai_has_bypass(argv),
-            model=new_model, new_sid=None if spoke else sid)
+            model=new_model, effort=new_effort, new_sid=None if spoke else sid)
         row._respawn = (launch, got[1], got[0], new_cli)
         row.argv = stored                   # before the old one stops
         row.ai_hunt = False
@@ -14798,11 +15118,12 @@ if (data !== null) {{
         in the same terminal."""
         launch, path, old_cli, new_cli = row._respawn
         row._respawn = None
-        old_title = f"{os.path.basename(old_cli)} · {self._claude_account_of(old_cli)}" \
-            if self._claude_account_of(old_cli) else os.path.basename(old_cli)
+        prog = os.path.basename(new_cli.rstrip("/"))
+        old_title = f"{prog} · {self._ai_account_of(old_cli)}" \
+            if self._ai_account_of(old_cli) else prog
         if getattr(row, "title_text", None) == old_title:
-            acct = self._claude_account_of(new_cli)
-            self._set_tab_name(row, f"claude · {acct}" if acct else "claude")
+            acct = self._ai_account_of(new_cli)
+            self._set_tab_name(row, f"{prog} · {acct}" if acct else prog)
         row.sub_text = self._ai_sub(path, new_cli)
         row.subtitle.set_text(row.sub_text)
         row._agent_hook_tx = ""
@@ -14821,6 +15142,69 @@ if (data !== null) {{
             shutil.rmtree(home, ignore_errors=True)
 
     @staticmethod
+    def _codex_account_remove(name):
+        """Delete Codex account `name`, as for Claude. Its codex left a
+        background server (`codex app-server`) running on its own folder:
+        that one stops first. Settings refuses while a tab uses the account."""
+        home = os.path.join(CODEX_ACCOUNTS_DIR, name)
+        if not name or os.path.dirname(home) != CODEX_ACCOUNTS_DIR:
+            return
+        own = os.path.join(home, "home") + "/"
+        for pid in filter(str.isdigit, os.listdir("/proc")):
+            if int(pid) == os.getpid():
+                continue
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as f:
+                    if b"app-server" not in f.read():
+                        continue
+                fds = os.listdir(f"/proc/{pid}/fd")
+                if any(os.readlink(f"/proc/{pid}/fd/{fd}").startswith(own) for fd in fds):
+                    os.kill(int(pid), signal.SIGKILL)
+            except OSError:
+                continue
+        shutil.rmtree(home, ignore_errors=True)
+
+    @staticmethod
+    def _ai_account_remove(prog, name):
+        if prog == "codex":
+            Tabit._codex_account_remove(name)
+        else:
+            Tabit._claude_account_remove(name)
+
+    @staticmethod
+    def _claude_usage(account):
+        """[{"name", "pct", "resets"}] of a Claude login's limits, asked of
+        Anthropic the way Claude's own /usage asks, with that login's token.
+        None when it cannot tell (no login, a token past its time: claude
+        renews it the next time it runs)."""
+        cfg = os.path.join(CLAUDE_ACCOUNTS_DIR, account, "config") if account else CLAUDE_DEFAULT_DIR
+        try:
+            with open(os.path.join(cfg, ".credentials.json")) as f:
+                oauth = json.load(f)["claudeAiOauth"]
+            if oauth.get("expiresAt", 0) / 1000 < time.time() + 30:
+                return None
+            req = urllib.request.Request(
+                "https://api.anthropic.com/api/oauth/usage",
+                headers={"Authorization": "Bearer " + oauth["accessToken"],
+                         "anthropic-beta": "oauth-2025-04-20"})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                got = json.load(r)
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        out = []
+        for key, name in (("five_hour", "5h"), ("seven_day", "7d")):
+            w = got.get(key) if isinstance(got, dict) else None
+            if isinstance(w, dict) and isinstance(w.get("utilization"), (int, float)):
+                try:
+                    # Python 3.10 takes only 3 or 6 digits of a second: drop them
+                    resets = int(datetime.datetime.fromisoformat(
+                        re.sub(r"\.\d+", "", w["resets_at"].replace("Z", "+00:00"))).timestamp())
+                except (KeyError, TypeError, ValueError):
+                    resets = 0
+                out.append({"name": name, "pct": round(w["utilization"]), "resets": resets})
+        return out or None
+
+    @staticmethod
     def _claude_auth_status(cli):
         """`claude auth status` of one account as a dict, {} if unknown."""
         try:
@@ -14830,6 +15214,37 @@ if (data !== null) {{
         except (OSError, subprocess.SubprocessError, ValueError):
             return {}
         return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _codex_auth_status(cli):
+        """A Codex account's login in the shape of `claude auth status`:
+        loggedIn, email and subscriptionType (the ChatGPT plan), read from
+        its auth.json."""
+        acct = Tabit._ai_account_of(cli)
+        home = os.path.join(CODEX_ACCOUNTS_DIR, acct, "home") if acct else CODEX_DEFAULT_DIR
+        try:
+            with open(os.path.join(home, "auth.json")) as f:
+                auth = json.load(f)
+            tok = ((auth.get("tokens") or {}).get("id_token") or "").split(".")
+        except (OSError, ValueError, AttributeError):
+            return {"loggedIn": False}
+        info = {}
+        if len(tok) == 3:
+            try:
+                info = json.loads(base64.urlsafe_b64decode(tok[1] + "=" * (-len(tok[1]) % 4)))
+            except (ValueError, TypeError):
+                info = {}
+        info = info if isinstance(info, dict) else {}
+        plan = (info.get("https://api.openai.com/auth") or {}).get("chatgpt_plan_type") or ""
+        return {"loggedIn": bool(auth.get("tokens") or auth.get("OPENAI_API_KEY")),
+                "email": info.get("email") or "", "subscriptionType": plan}
+
+    @staticmethod
+    def _ai_auth_status(cli):
+        """The login of a claude or codex CLI path, as a dict."""
+        if os.path.basename((cli or "").rstrip("/")) == "codex":
+            return Tabit._codex_auth_status(cli)
+        return Tabit._claude_auth_status(cli)
 
     def _ai_session_ids_in_use(self):
         """Session ids already open: held by an AI tab (its command, or its
@@ -14986,9 +15401,12 @@ if (data !== null) {{
 
     @classmethod
     def _ai_hook_tokens(cls, cli):
-        """Claude loads tabit's hooks, which report its status exactly."""
+        """Claude loads tabit's hooks, which report its status exactly. Codex
+        names its session after each turn, for the tab's chat."""
         if cls._ai_is_claude(cli):
             return ["--settings", CLAUDE_HOOKS_FILE]
+        if os.path.basename(cli.rstrip("/")) == "codex":
+            return ["-c", CODEX_NOTIFY_ARG]
         return []
 
     @classmethod
@@ -15027,15 +15445,40 @@ if (data !== null) {{
 
         return head + sep + word.sub(add, rest)
 
+    @staticmethod
+    def _ai_cmd_codex_notify(cmd):
+        """Put tabit's notify on every codex in a command tabit already stored:
+        a tab saved before it was added gets it the next time it starts."""
+        head, sep, rest = cmd.partition(" || exit 1; ")
+        if not sep:
+            head, rest = "", cmd
+        word = re.compile(
+            r"(?:^|(?<=\|\| )|(?<=exec ))(?P<bin>(?:[\w./-]+/)?codex)(?=\s|$)"
+            r"(?P<args>(?:\s+(?!&&|\|\|)[^\s;|&]+)*)")
+
+        def add(match):
+            args = match.group("args")
+            if "notify=" in args:
+                return match.group(0)
+            return match.group("bin") + args + " -c " + shlex.quote(CODEX_NOTIFY_ARG)
+
+        return head + sep + word.sub(add, rest)
+
     @classmethod
-    def _ai_ensure_grok_minimal(cls, argv):
-        """Same command, with Grok's minimal flag, or argv when nothing changed."""
+    def _ai_ensure_codex_notify(cls, argv):
+        """Same command, with tabit's Codex notify, or argv when nothing changed."""
+        return cls._ai_ensure_grok_minimal(argv, cls._ai_cmd_codex_notify)
+
+    @classmethod
+    def _ai_ensure_grok_minimal(cls, argv, fix=None):
+        """Same command, with Grok's minimal flag (or what `fix` does to it),
+        or argv when nothing changed."""
         if not argv or len(argv) != 3 or argv[0] != "/bin/sh":
             return argv
         inner, sess = cls._ai_tmux_unwrap(argv)
         if len(inner) != 3 or inner[0] != "/bin/sh":
             return argv
-        new_cmd = cls._ai_cmd_grok_minimal(inner[2])
+        new_cmd = (fix or cls._ai_cmd_grok_minimal)(inner[2])
         if new_cmd == inner[2]:
             return argv
         new_inner = ["/bin/sh", "-c", new_cmd]
@@ -15055,7 +15498,17 @@ if (data !== null) {{
                     and tokens[i + 1] == CLAUDE_HOOKS_FILE:
                 i += 2
                 continue
+            if t == "-c" and i + 1 < len(tokens) and tokens[i + 1] == CODEX_NOTIFY_ARG:
+                i += 2           # ... and its notify to every codex
+                continue
             if t == "--model" and i + 1 < len(tokens):      # tabit adds the tab's own model
+                i += 2
+                continue
+            if t == "--effort" and i + 1 < len(tokens):     # ... and its own effort
+                i += 2
+                continue
+            if t == "-c" and i + 1 < len(tokens) \
+                    and tokens[i + 1].startswith("model_reasoning_effort="):
                 i += 2
                 continue
             if t == "--permission-mode" and i + 1 < len(tokens) \
@@ -15086,12 +15539,34 @@ if (data !== null) {{
         return m.group(1).strip("'\"") if m else ""
 
     @classmethod
-    def _ai_argv(cls, cli, path, tries=None, bypass=False, model=""):
+    def _ai_effort_of(cls, argv):
+        """The thinking effort a tab's command asks for, or "": claude's
+        --effort, codex's -c model_reasoning_effort=."""
+        inner, _sess = cls._ai_tmux_unwrap(argv or [])
+        m = re.search(r"(?:^|\s)(?:--effort[ =]|'?model_reasoning_effort=)([A-Za-z]+)",
+                      inner[2] if len(inner) == 3 else "")
+        return m.group(1) if m else ""
+
+    @staticmethod
+    def _ai_effort_tokens(cli, effort):
+        """How claude and codex are told a thinking effort."""
+        prog = os.path.basename(cli.rstrip("/"))
+        if not effort:
+            return []
+        if prog == "claude":
+            return ["--effort", effort]
+        if prog == "codex":
+            return ["-c", f"model_reasoning_effort={effort}"]
+        return []
+
+    @classmethod
+    def _ai_argv(cls, cli, path, tries=None, bypass=False, model="", effort=""):
         # For each try string T: run `cli T`; if all fail, plain `cli`.
         c = shlex.quote(cli)
         d = shlex.quote(path)
-        # a model picked for this tab (a chat switched it): kept in the command
-        model_tokens = ["--model", model] if model and cls._ai_is_claude(cli) else []
+        # a model and effort picked for this tab (a chat switched them): kept in the command
+        model_tokens = (["--model", model] if model and os.path.basename(
+            cli.rstrip("/")) in ("claude", "codex") else []) + cls._ai_effort_tokens(cli, effort)
         tail = " ".join(shlex.quote(t) for t in (
             cls._ai_bypass_tokens(cli, bypass) + cls._ai_hook_tokens(cli)
             + model_tokens + cls._ai_screen_tokens(cli)))
@@ -15220,7 +15695,7 @@ if (data !== null) {{
         base = os.path.basename(os.path.normpath(path)) or "home"
         # an account's CLI is a path: name it by the program and the account
         label = os.path.basename(cli.rstrip("/")) or cli
-        acct = Tabit._claude_account_of(cli)
+        acct = Tabit._ai_account_of(cli)
         if acct:
             label = f"{label}-{acct}"
         slug = re.sub(r"[^A-Za-z0-9_-]", "-", f"{label}-{base}")[:32].strip("-")
@@ -15268,7 +15743,7 @@ if (data !== null) {{
     @classmethod
     def _ai_launch_pair(cls, cli, cwd, tries, bypass=False, tmux=False,
                         continue_now=True, resume_later=True, new_sid=None,
-                        resume_id=None, model=""):
+                        resume_id=None, model="", effort=""):
         """(launch argv, stored argv, icon) for a new +AI tab.
 
         The two questions are separate: continue_now picks what runs now
@@ -15288,15 +15763,15 @@ if (data !== null) {{
         resume_id = (resume_id or "").strip() if continue_now else ""
         tries = list(tries or [])
         launch = cls._ai_argv(cli, cwd, tries if continue_now else [],
-                              bypass=bypass, model=model)
+                              bypass=bypass, model=model, effort=effort)
         stored = cls._ai_argv(cli, cwd, tries if resume_later else [],
-                              bypass=bypass, model=model)
+                              bypass=bypass, model=model, effort=effort)
         base = os.path.basename(cli.rstrip("/"))
         if base in AI_SESSION_FILES and not continue_now:
             # Its id is not known until the first message. Until then a
             # restart starts fresh: "the newest in this folder" may be
             # another tab's session. The hunt fills the id in.
-            stored = cls._ai_argv(cli, cwd, [], bypass=bypass, model=model)
+            stored = cls._ai_argv(cli, cwd, [], bypass=bypass, model=model, effort=effort)
         new_arg = AI_NEW_ID_ARGS.get(base)
         if new_sid and new_arg and not continue_now:
             # exec, not a try: "a || b" also runs b when a exits nonzero
@@ -15313,7 +15788,7 @@ if (data !== null) {{
                 # one in the folder would pick up another tab's session.
                 stored = cls._ai_argv(
                     cli, cwd, cls._ai_tries_with_id(cli, [], new_sid),
-                    bypass=bypass, model=model)
+                    bypass=bypass, model=model, effort=effort)
         if resume_id:
             first = cls._ai_tries_with_id(cli, [], resume_id)[0]
             ways = [first]
@@ -15322,7 +15797,7 @@ if (data !== null) {{
                 # `claude attach <short id>` opens it (and ignores, with a
                 # warning, the hooks flag every try gets)
                 ways.append("attach " + resume_id[:8])
-            plain = cls._ai_argv(cli, cwd, [], bypass=bypass, model=model)
+            plain = cls._ai_argv(cli, cwd, [], bypass=bypass, model=model, effort=effort)
             head, _sep, tail = plain[2].rpartition("; exec ")
             tries = " || ".join(tail.replace(shlex.quote(cli), "%s %s" % (
                 shlex.quote(cli), " ".join(shlex.quote(t) for t in shlex.split(w))), 1)
@@ -15332,7 +15807,7 @@ if (data !== null) {{
             launch = ["/bin/sh", "-c", "%s; %s || { printf %%b %s; "
                       'exec "${SHELL:-sh}"; }' % (head, tries, note)]
             stored = cls._ai_argv(cli, cwd, ways if resume_later else [],
-                                  bypass=bypass, model=model)
+                                  bypass=bypass, model=model, effort=effort)
         if not tmux:
             return launch, stored, ICON_AI
         name = cls._ai_tmux_session(cli, cwd, unique=not continue_now)
@@ -15404,7 +15879,8 @@ if (data !== null) {{
             return argv
         cli, path = got
         new = cls._ai_argv(cli, path, cls._ai_tries_with_id(cli, [], sid),
-                           bypass=cls._ai_has_bypass(argv), model=cls._ai_model_of(argv))
+                           bypass=cls._ai_has_bypass(argv), model=cls._ai_model_of(argv),
+                           effort=cls._ai_effort_of(argv))
         _inner, sess = cls._ai_tmux_unwrap(argv)
         return cls._ai_tmux_argv(new, sess) if sess else new
 
@@ -17602,7 +18078,7 @@ if (data !== null) {{
         ai_notify.set_active(bool(s.get("ai_notify", True)))
         ai_notify.set_tooltip_text(
             "A desktop popup when an AI tab goes from working to done, "
-            "to needs-input, or to replied with sub-agents still running, "
+            "to needs-input, or to replied with background work still running, "
             "with a button that switches to it. Nothing "
             "pops for the tab you are looking at. Default is on.")
         urg_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -17811,10 +18287,12 @@ if (data !== null) {{
                            margin_top=8)
         acct_rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         acct_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        acct_title = Gtk.Label(label="Claude accounts", xalign=0)
+        acct_progs = ["claude"] + (["codex"] if shutil.which("codex") else [])
+        acct_title = Gtk.Label(label="AI accounts" if len(acct_progs) > 1
+                               else "Claude accounts", xalign=0)
         acct_title.set_tooltip_text(
             "Each account logs in on its own, and +AI picks one per tab. "
-            "They share settings, CLAUDE.md, skills, agents and the session "
+            "They share settings, instructions, skills and the session "
             "list, so a session can go on under another account.")
         acct_again = Gtk.Button.new_from_icon_name("view-refresh-symbolic",
                                                    Gtk.IconSize.MENU)
@@ -17828,6 +18306,12 @@ if (data !== null) {{
         acct_msg.get_style_context().add_class("session-sub")
         acct_msg.set_line_wrap(True)
         acct_add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        acct_prog = Gtk.ComboBoxText()     # which program a new account is for
+        for p in acct_progs:
+            acct_prog.append(p, p.capitalize())
+        acct_prog.set_active_id("claude")
+        if len(acct_progs) > 1:
+            acct_add_row.pack_start(acct_prog, False, False, 0)
         acct_add_row.pack_start(acct_new, True, True, 0)
         acct_add_row.pack_start(acct_add, False, False, 0)
         for w in (acct_head, acct_rows, acct_add_row, acct_msg):
@@ -17836,21 +18320,33 @@ if (data !== null) {{
         def acct_login(run, name):
             # in a tab: the browser page opens from there, and a code, if
             # Claude asks for one, is typed there
+            prog = os.path.basename(run.rstrip("/"))
             self._add_session(
-                f"Claude login · {name}",
-                ["/bin/sh", "-c", f"{shlex.quote(run)} auth login; "
+                f"{prog.capitalize()} login · {name}",
+                ["/bin/sh", "-c", f"{shlex.quote(run)} "
+                 f"{'login' if prog == 'codex' else 'auth login'}; "
                  'exec "${SHELL:-sh}"'], ICON_COMMAND)
             # Settings is modal: the tab takes typing once it closes
             acct_msg.set_text(f"A tab to log in to “{name}” is open. Close "
                               "Settings, finish there (a browser page, maybe "
                               "a code to paste), then reopen Settings to see it.")
 
-        def acct_remove(name):
+        def acct_remove(prog, name):
+            if prog == "codex":
+                # its background server stops with it, and a codex on it with that
+                in_use = [r for r in self._session_rows()
+                          if not getattr(r, "dead", False)
+                          and (self._ai_cli_path_of(getattr(r, "argv", None)) or ("",))[0]
+                          == dict(self._codex_accounts()).get(name)]
+                if in_use:
+                    acct_msg.set_text(f"“{name}” is in use by {len(in_use)} tab(s): "
+                                      "switch them to another account or close them first.")
+                    return
             ask = Gtk.MessageDialog(
                 transient_for=dialog, modal=True,
                 message_type=Gtk.MessageType.QUESTION,
                 buttons=Gtk.ButtonsType.NONE,
-                text=f"Remove Claude account “{name}”?")
+                text=f"Remove {prog.capitalize()} account “{name}”?")
             ask.format_secondary_text(
                 "This computer forgets its login. Tabs that use it stop "
                 "working after they close. Sessions and settings stay: they "
@@ -17861,19 +18357,21 @@ if (data !== null) {{
             go = ask.run() == Gtk.ResponseType.OK
             ask.destroy()
             if go:
-                self._claude_account_remove(name)
+                self._ai_account_remove(prog, name)
                 acct_refresh()
 
         def acct_fill(found):
             for c in acct_rows.get_children():
                 acct_rows.remove(c)
             for name, run, st in found:
+                prog = os.path.basename(run.rstrip("/"))
                 who = (f"{st.get('email') or 'logged in'}"
                        f"{' · ' + st['subscriptionType'] if st.get('subscriptionType') else ''}"
                        if st.get("loggedIn") else "not logged in")
                 r = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
                             margin_start=12)
-                lbl = Gtk.Label(label=f"{name or 'Default'} — {who}", xalign=0)
+                tag = f"{prog.capitalize()} · " if len(acct_progs) > 1 else ""
+                lbl = Gtk.Label(label=f"{tag}{name or 'Default'} — {who}", xalign=0)
                 lbl.set_ellipsize(Pango.EllipsizeMode.END)
                 r.pack_start(lbl, True, True, 0)
                 if not st.get("loggedIn"):
@@ -17886,7 +18384,7 @@ if (data !== null) {{
                                                       Gtk.IconSize.MENU)
                     b.set_relief(Gtk.ReliefStyle.NONE)
                     b.set_tooltip_text("Remove this account")
-                    b.connect("clicked", lambda _b, n=name: acct_remove(n))
+                    b.connect("clicked", lambda _b, p=prog, n=name: acct_remove(p, n))
                     r.pack_start(b, False, False, 0)
                 acct_rows.pack_start(r, False, False, 0)
             acct_rows.show_all()
@@ -17894,15 +18392,15 @@ if (data !== null) {{
 
         def acct_refresh(*_a):
             def work():
-                found = [(name, run, self._claude_auth_status(run))
-                         for name, run in [("", "claude")] + self._claude_accounts()]
+                found = [(name, run, self._ai_auth_status(run)) for prog in acct_progs
+                         for name, run in [("", prog)] + self._ai_accounts(prog)]
                 GLib.idle_add(acct_fill, found)
             threading.Thread(target=work, daemon=True).start()
 
         def acct_on_add(*_a):
             name = acct_new.get_text().strip()
             try:
-                run = self._claude_account_add(name)
+                run = self._ai_account_add(acct_prog.get_active_id() or "claude", name)
             except (ValueError, OSError) as e:
                 acct_msg.set_text(f"Not added: {e}")
                 return
