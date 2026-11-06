@@ -7,6 +7,7 @@ import tempfile
 import time
 import types
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -299,6 +300,9 @@ class CodexChatTest(unittest.TestCase):
         old = os.environ.get("HOME")
         os.environ["HOME"] = self.home
         self.addCleanup(os.environ.__setitem__, "HOME", old)
+        p = mock.patch.object(tabit, "CODEX_DEFAULT_DIR", os.path.join(self.home, ".codex"))
+        p.start()
+        self.addCleanup(p.stop)
         T._codex_rollouts.clear()
 
     def rollout(self, sid):
@@ -364,6 +368,9 @@ class CodexNotifyTest(unittest.TestCase):
         old = os.environ.get("HOME")
         os.environ["HOME"] = home
         self.addCleanup(os.environ.__setitem__, "HOME", old)
+        p = mock.patch.object(tabit, "CODEX_DEFAULT_DIR", os.path.join(home, ".codex"))
+        p.start()
+        self.addCleanup(p.stop)
         T._codex_rollouts.clear()
         day = os.path.join(home, ".codex", "sessions", "2026", "11", "05")
         os.makedirs(day)

@@ -1,4 +1,4 @@
-/* tabit's Settings sheet: AI defaults, Claude accounts, update, restart.
+/* tabit's Settings sheet: AI defaults, Claude and Codex accounts, update, restart.
    The terminal view (remote.html) and Tabit Chat (chat.html) both load it and
    call openTabitSettings(sheet, close) with their own way to show and close a
    sheet; each page styles the markup.
@@ -61,17 +61,27 @@ async function drawSettings() {
   }
   const acctRow = (a) => `<div class="acct"><span>${esc(a.name || "Default")} — ${a.loggedIn
     ? esc(a.email || "logged in") + (a.plan ? ` · ${esc(a.plan)}` : "") : "not logged in"}</span>${a.loggedIn
-    ? "" : `<button class="slogin" data-n="${esc(a.name)}">Log in</button>`}</div>`;
+    ? "" : `<button class="slogin" data-c="${esc(a.cli || "claude")}" data-n="${esc(a.name)}">Log in</button>`}</div>`;
+  const PROG = { claude: "Claude", codex: "Codex" };
+  const progs = [...new Set(st.accounts.map((a) => a.cli || "claude"))];
+  const lgName = lg ? (lg.cli === "codex" ? "Codex " : "") + (lg.account || "Default") : "";
   let login = "";
-  if (lg && (lg.state === "starting" || lg.state === "waiting")) {
-    login = `<div class="box"><b>Log in to ${esc(lg.account || "Default")}</b>${lg.url
+  if (lg && (lg.state === "starting" || lg.state === "waiting") && lg.cli === "codex") {
+    // a device code: typed on the login page, and nothing comes back here
+    login = `<div class="box"><b>Log in to ${esc(lgName)}</b>${lg.url && lg.code
+      ? `<a class="btnlink" href="${esc(lg.url)}" target="_blank" rel="noopener">1. Open the login page</a>
+        <label>2. Type this code there</label><div class="scodeshow"><b>${esc(lg.code)}</b></div>
+        <div class="dim">This turns to ✓ by itself when you are done.</div>`
+      : `<div class="dim">Starting…</div>`}</div>`;
+  } else if (lg && (lg.state === "starting" || lg.state === "waiting")) {
+    login = `<div class="box"><b>Log in to ${esc(lgName)}</b>${lg.url
       ? `<a class="btnlink" href="${esc(lg.url)}" target="_blank" rel="noopener">1. Open the login page</a>
         <label for="scode">2. Paste the code it shows</label>
         <input id="scode" autocapitalize="off" autocorrect="off" spellcheck="false">
         <div class="row"><button id="scodego" class="go">Send code</button></div>`
       : `<div class="dim">Starting…</div>`}<div id="slmsg" class="dim">${esc(lg.msg || "")}</div></div>`;
   } else if (lg && lg.state === "done") {
-    login = `<div class="dim">✓ ${esc(lg.account || "Default")} logged in.</div>`;
+    login = `<div class="dim">✓ ${esc(lgName)} logged in.</div>`;
   } else if (lg && lg.state === "failed") {
     login = `<div class="err">Login stopped: ${esc(lg.msg || "")}</div>`;
   }
@@ -89,10 +99,10 @@ async function drawSettings() {
     <label>AI defaults (new tabs)</label>
     ${Object.keys(SET_LABELS).map((k) => `<label class="check"><input type="checkbox" data-k="${k}"${
       st.settings[k] ? " checked" : ""}> ${esc(SET_LABELS[k])}</label>`).join("")}
-    <label>Claude accounts</label>
-    ${st.accounts.map(acctRow).join("")}
+    ${progs.map((p) => `<label>${PROG[p] || p} accounts</label>
+    ${st.accounts.filter((a) => (a.cli || "claude") === p).map(acctRow).join("")}`).join("")}
     ${login}
-    <div class="pathline"><input id="snewacct" placeholder="new account name, e.g. work" autocapitalize="off"
+    <div class="pathline">${progs.length > 1 ? `<select id="snewcli">${progs.map((p) => `<option value="${p}">${PROG[p] || p}</option>`).join("")}</select>` : ""}<input id="snewacct" placeholder="new account name, e.g. work" autocapitalize="off"
       autocorrect="off" spellcheck="false"><button id="saddacct">Add</button></div>
     <label>tabit ${esc(st.version)}</label>
     ${upd}
@@ -105,8 +115,8 @@ async function drawSettings() {
     try { await admin("set", { [c.dataset.k]: c.checked }); settingsMsg("saved"); }
     catch (e) { c.checked = !c.checked; settingsMsg(e.message || String(e), true); }
   };
-  for (const b of $("sbody").querySelectorAll(".slogin")) b.onclick = () => run(() => admin("login-start", { name: b.dataset.n }));
-  $("saddacct").onclick = () => run(() => admin("account-add", { name: $("snewacct").value.trim() }));
+  for (const b of $("sbody").querySelectorAll(".slogin")) b.onclick = () => run(() => admin("login-start", { cli: b.dataset.c, name: b.dataset.n }));
+  $("saddacct").onclick = () => run(() => admin("account-add", { cli: $("snewcli") ? $("snewcli").value : "claude", name: $("snewacct").value.trim() }));
   if ($("scodego")) $("scodego").onclick = () => run(() => admin("login-code", { code: $("scode").value.trim() }));
   if ($("supcheck")) $("supcheck").onclick = async () => {
     $("supinfo").innerHTML = `<div class="dim">Checking…</div>`;

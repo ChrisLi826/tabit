@@ -1160,6 +1160,7 @@ class TestChatModelSwitch(unittest.TestCase):
             _tg_row_by_id = lambda _s, tid: test.row if tid == "t1" else None
             _ai_cli_path_of = staticmethod(tabit.Tabit._ai_cli_path_of)
             _claude_account_of = staticmethod(tabit.Tabit._claude_account_of)
+            _ai_account_of = staticmethod(tabit.Tabit._ai_account_of)
 
             def _ai_switch_account(self, row, name, model=None):
                 test.asked.append((row, name, model))

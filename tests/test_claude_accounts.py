@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Claude accounts: one wrapper per account, picked per +AI tab."""
+import base64
 import json
 import os
 import re
@@ -223,7 +224,7 @@ class TestSwitchAccount(AccountDirs):
         self.addCleanup(p.stop)
         for name in ("_ai_cli_path_of", "_ai_is_claude", "_claude_account_of",
                      "_ai_tmux_unwrap", "_ai_launch_pair", "_ai_has_bypass", "_ai_model_of",
-                     "_claude_session_saved"):
+                     "_claude_session_saved", "_ai_account_of", "_ai_accounts"):
             setattr(self.app, name, getattr(T, name))
 
     def row(self, cli="claude", tmux=True, model="", **kw):
@@ -263,8 +264,8 @@ class TestSwitchAccount(AccountDirs):
                  (self.row(agent_status="background"), "work", "background"),
                  (self.row(), "gone", "no Claude account"),
                  (self.row(dead=True), "work", "exited"),
-                 (self.row(argv=T._ai_launch_pair("codex", self.tmp, [], tmux=True)[1]),
-                  "work", "only a Claude tab")]
+                 (self.row(argv=T._ai_launch_pair("grok", self.tmp, [], tmux=True)[1]),
+                  "work", "only a Claude or Codex tab")]
         r = self.row()
         r.argv = T._ai_argv("claude", self.tmp, [])     # no id yet
         cases.append((r, "work", "send one message"))
@@ -348,6 +349,7 @@ class TestRemoteNewTab(AccountDirs):
         app._ai_is_claude = T._ai_is_claude
         app._ai_launch_pair = T._ai_launch_pair
         app._claude_accounts = T._claude_accounts
+        app._ai_accounts = T._ai_accounts
         app._ai_sub = lambda p, cli=None: p
         return app
 
@@ -374,6 +376,117 @@ class TestRemoteNewTab(AccountDirs):
                                          "cwd": self.tmp, "account": "gone"})
         self.assertEqual(code, 400)
         app._add_session.assert_not_called()
+
+
+class TestCodexAccounts(unittest.TestCase):
+    """Codex accounts: the same layout, with CODEX_HOME."""
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.tmp = d.name
+        self.home = os.path.join(d.name, "dot-codex")
+        for sub in ("sessions", "packages", "skills"):
+            os.makedirs(os.path.join(self.home, sub))
+        for name in ("config.toml", "AGENTS.md", "auth.json"):
+            with open(os.path.join(self.home, name), "w") as f:
+                f.write("{}")
+        for name, value in (("CODEX_ACCOUNTS_DIR", os.path.join(d.name, "codex-accounts")),
+                            ("CODEX_DEFAULT_DIR", self.home)):
+            p = mock.patch.object(tabit, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def run_wrapper(self, cli):
+        fake = os.path.join(self.tmp, "fakebin")
+        os.makedirs(fake, exist_ok=True)
+        with open(os.path.join(fake, "codex"), "w") as f:
+            f.write('#!/bin/sh\necho "$CODEX_HOME|$*"\n')
+        os.chmod(os.path.join(fake, "codex"), 0o755)
+        env = dict(os.environ, PATH=fake + os.pathsep + os.environ["PATH"])
+        return subprocess.run([cli, "resume", A], env=env, capture_output=True,
+                              text=True, check=True).stdout.strip()
+
+    def test_add_makes_a_codex_named_wrapper(self):
+        cli = T._codex_account_add("home")
+        self.assertEqual(os.path.basename(cli), "codex")
+        self.assertEqual(T._ai_account_of(cli), "home")
+        self.assertIsNone(T._claude_account_of(cli))
+        self.assertIsNone(T._ai_account_of("codex"))
+        self.assertEqual(T._codex_accounts(), [("home", cli)])
+        self.assertEqual(T._ai_accounts("codex"), [("home", cli)])
+        with self.assertRaises(ValueError):
+            T._codex_account_add("home")
+
+    def test_it_runs_codex_with_its_own_home_and_shares_the_rest(self):
+        cli = T._codex_account_add("home")
+        own = os.path.join(os.path.dirname(os.path.dirname(cli)), "home")
+        self.assertEqual(self.run_wrapper(cli), f"{own}|resume {A}")
+        for name in ("config.toml", "AGENTS.md", "sessions", "packages", "skills"):
+            self.assertEqual(os.readlink(os.path.join(own, name)),
+                             os.path.join(self.home, name), name)
+        self.assertFalse(os.path.lexists(os.path.join(own, "auth.json")))   # the login is its own
+
+    def test_remove_leaves_the_shared_files_alone(self):
+        cli = T._codex_account_add("home")
+        self.run_wrapper(cli)
+        T._ai_account_remove("codex", "home")
+        self.assertEqual(T._codex_accounts(), [])
+        self.assertTrue(os.path.isdir(os.path.join(self.home, "sessions")))
+        self.assertTrue(os.path.isfile(os.path.join(self.home, "config.toml")))
+
+    def test_the_login_comes_from_its_auth_file(self):
+        cli = T._codex_account_add("home")
+        self.assertEqual(T._ai_auth_status(cli), {"loggedIn": False})
+        claims = {"email": "me@x", "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"}}
+        jwt = "h." + base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=") + ".s"
+        with open(os.path.join(os.path.dirname(os.path.dirname(cli)), "home", "auth.json"), "w") as f:
+            json.dump({"tokens": {"id_token": jwt}}, f)
+        self.assertEqual(T._ai_auth_status(cli),
+                         {"loggedIn": True, "email": "me@x", "subscriptionType": "plus"})
+
+    def switcher(self, spoke=True):
+        app = mock.Mock()
+        for name in ("_ai_switch_account", "_ai_respawn"):
+            setattr(app, name, getattr(T, name).__get__(app))
+        for name in ("_ai_cli_path_of", "_ai_is_claude", "_ai_tmux_unwrap", "_ai_launch_pair",
+                     "_ai_has_bypass", "_ai_model_of", "_ai_account_of", "_ai_accounts"):
+            setattr(app, name, getattr(T, name))
+        # codex names its session after a turn; a session with a file has spoken
+        app._codex_notified = lambda row: [A] if spoke else []
+        app._codex_rollout = lambda argv: (f"/x/rollout-2026-11-06T09-00-00-{A}.jsonl"
+                                           if A in " ".join(argv) else "")
+        return app
+
+    def row(self, cli="codex"):
+        stored = T._ai_launch_pair(cli, self.tmp, [], tmux=True)[1]
+        return types.SimpleNamespace(kind="term", argv=stored, agent_status="idle",
+                                     dead=False, pid=4321, title_text="codex",
+                                     _live_tmux=T._ai_tmux_unwrap(stored)[1])
+
+    def test_a_codex_tab_goes_on_under_another_login_and_model(self):
+        cli = T._codex_account_add("home")
+        app, r = self.switcher(), self.row()
+        with mock.patch.object(tabit, "_tmux_kill_session") as kill:
+            self.assertIsNone(app._ai_switch_account(r, "home", model="gpt-a"))
+        kill.assert_called_once()
+        self.assertEqual(T._ai_cli_path_of(r.argv)[0], cli)
+        self.assertEqual(T._ai_model_of(r.argv), "gpt-a")
+        self.assertTrue(T._ai_tmux_unwrap(r.argv)[1].startswith("ai-codex-home-"))
+        launch = T._ai_tmux_unwrap(r._respawn[0])[0][2]
+        self.assertIn(f"resume {A}", launch)
+        self.assertIn("--model gpt-a", launch)
+        self.assertIn("notify=", launch)               # its chat still learns the session
+        r.term, r.subtitle = mock.Mock(), mock.Mock()
+        app._ai_sub = lambda p, cli=None: p
+        T._ai_respawn(app, r)
+        app._set_tab_name.assert_called_once_with(r, "codex · home")
+
+    def test_a_codex_tab_that_never_spoke_waits(self):
+        T._codex_account_add("home")
+        app, r = self.switcher(spoke=False), self.row()
+        self.assertIn("send one message", app._ai_switch_account(r, "home"))
+        self.assertIn("no Codex account", self.switcher()._ai_switch_account(r, "gone"))
 
 
 if __name__ == "__main__":

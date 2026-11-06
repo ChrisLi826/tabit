@@ -28,7 +28,7 @@ def app(**kw):
                  "_remote_admin_login_code", "_remote_unsaved_notes"):
         setattr(a, name, getattr(T, name).__get__(a))
     a._session_rows.return_value = []
-    a._claude_accounts.return_value = []
+    a._ai_accounts.return_value = []
     for k, v in kw.items():
         setattr(a, k, v)
     return a
@@ -104,21 +104,32 @@ class TestAccounts(unittest.TestCase):
 
     def test_a_bad_name_is_refused(self):
         a = app()
-        a._claude_account_add.side_effect = ValueError("use 1-24 letters")
+        a._ai_account_add.side_effect = ValueError("use 1-24 letters")
         self.assertEqual(T._remote_admin(a, "account-add", {"name": "a b"})[0], 400)
         a._remote_login_start.assert_not_called()
 
     def test_adding_starts_its_login(self):
         a = app()
-        a._claude_account_add.return_value = "/x/work/bin/claude"
+        a._ai_account_add.return_value = "/x/work/bin/claude"
         self.assertEqual(T._remote_admin(a, "account-add", {"name": "work"})[0], 200)
+        a._ai_account_add.assert_called_once_with("claude", "work")
         a._remote_login_start.assert_called_once_with("work", "/x/work/bin/claude")
+
+    def test_a_codex_account(self):
+        a = app()
+        a._ai_account_add.return_value = "/x/home/bin/codex"
+        self.assertEqual(T._remote_admin(a, "account-add", {"cli": "codex", "name": "home"})[0], 200)
+        a._ai_account_add.assert_called_once_with("codex", "home")
+        a = app()
+        self.assertEqual(T._remote_admin(a, "login-start", {"cli": "codex", "name": ""})[0], 200)
+        a._remote_login_start.assert_called_once_with("", "codex")
 
     def test_log_in_an_existing_one(self):
         a = app()
-        a._claude_accounts.return_value = [("work", "/x/work/bin/claude")]
+        a._ai_accounts.return_value = [("work", "/x/work/bin/claude")]
         self.assertEqual(T._remote_admin(a, "login-start", {"name": "work"})[0], 200)
         a._remote_login_start.assert_called_once_with("work", "/x/work/bin/claude")
+        a._ai_accounts.assert_called_with("claude")
         a = app()
         self.assertEqual(T._remote_admin(a, "login-start", {"name": ""})[0], 200)
         a._remote_login_start.assert_called_once_with("", "claude")
@@ -165,6 +176,23 @@ class TestLoginJob(unittest.TestCase):
         self.assertIn("Invalid code", a._remote_login["msg"])
         T._remote_admin_login_code(a, "good")
         self.wait(a, "done")
+
+    def test_codex_shows_a_code_to_type_on_the_page(self):
+        cli = os.path.join(os.path.dirname(self.cli), "codex")
+        with open(cli, "w") as f:      # what `codex login --device-auth` prints, colors and all
+            f.write("#!/bin/sh\n"
+                    "[ \"$*\" = 'login --device-auth' ] || exit 3\n"
+                    "printf '1. Open this link in your browser and sign in to your account\\r\\n'\n"
+                    "printf '   \\033[94mhttps://auth.openai.com/codex/device\\033[0m\\r\\n\\r\\n'\n"
+                    "printf '2. Enter this one-time code \\033[90m(expires in 15 minutes)\\033[0m\\r\\n'\n"
+                    "printf '   \\033[94m23BN-CBSKB\\033[0m\\r\\n'\n"
+                    "sleep 0.5; echo 'Successfully logged in'\n")
+        os.chmod(cli, 0o755)
+        a = types.SimpleNamespace(_remote_login=None)
+        T._remote_login_start(a, "home", cli)
+        job = self.wait(a, "done")
+        self.assertEqual((job["cli"], job["url"], job["code"]),
+                         ("codex", "https://auth.openai.com/codex/device", "23BN-CBSKB"))
 
     def test_a_code_needs_a_login_waiting(self):
         a = types.SimpleNamespace(_remote_login=None)

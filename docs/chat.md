@@ -102,8 +102,12 @@ tabit starts each Codex with `-c notify=[...]`: after each turn Codex runs
 that tab. So a Codex chat fills in once its first turn ends. A Codex tab
 saved before this gets the notify the next time its codex starts. tabit
 takes Codex's `notify` setting for this: a `notify` in your
-`~/.codex/config.toml` is not run in a tab. Its login and model are
-Codex's own; the chat's settings do not change them. When Codex asks to
+`~/.codex/config.toml` is not run in a tab. Account and model switch as
+for Claude (below): tabit restarts the tab's codex with `resume <id>`,
+under the account's own `codex`, with `--model` for a model. The models are
+the ones Codex lists in its own `/model` picker (`~/.codex/models_cache.json`).
+A Codex tab can switch only after its first turn: before that tabit does not
+know its session. When Codex asks to
 run a command or make an edit, the chat shows its question as a card, the
 same as a menu in a Claude tab: a tap presses that option's number in the tab.
 
@@ -113,7 +117,7 @@ same as a menu in a Claude tab: a tap presses that option's number in the tab.
 - **New chat** opens a Claude tab in the group you pick, in the folder you
   pick. With no group picked, the tab is in no group. When Codex is
   installed, the form asks which AI: Claude or Codex. It remembers the last
-  pick.
+  pick. With more than one login for that AI, it also asks which account.
 - **Delete.** Deleting a chat closes its tab. The chat asks first. The last
   tab in tabit cannot be closed from the phone, so that chat stays. Closing a
   tab removes its chat after about a minute.
@@ -132,8 +136,8 @@ same as a menu in a Claude tab: a tap presses that option's number in the tab.
   and both together are one restart. Not while Claude works, asks something
   or still runs agents. Claude's own settings are not touched. The tab shows
   the model that answered last, read from its transcript.
-- Tabs of other tools (Codex, Grok) have no chat: only Claude's transcript is
-  read.
+- Tabs of other tools (Grok, agy) have no chat: only Claude's and Codex's
+  sessions are read.
 - When the tab starts a new conversation, the chat says so and goes on with
   the new one.
 - **Menus on the tab's screen.** A tab that waits on a menu (the trust

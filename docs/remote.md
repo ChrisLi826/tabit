@@ -85,9 +85,11 @@ console, that is a remote shell from your phone.
   phone while you look at it, and gets its own size back about 45 seconds
   after you leave it.
 - ⚙ Settings: the three AI defaults (tmux, Claude bypass, fresh after
-  reopening); Claude accounts, with their login state, **Add**, and **Log
-  in**: tabit runs `claude auth login` itself, the page shows the login link,
-  and you paste the code back; **Check for updates** and **Update now**,
+  reopening); Claude accounts, and Codex accounts when Codex is installed,
+  with their login state, **Add**, and **Log in**: for Claude tabit runs
+  `claude auth login` itself, the page shows the login link, and you paste
+  the code back; for Codex it runs `codex login --device-auth`, and the page
+  shows the link and a one-time code to type on that page; **Check for updates** and **Update now**,
   which restarts tabit when it is done; and **Restart tabit**. Tabs outside
   tmux close on a restart; tmux tabs keep running. An update needs sudo
   without a password, and a restart or an update waits until no note has

@@ -1312,10 +1312,12 @@ class Group(_Log):
 
 class ChatManager:
     def __init__(self, accounts=None, env_drop=(), root=CHAT_DIR, claude=None, auth=None,
-                 tab_hook=None, extra_env=None, tabs_hook=None, tab_ops=None, roster_dir=None):
+                 tab_hook=None, extra_env=None, tabs_hook=None, tab_ops=None, roster_dir=None,
+                 codex_accounts=None):
         self.accounts = accounts or (lambda: [])     # [(name, cli)]
+        self.codex_accounts = codex_accounts or (lambda: [])   # the same, for Codex tabs
         self.auth = auth                             # fn(cli) -> {"email", "subscriptionType"}
-        self._labels = (0, [])
+        self._labels = {}                            # cli -> (when, rows)
         self.account = ""                            # the login of a chat that picked none
         self.env_drop = tuple(env_drop)
         self.root = root
@@ -1347,25 +1349,31 @@ class ChatManager:
         except (OSError, ValueError, AttributeError):
             pass
 
-    def account_choices(self):
-        """[{"name", "label"}]: the default login first, then each extra one.
-        The email and plan come from asking claude, so they are kept a minute."""
-        stamp, rows = self._labels
+    def accounts_of(self, cli):
+        """[(name, cli)] of the extra logins of claude or codex."""
+        return list(self.codex_accounts() if cli == "codex" else self.accounts())
+
+    def account_choices(self, cli="claude"):
+        """[{"name", "label"}]: the default login first, then each extra one,
+        of claude or codex. The email and plan come from asking the program,
+        so they are kept a minute."""
+        stamp, rows = self._labels.get(cli, (0, []))
         if rows and time.time() - stamp < 60:
             return rows
         rows = []
-        for name, cli in [("", self.claude or shutil.which("claude") or "claude")] + list(self.accounts()):
+        first = "codex" if cli == "codex" else (self.claude or shutil.which("claude") or "claude")
+        for name, run in [("", first)] + self.accounts_of(cli):
             info = {}
             if self.auth:
                 try:
-                    info = self.auth(cli) or {}
+                    info = self.auth(run) or {}
                 except Exception:
                     info = {}
             who = ((info.get("email") or "logged in") + (" · " + info["subscriptionType"]
                    if info.get("subscriptionType") else "")) if info.get("loggedIn", bool(info)) \
                 else ("not logged in" if self.auth else "")
             rows.append({"name": name, "label": (name or "Default") + (" — " + who if who else "")})
-        self._labels = (time.time(), rows)
+        self._labels[cli] = (time.time(), rows)
         return rows
 
     def _load(self):
@@ -1672,11 +1680,11 @@ class ChatManager:
         if cli not in CHAT_CLIS:
             return 400, {"error": "the AI is one of: " + ", ".join(CHAT_CLIS)}
         want = {"kind": "ai", "cli": cli, "cwd": cwd, "group": body.get("group") or ""}
-        if cli == "claude":                                  # Codex has its own login
-            account = body.get("account", self.account)     # picked in the form; else the default
-            if account not in [""] + [n for n, _ in self.accounts()]:
-                return 400, {"error": "no such Claude account"}
-            want["account"] = account
+        # picked in the form; else the default
+        account = body.get("account", self.account if cli == "claude" else "")
+        if account not in [""] + [n for n, _ in self.accounts_of(cli)]:
+            return 400, {"error": f"no such {cli.capitalize()} account"}
+        want["account"] = account
         if title:
             want["name"] = title
         with self._tabs_lock:
@@ -1884,12 +1892,14 @@ def api(mgr, method, parts, body):
             if mgr.tab_ops:
                 code, out = mgr.tab_ops("groups")
                 tabgroups = out if code == 200 else {}
-            return 200, {"chats": mgr.listing(),
-                         "groups": [g.summary() for g in mgr.groups.values()],
-                         "tabgroups": tabgroups,
-                         "accounts": mgr.account_choices(), "account": mgr.account,
-                         "modes": list(MODES), "models": list(MODELS),
-                         "clis": [c for c in CHAT_CLIS if c == "claude" or shutil.which(c)]}
+            clis = [c for c in CHAT_CLIS if c == "claude" or shutil.which(c)]
+            return 200, dict({"chats": mgr.listing(),
+                              "groups": [g.summary() for g in mgr.groups.values()],
+                              "tabgroups": tabgroups,
+                              "accounts": mgr.account_choices(), "account": mgr.account,
+                              "modes": list(MODES), "models": list(MODELS), "clis": clis},
+                             **({"codex_accounts": mgr.account_choices("codex"),
+                                 "codex_models": codex_models()} if "codex" in clis else {}))
         if method == "POST":
             return mgr.new_tab_chat(body) if body.get("kind") == "tab" else mgr.create(body)
         return 405, {"error": "GET or POST"}
@@ -2044,21 +2054,38 @@ def model_alias(model):
     return next((a for a in MODELS if a and a in str(model or "")), "")
 
 
+def codex_models():
+    """[{"name", "label"}] of the models Codex lists in its own picker, the
+    default first; from the list Codex keeps in its home."""
+    rows = [{"name": "", "label": "default"}]
+    try:
+        with open(os.path.join(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex"),
+                               "models_cache.json"), encoding="utf-8") as f:
+            got = json.load(f).get("models") or []
+    except (OSError, ValueError, AttributeError):
+        return rows
+    for m in got:
+        if isinstance(m, dict) and m.get("visibility") == "list" and m.get("slug"):
+            rows.append({"name": m["slug"], "label": m.get("display_name") or m["slug"]})
+    return rows
+
+
 def _edit_tab(chat, body):
     """The login and the model of a chat that is a tab: tabit restarts the
-    tab's claude on the same conversation, once for both. None when it went
-    well, else (status, object)."""
+    tab's claude or codex on the same conversation, once for both. None when
+    it went well, else (status, object)."""
     mgr, tab = chat.mgr, chat.meta["tab"]
+    cli = tab.get("cli") or "claude"
     acct = body["account"] if "account" in body and body["account"] != tab.get("account", "") else None
-    model = body["model"] if "model" in body and body["model"] != model_alias(tab.get("model")) else None
-    if acct is not None and acct not in [""] + [n for n, _ in mgr.accounts()]:
-        return 400, {"error": "no such Claude account"}
-    if model is not None and model not in MODELS:
+    now = tab.get("model") or "" if cli == "codex" else model_alias(tab.get("model"))
+    model = body["model"] if "model" in body and body["model"] != now else None
+    if acct is not None and acct not in [""] + [n for n, _ in mgr.accounts_of(cli)]:
+        return 400, {"error": f"no such {cli.capitalize()} account"}
+    if model is not None and model not in (
+            [m["name"] for m in codex_models()] if cli == "codex" else MODELS):
         return 400, {"error": "no such model"}
     if acct is None and model is None:
         return None
-    if tab.get("cli") == "codex":
-        return 400, {"error": "a Codex tab keeps its own login and model"}
     if not mgr.tab_ops:
         return 400, {"error": "no tabs here"}
     if model is not None:

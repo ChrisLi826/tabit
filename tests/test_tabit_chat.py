@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -1012,11 +1013,45 @@ class CodexMirrorTest(Base):
         chat = next(c for c in self.mgr.chats.values() if c.mirrored)
         self.assertEqual(chat.meta["tab"]["cli"], "codex")
 
-    def test_its_login_and_model_stay_codex(self):
+    def codex_home(self):
+        home = os.path.join(self.dir, "codex-home")
+        os.makedirs(home)
+        with open(os.path.join(home, "models_cache.json"), "w") as f:
+            json.dump({"models": [{"slug": "gpt-a", "display_name": "GPT-A", "visibility": "list"},
+                                  {"slug": "gpt-hidden", "visibility": "hide"}]}, f)
+        p = mock.patch.dict(os.environ, {"CODEX_HOME": home})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_the_models_are_those_codex_lists(self):
+        self.codex_home()
+        self.assertEqual(tc.codex_models(), [{"name": "", "label": "default"},
+                                             {"name": "gpt-a", "label": "GPT-A"}])
+
+    def test_its_login_and_model_switch_as_codex(self):
+        self.codex_home()
         chat = self.mirror()
-        self.mgr.tab_ops = lambda *a: self.fail("a Codex tab is not restarted as Claude")
-        code, out = tc.api(self.mgr, "POST", [chat.id, "edit"], {"model": "opus"})
-        self.assertEqual(code, 400, out)
+        chat.mirror_poll()                              # it answers as gpt-5.6-luna
+        ops = []
+        self.mgr.tab_ops = lambda op, target=None, body=None: ops.append((op, body)) or (200, {"ok": True})
+        self.mgr.accounts = lambda: [("Work", FAKE)]
+        self.mgr.codex_accounts = lambda: [("Home", FAKE)]
+        edit = lambda body: tc.api(self.mgr, "POST", [chat.id, "edit"], body)[0]
+        self.assertEqual(edit({"model": "opus"}), 400)          # a Claude model
+        self.assertEqual(edit({"account": "Work"}), 400)        # a Claude login
+        self.assertEqual(edit({"model": "gpt-5.6-luna"}), 200)  # the one it has: nothing to do
+        self.assertEqual(ops, [])
+        self.assertEqual(edit({"model": "gpt-a", "account": "Home"}), 200)
+        self.assertEqual(ops, [("model", {"model": "gpt-a", "account": "Home"})])
+        self.assertEqual((chat.meta["tab"]["model"], chat.summary()["account"]), ("gpt-a", "Home"))
+
+    def test_the_page_gets_the_codex_logins_and_models(self):
+        self.codex_home()
+        self.mgr.codex_accounts = lambda: [("Home", FAKE)]
+        with mock.patch.object(tc.shutil, "which", lambda c: "/usr/bin/" + c):
+            out = tc.api(self.mgr, "GET", [], None)[1]
+        self.assertEqual([a["name"] for a in out["codex_accounts"]], ["", "Home"])
+        self.assertEqual([m["name"] for m in out["codex_models"]], ["", "gpt-a"])
 
     def test_another_ai_tab_gets_none(self):
         self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False: {
@@ -1256,12 +1291,18 @@ class TabSyncTest(Base):
 
     def test_a_new_chat_can_open_a_codex_tab(self):
         self.mgr.accounts = lambda: [("Work", FAKE)]
+        self.mgr.codex_accounts = lambda: [("Home", FAKE)]
         code, out = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "cli": "codex",
                                                   "account": "Work"})
+        self.assertEqual(code, 400, out)               # a Claude login is no Codex login
+        code, out = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "cli": "codex",
+                                                  "account": "Home"})
         self.assertEqual(code, 200, out)
         body = next(o for o in self.ops if o[0] == "new")[2]
-        self.assertEqual(body["cli"], "codex")
-        self.assertNotIn("account", body)              # Codex has its own login
+        self.assertEqual((body["cli"], body["account"]), ("codex", "Home"))
+        self.ops.clear()
+        tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "cli": "codex"})
+        self.assertEqual(next(o for o in self.ops if o[0] == "new")[2]["account"], "")
         self.ops.clear()
         code, _ = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "cli": "grok"})
         self.assertEqual((code, self.ops), (400, []))
