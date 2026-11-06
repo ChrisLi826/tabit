@@ -1247,6 +1247,7 @@ const settings = async (t = cur) => {
     try { t = { kind: t.kind, id: t.id, meta: (await api(`${base(t.kind)}/${t.id}`)).meta }; } catch (e) { return; }
   }
   const m = t.meta;
+  if (!cfg) { try { cfg = await api("api/chats"); } catch (e) { return; } }   // a chat opened straight from a link
   const done = () => { closeSheet(); if (!cur || cur.id !== t.id) loadList(); };
   const gone = () => { closeSheet(); if (cur && cur.id === t.id) location.hash = ""; else loadList(); };
   if (t.kind === "groups") {

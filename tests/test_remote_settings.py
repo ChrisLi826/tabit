@@ -124,6 +124,10 @@ class TestAccounts(unittest.TestCase):
         self.assertEqual(T._remote_admin(a, "login-start", {"cli": "codex", "name": ""})[0], 200)
         a._remote_login_start.assert_called_once_with("", "codex")
 
+    def test_a_name_that_is_not_text(self):
+        self.assertEqual(T._remote_admin(app(), "account-add", {"name": 5})[0], 400)
+        self.assertEqual(T._remote_admin(app(), "login-start", {"name": ["x"]})[0], 400)
+
     def test_log_in_an_existing_one(self):
         a = app()
         a._ai_accounts.return_value = [("work", "/x/work/bin/claude")]
@@ -185,7 +189,8 @@ class TestLoginJob(unittest.TestCase):
                     "printf '1. Open this link in your browser and sign in to your account\\r\\n'\n"
                     "printf '   \\033[94mhttps://auth.openai.com/codex/device\\033[0m\\r\\n\\r\\n'\n"
                     "printf '2. Enter this one-time code \\033[90m(expires in 15 minutes)\\033[0m\\r\\n'\n"
-                    "printf '   \\033[94m23BN-CBSKB\\033[0m\\r\\n'\n"
+                    "printf '   \\033[94m23BN-CBSK'; sleep 0.3\n"     # one read ends mid-code
+                    "printf 'B\\033[0m\\r\\n'\n"
                     "sleep 0.5; echo 'Successfully logged in'\n")
         os.chmod(cli, 0o755)
         a = types.SimpleNamespace(_remote_login=None)

@@ -35,7 +35,7 @@ window.openTabitSettings = (sheet, close) => {
 };
 async function drawSettings() {
   clearTimeout(setTimer);
-  if (!$("sbody")) return;                   // closed, or another sheet now
+  if (!$("sbody") || !$("sbody").offsetParent) return;   // closed, hidden, or another sheet now
   let st;
   try {
     const res = await fetch("api/admin/state", { cache: "no-store" });

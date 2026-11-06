@@ -171,6 +171,9 @@ is `@claude-lpr`; two of the same name get `-2`, `-3`).
 - Every Claude tab is told, with each prompt, its own name and the other
   tabs it can call, through tabit's hooks. A tab that is alone is told
   nothing.
+- A Codex tab can be called too, and a line of its reply that starts with
+  `@name` is passed on the same way. Codex is not told the names (it has no
+  such hook), so it calls only when a message asks it to.
 - Only replies written from now on count: what a tab said before is not sent.
   A line inside a code block, or a file name like `@tabit.py`, is no call.
 - There is no limit on how often tabs answer each other. Two tabs that keep

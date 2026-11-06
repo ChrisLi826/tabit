@@ -1968,13 +1968,13 @@ def _ensure_codex_notify():
     """Write the script a codex AI tab runs after each turn, when it changed."""
     want = _codex_notify_script(AGENT_HOOK_DIR)
     try:
+        os.makedirs(AGENT_HOOK_DIR, mode=0o700, exist_ok=True)   # gone after a reboot
         with open(CODEX_NOTIFY_FILE) as f:
             if f.read() == want:
                 return
     except OSError:
         pass
     try:
-        os.makedirs(AGENT_HOOK_DIR, mode=0o700, exist_ok=True)
         os.makedirs(os.path.dirname(CODEX_NOTIFY_FILE), exist_ok=True)
         with open(CODEX_NOTIFY_FILE, "w") as f:
             f.write(want)
@@ -6469,6 +6469,18 @@ if (data !== null) {{
         if getattr(self, "_ai_hunting", False):
             return True
         jobs = self._ai_hunt_jobs()
+        # Codex 0.166 holds every session file open in one shared daemon,
+        # so the tab's own processes do not tell which is its. Its notify
+        # names the session after each turn: the newest one with a file.
+        named = {}
+        for j in [j for j in jobs if os.path.basename(j[1].rstrip("/")) == "codex"]:
+            jobs.remove(j)
+            tx = self._codex_rollout(self._codex_notified(j[0]))
+            sid = (re.findall(_UUID_RE, os.path.basename(tx)) or [None])[-1]
+            if sid:
+                named[j[0]] = sid
+        if named:
+            self._ai_hunt_apply(named, {r: r.argv for r in named})
         if not jobs:
             return True
         self._ai_hunting = True
@@ -12408,7 +12420,8 @@ if (data !== null) {{
                 if entry is None:
                     return 400, {"error": "pick an AI from tabit's list"}
                 # a Claude or Codex account runs as its own program, as in +AI
-                account = body.get("account") if tool in ("claude", "codex") else None
+                prog = os.path.basename(str(tool).rstrip("/"))
+                account = body.get("account") if prog in ("claude", "codex") else None
                 # one exact conversation to go on with (a Tabit Chat moving to a tab)
                 resume = body.get("resume") if self._ai_is_claude(tool) else None
                 if resume is not None and not (isinstance(resume, str)
@@ -12418,9 +12431,9 @@ if (data !== null) {{
                     return 409, {"error": "that conversation is open in another Claude"}
                 run = tool
                 if account:
-                    run = dict(self._ai_accounts(tool)).get(account)
+                    run = dict(self._ai_accounts(prog)).get(account)
                     if run is None:
-                        return 400, {"error": f"no {tool.capitalize()} account “{account}”"}
+                        return 400, {"error": f"no {prog.capitalize()} account “{account}”"}
                 launch, argv, icon = self._ai_launch_pair(
                     run, cwd, list(entry.get("try") or []),
                     bypass=(bool(self._load_settings().get("ai_claude_bypass"))
@@ -12711,7 +12724,8 @@ if (data !== null) {{
         pager = self._term_pager_rows(term) if not tmux else 0
         if pager:
             back = 0
-        coloured = self._term_tail_ansi(term, 60) if color and not tmux else None
+        tail = max(60, pager)       # a pager's whole screen, on a tall tab too
+        coloured = self._term_tail_ansi(term, tail) if color and not tmux else None
         if coloured and back > 0:
             # older lines without colours: reading them with colours cost
             # about a second per 3000 lines on the GTK thread, while the
@@ -12724,7 +12738,7 @@ if (data !== null) {{
             lines, ansi = coloured
             ansi = ansi + [""] * (len(lines) - len(ansi))     # line for line, to cut both alike
         else:
-            lines = self._term_tail_text(term, 60).rstrip().splitlines()[-60:]
+            lines = self._term_tail_text(term, tail).rstrip().splitlines()[-tail:]
         if pager:
             lines = lines[-pager:]
             if coloured:
@@ -12755,6 +12769,13 @@ if (data !== null) {{
         except (AttributeError, OSError, TypeError, ValueError):
             return 0
         todo, looked = [fg], 0
+        try:        # `cat f | less`: the pager is the leader's sibling, a child of the shell
+            with open("/proc/%d/stat" % fg) as f:
+                ppid = int(f.read().rpartition(")")[2].split()[1])
+            with open("/proc/%d/task/%d/children" % (ppid, ppid)) as f:
+                todo += [int(c) for c in f.read().split() if int(c) != fg]
+        except (OSError, ValueError, IndexError):
+            pass
         while todo and looked < 16:
             pid = todo.pop()
             looked += 1
@@ -13002,6 +13023,8 @@ if (data !== null) {{
             self._save_settings(dict(body))
             return 200, {"ok": True}
         prog = body.get("cli") if isinstance(body, dict) and body.get("cli") == "codex" else "claude"
+        if op in ("account-add", "login-start") and not isinstance(body.get("name", ""), str):
+            return 400, {"error": "name is text"}
         if op == "account-add":
             try:
                 run = self._ai_account_add(prog, (body.get("name") or "").strip())
@@ -13170,7 +13193,7 @@ if (data !== null) {{
             if m and not job["url"]:
                 job.update(url=m.group(0), state="waiting")
             # codex's one-time code, alone on its line: typed on the login page
-            m = re.search(r"^\s*([A-Z0-9]{4,}-[A-Z0-9]{4,})\s*$", out, re.M)
+            m = re.search(r"^[ \t]*([A-Z0-9]{4,}-[A-Z0-9]{4,})[ \t]*\n", out, re.M)
             if m and not job.get("code"):
                 job["code"] = m.group(1)
             for line in text.splitlines():
@@ -14921,6 +14944,9 @@ if (data !== null) {{
         home = Tabit._ai_account_home(CODEX_ACCOUNTS_DIR, name)
         cfg = os.path.join(home, "home")
         os.makedirs(cfg, mode=0o700)
+        # a default home that never ran a session has no sessions folder:
+        # the account would make its own, unshared, and lose it on removal
+        os.makedirs(os.path.join(CODEX_DEFAULT_DIR, "sessions"), exist_ok=True)
         return Tabit._ai_account_wrapper(home, "codex", "Codex", "CODEX_HOME",
                                          cfg, CODEX_DEFAULT_DIR, CODEX_SHARED)
 
@@ -15050,13 +15076,19 @@ if (data !== null) {{
     @staticmethod
     def _codex_account_remove(name):
         """Delete Codex account `name`, as for Claude. Its codex left a
-        background server running on its own folder: that one stops first."""
+        background server (`codex app-server`) running on its own folder:
+        that one stops first. Settings refuses while a tab uses the account."""
         home = os.path.join(CODEX_ACCOUNTS_DIR, name)
         if not name or os.path.dirname(home) != CODEX_ACCOUNTS_DIR:
             return
         own = os.path.join(home, "home") + "/"
         for pid in filter(str.isdigit, os.listdir("/proc")):
+            if int(pid) == os.getpid():
+                continue
             try:
+                with open(f"/proc/{pid}/cmdline", "rb") as f:
+                    if b"app-server" not in f.read():
+                        continue
                 fds = os.listdir(f"/proc/{pid}/fd")
                 if any(os.readlink(f"/proc/{pid}/fd/{fd}").startswith(own) for fd in fds):
                     os.kill(int(pid), signal.SIGKILL)
@@ -18199,6 +18231,16 @@ if (data !== null) {{
                               "a code to paste), then reopen Settings to see it.")
 
         def acct_remove(prog, name):
+            if prog == "codex":
+                # its background server stops with it, and a codex on it with that
+                in_use = [r for r in self._session_rows()
+                          if not getattr(r, "dead", False)
+                          and (self._ai_cli_path_of(getattr(r, "argv", None)) or ("",))[0]
+                          == dict(self._codex_accounts()).get(name)]
+                if in_use:
+                    acct_msg.set_text(f"“{name}” is in use by {len(in_use)} tab(s): "
+                                      "switch them to another account or close them first.")
+                    return
             ask = Gtk.MessageDialog(
                 transient_for=dialog, modal=True,
                 message_type=Gtk.MessageType.QUESTION,

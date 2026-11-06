@@ -384,6 +384,15 @@ class TestRemoteNewTab(AccountDirs):
         self.assertEqual(title, "claude · work")
         self.assertEqual(T._ai_cli_path_of(argv)[0], cli)
 
+    def test_a_claude_given_as_a_path_keeps_its_account(self):
+        cli = T._claude_account_add("work")
+        app = self.app()
+        app._load_ai_clis.return_value = [{"cli": "/usr/local/bin/claude", "try": []}]
+        code, _ = T._remote_new(app, {"kind": "ai", "cli": "/usr/local/bin/claude",
+                                      "cwd": self.tmp, "account": "work"})
+        self.assertEqual(code, 200)
+        self.assertEqual(T._ai_cli_path_of(app._add_session.call_args[0][1])[0], cli)
+
     def test_no_account_is_the_default_one(self):
         T._claude_account_add("work")
         app = self.app()
@@ -447,6 +456,21 @@ class TestCodexAccounts(unittest.TestCase):
             self.assertEqual(os.readlink(os.path.join(own, name)),
                              os.path.join(self.home, name), name)
         self.assertFalse(os.path.lexists(os.path.join(own, "auth.json")))   # the login is its own
+
+    def test_a_default_home_with_no_sessions_yet_still_shares_them(self):
+        os.rmdir(os.path.join(self.home, "sessions"))
+        cli = T._codex_account_add("home")
+        own = os.path.join(os.path.dirname(os.path.dirname(cli)), "home")
+        self.run_wrapper(cli)
+        self.assertEqual(os.readlink(os.path.join(own, "sessions")),
+                         os.path.join(self.home, "sessions"))
+
+    def test_remove_never_stops_tabit_itself(self):
+        cli = T._codex_account_add("home")
+        own = os.path.join(os.path.dirname(os.path.dirname(cli)), "home")
+        with open(os.path.join(own, "auth.json"), "w") as f:    # open in this process
+            T._codex_account_remove("home")
+        self.assertEqual(T._codex_accounts(), [])
 
     def test_remove_leaves_the_shared_files_alone(self):
         cli = T._codex_account_add("home")

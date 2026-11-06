@@ -390,5 +390,17 @@ class TestHuntMainLoop(unittest.TestCase):
         self.assertEqual(w.saved, 0)
 
 
+    def test_a_codex_tab_resumes_the_session_its_notify_named(self):
+        # Codex 0.166 holds every session file in one daemon: no /proc look
+        r = self._codex(True, True)
+        w = _Win([r])
+        w._codex_notified = lambda row: ["0" * 8 + SID[8:], SID]
+        w._codex_rollout = lambda ids: ("/s/rollout-x-%s.jsonl" % SID) if SID in ids else ""
+        w._ai_hunt_session_ids = Tabit._ai_hunt_session_ids.__get__(w)
+        self.assertTrue(w._ai_hunt_session_ids())
+        self.assertIn("resume " + SID, Tabit._ai_tmux_unwrap(r.argv)[0][2])
+        self.assertFalse(getattr(w, "_ai_hunting", False))     # no scan thread for it
+
+
 if __name__ == "__main__":
     unittest.main()

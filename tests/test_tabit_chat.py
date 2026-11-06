@@ -1496,6 +1496,14 @@ class ScreenMenuTest(Base):
                                "codex_approval_screen.txt")) as f:
             return f.read().splitlines()
 
+    def test_the_last_choice_picked_under_a_long_one(self):
+        rows = [("  " + r[2:]) if r.startswith("› 1.") else
+                ("› " + r.lstrip()) if r.lstrip().startswith("3. No") else r
+                for r in self.codex_screen()]
+        menu = tc.screen_prompt(rows)
+        self.assertEqual(menu["numbers"], [1, 2, 3])        # the long 2nd one does not cut the menu
+        self.assertEqual(menu["selected"], 2)               # the 3rd choice, not the 4th row
+
     def test_a_codex_approval_is_read(self):
         menu = tc.screen_prompt(self.codex_screen())
         self.assertEqual(menu["question"], "Would you like to run the following command?")

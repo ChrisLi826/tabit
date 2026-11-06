@@ -290,16 +290,24 @@ def screen_prompt(lines):
     other = re.compile(r"^ {%d}%s\S" % (ind + 2, r"\d+\.\s+" if re.match(r"^\s*[❯›]\s+\d+\.\s", rows[sel]) else ""))
     more = re.compile(r"^ {%d,}\S" % (ind + 3))          # the rest of a long row
     top = bot = sel
-    while top > 0 and other.match(rows[top - 1]):
-        top -= 1
+    j = top - 1
+    while j >= 0:               # up, over a long row's rest too, when a choice heads it
+        k = j
+        while k >= 0 and more.match(rows[k]) and not other.match(rows[k]):
+            k -= 1
+        if k < 0 or not other.match(rows[k]):
+            break
+        top, j = k, k - 1
     while bot + 1 < len(rows) and (other.match(rows[bot + 1]) or more.match(rows[bot + 1])):
         bot += 1
-    picks = []
-    for r in rows[top:bot + 1]:
+    picks, chosen = [], 0
+    for at, r in enumerate(rows[top:bot + 1], top):
         if picks and not other.match(r) and not re.match(r"^\s*[❯›]\s", r) and more.match(r):
             picks[-1] += " " + r.strip()
         else:
             picks.append(re.sub(r"^\s*[❯›]?\s*", "", r).rstrip())
+        if at == sel:
+            chosen = len(picks) - 1     # which choice, not which row: long rows take two
     numbers = []
     for i, p in enumerate(picks):
         m = re.match(r"(\d+)\.\s+(.*)", p)
@@ -324,7 +332,7 @@ def screen_prompt(lines):
     question = (asks[-1] if asks else above[-1].strip() if above else "The tab asks you to choose")[:200]
     key = hashlib.md5((detail + "|".join(picks)).encode()).hexdigest()[:10]
     return {"id": "scr-" + key, "question": question, "detail": detail, "options": picks,
-            "numbers": numbers, "selected": sel - top}
+            "numbers": numbers, "selected": chosen}
 
 
 def transcript_model(path):
