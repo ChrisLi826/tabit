@@ -119,6 +119,17 @@ that is working takes your line too: Claude reads it at its next step, in the
 same turn, and the chat shows it.
 **Stop** presses Esc in the tab.
 
+Until Claude reads such a line, the chat shows it as a pale **Queued**
+bubble. tabit follows Claude Code's own queue in the transcript
+(`queue-operation` lines: enqueue, dequeue, remove, popAll). **Take back**
+does what you would do at the tab: it presses Up (Claude Code brings every
+held line back into its message box), empties the box, and types the other
+held lines again. The line you took back goes into the chat's message box,
+to change or delete. It works only while the tab's box is empty (Claude
+Code shows "Press up to edit queued messages"); with your own text in it,
+take the line back in the tab. Lines another tab passed on (`[from @name]`)
+are not shown. A Codex tab reads a line at once, so nothing waits there.
+
 **Codex tabs** have a chat too. Their badge says `Codex · <model>`. The chat
 reads the Codex session's file (`~/.codex/sessions/.../rollout-*.jsonl`).
 Codex 0.166 keeps every session file open in one shared daemon, so tabit
