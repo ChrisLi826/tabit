@@ -130,10 +130,14 @@ same as a menu in a Claude tab: a tap presses that option's number in the tab.
   Bypass goes along; a chat in Accept edits or Plan first becomes a tab that
   asks each time (unless **Settings → AI → Claude bypass** is on, which makes
   every new Claude tab bypass, this one too). A chat that cannot move is tried 3 times.
-- **Account and model.** A chat's settings show Account and Model, and each
-  row shows `account · model`. Either switch restarts the tab's Claude in
-  place, on the same conversation (`--resume`, with `--model` for a model),
-  and both together are one restart. Not while Claude works, asks something
+- **Account, model and thinking effort.** A chat's settings show Account,
+  Model and Thinking effort, and each row shows `account · model effort`.
+  Any switch restarts the tab's Claude in place, on the same conversation
+  (`--resume`, with `--model` for a model and `--effort` for an effort), and
+  all together are one restart. Claude's efforts are low, medium, high,
+  xhigh and max; a Codex tab gets `-c model_reasoning_effort=<effort>` and
+  the efforts its model lists (Terra also has ultra). "default" leaves it to
+  the program's own setting. Not while Claude works, asks something
   or still runs agents. Claude's own settings are not touched. The tab shows
   the model that answered last, read from its transcript.
 - Tabs of other tools (Grok, agy) have no chat: only Claude's and Codex's

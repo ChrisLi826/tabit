@@ -1162,8 +1162,8 @@ class TestChatModelSwitch(unittest.TestCase):
             _claude_account_of = staticmethod(tabit.Tabit._claude_account_of)
             _ai_account_of = staticmethod(tabit.Tabit._ai_account_of)
 
-            def _ai_switch_account(self, row, name, model=None):
-                test.asked.append((row, name, model))
+            def _ai_switch_account(self, row, name, model=None, effort=None):
+                test.asked.append((row, name, model, effort))
                 return test.why
         App._chat_model = tabit.Tabit._chat_model
         self.app = App()
@@ -1174,11 +1174,15 @@ class TestChatModelSwitch(unittest.TestCase):
 
     def test_the_tab_restarts_with_the_model_and_keeps_its_login(self):
         self.assertEqual(self.ops({"model": "haiku"}), (200, {"ok": True}))
-        self.assertEqual(self.asked, [(self.row, "", "haiku")])
+        self.assertEqual(self.asked, [(self.row, "", "haiku", None)])
 
     def test_a_login_can_change_in_the_same_restart(self):
         self.ops({"model": "", "account": "Personal"})
-        self.assertEqual(self.asked, [(self.row, "Personal", "")])
+        self.assertEqual(self.asked, [(self.row, "Personal", "", None)])
+
+    def test_the_effort_alone_keeps_the_model(self):
+        self.ops({"effort": "high"})
+        self.assertEqual(self.asked, [(self.row, "", None, "high")])
 
     def test_a_tab_that_will_not_switch_says_why(self):
         self.why = "Claude is working: switch when it stops"

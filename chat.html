@@ -467,7 +467,7 @@ const GROUP_CSS = { red: "#f7768e", orange: "#ff9e64", yellow: "#e0af68", green:
 const modelShort = (id) => { const m = /^claude-([a-z]+)-(\d+)(?:-(\d+))?/.exec(id || ""); return m ? `${m[1]} ${m[2]}${m[3] ? "." + m[3] : ""}` : (id || ""); };
 // the login and the model a chat uses, as one small badge
 const usingBadge = (r) => {
-  const model = r.tab ? modelShort(r.tab.model) : (r.model || "default");
+  const model = (r.tab ? modelShort(r.tab.model) : (r.model || "default")) + ((r.tab ? r.tab.effort : r.effort) ? " " + (r.tab ? r.tab.effort : r.effort) : "");
   const who = r.tab && r.tab.cli === "codex" ? ["Codex", r.account].filter(Boolean).join(" · ") : r.account || "Default";
   return `<span class="badge">${esc([who, model].filter(Boolean).join(" · "))}</span>`;
 };
@@ -1286,7 +1286,8 @@ const settings = async (t = cur) => {
       <div class="hint warn" id="e-warn" ${m.mode === "bypass" ? "" : "hidden"}>Bypass: no questions asked.</div></div>
       <label>Model</label><select id="e-model">${codex
         ? cmodels.map((x) => `<option value="${esc(x.name)}"${x.name === (m.tab.model || "") ? " selected" : ""}>${esc(x.label)}</option>`).join("")
-        : opts(cfg.models, m.tab ? aliasOf(m.tab.model) : m.model, (x) => x || "default")}</select></div>
+        : opts(cfg.models, m.tab ? aliasOf(m.tab.model) : m.model, (x) => x || "default")}</select>
+      <label>Thinking effort</label><select id="e-effort"></select></div>
       <div class="hint" ${m.tab && m.tab.model ? "" : "hidden"}>${m.tab ? "Answering as " + esc(m.tab.model) + ". A new model starts with the next message, and only when the tab is not busy." : ""}</div>
       <div ${m.tab ? "hidden" : ""}><label>Connectors</label><button type="button" id="e-reload">↻ Reload Claude</button>
       <div class="hint" id="e-reloaded">Changed a connector (Gmail, Strava…)? Tap this. The chat keeps its history.</div></div>
@@ -1298,7 +1299,17 @@ const settings = async (t = cur) => {
     };
     const look = picker($("e-look"), m);
     $("e-mode").onchange = () => { $("e-warn").hidden = $("e-mode").value !== "bypass"; };
-    $("e-save").onclick = async () => { try { await api(`api/chats/${t.id}/edit`, { title: $("e-title").value, mode: $("e-mode").value, model: $("e-model").value, ...($("e-account").value !== (m.account || "") ? { account: $("e-account").value } : {}), ...look.get() }); done(); } catch (e) { $("e-err").textContent = e.message; } };
+    // the efforts the model picked takes: Codex says so per model, Claude takes them all
+    const effortNow = (m.tab ? m.tab.effort : m.effort) || "";
+    const effortsFill = (first) => {
+      const list = codex ? ((cmodels.find((x) => x.name === $("e-model").value) || {}).efforts || [""]) : (cfg.efforts || [""]);
+      let want = first ? effortNow : $("e-effort").value;
+      if (!first && !list.includes(want)) want = "";      // another model: one it takes
+      $("e-effort").innerHTML = opts(list.includes(want) ? list : [...list, want], want, (x) => x || "default");
+    };
+    effortsFill(true);
+    $("e-model").onchange = () => effortsFill(false);
+    $("e-save").onclick = async () => { try { await api(`api/chats/${t.id}/edit`, { title: $("e-title").value, mode: $("e-mode").value, model: $("e-model").value, effort: $("e-effort").value, ...($("e-account").value !== (m.account || "") ? { account: $("e-account").value } : {}), ...look.get() }); done(); } catch (e) { $("e-err").textContent = e.message; } };
     if ($("e-del")) $("e-del").onclick = async () => { if (!confirm(m.tab ? "Delete this chat? Its tab in tabit closes too." : "Delete this chat and its history?")) return; try { await api(`api/chats/${t.id}/delete`, {}); gone(); } catch (e) { $("e-err").textContent = e.message; } };
   }
   $("e-cancel").onclick = closeSheet;

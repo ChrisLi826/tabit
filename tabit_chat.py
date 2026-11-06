@@ -26,6 +26,7 @@ CHAT_DIR = os.path.expanduser("~/.local/share/tabit/chats")
 MODES = {"ask": "default", "edits": "acceptEdits", "plan": "plan",
          "bypass": "bypassPermissions"}
 MODELS = ("", "opus", "sonnet", "haiku", "fable")
+EFFORTS = ("", "low", "medium", "high", "xhigh", "max")     # claude --effort; "" is its default
 
 MAX_RUNNING = 6              # claude processes alive at once
 TAB_TEXT = 8000              # the most tabit types into a tab at once
@@ -574,6 +575,7 @@ class Chat(_Log):
         return {"id": self.id, "title": self.meta["title"],
                 "cwd": self.meta["cwd"], "account": self.login(),
                 "mode": self.meta["mode"], "model": self.meta.get("model", ""),
+                "effort": self.meta.get("effort", ""),
                 # the last message, not the last save: a mirror's transcript
                 # gains lines that are no message, and a rename is no news
                 "state": self.state, "updated": last["ts"] if last and last.get("ts")
@@ -624,6 +626,8 @@ class Chat(_Log):
             argv.append("--allow-dangerously-skip-permissions")
         if self.meta.get("model"):
             argv += ["--model", self.meta["model"]]
+        if self.meta.get("effort"):
+            argv += ["--effort", self.meta["effort"]]
         if self.meta.get("started"):
             argv += ["--resume", self.meta["session"]]
         else:
@@ -1483,6 +1487,7 @@ class ChatManager:
                 want = {"id": tab["id"], "title": tab.get("title") or "",
                         "group": tab.get("group") or "", "color": tab.get("color") or "",
                         "account": tab.get("account") or "", "cli": tab.get("cli") or "claude",
+                        "effort": tab.get("effort") or "",
                         "model": chat.meta["tab"].get("model", "") if chat else ""}
                 if chat is None:
                     code, out = self.create({"title": name, "tab": want})
@@ -1897,7 +1902,8 @@ def api(mgr, method, parts, body):
                               "groups": [g.summary() for g in mgr.groups.values()],
                               "tabgroups": tabgroups,
                               "accounts": mgr.account_choices(), "account": mgr.account,
-                              "modes": list(MODES), "models": list(MODELS), "clis": clis},
+                              "modes": list(MODES), "models": list(MODELS),
+                              "efforts": list(EFFORTS), "clis": clis},
                              **({"codex_accounts": mgr.account_choices("codex"),
                                  "codex_models": codex_models()} if "codex" in clis else {}))
         if method == "POST":
@@ -2055,9 +2061,10 @@ def model_alias(model):
 
 
 def codex_models():
-    """[{"name", "label"}] of the models Codex lists in its own picker, the
-    default first; from the list Codex keeps in its home."""
-    rows = [{"name": "", "label": "default"}]
+    """[{"name", "label", "efforts"}] of the models Codex lists in its own
+    picker, the default first; from the list Codex keeps in its home. The
+    default model takes the efforts every model takes."""
+    rows = [{"name": "", "label": "default", "efforts": [""]}]
     try:
         with open(os.path.join(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex"),
                                "models_cache.json"), encoding="utf-8") as f:
@@ -2066,7 +2073,13 @@ def codex_models():
         return rows
     for m in got:
         if isinstance(m, dict) and m.get("visibility") == "list" and m.get("slug"):
-            rows.append({"name": m["slug"], "label": m.get("display_name") or m["slug"]})
+            efforts = [x.get("effort") for x in m.get("supported_reasoning_levels") or []
+                       if isinstance(x, dict) and x.get("effort")]
+            rows.append({"name": m["slug"], "label": m.get("display_name") or m["slug"],
+                         "efforts": [""] + efforts})
+    if len(rows) > 1:
+        rows[0]["efforts"] += [e for e in rows[1]["efforts"][1:]
+                               if all(e in r["efforts"] for r in rows[2:])]
     return rows
 
 
@@ -2079,18 +2092,30 @@ def _edit_tab(chat, body):
     acct = body["account"] if "account" in body and body["account"] != tab.get("account", "") else None
     now = tab.get("model") or "" if cli == "codex" else model_alias(tab.get("model"))
     model = body["model"] if "model" in body and body["model"] != now else None
+    effort = body["effort"] if "effort" in body and body["effort"] != tab.get("effort", "") else None
     if acct is not None and acct not in [""] + [n for n, _ in mgr.accounts_of(cli)]:
         return 400, {"error": f"no such {cli.capitalize()} account"}
+    models = codex_models() if cli == "codex" else None
     if model is not None and model not in (
-            [m["name"] for m in codex_models()] if cli == "codex" else MODELS):
+            [m["name"] for m in models] if cli == "codex" else MODELS):
         return 400, {"error": "no such model"}
-    if acct is None and model is None:
+    if effort is not None:
+        if cli == "codex":       # what the model it will run takes
+            target = now if model is None else model
+            ok = next((m["efforts"] for m in models if m["name"] == target),
+                      [""] + sorted({e for m in models for e in m["efforts"] if e}))
+        else:
+            ok = EFFORTS
+        if effort not in ok:
+            return 400, {"error": "that model has no such effort"}
+    if acct is None and model is None and effort is None:
         return None
     if not mgr.tab_ops:
         return 400, {"error": "no tabs here"}
-    if model is not None:
-        code, out = mgr.tab_ops("model", tab["id"], dict({"model": model},
-                                                         **({"account": acct} if acct is not None else {})))
+    if model is not None or effort is not None:
+        ask = {k: v for k, v in (("model", model), ("effort", effort), ("account", acct))
+               if v is not None}
+        code, out = mgr.tab_ops("model", tab["id"], ask)
     else:
         code, out = mgr.tab_ops("account", tab["id"], {"account": acct})
     if code != 200:
@@ -2099,6 +2124,8 @@ def _edit_tab(chat, body):
         tab = dict(tab, account=acct)
     if model is not None:
         tab = dict(tab, model=model)     # the next answer says the full name
+    if effort is not None:
+        tab = dict(tab, effort=effort)
     chat.meta["tab"] = tab
     return None
 
@@ -2135,12 +2162,16 @@ def _edit(chat, body):
             if body["model"] not in MODELS:
                 return 400, {"error": "no such model"}
             new["model"] = body["model"]
+        if "effort" in body:
+            if body["effort"] not in EFFORTS:
+                return 400, {"error": "no such effort"}
+            new["effort"] = body["effort"]
         if "account" in body:
             if body["account"] not in [""] + [n for n, _ in chat.mgr.accounts()]:
                 return 400, {"error": "no such Claude account"}
             new["account"] = body["account"]
     restart = any(new.get(k, chat.meta.get(k)) != chat.meta.get(k)
-                  for k in ("mode", "model", "account")) and not chat.mirrored
+                  for k in ("mode", "model", "effort", "account")) and not chat.mirrored
     if restart and chat.state != "idle":
         return 409, {"error": "wait until Claude is done, or press Stop"}
     chat.meta.update(new)

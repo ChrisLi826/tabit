@@ -224,7 +224,7 @@ class TestSwitchAccount(AccountDirs):
         self.addCleanup(p.stop)
         for name in ("_ai_cli_path_of", "_ai_is_claude", "_claude_account_of",
                      "_ai_tmux_unwrap", "_ai_launch_pair", "_ai_has_bypass", "_ai_model_of",
-                     "_claude_session_saved", "_ai_account_of", "_ai_accounts"):
+                     "_claude_session_saved", "_ai_account_of", "_ai_accounts", "_ai_effort_of"):
             setattr(self.app, name, getattr(T, name))
 
     def row(self, cli="claude", tmux=True, model="", **kw):
@@ -327,6 +327,27 @@ class TestSwitchAccount(AccountDirs):
         self.assertEqual(T._ai_model_of(T._ai_argv_with_session(argv, A)), "sonnet")
         self.assertEqual(T._ai_tries_of(T._ai_tmux_unwrap(argv)[0][2]), ["--continue"])
         self.assertEqual(T._ai_model_of(T._ai_launch_pair("claude", self.tmp, [], tmux=True)[1]), "")
+
+    def test_an_effort_switch_keeps_the_model_and_the_login(self):
+        r = self.row(model="opus")
+        with mock.patch.object(tabit, "_tmux_kill_session"):
+            self.assertIsNone(self.app._ai_switch_account(r, "", effort="high"))
+        self.assertEqual((T._ai_model_of(r.argv), T._ai_effort_of(r.argv),
+                          T._ai_cli_path_of(r.argv)[0]), ("opus", "high", "claude"))
+        self.assertIn("--effort high", T._ai_tmux_unwrap(r._respawn[0])[0][2])
+        r2 = self.row()
+        r2.argv = T._ai_launch_pair("claude", self.tmp, [], tmux=True, resume_id=A, effort="high")[1]
+        self.assertIn("thinks at high already", self.app._ai_switch_account(r2, "", effort="high"))
+
+    def test_the_effort_survives_a_rebuild_and_is_no_try(self):
+        argv = T._ai_launch_pair("claude", self.tmp, ["--continue"], tmux=True, effort="max")[1]
+        self.assertEqual(T._ai_effort_of(T._ai_argv_with_session(argv, A)), "max")
+        self.assertEqual(T._ai_tries_of(T._ai_tmux_unwrap(argv)[0][2]), ["--continue"])
+        cx = T._ai_launch_pair("codex", self.tmp, ["resume --last"], tmux=True, effort="xhigh")[1]
+        self.assertIn("-c model_reasoning_effort=xhigh", cx[2])
+        self.assertEqual(T._ai_effort_of(cx), "xhigh")
+        self.assertEqual(T._ai_tries_of(T._ai_tmux_unwrap(cx)[0][2]), ["resume --last"])
+        self.assertEqual(T._ai_effort_of(T._ai_launch_pair("claude", self.tmp, [], tmux=True)[1]), "")
 
     def test_from_the_phone(self):
         r = self.row()
@@ -450,7 +471,7 @@ class TestCodexAccounts(unittest.TestCase):
         for name in ("_ai_switch_account", "_ai_respawn"):
             setattr(app, name, getattr(T, name).__get__(app))
         for name in ("_ai_cli_path_of", "_ai_is_claude", "_ai_tmux_unwrap", "_ai_launch_pair",
-                     "_ai_has_bypass", "_ai_model_of", "_ai_account_of", "_ai_accounts"):
+                     "_ai_has_bypass", "_ai_model_of", "_ai_account_of", "_ai_accounts", "_ai_effort_of"):
             setattr(app, name, getattr(T, name))
         # codex names its session after a turn; a session with a file has spoken
         app._codex_notified = lambda row: [A] if spoke else []

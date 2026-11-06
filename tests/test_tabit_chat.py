@@ -244,6 +244,15 @@ class TestChat(Base):
         self.assertIn("--session-id", argv)
         self.assertNotIn("--allow-dangerously-skip-permissions", argv)
 
+    def test_a_picked_effort_goes_on_the_command(self):
+        chat = self.new()
+        self.assertNotIn("--effort", chat._argv())
+        self.assertEqual(tc.api(self.mgr, "POST", [chat.id, "edit"], {"effort": "ultra"})[0], 400)
+        self.assertEqual(tc.api(self.mgr, "POST", [chat.id, "edit"], {"effort": "high"})[0], 200)
+        argv = chat._argv()
+        self.assertEqual(argv[argv.index("--effort") + 1], "high")
+        self.assertEqual(chat.summary()["effort"], "high")
+
     def test_allow_and_deny(self):
         chat = self.new()
         chat.send("write a.txt")
@@ -1017,7 +1026,11 @@ class CodexMirrorTest(Base):
         home = os.path.join(self.dir, "codex-home")
         os.makedirs(home)
         with open(os.path.join(home, "models_cache.json"), "w") as f:
-            json.dump({"models": [{"slug": "gpt-a", "display_name": "GPT-A", "visibility": "list"},
+            lv = lambda *e: [{"effort": x} for x in e]
+            json.dump({"models": [{"slug": "gpt-a", "display_name": "GPT-A", "visibility": "list",
+                                   "supported_reasoning_levels": lv("low", "high", "ultra")},
+                                  {"slug": "gpt-b", "display_name": "GPT-B", "visibility": "list",
+                                   "supported_reasoning_levels": lv("low", "high")},
                                   {"slug": "gpt-hidden", "visibility": "hide"}]}, f)
         p = mock.patch.dict(os.environ, {"CODEX_HOME": home})
         p.start()
@@ -1025,8 +1038,26 @@ class CodexMirrorTest(Base):
 
     def test_the_models_are_those_codex_lists(self):
         self.codex_home()
-        self.assertEqual(tc.codex_models(), [{"name": "", "label": "default"},
-                                             {"name": "gpt-a", "label": "GPT-A"}])
+        self.assertEqual(tc.codex_models(), [
+            {"name": "", "label": "default", "efforts": ["", "low", "high"]},   # what all take
+            {"name": "gpt-a", "label": "GPT-A", "efforts": ["", "low", "high", "ultra"]},
+            {"name": "gpt-b", "label": "GPT-B", "efforts": ["", "low", "high"]}])
+
+    def test_the_effort_is_one_the_model_takes(self):
+        self.codex_home()
+        chat = self.mirror()
+        chat.mirror_poll()
+        ops = []
+        self.mgr.tab_ops = lambda op, target=None, body=None: ops.append((op, body)) or (200, {"ok": True})
+        edit = lambda body: tc.api(self.mgr, "POST", [chat.id, "edit"], body)[0]
+        self.assertEqual(edit({"model": "gpt-b", "effort": "ultra"}), 400)    # gpt-b has no ultra
+        self.assertEqual(edit({"effort": "nope"}), 400)
+        self.assertEqual(ops, [])
+        self.assertEqual(edit({"model": "gpt-a", "effort": "ultra"}), 200)
+        self.assertEqual(edit({"effort": "low"}), 200)                         # the effort alone
+        self.assertEqual(ops, [("model", {"model": "gpt-a", "effort": "ultra"}),
+                               ("model", {"effort": "low"})])
+        self.assertEqual(chat.meta["tab"]["effort"], "low")
 
     def test_its_login_and_model_switch_as_codex(self):
         self.codex_home()
@@ -1051,7 +1082,8 @@ class CodexMirrorTest(Base):
         with mock.patch.object(tc.shutil, "which", lambda c: "/usr/bin/" + c):
             out = tc.api(self.mgr, "GET", [], None)[1]
         self.assertEqual([a["name"] for a in out["codex_accounts"]], ["", "Home"])
-        self.assertEqual([m["name"] for m in out["codex_models"]], ["", "gpt-a"])
+        self.assertEqual([m["name"] for m in out["codex_models"]], ["", "gpt-a", "gpt-b"])
+        self.assertEqual(out["efforts"], list(tc.EFFORTS))
 
     def test_another_ai_tab_gets_none(self):
         self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False: {
@@ -1379,6 +1411,14 @@ class TabSwitchTest(Base):
     def test_a_model_nobody_knows(self):
         self.assertEqual(self.edit({"model": "gpt"})[0], 400)
         self.assertEqual(self.ops, [])
+
+    def test_the_effort_is_switched_by_tabit(self):
+        self.assertEqual(self.edit({"effort": "ultra"})[0], 400)    # not a Claude effort
+        self.assertEqual(self.edit({"effort": "max"})[0], 200)
+        self.assertEqual(self.ops, [("model", "t1", {"effort": "max"})])
+        self.assertEqual(self.chat.summary()["tab"]["effort"], "max")
+        self.edit({"effort": "max"})
+        self.assertEqual(len(self.ops), 1)          # no change: nothing asked
 
     def test_login_and_model_change_in_one_restart(self):
         self.assertEqual(self.edit({"account": "Personal", "model": "haiku"})[0], 200)
