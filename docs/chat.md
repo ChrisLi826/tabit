@@ -69,17 +69,20 @@ The top of the chat list shows how much of each login's limits is used:
 one row per AI and account that a chat uses now (`Claude · Personal`,
 `Codex · Default`). Each row shows the limit windows the service reports,
 for example `5h 13% ↺9m` and `7d 36% ↺3d`: the share used and when that
-window starts again. A bar turns yellow at 50% and red at 80%. "reset"
-means the window has started again since the last reading.
+window starts again. A bar turns yellow at 50% and red at 80%. A window
+that has started again since the last reading shows 0%.
 
-- **Claude** hands its usage to the status line program. tabit's settings
+- **Claude**: tabit asks Anthropic every 3 minutes for each Claude login a
+  chat uses, the way Claude's own `/usage` does, with that login's token
+  from its `.credentials.json`. A token past its time is not renewed by
+  tabit: that login shows its last reading until its claude runs again.
+- Claude also hands its usage to the status line program. tabit's settings
   for a Claude tab name its own one (`~/.local/share/tabit/claude-statusline.py`),
   which keeps the usage for that tab and then runs the status line set in
   that account's `settings.json`, so your status line still shows. A status
   line set in a project's `.claude/settings.json` is not run in tabit tabs.
-  A running claude keeps the settings it started with: a tab reports usage
-  after its claude starts again. A chat that runs its own claude (`-p`) has
-  no status line, so its account shows "—" until one of its tabs reports.
+  A running claude keeps the settings it started with: its tab reports this
+  way after its claude starts again. The newest reading of the two wins.
 - **Codex** writes its usage into the session file after each turn; the
   chat reads it from there. A free plan has one 30-day window; paid plans
   have 5h and 7d.

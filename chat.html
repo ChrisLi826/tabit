@@ -596,8 +596,9 @@ function usageHtml(list) {
     const who = `${u.cli === "codex" ? "Codex" : "Claude"} · ${esc(u.account || "Default")}`;
     const now = Date.now() / 1000;
     const ws = (u.windows || []).map((w) => {
-      if (w.resets && w.resets < now) return `<span class="w" title="this window has started again">${esc(w.name)} reset</span>`;
-      const pct = Math.max(0, Math.min(100, w.pct));
+      const fresh = w.resets && w.resets < now;      // the window started again since this reading
+      const pct = fresh ? 0 : Math.max(0, Math.min(100, w.pct));
+      if (fresh) return `<span class="w" title="${esc(w.name)} limit: started again">${esc(w.name)} <span class="bar"><i style="width:0"></i></span> 0%</span>`;
       return `<span class="w${pct >= 80 ? " hot" : pct >= 50 ? " mid" : ""}" title="${esc(w.name)} limit: ${pct}% used${w.resets ? ", starts again in " + untilT(w.resets) : ""}">${esc(w.name)} <span class="bar"><i style="width:${pct}%"></i></span> ${pct}%${w.resets ? " ↺" + untilT(w.resets) : ""}</span>`;
     }).join("");
     return `<div class="u" title="${u.ts ? "as of " + (timeAgo(u.ts) === "now" ? "now" : timeAgo(u.ts) + " ago") : ""}"><span class="who">${who}</span>${ws || '<span class="w">— shows after its next reply</span>'}</div>`;

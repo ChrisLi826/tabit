@@ -27,6 +27,7 @@ MODES = {"ask": "default", "edits": "acceptEdits", "plan": "plan",
          "bypass": "bypassPermissions"}
 MODELS = ("", "opus", "sonnet", "haiku", "fable")
 EFFORTS = ("", "low", "medium", "high", "xhigh", "max")     # claude --effort; "" is its default
+USAGE_ASK = 180          # seconds between asking Anthropic for one Claude login's usage
 
 MAX_RUNNING = 6              # claude processes alive at once
 TAB_TEXT = 8000              # the most tabit types into a tab at once
@@ -277,7 +278,8 @@ def codex_limits(raw):
 def _raw_time(raw):
     """A transcript line's own time, as epoch seconds; now if it has none."""
     try:
-        return datetime.datetime.fromisoformat(str(raw["timestamp"]).replace("Z", "+00:00")).timestamp()
+        return datetime.datetime.fromisoformat(       # Python 3.10: no odd digits of a second
+            re.sub(r"\.\d+", "", str(raw["timestamp"]).replace("Z", "+00:00"))).timestamp()
     except (KeyError, TypeError, ValueError):
         return time.time()
 
@@ -1372,9 +1374,11 @@ class Group(_Log):
 class ChatManager:
     def __init__(self, accounts=None, env_drop=(), root=CHAT_DIR, claude=None, auth=None,
                  tab_hook=None, extra_env=None, tabs_hook=None, tab_ops=None, roster_dir=None,
-                 codex_accounts=None):
+                 codex_accounts=None, claude_usage=None):
         self.accounts = accounts or (lambda: [])     # [(name, cli)]
         self.codex_accounts = codex_accounts or (lambda: [])   # the same, for Codex tabs
+        self.claude_usage = claude_usage   # fn(account) -> windows or None: asks Anthropic
+        self._usage_asked = {}             # account -> when it was last asked
         self.auth = auth                             # fn(cli) -> {"email", "subscriptionType"}
         self._labels = {}                            # cli -> (when, rows)
         self.account = ""                            # the login of a chat that picked none
@@ -1700,9 +1704,24 @@ class ChatManager:
                         self.note_usage("claude", pair[1], windows, float(got.get("ts") or 0))
                 except (OSError, ValueError, AttributeError, TypeError):
                     pass
+        now = time.time()
+        for cli, acct in inuse:      # a running claude tells only after it restarts: ask too
+            if (cli == "claude" and self.claude_usage
+                    and now - (self._usage.get("claude/" + acct) or {}).get("ts", 0) > USAGE_ASK
+                    and now - self._usage_asked.get(acct, 0) > USAGE_ASK):
+                self._usage_asked[acct] = now
+                threading.Thread(target=self._ask_usage, args=(acct,), daemon=True).start()
         inuse.sort(key=lambda p: (p[0] != "claude", p[0], p[1] != "", p[1]))
         return [dict({"cli": cli, "account": acct, "windows": [], "ts": 0},
                      **self._usage.get("%s/%s" % (cli, acct), {})) for cli, acct in inuse]
+
+    def _ask_usage(self, account):
+        try:
+            windows = self.claude_usage(account)
+        except Exception:
+            windows = None
+        if windows:
+            self.note_usage("claude", account, windows, time.time())
 
     def _write_rosters(self, tabs, have):
         """Each tab's roster, for its prompt hook: who it is, whom it can @.

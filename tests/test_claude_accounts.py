@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Claude accounts: one wrapper per account, picked per +AI tab."""
 import base64
+import io
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 from unittest import mock
@@ -202,6 +204,38 @@ class TestTheTabSaysItsAccount(AccountDirs):
         self.assertEqual(T._ai_account_sub(argv, "@work · /tmp/proj"), "/tmp/proj")
         plain = T._ai_launch_pair("claude", "/tmp/proj", [], tmux=True)[1]
         self.assertEqual(T._ai_account_sub(plain, "@Default · /tmp/proj"), "/tmp/proj")
+
+
+class TestClaudeUsage(AccountDirs):
+    """A Claude login's usage, asked of Anthropic with that login's token."""
+
+    def creds(self, folder, expires):
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, ".credentials.json"), "w") as f:
+            json.dump({"claudeAiOauth": {"accessToken": "tok", "expiresAt": expires * 1000}}, f)
+
+    def test_it_reads_the_windows(self):
+        self.creds(self.home, time.time() + 3600)
+        body = json.dumps({"five_hour": {"utilization": 12.6, "resets_at": "2026-11-06T07:59:59.5+00:00"},
+                           "seven_day": {"utilization": 37.0, "resets_at": "2026-11-09T17:59:59+00:00"},
+                           "seven_day_opus": None}).encode()
+        seen = []
+
+        def fake(req, timeout=0):
+            seen.append(req)
+            return io.BytesIO(body)
+        with mock.patch.object(tabit.urllib.request, "urlopen", fake):
+            got = T._claude_usage("")
+        self.assertEqual(got, [{"name": "5h", "pct": 13, "resets": 1793951999},
+                               {"name": "7d", "pct": 37, "resets": 1794247199}])
+        self.assertEqual(seen[0].get_header("Authorization"), "Bearer tok")
+
+    def test_an_old_token_or_no_login_asks_nothing(self):
+        cli = T._claude_account_add("work")
+        self.creds(os.path.join(os.path.dirname(os.path.dirname(cli)), "config"), time.time() - 60)
+        with mock.patch.object(tabit.urllib.request, "urlopen", side_effect=AssertionError):
+            self.assertIsNone(T._claude_usage("work"))
+            self.assertIsNone(T._claude_usage("nobody"))
 
 
 class TestSwitchAccount(AccountDirs):

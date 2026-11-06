@@ -1403,6 +1403,15 @@ class UsageTest(Base):
                                                        {"name": "7d", "pct": 37, "resets": 1900500000}])
         self.assertEqual(got[("claude", "")], [])                # not known yet
 
+    def test_a_claude_login_with_no_fresh_reading_is_asked(self):
+        asked = []
+        self.mgr.claude_usage = lambda acct: asked.append(acct) or [{"name": "5h", "pct": 1, "resets": 0}]
+        self.mgr.create({"cwd": self.dir, "title": "own"})
+        self.mgr.usage()
+        self.assertTrue(wait(lambda: self.mgr._usage.get("claude/")))
+        self.assertEqual(self.mgr.usage()[0]["windows"], [{"name": "5h", "pct": 1, "resets": 0}])
+        self.assertEqual(asked, [""])                  # once: the reading is fresh now
+
     def test_an_older_reading_does_not_win(self):
         self.mgr.note_usage("codex", "", [{"name": "5h", "pct": 50, "resets": 0}], 200)
         self.mgr.note_usage("codex", "", [{"name": "5h", "pct": 10, "resets": 0}], 100)

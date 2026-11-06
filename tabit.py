@@ -15,6 +15,7 @@ Keyboard shortcuts are user-editable (sidebar → Shortcuts…, stored in
 """
 
 import base64
+import datetime
 import fcntl
 import hashlib
 import glob
@@ -13331,6 +13332,7 @@ if (data !== null) {{
                         self._chat_manager = tabit_chat.ChatManager(
                             accounts=Tabit._claude_accounts,
                             codex_accounts=Tabit._codex_accounts,
+                            claude_usage=Tabit._claude_usage,
                             env_drop=CLAUDE_SESSION_ENV,
                             auth=Tabit._ai_auth_status,
                             tab_hook=self._chat_tab_hook,
@@ -15168,6 +15170,39 @@ if (data !== null) {{
             Tabit._codex_account_remove(name)
         else:
             Tabit._claude_account_remove(name)
+
+    @staticmethod
+    def _claude_usage(account):
+        """[{"name", "pct", "resets"}] of a Claude login's limits, asked of
+        Anthropic the way Claude's own /usage asks, with that login's token.
+        None when it cannot tell (no login, a token past its time: claude
+        renews it the next time it runs)."""
+        cfg = os.path.join(CLAUDE_ACCOUNTS_DIR, account, "config") if account else CLAUDE_DEFAULT_DIR
+        try:
+            with open(os.path.join(cfg, ".credentials.json")) as f:
+                oauth = json.load(f)["claudeAiOauth"]
+            if oauth.get("expiresAt", 0) / 1000 < time.time() + 30:
+                return None
+            req = urllib.request.Request(
+                "https://api.anthropic.com/api/oauth/usage",
+                headers={"Authorization": "Bearer " + oauth["accessToken"],
+                         "anthropic-beta": "oauth-2025-04-20"})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                got = json.load(r)
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        out = []
+        for key, name in (("five_hour", "5h"), ("seven_day", "7d")):
+            w = got.get(key) if isinstance(got, dict) else None
+            if isinstance(w, dict) and isinstance(w.get("utilization"), (int, float)):
+                try:
+                    # Python 3.10 takes only 3 or 6 digits of a second: drop them
+                    resets = int(datetime.datetime.fromisoformat(
+                        re.sub(r"\.\d+", "", w["resets_at"].replace("Z", "+00:00"))).timestamp())
+                except (KeyError, TypeError, ValueError):
+                    resets = 0
+                out.append({"name": name, "pct": round(w["utilization"]), "resets": resets})
+        return out or None
 
     @staticmethod
     def _claude_auth_status(cli):
