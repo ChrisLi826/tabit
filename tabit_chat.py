@@ -984,13 +984,15 @@ class Chat(_Log):
             if not self.running:
                 self._spawn()
         self.last_used = time.time()
-        self._write({"type": "user", "message": {"role": "user", "content": quoted(reply, text)}})
-        self.inflight += 1
         if not quiet and not self.meta.get("titled"):
             self.meta["title"] = " ".join(text.split())[:40] or self.meta["title"]
             self.meta["titled"] = True
         self._save_meta()
+        # shown before Claude has it, so its answer can never come first: a
+        # group tells by the last question whether an answer is the group's
         self.emit(dict({"t": "user", "text": text}, **({"reply": reply} if reply else {})))
+        self._write({"type": "user", "message": {"role": "user", "content": quoted(reply, text)}})
+        self.inflight += 1
 
     def mirror_poll(self):
         """One look at the tab: its state, and what its transcript gained."""
@@ -1393,9 +1395,9 @@ MAX_HOPS = 8                 # chat-to-chat messages after one message from the 
 
 BRIEF = ('You are in a group chat called "{title}" with these members: {names}. '
          'You are "{me}". Messages arrive as "[name]: text"; "user" is the person. '
-         'Your replies show in the group. To talk to another member, start a '
-         'line of your reply with @name. Only do that when you need them: do '
-         'not answer just to say thanks.')
+         'Your replies to these messages show in the group. To talk to another '
+         'member, start a line of your reply with @name. Only do that when you '
+         'need them: do not answer just to say thanks.')
 
 
 NAME_END = r"(?![\w-]|[./\\]\S)"     # @tabit.py or @docs/x.md is a file, not a name
@@ -1566,7 +1568,7 @@ class Group(_Log):
                 pending.append(dict(p["ev"], chat=c.id, name=self.alias(c)))
         with self.cond:
             return {"state": self.state, "seq": self.seq, "pending": pending,
-                    "live": {c.id: c.live for c in mem if c.live},
+                    "live": {c.id: c.live for c in mem if c.live and self._ours(c)},
                     "paused": self.paused, "meta": self.summary()}
 
     # -- traffic
@@ -1575,12 +1577,26 @@ class Group(_Log):
             self.cond.notify_all()
         if not ev or ev.get("replay"):  # a mirror reading its tab's past: history, not news
             return
+        if ev["t"] in ("text", "error") and not self._ours(chat):
+            return               # it answers what was asked in its own chat: it stays there
         name = self.alias(chat)
         if ev["t"] == "text":
             self.emit({"t": "say", "chat": chat.id, "name": name, "text": ev["text"]})
             self._pass_on(chat, name, ev["text"])
         elif ev["t"] == "error":
             self.emit({"t": "error", "chat": chat.id, "name": name, "text": ev["text"]})
+
+    def _ours(self, chat):
+        """The member's last prompt came from this group, so what it says now
+        answers the group. A prompt from its own chat, from the desk, or from
+        another tab is private: the answer is not shown here or passed on."""
+        with chat.cond:
+            last = next((e for e in reversed(chat.events) if e["t"] == "user"), None)
+        text = (last or {}).get("text") or ""
+        if text.startswith(BRIEF.split("{", 1)[0]):
+            return True
+        names = list(self.meta["alias"].values()) + ["user"]
+        return any(text.startswith("[%s]: " % n) for n in names)
 
     def _mentions(self, text, skip=None):
         """Members named by @name at the start of a line, several per line allowed."""
@@ -1889,7 +1905,7 @@ class ChatManager:
     def _tab_talk(self, chat, ev):
         """A tab's reply with a line that starts with @name is typed into that
         tab, marked [from @me]. Its past (a first look) is not news. Two tabs
-        in one group leave it to the group."""
+        in one group leave it to the group while it answers the group."""
         if not ev or ev.get("t") != "text" or ev.get("replay") or not chat.mirrored:
             return
         called = mentions(ev.get("text"))
@@ -1902,8 +1918,8 @@ class ChatManager:
             if me is None or target is None or target is chat:
                 continue
             if any(chat.id in g.meta["members"] and name in g.meta["alias"].values()
-                   for g in self.groups.values()):
-                continue
+                   and g._ours(chat) for g in self.groups.values()):
+                continue             # answering the group: the group passes it on
             code, out = target.mirror_send(_cut("[from @%s]: %s" % (me, ev["text"]), TAB_TEXT - 16))
             if code == 200:
                 chat.emit({"t": "relay", "from": me, "to": name})

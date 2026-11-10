@@ -388,7 +388,7 @@ class TestStream(Base):
         self.assertIn("id: ", pushes[0])
         self.assertEqual(data["state"], "idle")
         later = json.loads(pushes[1].split("data: ", 1)[1])
-        self.assertEqual(later["events"][0]["text"], "two")
+        self.assertEqual((later["events"][0]["t"], later["events"][0]["text"]), ("user", "say two"))
 
     def test_no_event_is_lost_while_they_pour_in(self):
         chat = self.new()
@@ -475,6 +475,27 @@ class TestGroup(Base):
         group, (a, b, c) = self.group(3)
         self.assertEqual([x.id for x in group._mentions("@bob, @cy are you there", skip=a)], [b.id, c.id])
 
+    def test_what_a_member_is_asked_in_its_own_chat_stays_there(self):
+        group, (a, b) = self.group()
+        a.send("say @bob a private answer")
+        self.assertTrue(wait(lambda: any(e["t"] == "text" for e in a.events)))
+        time.sleep(0.3)
+        self.assertEqual(self.says(group), [])
+        self.assertFalse(any(e["t"] == "relay" for e in group.events))
+        self.assertEqual(b.events, [])
+        group.send("@alice say @bob for the group")           # the group's own question
+        self.assertTrue(wait(lambda: any(e["t"] == "user" for e in b.events)))
+        self.assertEqual(self.says(group)[0], ("alice", "@bob for the group"))
+        self.assertTrue(wait(lambda: any(e["t"] == "text" for e in b.events)))   # bob is done
+
+    def test_a_member_writing_now_shows_only_for_the_group(self):
+        group, (a, b) = self.group()
+        a.events.append({"t": "user", "text": "mine", "seq": 0})
+        a.live = "half an answer"
+        self.assertEqual(group.view()["live"], {})
+        a.events.append({"t": "user", "text": "[user]: yours", "seq": 0})
+        self.assertEqual(group.view()["live"], {a.id: "half an answer"})
+
     def test_members_can_join_and_leave(self):
         group, (a, b, c) = self.group(3)
         d = self.new(title="Dee")
@@ -530,6 +551,7 @@ class TestGroup(Base):
         self.assertEqual(len(group.events), n)             # it has really stopped
         group.send("say go on")                            # the user restarts it
         self.assertFalse(group.paused)
+        self.assertTrue(wait(lambda: [t for _, t in self.says(group)].count("go on") == 2))
 
     def test_the_group_shows_every_members_open_question(self):
         group, (a, b) = self.group()
@@ -938,6 +960,7 @@ class MirrorTest(Base):
         self.assertTrue(queue)
         self.assertIn("[user]: hello", text)                   # typed into the tab
         with open(self.path, "a") as f:                         # the tab answers, naming bob
+            f.write(json.dumps({"type": "user", "message": {"content": text}}) + "\n")
             f.write(json.dumps({"type": "assistant", "message": {"content": [
                 {"type": "text", "text": "@bob can you check it"}]}}) + "\n")
         chat.mirror_poll()
@@ -946,6 +969,40 @@ class MirrorTest(Base):
         self.assertTrue(wait(lambda: any(e["t"] == "relay" and e["to"] == "bob" for e in group.events)))
         self.assertTrue(wait(lambda: any("[mot]: @bob can you check it" in e["text"]
                                          for e in bob.events if e["t"] == "user")))
+
+    def test_what_the_tab_is_asked_at_the_desk_stays_out_of_the_group(self):
+        chat = self.mirror()
+        chat.mirror_poll()
+        bob = self.new(title="Bob")
+        code, out = self.mgr.create_group({"title": "Team", "members": [chat.id, bob.id]})
+        group = self.mgr.groups[out["group"]["id"]]
+        with open(self.path, "a") as f:                         # typed at the desk
+            f.write(json.dumps({"type": "user", "message": {"content": "just for you"}}) + "\n")
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "@bob a private answer"}]}}) + "\n")
+        chat.mirror_poll()
+        time.sleep(0.3)
+        self.assertEqual([e for e in group.events if e["t"] in ("say", "relay")], [])
+        self.assertFalse(any(e["t"] == "user" for e in bob.events))
+
+    def test_notes_and_tool_results_in_a_group_turn_keep_it_the_groups(self):
+        chat = self.mirror()
+        chat.mirror_poll()
+        bob = self.new(title="Bob")
+        code, out = self.mgr.create_group({"title": "Team", "members": [chat.id, bob.id]})
+        group = self.mgr.groups[out["group"]["id"]]
+        group.send("@mot look")
+        with open(self.path, "a") as f:
+            for raw in ({"type": "user", "message": {"content": self.calls[-1][0]}},
+                        {"type": "user", "message": {"content": "<system-reminder>x</system-reminder>"}},
+                        {"type": "user", "message": {"content": [
+                            {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}},
+                        {"type": "assistant", "message": {"content": [
+                            {"type": "text", "text": "seen it"}]}}):
+                f.write(json.dumps(raw) + "\n")
+        chat.mirror_poll()
+        self.assertIn(("mot", "seen it"),
+                      [(e["name"], e["text"]) for e in group.events if e["t"] == "say"])
 
     def test_old_lines_of_a_mirror_are_not_passed_on(self):
         # the first look reads the tab's past: it is history, not news
@@ -1770,8 +1827,23 @@ class TabTalkTest(Base):
     def test_tabs_in_one_group_leave_it_to_the_group(self):
         code, out = self.mgr.create_group({"members": [self.a.id, self.b.id]})
         self.assertEqual(code, 200, out)
+        group = self.mgr.groups[out["group"]["id"]]
+        group.send("@alpha ask beta")
+        with open(self.tx["ta"], "a") as f:                  # the group's question reaches the tab
+            f.write(json.dumps({"type": "user", "message": {"content": self.typed[-1][1]}}) + "\n")
         self.say("ta", "@beta hello")
-        self.assertEqual(len([t for t in self.typed if t[0] == "tb"]), 1)
+        to_b = [t[1] for t in self.typed if t[0] == "tb"]
+        self.assertEqual(len(to_b), 1)                      # once, through the group
+        self.assertTrue(to_b[0].endswith("[alpha]: @beta hello"))
+        self.assertTrue(any(e["t"] == "relay" for e in group.events))
+
+    def test_tabs_in_one_group_talk_directly_when_asked_alone(self):
+        code, out = self.mgr.create_group({"members": [self.a.id, self.b.id]})
+        group = self.mgr.groups[out["group"]["id"]]
+        self.say("ta", "@beta hello")                       # asked at the desk: not the group's
+        self.assertEqual([t for t in self.typed if t[0] == "tb"], [("tb", "[from @alpha]: @beta hello")])
+        self.assertTrue(any(e["t"] == "relay" and e["to"] == "beta" for e in self.a.events))
+        self.assertEqual([e for e in group.events if e["t"] in ("say", "relay")], [])
 
     def test_tabs_of_one_name_are_told_apart_by_their_group(self):
         for c, group in ((self.a, "EHR330"), (self.b, "Work")):
