@@ -261,7 +261,8 @@ is `@claude-lpr`; two of the same name get `-2`, `-3`).
 - A tab that is asking you something does not take a message; the sender's
   chat says so.
 - Two tabs in the same group talk through the group when they use the
-  group's names (see Groups). With their tab names (which differ when two
+  group's names (see Groups) while they answer the group. Asked alone, they
+  talk directly. With their tab names (which differ when two
   tabs have the same title) they talk directly, without the group's 8-pass
   pause.
 - It runs from the time tabit starts, with or without the chat page open.
@@ -288,6 +289,13 @@ A group puts two or more chats in one room.
   into its tab, and what the tab's Claude replies comes back into the group.
   The tab's past (what was said before it joined, or before a new
   conversation) is not passed on.
+- **What you ask a member alone stays with it.** Only a reply to a message
+  the group sent shows in the group. What you ask in the member's own chat,
+  or type in its tab at the desk, is answered there: the answer, its errors
+  and its text being written do not show in the group. An `@name` in it is
+  not passed on by the group; when both are tabs, it goes straight to that
+  tab instead, as tabs talk outside a group. A chat in two groups shows a reply to either group's
+  message in both.
 - Questions from any member show in the group. Stop stops all of them.
 - Deleting a group keeps its chats.
 
