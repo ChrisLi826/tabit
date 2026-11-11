@@ -5,7 +5,7 @@ Text it reacts to:  write <name>  asks to use a tool and waits for the answer
                     slow          streams until an interrupt arrives
                     say <text>    answers with exactly <text>
                     later <text>  answers <text> after half a second
-                    bounce a b    answers "@a bounce b a": two chats keep it going
+                    bounce a b    answers "@a: bounce b a": two chats keep it going
                     die           exits at once, with a line on stderr
                     anything else is echoed.
 Every start appends its argv to $FAKE_CLAUDE_LOG.
@@ -51,10 +51,10 @@ def main():
         text = msg["message"]["content"]
         out({"type": "system", "subtype": "init", "session_id": sid})
         body = text.strip().split("\n")[-1].split("]: ", 1)[-1]   # a group adds a briefing line and "[name]: "
-        body = re.sub(r"^(@[\w-]+\s*)+", "", body)         # a leading @name is the address
+        body = re.sub(r"^(@[\w-]+[\s,:：]*)+", "", body)         # a leading @name is the address
         if body.startswith("bounce "):
             a, b = body.split()[1:3]
-            reply(sid, "@%s bounce %s %s" % (a, b, a))
+            reply(sid, "@%s: bounce %s %s" % (a, b, a))
         elif body.startswith("die"):
             sys.stderr.write("boom: it died\n")
             sys.stderr.flush()

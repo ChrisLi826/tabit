@@ -328,7 +328,7 @@ class TestHookBeatsScreen(unittest.TestCase):
                  + FOOT.format(""))
 
     def run_update(self, state, screen, esc_age=None, event_age=10.0, pty_age=None,
-                   scrolled=False, back="", busy_age=None, argv=None):
+                   scrolled=False, back="", busy_age=None, argv=None, seen_age=None):
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
         old = tabit.AGENT_HOOK_DIR
@@ -351,6 +351,9 @@ class TestHookBeatsScreen(unittest.TestCase):
             _agent_esc_at=None if esc_age is None else time.time() - esc_age,
             _agent_hook_busy_at=None if busy_age is None else time.time() - busy_age,
             _agent_last_pty_activity=0.0 if pty_age is None else time.time() - pty_age)
+        if seen_age is not None:        # this screen, unchanged since that long ago
+            row._agent_hook_seen_text = screen
+            row._agent_hook_seen_at = time.time() - seen_age
         self.row = row
         read = []
 
@@ -361,7 +364,7 @@ class TestHookBeatsScreen(unittest.TestCase):
             _agent_status_mod=lambda: as_, _term_tail_text=tail,
             listbox=types.SimpleNamespace(get_selected_row=lambda: None),
             is_active=lambda: True, _AGENT_TAIL_LINES=40, _AGENT_READY_STABLE_S=1.0,
-            _AGENT_HOOK_QUIET_S=T._AGENT_HOOK_QUIET_S,
+            _AGENT_HOOK_QUIET_S=T._AGENT_HOOK_QUIET_S, _AGENT_HOOK_STALE_S=T._AGENT_HOOK_STALE_S,
             _agent_hook_raw=T._agent_hook_raw, _agent_hook_scrolled=lambda r: scrolled,
             _set_agent_status=lambda r, s: got.append(s))
         app._agent_hook_still_busy = lambda *a: T._agent_hook_still_busy(app, *a)
@@ -416,6 +419,42 @@ class TestHookBeatsScreen(unittest.TestCase):
         for screen in (self.STREAMING, self.QUIET):
             self.assertEqual(self.run_update("working", screen, event_age=60)[0],
                              "working")
+
+    def test_a_screen_that_stays_still_with_no_busy_line_is_idle(self):
+        # a turn stopped before claude answered, with the key unseen (pressed
+        # before a restart): the hook still says working
+        self.assertEqual(self.run_update("working", self.QUIET, event_age=600,
+                                         seen_age=40)[0], "idle")
+
+    def test_a_still_screen_is_not_idle_too_soon(self):
+        self.assertEqual(self.run_update("working", self.QUIET, event_age=600,
+                                         seen_age=20)[0], "working")
+        # nor right after a hook event, or after the busy line went
+        self.assertEqual(self.run_update("working", self.QUIET, event_age=10,
+                                         seen_age=40)[0], "working")
+        self.assertEqual(self.run_update("working", self.QUIET, event_age=600,
+                                         seen_age=40, busy_age=10)[0], "working")
+
+    def test_a_still_screen_with_a_busy_line_stays_working(self):
+        self.assertEqual(self.run_update("working", self.BUSY, event_age=600,
+                                         seen_age=40)[0], "working")
+
+    def test_a_still_screen_scrolled_up_stays_working(self):
+        # tmux shows old lines that do not move
+        self.assertEqual(self.run_update("working", self.QUIET, event_age=600,
+                                         seen_age=40, scrolled=True)[0], "working")
+
+    def test_a_changed_screen_starts_the_wait_again(self):
+        got = self.run_update("working", self.QUIET, event_age=600, seen_age=40)[0]
+        self.assertEqual(got, "idle")
+        self.row._agent_hook_seen_text = "something else"       # the screen moved
+        self.row._agent_hook_seen_at = time.time() - 40
+        self.assertTrue(T._agent_hook_still_busy(
+            types.SimpleNamespace(_agent_status_mod=lambda: __import__("agent_status"),
+                                  _agent_hook_screen_says=lambda *a: a[2],
+                                  _AGENT_HOOK_STALE_S=T._AGENT_HOOK_STALE_S,
+                                  _AGENT_HOOK_QUIET_S=T._AGENT_HOOK_QUIET_S),
+            self.row, self.QUIET, time.time()))
 
     def test_esc_then_quiet_is_idle(self):
         self.assertEqual(self.run_update("working", self.QUIET, esc_age=5)[0], "idle")
