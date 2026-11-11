@@ -246,9 +246,11 @@ same as a menu in a Claude tab: a tap presses that option's number in the tab.
 ## Tabs talk to each other
 
 A Claude tab can send a message to another Claude tab. When a line of its
-reply starts with `@name`, tabit types the whole reply into that tab, marked
-`[from @me]`; the other tab answers the same way, with a line that starts
-with `@me`. Each tab's name is its tab name made into one word (`[Claude] LPR`
+reply starts with `@name` and a colon (`@name: ...`), tabit types the whole
+reply into that tab, marked `[from @me]`; the other tab answers the same way,
+with a line that starts with `@me:`. Without the colon, `@name` only mentions
+the tab (`@beta agrees with me`) and nothing is sent: a tab often names
+another when it tells you what the other said. Each tab's name is its tab name made into one word (`[Claude] LPR`
 is `@claude-lpr`; two of the same name get `-2`, `-3`).
 
 In the other tab's chat, a message that came this way shows on the AI side,
@@ -258,7 +260,7 @@ under the sending tab's picture and name, not as one you typed.
   tabs it can call, through tabit's hooks. A tab that is alone is told
   nothing.
 - A Codex tab can be called too, and a line of its reply that starts with
-  `@name` is passed on the same way. Codex is not told the names (it has no
+  `@name:` is passed on the same way. Codex is not told the names (it has no
   such hook), so it calls only when a message asks it to.
 - Only replies written from now on count: what a tab said before is not sent.
   A line inside a code block, or a file name like `@tabit.py`, is no call.
@@ -288,7 +290,8 @@ A group puts two or more chats in one room.
 - Your message goes to everyone. `@name` at the start sends it to one (or
   several: `@ann @ben ...`, with or without commas).
 - A chat can talk to another: when its reply has a line that starts with
-  `@name`, tabit passes that message on. This is how chats talk to each other.
+  `@name:` (the name and a colon), tabit passes that message on. `@name`
+  with no colon only mentions it. This is how chats talk to each other.
 - After 8 such passes the group stops and waits for you, so two chats can never
   talk forever. Anything you say starts the count again.
 - A chat that is a tab joins like any other: the group's messages are typed

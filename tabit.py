@@ -401,7 +401,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.2.4.2"
+APP_VERSION = "v2.2.4.3"
 # Taiwan main dish of the major version + a fresh snack or drink, picked at
 # release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
 APP_CODENAME = "Ginger Duck + Scallion Pancake"
@@ -7411,19 +7411,35 @@ if (data !== null) {{
             pass
         return event.keyval
 
+    # A turn stopped before claude answered runs no hook either, and tabit
+    # may not have seen the key: it was pressed before tabit restarted, or
+    # the stop came from claude. No busy line and a screen that has not
+    # changed for this long is no turn.
+    _AGENT_HOOK_STALE_S = 30.0
+
     def _agent_hook_still_busy(self, row, text, now):
         """Only a hook ends a turn, and a reply streaming in shows no busy
-        line, so a quiet screen alone is not the end. Esc or Ctrl+C runs
+        line, so a short quiet alone is not the end. Esc or Ctrl+C runs
         no hook: after one pressed here since the last event, the turn is
         over once the busy line has been gone for a few seconds. Typing
         into the prompt claude put back does not count; a busy line does,
-        since then the key did not stop it."""
-        esc = getattr(row, "_agent_esc_at", 0) or 0
-        if esc <= getattr(row, "_agent_hook_mtime", 0):
-            return True
+        since then the key did not stop it. Without a key, the turn is over
+        when the busy line is gone and the screen has not changed for
+        _AGENT_HOOK_STALE_S (not while the tab is scrolled up)."""
         as_ = self._agent_status_mod()
         if as_ is None or as_.bottom_live_busy(text or ""):
             row._agent_hook_busy_at = now
+            return True
+        if text != getattr(row, "_agent_hook_seen_text", None):
+            row._agent_hook_seen_text = text
+            row._agent_hook_seen_at = now
+        hook_at = getattr(row, "_agent_hook_mtime", 0) or 0
+        quiet = now - max(getattr(row, "_agent_hook_seen_at", 0) or 0,
+                          getattr(row, "_agent_hook_busy_at", 0) or 0, hook_at)
+        if self._agent_hook_screen_says(row, "stale", quiet >= self._AGENT_HOOK_STALE_S):
+            return False
+        esc = getattr(row, "_agent_esc_at", 0) or 0
+        if esc <= hook_at:
             return True
         since = max(esc, getattr(row, "_agent_hook_busy_at", 0) or 0)
         return now - since < self._AGENT_HOOK_QUIET_S

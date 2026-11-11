@@ -17,10 +17,12 @@ was already running keeps the old ones until it starts again.
 Esc, Ctrl+C and No run no hook. For those tabit reads the session's
 transcript for the interrupt, and after an Esc or Ctrl+C pressed in the
 tab (in tabit, or on the Remote page) the turn is over once Claude's busy
-line has gone. A pause while a reply streams in is not the end: without
-one of those keys, only a hook ends a turn. An Esc typed into the same
-Claude from somewhere else, such as another terminal attached to its tmux
-session, is not seen, and the tab shows working until the next prompt.
+line has gone. A short pause while a reply streams in is not the end.
+When tabit did not see the key (an Esc typed from another terminal
+attached to the tmux session, or one pressed before tabit restarted), the
+turn is over once the busy line is gone and the screen has not changed for
+30 seconds. A tab scrolled up in tmux keeps working until it is back at
+the bottom.
 
 The hooks add to your own Claude settings and replace none of them. Claude
 reads them once, when it starts: after an update that changes them, a

@@ -473,19 +473,19 @@ class TestGroup(Base):
 
     def test_a_reply_can_name_several_chats(self):
         group, (a, b, c) = self.group(3)
-        self.assertEqual([x.id for x in group._mentions("@bob, @cy are you there", skip=a)], [b.id, c.id])
+        self.assertEqual([x.id for x in group._mentions("@bob, @cy: are you there", skip=a)], [b.id, c.id])
 
     def test_what_a_member_is_asked_in_its_own_chat_stays_there(self):
         group, (a, b) = self.group()
-        a.send("say @bob a private answer")
+        a.send("say @bob: a private answer")
         self.assertTrue(wait(lambda: any(e["t"] == "text" for e in a.events)))
         time.sleep(0.3)
         self.assertEqual(self.says(group), [])
         self.assertFalse(any(e["t"] == "relay" for e in group.events))
         self.assertEqual(b.events, [])
-        group.send("@alice say @bob for the group")           # the group's own question
+        group.send("@alice say @bob: for the group")           # the group's own question
         self.assertTrue(wait(lambda: any(e["t"] == "user" for e in b.events)))
-        self.assertEqual(self.says(group)[0], ("alice", "@bob for the group"))
+        self.assertEqual(self.says(group)[0], ("alice", "@bob: for the group"))
         self.assertTrue(wait(lambda: any(e["t"] == "text" for e in b.events)))   # bob is done
 
     def test_a_member_writing_now_shows_only_for_the_group(self):
@@ -508,7 +508,7 @@ class TestGroup(Base):
 
     def test_a_group_line_during_a_private_turn_does_not_take_its_answer(self):
         group, (a, b) = self.group()
-        a.send("later @bob a secret")
+        a.send("later @bob: a secret")
         group.send("@alice say hi all")                     # while alice still works
         self.assertTrue(wait(lambda: len([e for e in a.events if e["t"] == "text"]) == 2))
         time.sleep(0.2)
@@ -581,13 +581,13 @@ class TestGroup(Base):
     def test_a_chat_can_pass_a_message_to_another(self):
         group, (a, b) = self.group()
         # bob is told to say a line that starts with @alice: it reaches alice
-        group.send("@bob say @alice are you there")
+        group.send("@bob say @alice: are you there")
         self.assertTrue(wait(lambda: any(e["t"] == "relay" for e in group.events)))
         self.assertTrue(wait(lambda: any(n == "alice" for n, _ in self.says(group))))
         relay = [e for e in group.events if e["t"] == "relay"][0]
         self.assertEqual((relay["from"], relay["to"]), ("bob", "alice"))
         got = [e["text"] for e in a.events if e["t"] == "user"][0]
-        self.assertIn("[bob]: @alice are you there", got)
+        self.assertIn("[bob]: @alice: are you there", got)
         self.assertIn('group chat called "Team"', got)      # told how the group works, once
 
     def test_two_chats_cannot_talk_forever(self):
@@ -1031,12 +1031,12 @@ class MirrorTest(Base):
         with open(self.path, "a") as f:                         # the tab answers, naming bob
             f.write(json.dumps({"type": "user", "message": {"content": text}}) + "\n")
             f.write(json.dumps({"type": "assistant", "message": {"content": [
-                {"type": "text", "text": "@bob can you check it"}]}}) + "\n")
+                {"type": "text", "text": "@bob: can you check it"}]}}) + "\n")
         chat.mirror_poll()
-        self.assertIn(("mot", "@bob can you check it"),
+        self.assertIn(("mot", "@bob: can you check it"),
                       [(e["name"], e["text"]) for e in group.events if e["t"] == "say"])
         self.assertTrue(wait(lambda: any(e["t"] == "relay" and e["to"] == "bob" for e in group.events)))
-        self.assertTrue(wait(lambda: any("[mot]: @bob can you check it" in e["text"]
+        self.assertTrue(wait(lambda: any("[mot]: @bob: can you check it" in e["text"]
                                          for e in bob.events if e["t"] == "user")))
 
     def test_what_the_tab_is_asked_at_the_desk_stays_out_of_the_group(self):
@@ -1048,7 +1048,7 @@ class MirrorTest(Base):
         with open(self.path, "a") as f:                         # typed at the desk
             f.write(json.dumps({"type": "user", "message": {"content": "just for you"}}) + "\n")
             f.write(json.dumps({"type": "assistant", "message": {"content": [
-                {"type": "text", "text": "@bob a private answer"}]}}) + "\n")
+                {"type": "text", "text": "@bob: a private answer"}]}}) + "\n")
         chat.mirror_poll()
         time.sleep(0.3)
         self.assertEqual([e for e in group.events if e["t"] in ("say", "relay")], [])
@@ -1129,7 +1129,7 @@ class MirrorTest(Base):
         # the first look reads the tab's past: it is history, not news
         with open(self.path, "a") as f:
             f.write(json.dumps({"type": "assistant", "message": {"content": [
-                {"type": "text", "text": "@bob an old line"}]}}) + "\n")
+                {"type": "text", "text": "@bob: an old line"}]}}) + "\n")
         chat, bob = self.mirror(), self.new(title="Bob")
         code, out = self.mgr.create_group({"members": [chat.id, bob.id]})
         group = self.mgr.groups[out["group"]["id"]]
@@ -1920,29 +1920,29 @@ class TabTalkTest(Base):
         (self.a if tab == "ta" else self.b).mirror_poll()
 
     def test_a_line_starting_with_at_name_goes_to_that_tab(self):
-        self.say("ta", "Let me ask.\n@beta can you check the build?")
-        self.assertEqual(self.typed, [("tb", "[from @alpha]: Let me ask.\n@beta can you check the build?")])
+        self.say("ta", "Let me ask.\n@beta: can you check the build?")
+        self.assertEqual(self.typed, [("tb", "[from @alpha]: Let me ask.\n@beta: can you check the build?")])
         self.assertTrue(any(e["t"] == "relay" and e["to"] == "beta" for e in self.a.events))
-        self.say("tb", "@alpha it passes")                   # and back
-        self.assertEqual(self.typed[-1], ("ta", "[from @beta]: @alpha it passes"))
+        self.say("tb", "@alpha: it passes")                   # and back
+        self.assertEqual(self.typed[-1], ("ta", "[from @beta]: @alpha: it passes"))
 
     def test_no_mention_no_name_and_no_self_send_nothing(self):
         self.say("ta", "all done, nobody to ask")
-        self.say("ta", "@nobody hello")
-        self.say("ta", "@alpha talking to myself")
+        self.say("ta", "@nobody: hello")
+        self.say("ta", "@alpha: talking to myself")
         self.assertEqual(self.typed, [])
 
     def test_the_past_is_not_sent(self):
         with open(self.tx["ta"], "a") as f:
             f.write(json.dumps({"type": "assistant", "message": {"content": [
-                {"type": "text", "text": "@beta an old line"}]}}) + "\n")
+                {"type": "text", "text": "@beta: an old line"}]}}) + "\n")
         self.a.meta["mirror"] = {}                            # a first look again: the past
         self.a.mirror_poll()
         self.assertEqual(self.typed, [])
 
     def test_a_tab_that_cannot_take_it_says_so_in_the_sender(self):
         self.refuse.add("tb")
-        self.say("ta", "@beta hello")
+        self.say("ta", "@beta: hello")
         self.assertTrue(any(e["t"] == "error" and "beta" in e["text"] for e in self.a.events))
 
     def test_tabs_in_one_group_leave_it_to_the_group(self):
@@ -1952,10 +1952,10 @@ class TabTalkTest(Base):
         group.send("@alpha ask beta")
         with open(self.tx["ta"], "a") as f:                  # the group's question reaches the tab
             f.write(json.dumps({"type": "user", "message": {"content": self.typed[-1][1]}}) + "\n")
-        self.say("ta", "@beta hello")
+        self.say("ta", "@beta: hello")
         to_b = [t[1] for t in self.typed if t[0] == "tb"]
         self.assertEqual(len(to_b), 1)                      # once, through the group
-        self.assertTrue(to_b[0].endswith("[alpha]: @beta hello"))
+        self.assertTrue(to_b[0].endswith("[alpha]: @beta: hello"))
         self.assertTrue(any(e["t"] == "relay" for e in group.events))
 
     def test_a_bracket_typed_at_the_desk_is_no_group_line(self):
@@ -1963,9 +1963,9 @@ class TabTalkTest(Base):
         group = self.mgr.groups[out["group"]["id"]]
         with open(self.tx["ta"], "a") as f:
             f.write(json.dumps({"type": "user", "message": {"content": "[WIP]: tidy the parser"}}) + "\n")
-        self.say("ta", "@beta can you look at this?")
+        self.say("ta", "@beta: can you look at this?")
         self.assertEqual([e for e in group.events if e["t"] == "say"], [])
-        self.assertEqual(self.typed, [("tb", "[from @alpha]: @beta can you look at this?")])
+        self.assertEqual(self.typed, [("tb", "[from @alpha]: @beta: can you look at this?")])
 
     def test_a_groups_name_is_its_member_not_a_tab_of_the_same_name(self):
         self.tabs.append({"id": "tc", "title": "Gamma 2", "group": "", "color": "", "key": "ai-c"})
@@ -1976,16 +1976,16 @@ class TabTalkTest(Base):
         code, out = self.mgr.create_group({"members": [self.a.id, self.b.id, other.id]})
         group = self.mgr.groups[out["group"]["id"]]
         group.meta["alias"][self.b.id] = "gamma-2"         # and the group calls beta so
-        self.say("ta", "@gamma-2 hello")
+        self.say("ta", "@gamma-2: hello")
         self.assertEqual([t[0] for t in self.typed], ["tb"])
-        self.say("ta", "@gamma hello")                      # a member with no tab
+        self.say("ta", "@gamma: hello")                      # a member with no tab
         self.assertTrue(any(e["t"] == "error" and "not a tab" in e["text"] for e in self.a.events))
 
     def test_tabs_in_one_group_talk_directly_when_asked_alone(self):
         code, out = self.mgr.create_group({"members": [self.a.id, self.b.id]})
         group = self.mgr.groups[out["group"]["id"]]
-        self.say("ta", "@beta hello")                       # asked at the desk: not the group's
-        self.assertEqual([t for t in self.typed if t[0] == "tb"], [("tb", "[from @alpha]: @beta hello")])
+        self.say("ta", "@beta: hello")                       # asked at the desk: not the group's
+        self.assertEqual([t for t in self.typed if t[0] == "tb"], [("tb", "[from @alpha]: @beta: hello")])
         self.assertTrue(any(e["t"] == "relay" and e["to"] == "beta" for e in self.a.events))
         self.assertEqual([e for e in group.events if e["t"] in ("say", "relay")], [])
 
@@ -1996,14 +1996,18 @@ class TabTalkTest(Base):
         names = sorted(self.mgr.tab_names())
         self.assertEqual(names, ["ehr330-claude", "work-claude"])
 
-    def test_a_file_or_a_code_block_is_no_call(self):
+    def test_a_file_a_code_block_or_a_mention_is_no_call(self):
         self.say("ta", "@beta.py is the file\n@beta/x.md too")
-        self.say("ta", "Like this:\n```\n@beta hello\n```\ndone")
+        self.say("ta", "Like this:\n```\n@beta: hello\n```\ndone")
         self.assertEqual(self.typed, [])
-        self.say("ta", "@beta, please look")
+        self.say("ta", "@beta, please look")              # only a mention: no colon
+        self.say("ta", "@beta 同意我的 review。")
+        self.assertEqual(self.typed, [])
         self.say("ta", "@beta: and this")
+        self.say("ta", "@beta：好")                          # a Chinese colon too
         self.assertEqual(len(self.typed), 2)
-        self.assertEqual(tc.mentions("@beta，請看"), ["beta"])
+        self.assertEqual(tc.mentions("@beta，請看"), [])
+        self.assertEqual(tc.mentions("@alpha, @beta：請看"), ["alpha", "beta"])
 
     def test_the_same_file_by_another_path_is_no_new_conversation(self):
         link = os.path.join(self.dir, "acct")
@@ -2011,7 +2015,7 @@ class TabTalkTest(Base):
         before = len(self.a.events)
         self.a._mirror_read(os.path.join(link, os.path.basename(self.tx["ta"])))
         self.assertEqual(len(self.a.events), before)
-        self.say("ta", "@beta still here")
+        self.say("ta", "@beta: still here")
         self.assertEqual(len(self.typed), 1)
 
     def send(self, chat, text):
@@ -2092,7 +2096,7 @@ class TabTalkTest(Base):
         self.assertIsNotNone(self.roster("ai-a"))
 
     def test_a_long_reply_reaches_the_other_tab_cut(self):
-        self.say("ta", "@beta here it is\n" + "x" * 9000)
+        self.say("ta", "@beta: here it is\n" + "x" * 9000)
         [(tab, text)] = self.typed
         self.assertEqual(tab, "tb")
         self.assertLessEqual(len(text), 8000)

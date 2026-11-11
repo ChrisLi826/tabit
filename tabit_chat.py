@@ -1433,21 +1433,23 @@ MAX_HOPS = 8                 # chat-to-chat messages after one message from the 
 BRIEF = ('You are in a group chat called "{title}" with these members: {names}. '
          'You are "{me}". Messages arrive as "[name]: text"; "user" is the person. '
          'Your replies to these messages show in the group. To talk to another '
-         'member, start a line of your reply with @name. Only do that when you '
-         'need them: do not answer just to say thanks.')
+         'member, start a line of your reply with @name and a colon ("@name: ..."). '
+         'To only mention a member, write its name without @. Only talk to them '
+         'when you need them: do not answer just to say thanks.')
 
 
 NAME_END = r"(?![\w-]|[./\\]\S)"     # @tabit.py or @docs/x.md is a file, not a name
 
 
 def mentions(text):
-    """The names a reply calls by @name at the start of a line (several per
-    line allowed), lower case, in order."""
+    """The names a reply calls: a line that starts with @name and a colon
+    ("@bob: ..." or "@bob, @cy: ..."), lower case, in order. "@bob says ..."
+    only mentions bob: an AI writes that when it talks about a tab."""
     named, code = [], False
     for line in (text or "").splitlines():
         if line.lstrip().startswith("```"):
             code = not code
-        m = not code and re.match(r"\s*((?:@[\w-]+%s[\s,:]*)+)" % NAME_END, line)
+        m = not code and re.match(r"\s*((?:@[\w-]+%s(?:[\s,，、]+(?=@))?)+)\s*[:：]" % NAME_END, line)
         if m:
             for x in re.findall(r"@([\w-]+)", m.group(1)):
                 if x.lower() not in named:
@@ -1457,11 +1459,12 @@ def mentions(text):
 
 ROSTER = ("You are the AI tab @{me} in tabit, on this computer. Other AI tabs you can "
           "talk to: {others}. To send one a message, start a line of your reply with "
-          "@name: tabit types your whole reply into that tab, marked [from @{me}]. A "
-          "message that starts with [from @name] came from that tab (another AI, not "
-          "the user); answer it the same "
-          "way, with a line that starts with @name. Only do this when you need another "
-          "tab. A reply with no @name stays in this tab.")
+          "@name and a colon (\"@name: ...\"): tabit types your whole reply into that "
+          "tab, marked [from @{me}]. To only mention a tab, write its name without @. "
+          "A message that starts with [from @name] came from that tab (another AI, not "
+          "the user); answer it the same way, with a line that starts with @name and a "
+          "colon. Only do this when you need another tab. A reply with no such line "
+          "stays in this tab.")
 
 
 def slug(text):
@@ -1658,7 +1661,7 @@ class Group(_Log):
         return False
 
     def _mentions(self, text, skip=None):
-        """Members named by @name at the start of a line, several per line allowed."""
+        """Members a reply calls: a line that starts with @name and a colon."""
         named = set(mentions(text))
         return [c for c in self.members()
                 if c is not skip and self.alias(c).lower() in named]
@@ -1962,7 +1965,7 @@ class ChatManager:
         return names
 
     def _tab_talk(self, chat, ev):
-        """A tab's reply with a line that starts with @name is typed into that
+        """A tab's reply with a line that starts with @name: is typed into that
         tab, marked [from @me]. Its past (a first look) is not news. Two tabs
         in one group leave it to the group while it answers the group."""
         if not ev or ev.get("t") != "text" or ev.get("replay") or not chat.mirrored:
