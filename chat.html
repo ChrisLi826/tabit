@@ -931,16 +931,25 @@ function draw(me, ev) {
   if (el && ev.ts && el.classList.contains("b")) el.insertAdjacentHTML("beforeend", `<div class="ts">${clock(ev.ts)}</div>`);
   if (el && REPLYABLE.has(ev.t) && ev.text) {
     el.dataset.seq = ev.seq;
-    el.dataset.who = ev.t === "user" ? "You" : ev.name || aiName(me.meta);
+    el.dataset.who = ev.t === "user" ? (fromTab(ev.text) || ["You"])[0] : ev.name || aiName(me.meta);
     el.dataset.snip = ev.text.replace(/\s+/g, " ").trim().slice(0, 140);
     el.insertAdjacentHTML("beforeend", '<button type="button" class="rp">↩ Reply</button>');
   }
   return el;
 }
+// "[from @name]: text" is what another AI tab sends: [name, text], or null
+function fromTab(text) {
+  const m = /^\[from @([^\]\s]+)\]: ?/.exec(text || "");
+  return m ? [m[1], text.slice(m[0].length)] : null;
+}
 function drawOne(me, ev) {
   const div = (cls, html) => { const d = document.createElement("div"); d.className = cls; d.innerHTML = html; return d; };
   switch (ev.t) {
     case "user":
+      if (fromTab(ev.text)) {            // another AI tab typed it, not the user
+        const [name, text] = fromTab(ev.text), c = (cfg?.chats || []).find((x) => x.at === name);
+        return div("b ai", `<div class="who" style="color:${colorOf(name)}">${c ? emo(face(c)) : "🤖"} ${esc(name)}</div>${md(text)}`);
+      }
       return div("b me", `${ev.reply ? `<div class="quote"${ev.reply.seq ? ` data-go="${+ev.reply.seq}"` : ""}><b>${esc(ev.reply.who)}</b>${esc(ev.reply.snip)}</div>` : ""}${esc(ev.text)}${ev.to ? `<div class="to">to ${ev.to.map((x) => "@" + esc(x)).join(" ")}</div>` : ""}`);
     case "text":
       return div(me.codex.has("") ? "b ai cx" : "b ai", md(ev.text));

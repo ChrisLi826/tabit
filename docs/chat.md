@@ -117,7 +117,10 @@ Every Claude tab in tabit has a chat, and every new chat is a Claude tab. The
 chat shows that tab's conversation, and what you type goes into the tab. A tab
 that is working takes your line too: Claude reads it at its next step, in the
 same turn, and the chat shows it.
-**Stop** presses Esc in the tab.
+**Stop** presses Esc in the tab, once, and only while the tab works or asks
+something. More taps in the next 5 seconds, or a tap on a tab that has
+already stopped, do nothing: two Escs in an idle Claude open its Rewind
+screen.
 
 Until Claude reads such a line, the chat shows it as a pale **Queued**
 bubble. tabit follows Claude Code's own queue in the transcript
@@ -248,6 +251,9 @@ reply starts with `@name`, tabit types the whole reply into that tab, marked
 with `@me`. Each tab's name is its tab name made into one word (`[Claude] LPR`
 is `@claude-lpr`; two of the same name get `-2`, `-3`).
 
+In the other tab's chat, a message that came this way shows on the AI side,
+under the sending tab's picture and name, not as one you typed.
+
 - Every Claude tab is told, with each prompt, its own name and the other
   tabs it can call, through tabit's hooks. A tab that is alone is told
   nothing.
@@ -294,8 +300,17 @@ A group puts two or more chats in one room.
   or type in its tab at the desk, is answered there: the answer, its errors
   and its text being written do not show in the group. An `@name` in it is
   not passed on by the group; when both are tabs, it goes straight to that
-  tab instead, as tabs talk outside a group. A chat in two groups shows a reply to either group's
-  message in both.
+  tab instead, as tabs talk outside a group. A member with no tab is not
+  reached that way, and the sender's chat says so.
+- **Each answer goes where its question came from**, also when messages
+  overlap: a line you send a member while it answers the group does not take
+  that answer away from the group, and a group's message that arrives while
+  it answers you does not pull your answer into the group. A chat that is
+  not a tab knows who sent each message. A tab goes by the line that started
+  its turn; a line you type at the desk while it works stays an aside, and a
+  group's line it reads mid-turn makes the rest of that turn the group's.
+- A tab in two groups shows its answer to a group's line in both groups. A
+  chat that is not a tab shows it only in the group that asked.
 - Questions from any member show in the group. Stop stops all of them.
 - Deleting a group keeps its chats.
 
