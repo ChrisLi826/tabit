@@ -4,6 +4,7 @@
 Text it reacts to:  write <name>  asks to use a tool and waits for the answer
                     slow          streams until an interrupt arrives
                     say <text>    answers with exactly <text>
+                    later <text>  answers <text> after half a second
                     bounce a b    answers "@a bounce b a": two chats keep it going
                     die           exits at once, with a line on stderr
                     anything else is echoed.
@@ -85,6 +86,9 @@ def main():
             done(sid)
         elif body.startswith("say "):
             reply(sid, body[4:])
+        elif body.startswith("later "):
+            time.sleep(0.5)
+            reply(sid, body[6:])
         else:
             reply(sid, "echo: " + text)
 

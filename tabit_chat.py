@@ -28,6 +28,7 @@ MODES = {"ask": "default", "edits": "acceptEdits", "plan": "plan",
          "bypass": "bypassPermissions"}
 MODELS = ("", "opus", "sonnet", "haiku", "fable")
 EFFORTS = ("", "low", "medium", "high", "xhigh", "max")     # claude --effort; "" is its default
+STOP_AGAIN = 5           # seconds after Stop pressed Esc in a tab before it presses another
 USAGE_ASK = 180          # seconds between asking Anthropic for one Claude login's usage
 
 MAX_RUNNING = 6              # claude processes alive at once
@@ -158,7 +159,7 @@ def _transcript_events(raw):
         if (a.get("type") == "queued_command" and a.get("commandMode") == "prompt"
                 and (a.get("origin") or {}).get("kind") == "human" and isinstance(typed, str)
                 and typed.strip() and not typed.strip().startswith(NOT_TYPED)):
-            return [_typed_event(typed.strip())]
+            return [dict(_typed_event(typed.strip()), queued=True)]     # read mid-turn
         return []
     if raw.get("type") == "system" and raw.get("subtype") == "local_command":
         return _command_events(raw.get("content"))
@@ -710,9 +711,11 @@ class Chat(_Log):
         self.pending = {}            # request id -> {"ev", "input", "suggest"}
         self.tab_state = "idle"      # a mirrored chat: what its tab is doing
         self.held = []               # lines sent while the tab showed a screen: (key, text)
+        self._esc_at = 0             # when Stop last pressed Esc in the tab
         self._tab_answered = set()   # tool ids of the tab's questions answered from here
         self._model_looked = False   # the tab's model was looked for in its transcript
         self.inflight = 0            # messages sent that have no "done" yet
+        self.owners = collections.deque()   # who sent each of those: a group's id, or None
         self.proc = None
         self.wlock = threading.Lock()
         self.slock = threading.Lock()   # one claude per chat, even when two send at once
@@ -859,6 +862,9 @@ class Chat(_Log):
         self.mgr.make_room(self)
         self._expected_exit = False
         self.errtail.clear()
+        with self.cond:              # a process that died answers nothing it was sent
+            self.inflight = 0
+            self.owners.clear()
         proc = subprocess.Popen(
             self._argv(), cwd=self.meta["cwd"], env=self.mgr.child_env(self),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -919,7 +925,10 @@ class Chat(_Log):
                 self._set_live("")
             if ev["t"] == "done":
                 self._set_live("")
-                self.inflight = max(0, self.inflight - 1)
+                with self.cond:
+                    self.inflight = max(0, self.inflight - 1)
+                    if self.owners:
+                        self.owners.popleft()      # the next answer is the next message's
             self.emit(ev)
             if ev["t"] == "done":
                 self.mgr.note_idle(self)
@@ -949,6 +958,8 @@ class Chat(_Log):
             why = " ".join(list(self.errtail)[-3:]) or "it ended without a word"
             self.emit({"t": "error", "text": "Claude stopped: " + why})
         with self.cond:
+            if self.proc is None:    # not when a new claude took the messages since
+                self.owners.clear()
             self.cond.notify_all()
 
     def stop_process(self):
@@ -975,24 +986,35 @@ class Chat(_Log):
                 raise RuntimeError("Claude has stopped: send a message to start it again")
 
     # -- what the page can do
-    def send(self, text, quiet=False, reply=None):
+    def send(self, text, quiet=False, reply=None, owner=None):
         """quiet: a group sends it, so the chat's title is not made from it.
-        reply: the message this one answers, from quote()."""
+        reply: the message this one answers, from quote(). owner: the group
+        that asks, whose answer it is; None for the user in this chat."""
         with self.slock:
             if self.moving:
                 raise RuntimeError("this chat is moving into a tab")
             if not self.running:
                 self._spawn()
-        self.last_used = time.time()
+            self.last_used = time.time()
+            # counted and shown before Claude has it, so its answer can never
+            # come first; one send at a time, so the order is Claude's order
+            with self.cond:
+                self.inflight += 1
+                self.owners.append(owner)
+            self.emit(dict({"t": "user", "text": text}, **({"reply": reply} if reply else {})))
+            try:
+                self._write({"type": "user", "message": {"role": "user", "content": quoted(reply, text)}})
+            except RuntimeError as e:
+                with self.cond:
+                    self.inflight = max(0, self.inflight - 1)
+                    if self.owners:
+                        self.owners.pop()
+                self.emit({"t": "error", "text": "Not sent: %s" % e, "unsent": True})
+                raise
         if not quiet and not self.meta.get("titled"):
             self.meta["title"] = " ".join(text.split())[:40] or self.meta["title"]
             self.meta["titled"] = True
         self._save_meta()
-        # shown before Claude has it, so its answer can never come first: a
-        # group tells by the last question whether an answer is the group's
-        self.emit(dict({"t": "user", "text": text}, **({"reply": reply} if reply else {})))
-        self._write({"type": "user", "message": {"role": "user", "content": quoted(reply, text)}})
-        self.inflight += 1
 
     def mirror_poll(self):
         """One look at the tab: its state, and what its transcript gained."""
@@ -1311,8 +1333,23 @@ class Chat(_Log):
 
     def interrupt(self):
         if self.mirrored:
-            code, _out = self.mgr.tab_hook(self.meta["tab"]["id"], key="esc") \
-                if self.mgr.tab_hook else (404, None)
+            if self.mgr.tab_hook is None:
+                return False
+            # Esc stops only a tab that works or asks. In an idle Claude a
+            # second Esc soon after the first opens its Rewind screen, and
+            # the tab then waits there. tabit sees a stopped Claude as idle
+            # only after about 3 s (an early stop writes no line), so Stop
+            # gets tapped again and again: one Esc per STOP_AGAIN seconds
+            info = self.mgr.tab_hook(self.meta["tab"]["id"])
+            if info.get("status") not in ("working", "blocked"):
+                return False
+            with self.cond:
+                if time.time() - self._esc_at < STOP_AGAIN:
+                    return False
+                self._esc_at = time.time()
+            code, _out = self.mgr.tab_hook(self.meta["tab"]["id"], key="esc")
+            if code != 200:
+                self._esc_at = 0             # it did not go: the next tap tries again
             return code == 200
         if not self.running:
             return False
@@ -1430,6 +1467,15 @@ ROSTER = ("You are the AI tab @{me} in tabit, on this computer. Other AI tabs yo
 def slug(text):
     out = "".join(c if c.isalnum() else "-" for c in text.lower()).strip("-")
     return "-".join(p for p in out.split("-") if p)[:40] or "chat"
+
+
+def _from_group(text, names):
+    """A line a group typed into a tab: its briefing, or "[name]: text" with
+    "user" or a member's name. "[WIP]: ..." typed at the desk is not one."""
+    if text.startswith(BRIEF.split("{", 1)[0]):
+        return True
+    m = re.match(r"\[([\w-]+)\]: ", text)
+    return bool(m) and m.group(1) in names
 
 
 class Group(_Log):
@@ -1577,8 +1623,9 @@ class Group(_Log):
             self.cond.notify_all()
         if not ev or ev.get("replay"):  # a mirror reading its tab's past: history, not news
             return
-        if ev["t"] in ("text", "error") and not self._ours(chat):
+        if (ev["t"] in ("text", "error") and not self._ours(chat)) or ev.get("unsent"):
             return               # it answers what was asked in its own chat: it stays there
+                                 # (a group's own message that did not go says so itself)
         name = self.alias(chat)
         if ev["t"] == "text":
             self.emit({"t": "say", "chat": chat.id, "name": name, "text": ev["text"]})
@@ -1587,16 +1634,28 @@ class Group(_Log):
             self.emit({"t": "error", "chat": chat.id, "name": name, "text": ev["text"]})
 
     def _ours(self, chat):
-        """The member's last prompt came from this group, so what it says now
-        answers the group. A prompt from its own chat, from the desk, or from
-        another tab is private: the answer is not shown here or passed on."""
+        """What the member says now answers this group: the message it is
+        answering came from here. One asked in its own chat, at the desk or
+        by another tab is private: the answer is not shown here or passed on.
+        A chat knows who sent each message. A tab tells by the line that
+        started its turn, or by a group's line it read during the turn."""
+        if not chat.mirrored:
+            with chat.cond:
+                return bool(chat.owners) and chat.owners[0] == self.id
+        # the names of every group it is in: a line one group typed shows in each
+        names = {"user"}
+        for g in list(self.mgr.groups.values()):
+            if chat.id in g.meta["members"]:
+                names.update(g.meta["alias"].values())
         with chat.cond:
-            last = next((e for e in reversed(chat.events) if e["t"] == "user"), None)
-        text = (last or {}).get("text") or ""
-        if text.startswith(BRIEF.split("{", 1)[0]):
-            return True
-        names = list(self.meta["alias"].values()) + ["user"]
-        return any(text.startswith("[%s]: " % n) for n in names)
+            for e in reversed(chat.events):
+                if e["t"] != "user" or e.get("to"):     # "to": the chat sent it on to tabs
+                    continue
+                mine = _from_group(e.get("text") or "", names)
+                if e.get("queued") and not mine:
+                    continue                 # an aside read mid-turn: the turn is still the same
+                return mine
+        return False
 
     def _mentions(self, text, skip=None):
         """Members named by @name at the start of a line, several per line allowed."""
@@ -1633,7 +1692,7 @@ class Group(_Log):
                            "text": "could not reach it: %s" % (out or {}).get("error", code)})
             return
         try:
-            chat.send(text, quiet=True)
+            chat.send(text, quiet=True, owner=self.id)
         except (OSError, RuntimeError, ValueError) as e:
             self.emit({"t": "error", "chat": chat.id, "name": self.alias(chat),
                        "text": "could not reach it: %s" % e})
@@ -1913,13 +1972,22 @@ class ChatManager:
             return
         names = self.tab_names()
         me = next((n for n, c in names.items() if c is chat), None)
+        with self.lock:
+            mine = [g for g in self.groups.values() if chat.id in g.meta["members"]]
         for name in called:
-            target = names.get(name)
+            # a name its group gave is that member, even when a tab elsewhere
+            # has the same name
+            ours = [g for g in mine if name in g.meta["alias"].values()]
+            if any(g._ours(chat) for g in ours):
+                continue             # answering the group: the group passes it on
+            member = next((m for g in ours for m in g.members() if g.alias(m) == name), None)
+            target = member if member is not None else names.get(name)
             if me is None or target is None or target is chat:
                 continue
-            if any(chat.id in g.meta["members"] and name in g.meta["alias"].values()
-                   and g._ours(chat) for g in self.groups.values()):
-                continue             # answering the group: the group passes it on
+            if not target.mirrored:
+                chat.emit({"t": "error", "text": "could not reach @%s: it is not a tab, so "
+                           "only its group reaches it" % name})
+                continue
             code, out = target.mirror_send(_cut("[from @%s]: %s" % (me, ev["text"]), TAB_TEXT - 16))
             if code == 200:
                 chat.emit({"t": "relay", "from": me, "to": name})
