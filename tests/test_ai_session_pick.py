@@ -329,7 +329,8 @@ class CodexChatTest(unittest.TestCase):
             argv=["/bin/bash", "-c", "cd /p || exit 1; exec " + run] if run else ["bash"]))
         self.assertEqual(cli("/usr/bin/claude --continue"), "claude")
         self.assertEqual(cli("/home/u/.nvm/bin/codex resume " + A), "codex")
-        self.assertIsNone(cli("grok --continue"))
+        self.assertEqual(cli("grok --continue"), "grok")
+        self.assertIsNone(cli("agy -c"))
         self.assertIsNone(cli(""))
 
 

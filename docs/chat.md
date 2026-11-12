@@ -86,6 +86,9 @@ that has started again since the last reading shows 0%.
 - **Codex** writes its usage into the session file after each turn; the
   chat reads it from there. A free plan has one 30-day window; paid plans
   have 5h and 7d.
+- **Grok** tells its usage to no file and no status line. While a Grok tab
+  is open, tabit asks a Grok with no screen for it, as Grok's `/usage` does:
+  one window, the share of the login's credits used this week or month.
 - The last reading of each login is kept in
   `~/.local/share/tabit/chats/usage.json`, so it shows again after a restart.
 
@@ -118,7 +121,13 @@ chat shows that tab's conversation, and what you type goes into the tab. A tab
 that is working takes your line too: Claude reads it at its next step, in the
 same turn, and the chat shows it.
 **Stop** presses Esc in the tab, once, and only while the tab works or asks
-something. More taps in the next 5 seconds, or a tap on a tab that has
+something. In a Grok tab it presses Ctrl+C (Esc does not stop Grok), and
+only while Grok works with an empty box in the tab: with text there Ctrl+C
+would only clear it, and while Grok asks something it would only open a
+panel. It presses again only after 30 seconds, since a second Ctrl+C while
+a turn is being cancelled heads for quitting Grok. If Grok has not stopped
+3 seconds later (it may ask in the tab about its sub-agents), the chat says
+so. More taps in the next 5 seconds, or a tap on a tab that has
 already stopped, do nothing: two Escs in an idle Claude open its Rewind
 screen.
 
@@ -223,8 +232,16 @@ same as a menu in a Claude tab: a tap presses that option's number in the tab.
   the program's own setting. Not while Claude works, asks something
   or still runs agents. Claude's own settings are not touched. The tab shows
   the model that answered last, read from its transcript.
-- Tabs of other tools (Grok, agy) have no chat: only Claude's and Codex's
-  sessions are read.
+- A **Grok** tab has a chat too, read from its session's `updates.jsonl`:
+  what you typed, what Grok said, and its tools with their results. Its
+  thinking, its own notes and its sub-agents' work are left out. Its login,
+  model and effort are set in the tab, and the chat lists none of its `/`
+  commands. Its usage shows with the others: the share of the login's
+  credits used this week (or month), asked of a Grok with no screen
+  (`grok agent stdio`, as its `/usage` asks) every 10 minutes at most. No
+  prompt is sent, so asking costs nothing. A line you type at the desk while Grok works is
+  not marked as waiting, as with Codex.
+- Tabs of other tools (agy) have no chat.
 - When the tab starts a new conversation, the chat says so and goes on with
   the new one.
 - **Menus on the tab's screen.** A tab that waits on a menu (the trust
@@ -259,9 +276,10 @@ under the sending tab's picture and name, not as one you typed.
 - Every Claude tab is told, with each prompt, its own name and the other
   tabs it can call, through tabit's hooks. A tab that is alone is told
   nothing.
-- A Codex tab can be called too, and a line of its reply that starts with
-  `@name:` is passed on the same way. Codex is not told the names (it has no
-  such hook), so it calls only when a message asks it to.
+- A Codex or Grok tab can be called too, and a line of its reply that starts
+  with `@name:` is passed on the same way. Codex and Grok are not told the
+  names (tabit has no such hook for them), so they call only when a message
+  asks them to.
 - Only replies written from now on count: what a tab said before is not sent.
   A line inside a code block, or a file name like `@tabit.py`, is no call.
 - There is no limit on how often tabs answer each other. Two tabs that keep

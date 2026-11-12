@@ -9,6 +9,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import subprocess
 import time
 import unittest
 from unittest import mock
@@ -1284,6 +1285,203 @@ class CodexMirrorTest(Base):
             "title": "G", "status": "idle", "transcript": "", "cli": ""}
         code, out = self.mgr.create({"tab": {"id": "t1", "title": "x"}})
         self.assertEqual(code, 400, out)
+
+
+class GrokMirrorTest(Base):
+    """A chat that shows a Grok tab: its bubbles come from the session's updates.jsonl."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, tc, "MIRROR_EVERY", tc.MIRROR_EVERY)
+        tc.MIRROR_EVERY = 3600       # the tests look by hand
+        self.path = os.path.join(self.dir, "updates.jsonl")
+        shutil.copy(os.path.join(os.path.dirname(__file__), "fixtures", "chat",
+                                 "grok_updates.jsonl"), self.path)
+        self.status, self.calls, self.box = "idle", [], "❯"
+
+        def hook(tab, text=None, key=None, queue=False, screen=False):
+            if text is None and key is None:
+                return dict({"title": "Fox", "status": self.status, "transcript": self.path, "cli": "grok"},
+                            **({"screen": ["Worked for 3s", "minimal · /help", self.box,
+                                           "Grok 4.7 (high) · always-approve"]} if screen else {}))
+            self.calls.append((text, key, queue))
+            return 200, {"ok": True}
+        self.mgr.tab_hook = hook
+        self.mgr.tabs_hook = lambda: [{"id": "t1", "title": "Fox", "cli": "grok"}]
+
+    mirror = MirrorTest.mirror
+    texts = MirrorTest.texts
+
+    def test_the_converter_keeps_what_was_said(self):
+        with open(self.path) as f:
+            got = [e for line in f for e in tc.transcript_events(json.loads(line), "grok")]
+        # its thinking, its own notes and an image are not shown
+        self.assertEqual([(e["t"], e.get("text") or e.get("name")) for e in got],
+                         [("user", "fix the bug"), ("text", "Looking now."),
+                          ("tool", "Bash"), ("result", "a.txt"),
+                          ("tool", "Read"), ("result", "No such file: /home/u/proj/b.txt"),
+                          ("tool", "Edit"), ("result", got[7]["text"]),
+                          ("tool", "LS"), ("result", "- /home/u/proj/\n  - a.txt"),
+                          ("text", "Fixed."), ("user", "and this one"),
+                          ("notice", "Interrupted.")])
+        tools = [e for e in got if e["t"] in ("tool", "result")]
+        self.assertEqual([e["summary"] for e in tools if e["t"] == "tool"],
+                         ["ls", "/home/u/proj/b.txt", "/home/u/proj/a.txt", "/home/u/proj"])
+        self.assertEqual([e["error"] for e in tools if e["t"] == "result"], [False, True, False, False])
+        self.assertIn("-x = 1\n+x = 2", got[7]["text"])            # an edit shows its diff
+        self.assertEqual(got[0]["ts"], 1793000001)                  # Grok's time: epoch seconds
+
+    def test_a_result_kept_only_in_raw_output_is_shown(self):
+        def result(raw, status="completed"):
+            line = {"method": "session/update", "params": {"update": {
+                "sessionUpdate": "tool_call_update", "toolCallId": "c", "status": status, "rawOutput": raw}}}
+            return tc.grok_events(line)[0]["text"]
+        self.assertEqual(result({"type": "ListDir", "NotFound": "Error: /x does not exist."}, "failed"),
+                         "Error: /x does not exist.")
+        self.assertEqual(result({"type": "KillTask", "Result": {"outcome": "killed",
+                                                               "message": "Task was terminated"}}),
+                         "Task was terminated")
+        self.assertEqual(result({"type": "Bash", "output_for_prompt": "boom"}, "failed"), "boom")
+        self.assertEqual(result({"type": "Bash", "output_for_prompt": "", "exit_code": 2}, "failed"),
+                         "exit code 2")
+        self.assertEqual(result({"action": {"type": "search", "query": "tabit grok",
+                                            "sources": [{"type": "url", "url": "https://a.example/"}]}}),
+                         "tabit grok\nhttps://a.example/")
+
+    def test_an_error_ends_the_turn_with_why(self):
+        raw = {"method": "_x.ai/session/update", "params": {"update": {
+            "sessionUpdate": "turn_completed", "stop_reason": "error",
+            "agent_result": "API error (status 402): balance exhausted"}}}
+        self.assertEqual(tc.grok_events(raw), [
+            {"t": "error", "text": "Grok stopped: API error (status 402): balance exhausted"}])
+
+    def test_the_model_comes_from_the_last_prompt(self):
+        self.assertEqual(tc.transcript_model(self.path), "grok-4.8")
+
+    def test_a_grok_tab_gets_a_chat_that_shows_it(self):
+        self.mgr.sync_tabs()
+        chat = next(c for c in self.mgr.chats.values() if c.mirrored)
+        self.assertEqual(chat.meta["tab"]["cli"], "grok")
+        chat.mirror_poll()
+        self.assertEqual(self.texts(chat)[:2], [("user", "fix the bug"), ("text", "Looking now.")])
+        self.assertEqual(chat.meta["tab"].get("model"), "grok-4.8")
+        self.assertEqual(self.mgr.listing()[0]["tab"]["cli"], "grok")
+
+    def test_a_message_is_typed_into_the_tab(self):
+        chat = self.mirror()
+        self.assertEqual(tc.api(self.mgr, "POST", [chat.id, "send"], {"text": "go on"})[0], 200)
+        self.assertEqual(self.calls, [("go on", None, True)])
+
+    def test_stop_presses_ctrl_c_once_while_grok_works(self):
+        # Esc never stops a Grok turn
+        self.addCleanup(setattr, tc, "GROK_STOP_LOOK", tc.GROK_STOP_LOOK)
+        tc.GROK_STOP_LOOK = 0.05
+        chat = self.mirror()
+        self.assertFalse(chat.interrupt())                   # idle: nothing to stop
+        self.status = "blocked"
+        self.assertFalse(chat.interrupt())                   # it asks: Ctrl+C would only open a panel
+        self.status, self.box = "working", "❯ half a line typed at the desk"
+        self.assertFalse(chat.interrupt())                   # Ctrl+C would only clear the draft
+        self.box = "❯"
+        self.assertTrue(chat.interrupt())
+        self.assertFalse(chat.interrupt())                   # again soon: it heads for quitting Grok
+        self.assertEqual([k for _t, k, _q in self.calls], ["ctrl-c"])
+        # still working a moment later (a panel about its sub-agents): the chat says so
+        self.assertTrue(wait(lambda: any(e["t"] == "notice" and "not stopped" in e["text"]
+                                         for e in chat.events)))
+        chat._esc_at -= tc.GROK_STOP_AGAIN
+        n = len(chat.events)
+        self.assertTrue(chat.interrupt())
+        self.status = "idle"                                 # this time it stopped
+        time.sleep(0.2)
+        self.assertEqual(len(chat.events), n)
+
+    def test_no_login_model_commands_or_usage_of_its_own(self):
+        chat = self.mirror()
+        chat.mirror_poll()
+        ops = []
+        self.mgr.tab_ops = lambda op, target=None, body=None: ops.append(op) or (200, {"ok": True})
+        edit = lambda body: tc.api(self.mgr, "POST", [chat.id, "edit"], body)[0]
+        self.assertEqual(edit({"model": "opus"}), 400)
+        self.assertEqual(edit({"effort": "high"}), 400)
+        self.assertEqual(edit({"account": "Work"}), 400)
+        self.assertEqual(edit({"title": "Fox 2"}), 200)              # its name still changes
+        self.assertEqual(ops, ["rename"])
+        self.assertEqual(chat.commands(), {"cli": "grok", "builtins": [], "skills": []})
+
+    def test_its_usage_is_asked_of_grok(self):
+        chat = self.mirror()
+        chat.mirror_poll()
+        self.assertEqual(self.mgr.usage(), [{"cli": "grok", "account": "", "windows": [], "ts": 0}])
+        week = [{"name": "7d", "pct": 16, "resets": 1794744301.0}]
+        asked = []
+        self.mgr.grok_usage = lambda: asked.append(1) or week
+        self.mgr.usage()
+        self.assertTrue(wait(lambda: self.mgr.usage()[0]["windows"] == week))
+        saved = os.path.join(self.mgr.root, "usage.json")
+        self.assertTrue(wait(lambda: os.path.exists(saved) and not os.path.exists(saved + ".tmp")))
+        self.mgr.usage()
+        self.assertEqual(len(asked), 1)                  # not again for GROK_ASK seconds
+
+    def test_billing_is_read_as_a_window(self):
+        billing = {"config": {"creditUsagePercent": 16.4, "currentPeriod": {
+            "type": "USAGE_PERIOD_TYPE_WEEKLY", "start": "2026-11-08T12:05:01.043+00:00",
+            "end": "2026-11-15T12:05:01.043+00:00"}}, "subscription_tier": "SuperGrok"}
+        self.assertEqual(tc.grok_limits(billing), [{"name": "7d", "pct": 16, "resets": 1794744301.0}])
+        self.assertEqual(tc.grok_limits({"config": {}}), [])
+        self.assertEqual(tc.grok_limits(None), [])
+
+    def test_a_grok_with_no_screen_is_asked(self):
+        fake = os.path.join(self.dir, "grok")
+        with open(fake, "w") as f:
+            f.write("#!/usr/bin/env python3\n"
+                    "import json, sys\n"
+                    "assert sys.argv[1:] == ['agent', '--no-leader', 'stdio'], sys.argv\n"
+                    "for line in sys.stdin:\n"
+                    "    m = json.loads(line)\n"
+                    "    if m['method'] == 'initialize':\n"
+                    "        print(json.dumps({'jsonrpc': '2.0', 'method': '_x.ai/models/update', 'params': {}}))\n"
+                    "        print(json.dumps({'jsonrpc': '2.0', 'id': m['id'], 'result': {}}), flush=True)\n"
+                    "    else:\n"
+                    "        print(json.dumps({'jsonrpc': '2.0', 'id': m['id'], 'result': {'config': {\n"
+                    "            'creditUsagePercent': 40, 'currentPeriod': {'type': 'USAGE_PERIOD_TYPE_MONTHLY',\n"
+                    "            'end': '2026-12-01T00:00:00+00:00'}}}}), flush=True)\n")
+        os.chmod(fake, 0o755)
+        self.assertEqual(tc.grok_usage(fake), [{"name": "30d", "pct": 40, "resets": 1796083200.0}])
+        self.assertIsNone(tc.grok_usage(os.path.join(self.dir, "none")))
+
+    def test_a_grok_that_never_answers_goes_with_its_helpers(self):
+        mark = "tabit-grok-helper-%d" % os.getpid()
+        fake = os.path.join(self.dir, "grok")
+        with open(fake, "w") as f:
+            f.write("#!/bin/bash\nexec -a %s sleep 300 &\nsleep 300\n" % mark)
+        os.chmod(fake, 0o755)
+        start = time.time()
+        self.assertIsNone(tc.grok_usage(fake, wait=0.5))
+        self.assertLess(time.time() - start, 5)
+        self.assertTrue(wait(lambda: subprocess.run(["pgrep", "-f", mark], capture_output=True).returncode != 0))
+
+    def test_a_reply_line_calls_another_tab(self):
+        other = os.path.join(self.dir, "beta.jsonl")
+        shutil.copy(os.path.join(HERE, "fixtures", "chat", "tab_transcript.jsonl"), other)
+        old = self.mgr.tab_hook
+
+        def hook(tab, text=None, key=None, queue=False, screen=False):
+            if tab == "t2" and text is None and key is None:
+                return {"title": "Beta", "status": "idle", "transcript": other, "cli": "claude"}
+            return old(tab, text, key, queue, screen)
+        self.mgr.tab_hook = hook
+        self.mgr.tabs_hook = lambda: [{"id": "t1", "title": "Fox", "cli": "grok"},
+                                      {"id": "t2", "title": "Beta", "cli": "claude"}]
+        self.mgr.sync_tabs()
+        fox = next(c for c in self.mgr.chats.values() if c.meta["tab"]["id"] == "t1")
+        fox.mirror_poll()
+        with open(self.path, "a") as f:
+            f.write(json.dumps({"timestamp": 1793000100, "method": "session/update", "params": {
+                "update": {"sessionUpdate": "agent_message_chunk",
+                           "content": {"type": "text", "text": "@beta: can you look?"}}}}) + "\n")
+        fox.mirror_poll()
+        self.assertIn(("[from @fox]: @beta: can you look?", None, True), self.calls)
 
 
 class TabSyncTest(Base):
