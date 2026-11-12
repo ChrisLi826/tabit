@@ -401,10 +401,10 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.2.4.3"
+APP_VERSION = "v2.2.5"
 # Taiwan main dish of the major version + a fresh snack or drink, picked at
 # release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
-APP_CODENAME = "Ginger Duck + Scallion Pancake"
+APP_CODENAME = "Ginger Duck + Douhua"
 _VERSION_CODENAME_SEP = " · "
 
 
@@ -8043,7 +8043,13 @@ if (data !== null) {{
 
     def _tg_paste(self, row, text):
         self._tmux_unscroll(row)
-        row.term.paste_text(self._tg_safe_text(text))
+        text = self._tg_safe_text(text)
+        if (re.search(r"(?:^|\s)@\S*\Z", text.rstrip("\n"))
+                and self._chat_cli_of(row) == "grok"):
+            # an @word last opens Grok's file picker, and the Enter then
+            # picks a file instead of sending: a space closes it
+            text = text.rstrip("\n") + " "
+        row.term.paste_text(text)
         GLib.timeout_add(self._TG_ENTER_MS, self._tg_enter, row)
 
     def _tg_enter(self, row):
@@ -13349,6 +13355,7 @@ if (data !== null) {{
                             accounts=Tabit._claude_accounts,
                             codex_accounts=Tabit._codex_accounts,
                             claude_usage=Tabit._claude_usage,
+                            grok_usage=tabit_chat.grok_usage,
                             env_drop=CLAUDE_SESSION_ENV,
                             auth=Tabit._ai_auth_status,
                             tab_hook=self._chat_tab_hook,
@@ -13367,7 +13374,7 @@ if (data !== null) {{
         return {"TABIT_SOCK": REMOTE_SOCK, "TABIT_OWNER": owner or ""}
 
     def _chat_tabs_hook(self):
-        """For a chat: every Claude or Codex AI tab as {"id", "title", "group",
+        """For a chat: every Claude, Codex or Grok AI tab as {"id", "title", "group",
         "cli", ...}, or None when tabit is busy. Runs on the GTK thread through
         _remote_call."""
         def work():
@@ -13392,13 +13399,14 @@ if (data !== null) {{
         return res if isinstance(res, list) else None
 
     def _chat_cli_of(self, row):
-        """"claude" or "codex" for an AI tab a chat can show, else None."""
+        """"claude", "codex" or "grok" for an AI tab a chat can show, else None."""
         got = self._ai_cli_path_of(getattr(row, "argv", None))
         if not got:
             return None
         if self._ai_is_claude(got[0]):
             return "claude"
-        return "codex" if os.path.basename(got[0].rstrip("/")) == "codex" else None
+        name = os.path.basename(got[0].rstrip("/"))
+        return name if name in ("codex", "grok") else None
 
     def _codex_notified(self, row):
         """The session ids the tab's codex named after its turns, oldest first."""

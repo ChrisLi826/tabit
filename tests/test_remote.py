@@ -735,6 +735,23 @@ class TestInjectEnter(unittest.TestCase):
         self.assertIsNone(self.row._tg_typing)
         self.assertEqual(self.timers, [])
 
+    def test_an_at_word_last_gets_a_space_in_a_grok_tab(self):
+        # Grok opens its file picker on "@." and the Enter would pick a file
+        for cli, text, typed in (("grok", "do not start a line with @.", "do not start a line with @. "),
+                                 ("grok", "ask @beta", "ask @beta "),
+                                 ("grok", "ask @beta\n", "ask @beta "),
+                                 ("grok", "mail me@x.com", "mail me@x.com"),
+                                 ("grok", "P@ssw0rd", "P@ssw0rd"),
+                                 ("grok", "@beta: hi", "@beta: hi"),
+                                 ("claude", "ask @beta", "ask @beta"),
+                                 (None, "P@ss @w0rd", "P@ss @w0rd")):   # a shell's password prompt
+            self.app._chat_cli_of = lambda row, cli=cli: cli
+            self.row.reset_mock()
+            self.row._tg_typing = None
+            self.app._tg_inject(self.row, text)
+            self.assertEqual(self.keys(), [typed], (cli, text))
+            self.tick()
+
     def test_a_second_text_waits_for_the_first_enter(self):
         self.app._tg_inject(self.row, "one")
         self.app._tg_inject(self.row, "two")

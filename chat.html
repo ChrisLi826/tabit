@@ -496,8 +496,9 @@ function picker(host, r) {
 }
 // "Mirror a tab" chooser: the Claude tabs open in tabit; get() is null or {id, title}
 // opus, sonnet, haiku or fable for a model id such as claude-opus-4-5; "" (default) otherwise
-// who answers in a chat: a Codex tab's chat is Codex, every other chat is Claude
-const aiName = (meta) => (meta && meta.tab && meta.tab.cli === "codex" ? "Codex" : "Claude");
+// who answers in a chat: a Codex or Grok tab's chat is Codex or Grok, every other chat is Claude
+const AI_NAMES = { codex: "Codex", grok: "Grok" };
+const aiName = (meta) => (meta && meta.tab && AI_NAMES[meta.tab.cli]) || "Claude";
 const aliasOf = (id) => (cfg?.models || []).find((a) => a && String(id || "").includes(a)) || "";
 // the colours tabit gives its tab groups
 const GROUP_CSS = { red: "#f7768e", orange: "#ff9e64", yellow: "#e0af68", green: "#9ece6a", teal: "#73daca", cyan: "#7dcfff", blue: "#7aa2f7",
@@ -508,7 +509,7 @@ const modelShort = (id) => { const m = /^claude-([a-z]+)-(\d+)(?:-(\d+))?/.exec(
 // the login and the model a chat uses, as one small badge
 const usingBadge = (r) => {
   const model = (r.tab ? modelShort(r.tab.model) : (r.model || "default")) + ((r.tab ? r.tab.effort : r.effort) ? " " + (r.tab ? r.tab.effort : r.effort) : "");
-  const who = r.tab && r.tab.cli === "codex" ? ["Codex", r.account].filter(Boolean).join(" · ") : r.account || "Default";
+  const who = r.tab && AI_NAMES[r.tab.cli] ? [AI_NAMES[r.tab.cli], r.account].filter(Boolean).join(" · ") : r.account || "Default";
   return `<span class="badge">${esc([who, model].filter(Boolean).join(" · "))}</span>`;
 };
 const groupBadge = (tab) => tab && tab.group ? `<span class="badge"><i class="gdot" style="background:${GROUP_CSS[tab.color] || "var(--dim)"}"></i>${esc(tab.group)}</span>` : "";
@@ -526,16 +527,16 @@ const pathLink = (c) => `<a class="path" target="_blank" rel="noopener" href="ap
 function inline(raw) {
   // `code` is set aside first, so **bold** may hold it; a path in plain text
   // opens the file too (home and /tmp: what the file view shows), without a
-  // full stop that ends the sentence
+  // full stop that ends the sentence; a name may hold any letters (Chinese too)
   const codes = [];
   let t = esc(String(raw).replace(/\0/g, "").replace(/`([^`]+)`/g, (_m, c) => `\0${codes.push(c) - 1}\0`));
-  t = t.replace(/(^|[\s(*:：，、「（])((?:\/home\/|\/tmp\/|~\/)[\w.\-\/~@+]*[\w\/~@+-])/g, (_m, pre, c) => pre + pathLink(c));
+  t = t.replace(/(^|[\s(*:：，、「（])((?:\/home\/|\/tmp\/|~\/)[\p{L}\p{M}\p{N}_.\-\/~@+]*[\p{L}\p{M}\p{N}_\/~@+\-])/gu, (_m, pre, c) => pre + pathLink(c));
   t = t.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
   t = t.replace(/(^|[^\w*])\*([^*\s](?:[^*]*[^*\s])?)\*(?![\w*])/g, "$1<i>$2</i>");
   t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
   return t.replace(/\0(\d+)\0/g, (_m, i) => {
     const c = esc(codes[i]);
-    return /^(\/|~\/)[\w.\-\/~@+]+$/.test(c) ? pathLink(c) : `<code>${c}</code>`;
+    return /^(\/|~\/)[\p{L}\p{M}\p{N}_.\-\/~@+]+$/u.test(c) ? pathLink(c) : `<code>${c}</code>`;
   });
 }
 // colors in a code block, like the terminal shows them: keys, strings,
@@ -657,7 +658,7 @@ function stateLine(r) {
 const untilT = (t) => { const s = t - Date.now() / 1000; return s < 3600 ? Math.max(1, Math.round(s / 60)) + "m" : s < 86400 ? Math.round(s / 3600) + "h" : Math.round(s / 86400) + "d"; };
 function usageHtml(list) {
   return (list || []).map((u) => {
-    const who = `${u.cli === "codex" ? "Codex" : "Claude"} · ${esc(u.account || "Default")}`;
+    const who = `${AI_NAMES[u.cli] || "Claude"} · ${esc(u.account || "Default")}`;
     const now = Date.now() / 1000;
     const ws = (u.windows || []).map((w) => {
       const fresh = w.resets && w.resets < now;      // the window started again since this reading
@@ -1526,19 +1527,20 @@ const settings = async (t = cur) => {
     $("e-del").onclick = async () => { if (!confirm("Delete this group? Its chats stay.")) return; await api(`api/chat-groups/${t.id}/delete`, {}); gone(); };
   } else {
     const codex = m.tab && m.tab.cli === "codex";     // Codex's own logins and models
+    const grok = m.tab && m.tab.cli === "grok";       // Grok's are set in its tab
     const accts = (codex ? cfg.codex_accounts : cfg.accounts) || [];
     const cmodels = (cfg.codex_models || []).slice();
     if (codex && m.tab.model && !cmodels.some((x) => x.name === m.tab.model)) cmodels.push({ name: m.tab.model, label: m.tab.model });
     sheet(`<h2>Chat</h2><div id="e-look"></div><div class="hint">${m.tab ? "Its tab in tabit: the name is the tab’s name" : esc(tilde(m.cwd))}</div>
       <label>Name</label><input id="e-title" value="${esc(m.title)}" maxlength="80">
-      <div><label>Account</label><select id="e-account">${accts.map((a) => `<option value="${esc(a.name)}"${a.name === (m.account || "") ? " selected" : ""}>${esc(a.label)}</option>`).join("")}</select>
+      <div ${grok ? "hidden" : ""}><label>Account</label><select id="e-account">${accts.map((a) => `<option value="${esc(a.name)}"${a.name === (m.account || "") ? " selected" : ""}>${esc(a.label)}</option>`).join("")}</select>
       <div ${m.tab ? "hidden" : ""}><label>When Claude wants to do something</label><select id="e-mode">${opts(cfg.modes, m.mode, (x) => MODE_NAME[x])}</select>
       <div class="hint warn" id="e-warn" ${m.mode === "bypass" ? "" : "hidden"}>Bypass: no questions asked.</div></div>
       <label>Model</label><select id="e-model">${codex
         ? cmodels.map((x) => `<option value="${esc(x.name)}"${x.name === (m.tab.model || "") ? " selected" : ""}>${esc(x.label)}</option>`).join("")
         : opts(cfg.models, m.tab ? aliasOf(m.tab.model) : m.model, (x) => x || "default")}</select>
       <label>Thinking effort</label><select id="e-effort"></select></div>
-      <div class="hint" ${m.tab && m.tab.model ? "" : "hidden"}>${m.tab ? "Answering as " + esc(m.tab.model) + ". A new model starts with the next message, and only when the tab is not busy." : ""}</div>
+      <div class="hint" ${m.tab && m.tab.model ? "" : "hidden"}>${m.tab ? "Answering as " + esc(m.tab.model) + (grok ? ". Its login and model are set in its tab." : ". A new model starts with the next message, and only when the tab is not busy.") : ""}</div>
       <div ${m.tab ? "hidden" : ""}><label>Connectors</label><button type="button" id="e-reload">↻ Reload Claude</button>
       <div class="hint" id="e-reloaded">Changed a connector (Gmail, Strava…)? Tap this. The chat keeps its history.</div></div>
       <div class="hint" id="e-err" style="color:var(--red)"></div>
@@ -1559,7 +1561,9 @@ const settings = async (t = cur) => {
     };
     effortsFill(true);
     $("e-model").onchange = () => effortsFill(false);
-    $("e-save").onclick = async () => { try { await api(`api/chats/${t.id}/edit`, { title: $("e-title").value, mode: $("e-mode").value, model: $("e-model").value, effort: $("e-effort").value, ...($("e-account").value !== (m.account || "") ? { account: $("e-account").value } : {}), ...look.get() }); done(); } catch (e) { $("e-err").textContent = e.message; } };
+    const asked = () => grok ? { title: $("e-title").value, ...look.get() }
+      : { title: $("e-title").value, mode: $("e-mode").value, model: $("e-model").value, effort: $("e-effort").value, ...($("e-account").value !== (m.account || "") ? { account: $("e-account").value } : {}), ...look.get() };
+    $("e-save").onclick = async () => { try { await api(`api/chats/${t.id}/edit`, asked()); done(); } catch (e) { $("e-err").textContent = e.message; } };
     if ($("e-del")) $("e-del").onclick = async () => { if (!confirm(m.tab ? "Delete this chat? Its tab in tabit closes too." : "Delete this chat and its history?")) return; try { await api(`api/chats/${t.id}/delete`, {}); gone(); } catch (e) { $("e-err").textContent = e.message; } };
   }
   $("e-cancel").onclick = closeSheet;
