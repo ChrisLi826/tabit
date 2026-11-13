@@ -72,6 +72,14 @@ for example `5h 13% ↺9m` and `7d 36% ↺3d`: the share used and when that
 window starts again. A bar turns yellow at 50% and red at 80%. A window
 that has started again since the last reading shows 0%.
 
+The number after a login is how many chats use it.
+
+Tap a row to list only the chats that use that login; the other rows
+fade. Tap more rows to add their chats too, and tap a picked row again
+to drop it; with none picked, all chats show. Groups are picked the same
+way: a group shows when one of its members uses a picked login. The pick
+also works with the search box, and it is gone after a page reload.
+
 - **Claude**: tabit asks Anthropic every 3 minutes for each Claude login a
   chat uses, the way Claude's own `/usage` does, with that login's token
   from its `.credentials.json`. A token past its time is not renewed by
