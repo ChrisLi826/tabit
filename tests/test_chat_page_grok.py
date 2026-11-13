@@ -36,6 +36,15 @@ console.log("ok");
         self.assertIn('<div ${grok ? "hidden" : ""}><label>Account</label>', src)
         self.assertIn("const asked = () => grok ? { title: $(\"e-title\").value, ...look.get() }", src)
 
+    def test_the_new_chat_form_offers_grok_and_past_conversations(self):
+        src = _page()
+        self.assertIn('${AI_NAMES[c] || "Claude"}</option>', src)
+        # Grok gets no Claude logins to pick from
+        self.assertIn('cli === "claude" ? cfg?.accounts : []', src)
+        self.assertIn('<select id="n-sess">', src)
+        self.assertIn('api("api/chats/sessions", { cli: cliOf(), cwd: $("n-cwd").value', src)
+        self.assertIn('const go = $("n-sess").value ? { resume: $("n-sess").value } : {};', src)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3054,6 +3054,9 @@ class Tabit(Gtk.Window):
             self._agent_hook_mon = None
         GLib.timeout_add_seconds(self._AGENT_POLL_SEC, self._poll_ai_agent_statuses)
         GLib.timeout_add_seconds(self._AI_HUNT_SEC, self._ai_hunt_session_ids)
+        # what the tabit before a restart spawned exits later: wait for it
+        GLib.idle_add(_reap_tick, False)
+        GLib.timeout_add_seconds(60, _reap_tick, True)
         _tmux_apply_user_conf()
         GLib.idle_add(self._check_weekly_auto_update)
         # Tabit Chat runs from the start, not from the first /chat: it carries
@@ -5450,6 +5453,10 @@ if (data !== null) {{
         # tabs/groups + tmux sessions must resume/Attach.
         self._shutting_down = True
         self._remote_stop(unpublish=False)  # keep the Tailscale mapping for next start
+        # Nearby: take its firewall rule away; tabs survive, a LAN door should not
+        nearby = getattr(getattr(self, "_chat_manager", None), "nearby", None)
+        if nearby is not None and nearby.on():
+            nearby.turn_off()
         return False
 
     def _move_session(self, delta, row=None):
@@ -12511,13 +12518,17 @@ if (data !== null) {{
                 # a Claude or Codex account runs as its own program, as in +AI
                 prog = os.path.basename(str(tool).rstrip("/"))
                 account = body.get("account") if prog in ("claude", "codex") else None
-                # one exact conversation to go on with (a Tabit Chat moving to a tab)
-                resume = body.get("resume") if self._ai_is_claude(tool) else None
+                # one exact conversation to go on with (a Tabit Chat moving to
+                # a tab, or one picked in the new chat form)
+                resume = body.get("resume") if prog in ("claude", "codex", "grok") else None
                 if resume is not None and not (isinstance(resume, str)
                                                and re.fullmatch(r"[0-9a-f-]{36}", resume)):
                     return 400, {"error": "resume is a session id"}
-                if resume and self._ai_session_open_elsewhere(resume):
+                if resume and self._ai_is_claude(tool) and (self._ai_session_open_elsewhere(resume)
+                                                            or resume in self._ai_tab_session_ids()):
                     return 409, {"error": "that conversation is open in another Claude"}
+                if resume and not self._ai_is_claude(tool) and resume in self._ai_session_ids_in_use():
+                    return 409, {"error": "that conversation is open in another tab"}
                 run = tool
                 if account:
                     run = dict(self._ai_accounts(prog)).get(account)
@@ -13364,6 +13375,10 @@ if (data !== null) {{
                             extra_env=self._chat_tool_env,
                             roster_dir=AGENT_HOOK_DIR)
                         self._chat_manager.retire_default()
+                        # a firewall rule a tabit that died while receiving left open
+                        nearby = getattr(self._chat_manager, "nearby", None)
+                        if nearby is not None:
+                            threading.Thread(target=nearby.clean_left_rule, daemon=True).start()
                         break
             return self._chat_manager
 
@@ -13452,12 +13467,20 @@ if (data !== null) {{
 
     def _chat_tab_ops(self, op, target=None, body=None):
         """For a chat: manage tabs the way the phone does. op: groups | new |
-        close | rename | account | model. Gives (code, body). A new tab with
+        close | rename | account | model | sessions. Gives (code, body). A new tab with
         no group asked for stays out of groups."""
         body = dict(body or {})
         if op == "model":
             return self._chat_model(target, body.get("model"), body.get("account"),
                                     body.get("effort"))
+        if op == "sessions":
+            # which ids tabs hold is read on the GTK thread; the session files
+            # here, so a folder with many of them does not freeze the window
+            used = self._remote_call(self._ai_session_ids_in_use, timeout=10)
+            if not isinstance(used, set):    # busy, or it failed: not "none held"
+                return 503, {"error": "tabit busy"}
+            return 200, {"sessions": self._ai_folder_sessions(
+                body.get("cli"), body.get("cwd") or "~", used)}
 
         def work():
             if op == "groups":
@@ -15272,12 +15295,15 @@ if (data !== null) {{
         return Tabit._claude_auth_status(cli)
 
     def _ai_session_ids_in_use(self):
-        """Session ids already open: held by an AI tab (its command, or its
-        claude hooks, also for an agent left running in tmux), or running
-        anywhere else, a background session included."""
+        """Session ids already open: held by an AI tab, or running anywhere
+        else, a background session included."""
+        ids = {d.get("sessionId") for d in self._claude_active_sessions() if d.get("sessionId")}
+        return ids | self._ai_tab_session_ids()
+
+    def _ai_tab_session_ids(self):
+        """Session ids an AI tab holds: its command, or its hooks, also for
+        an agent left running in tmux."""
         ids, keys = set(), set()
-        ids.update(d.get("sessionId") for d in self._claude_active_sessions()
-                   if d.get("sessionId"))
         rx = re.compile(_UUID_RE)
         for row in self._session_rows():
             if not _is_ai_icon(getattr(row, "icon_name", None)):
@@ -15293,12 +15319,22 @@ if (data !== null) {{
                     tx = (f.read().split("\n") + ["", ""])[1]
             except OSError:
                 continue
-            ids.update(rx.findall(os.path.basename(tx)))
+            # a Grok transcript is <id>/updates.jsonl: its folder names it
+            ids.update(rx.findall(os.path.basename(tx))
+                       or rx.findall(os.path.basename(os.path.dirname(tx))))
+            # a Codex tab's notify names its sessions, the open one last
+            try:
+                with open(os.path.join(AGENT_HOOK_DIR, key + ".codex")) as f:
+                    named = rx.findall(f.read())
+            except OSError:
+                named = []
+            ids.update(named[-1:])
         return ids
 
-    def _claude_free_sessions(self, path, limit=30):
+    def _claude_free_sessions(self, path, limit=30, used=None):
         """(id, title, mtime, last prompt, last reply) of the claude
-        sessions of a folder that no AI tab holds, newest first."""
+        sessions of a folder that no AI tab holds, newest first. used: the
+        held ids, when the caller read them already."""
         path = os.path.expanduser(path or "")
         dirs = []
         for p in (path, os.path.realpath(path)):
@@ -15320,7 +15356,7 @@ if (data !== null) {{
                         files.append((os.path.getmtime(full), sid, full))
                     except OSError:
                         pass
-        used = self._ai_session_ids_in_use()
+        used = self._ai_session_ids_in_use() if used is None else used
         out = []
         for mtime, sid, full in sorted(files, reverse=True):
             if sid in used:
@@ -15333,6 +15369,22 @@ if (data !== null) {{
             if len(out) >= limit:
                 break
         return out
+
+    def _ai_folder_sessions(self, cli, folder, used=None):
+        """[{"id", "title", "ts"}] of a folder's Claude, Codex or Grok
+        conversations that no tab holds, newest first: the new chat form's
+        list. Codex and Grok are read by tabit_chat, which knows their files."""
+        folder = os.path.expanduser(folder or "~")
+        if cli == "claude":
+            return [{"id": sid, "title": title, "ts": mtime}
+                    for sid, title, mtime, _q, _a in self._claude_free_sessions(folder, limit=20, used=used)]
+        chat = sys.modules.get("tabit_chat")
+        lister = {"codex": getattr(chat, "codex_sessions", None),
+                  "grok": getattr(chat, "grok_sessions", None)}.get(cli)
+        if lister is None:
+            return []
+        used = self._ai_session_ids_in_use() if used is None else used
+        return [s for s in lister(folder) if s["id"] not in used]
 
     def _ai_newest_free_session(self, tool, folder):
         """The session "Resume session" with no id continues: claude's
@@ -18997,6 +19049,79 @@ def _ensure_tmux_path():
                        capture_output=True, timeout=3)
     except (OSError, subprocess.SubprocessError):
         pass
+
+
+def _uptime_s():
+    """Seconds since boot, the clock /proc gives a process's start in."""
+    try:
+        with open("/proc/uptime") as f:
+            return float(f.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return 0.0
+
+
+# When this tabit (not the pid) started. A child it forks later starts at
+# or after this, on the same clock, as /proc rounds both down alike.
+_RUN_START_S = _uptime_s()
+_CLK_TCK = os.sysconf("SC_CLK_TCK")
+
+
+def _child_pids():
+    """Pids of this process's children, from every thread."""
+    pids = set()
+    try:
+        tasks = os.listdir("/proc/self/task")
+    except OSError:
+        return []
+    for t in tasks:
+        try:
+            with open("/proc/self/task/%s/children" % t) as f:
+                pids.update(int(x) for x in f.read().split())
+        except (OSError, ValueError):
+            pass
+    return sorted(pids)
+
+
+def _proc_state_start(pid):
+    """(state letter, start in seconds since boot) of a process, or None."""
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            st = f.read()
+        rest = st[st.rfind(")") + 2:].split()
+        return rest[0], int(rest[19]) / _CLK_TCK
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _reap_old_children(since=None, pids=None):
+    """Wait for the exited children an earlier tabit started; gives how many.
+
+    A restart execs tabit in place, so the processes the old one spawned
+    (tab clients, screen, helpers) stay this pid's children. The new tabit
+    never waits for them, and each one that exits stays a zombie: about 50
+    per restart. Children this run started are left to whoever spawned
+    them, which waits for them itself. pids limits it to those (for tests)."""
+    since = _RUN_START_S if since is None else since
+    n = 0
+    for pid in _child_pids() if pids is None else pids:
+        got = _proc_state_start(pid)
+        if got and got[0] == "Z" and got[1] < since:
+            try:
+                if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                    n += 1
+            except OSError:             # gone, or not ours after all: skip it
+                pass
+    return n
+
+
+def _reap_tick(again):
+    """_reap_old_children() for a GLib timer. A callback that raises is
+    dropped for good, so a failure here only skips this round."""
+    try:
+        _reap_old_children()
+    except Exception as e:
+        print("[tabit] reaping old children: %r" % e, file=sys.stderr)
+    return again
 
 
 def _ensure_screen_sh():
