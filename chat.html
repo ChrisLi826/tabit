@@ -320,6 +320,9 @@
   #usage .bar i { display: block; height: 100%; background: var(--green); }
   #usage .w.mid .bar i { background: var(--yellow); } #usage .w.hot .bar i { background: var(--red); }
   #usage .w.hot { color: var(--red); }
+  #usage .u { cursor: pointer; border-radius: 6px; }
+  #usage .who .n { color: var(--dim); font-weight: 400; }
+  #usage.only .u:not(.on) { opacity: .45; }
   /* the state as a speech bubble on the picture's top right; none when idle.
      One shape, body and tail together, so its white edge runs round both,
      as on the favicon's bubble; the sign inside is white too */
@@ -656,9 +659,19 @@ function stateLine(r) {
 }
 // "Claude · Personal  5h ▬ 13% ↺9m  7d ▬ 36% ↺3d": a row per AI login the chats use
 const untilT = (t) => { const s = t - Date.now() / 1000; return s < 3600 ? Math.max(1, Math.round(s / 60)) + "m" : s < 86400 ? Math.round(s / 3600) + "h" : Math.round(s / 86400) + "d"; };
-function usageHtml(list) {
+// "claude/Personal": the login a usage row is for, and the one a chat uses;
+// tapping usage rows keeps only the chats that use one of those logins
+const useKey = (cli, account) => `${cli || "claude"}/${account || ""}`;
+const chatUse = (r) => useKey(r.tab && r.tab.cli, r.account);
+const only = new Set();
+// a chat is kept when it uses a picked login, a group when one of its members does
+const picked = (r, uses) => r.members ? r.members.some((m) => only.has(uses.get(m.id))) : only.has(chatUse(r));
+// how many chats in the list use each login
+const useCount = (chats) => (chats || []).filter((r) => !r.default).reduce((n, r) => n.set(chatUse(r), (n.get(chatUse(r)) || 0) + 1), new Map());
+function usageHtml(list, counts) {
   return (list || []).map((u) => {
-    const who = `${AI_NAMES[u.cli] || "Claude"} · ${esc(u.account || "Default")}`;
+    const n = (counts && counts.get(useKey(u.cli, u.account))) || 0;
+    const who = `${AI_NAMES[u.cli] || "Claude"} · ${esc(u.account || "Default")} <span class="n" title="${n} chat${n === 1 ? "" : "s"}">(${n})</span>`;
     const now = Date.now() / 1000;
     const ws = (u.windows || []).map((w) => {
       const fresh = w.resets && w.resets < now;      // the window started again since this reading
@@ -666,7 +679,8 @@ function usageHtml(list) {
       if (fresh) return `<span class="w" title="${esc(w.name)} limit: started again">${esc(w.name)} <span class="bar"><i style="width:0"></i></span> 0%</span>`;
       return `<span class="w${pct >= 80 ? " hot" : pct >= 50 ? " mid" : ""}" title="${esc(w.name)} limit: ${pct}% used${w.resets ? ", starts again in " + untilT(w.resets) : ""}">${esc(w.name)} <span class="bar"><i style="width:${pct}%"></i></span> ${pct}%${w.resets ? " ↺" + untilT(w.resets) : ""}</span>`;
     }).join("");
-    return `<div class="u" title="${u.ts ? "as of " + (timeAgo(u.ts) === "now" ? "now" : timeAgo(u.ts) + " ago") : ""}"><span class="who">${who}</span>${ws || '<span class="w">— shows after its next reply</span>'}</div>`;
+    const k = useKey(u.cli, u.account);
+    return `<div class="u${only.has(k) ? " on" : ""}" data-use="${esc(k)}" role="button" title="${only.has(k) ? "its chats are shown: tap to drop them. " : "tap to show its chats. "}${u.ts ? "as of " + (timeAgo(u.ts) === "now" ? "now" : timeAgo(u.ts) + " ago") : ""}"><span class="who">${who}</span>${ws || '<span class="w">— shows after its next reply</span>'}</div>`;
   }).join("");
 }
 async function loadList() {
@@ -678,11 +692,15 @@ async function loadList() {
     $("cards").innerHTML = `<div class="empty">${esc(e.message)}<br><br><a href="terminal">Open the terminal view</a></div>`; return;
   }
   cfg = data;
-  $("usage").innerHTML = usageHtml(data.usage);
+  const shown = new Set((data.usage || []).map((u) => useKey(u.cli, u.account)));
+  only.forEach((k) => { if (!shown.has(k)) only.delete(k); });
+  $("usage").innerHTML = usageHtml(data.usage, useCount(data.chats));
+  $("usage").classList.toggle("only", only.size > 0);
   const q = $("q").value.trim().toLowerCase();
-  const all = (kind === "chats" ? data.chats : data.groups).filter((r) => !r.default);
+  const uses = new Map((data.chats || []).map((c) => [c.id, chatUse(c)]));
+  const all = (kind === "chats" ? data.chats : data.groups).filter((r) => !r.default && (!only.size || picked(r, uses)));
   const rows = q ? all.filter((r) => `${r.title} ${r.last}`.toLowerCase().includes(q)) : all;
-  if (q && !rows.length) { $("cards").innerHTML = '<div class="empty">Nothing found.</div>'; return; }
+  if ((q || only.size) && !rows.length) { $("cards").innerHTML = '<div class="empty">Nothing found.</div>'; return; }
   if (!rows.length) {
     $("cards").innerHTML = `<div class="empty"><div class="big">${kind === "chats" ? "💬" : "👥"}</div>${kind === "chats" ? "No chats yet.<br>Tap ＋ to start one." : "No groups yet. A group puts several chats in one room.<br>Tap ＋ (you need two chats first)."}</div>`;
     return;
@@ -710,6 +728,11 @@ $("cards").addEventListener("click", (e) => {
   const c = e.target.closest(".card");
   if (c && e.target.closest("[data-more]")) { settings({ kind, id: c.dataset.id }); return; }
   if (c) location.hash = (kind === "chats" ? "#c/" : "#g/") + c.dataset.id;
+});
+$("usage").addEventListener("click", (e) => {
+  const u = e.target.closest("[data-use]"); if (!u) return;
+  if (!only.delete(u.dataset.use)) only.add(u.dataset.use);
+  loadList();
 });
 $("tabs").addEventListener("click", (e) => {
   const b = e.target.closest("button"); if (!b) return;
