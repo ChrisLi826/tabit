@@ -12,6 +12,7 @@ import threading
 import subprocess
 import time
 import unittest
+import urllib.parse
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1287,6 +1288,77 @@ class CodexMirrorTest(Base):
         self.assertEqual(code, 400, out)
 
 
+class SessionListTest(unittest.TestCase):
+    """The past conversations of a folder, for the new chat form."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = self.tmp.name
+
+    def write(self, path, lines, mtime):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write("".join(json.dumps(x) + "\n" for x in lines))
+        os.utime(path, (mtime, mtime))
+
+    def codex(self, sid, cwd, said, mtime):
+        typed = [{"type": "event_msg", "payload": {"type": "item_completed", "item": {
+            "type": "UserMessage", "id": "u1", "content": [{"type": "text", "text": said}]}}}] if said else []
+        self.write(os.path.join(self.root, "2026", "11", "05", "rollout-2026-11-05T17-30-59-%s.jsonl" % sid),
+                   [{"type": "session_meta", "payload": {"id": sid, "cwd": cwd}},
+                    {"type": "response_item", "payload": {"type": "message", "role": "user",
+                                                          "content": [{"type": "input_text", "text": "# AGENTS.md"}]}}]
+                   + typed, mtime)
+
+    def test_codex_lists_the_folders_conversations_newest_first(self):
+        self.codex("a" * 36, "/w", "first job", 100)
+        self.codex("b" * 36, "/w", "second   job", 200)
+        self.codex("c" * 36, "/other", "elsewhere", 300)
+        self.codex("d" * 36, "/w", "", 400)               # nobody typed in it: nothing to go on with
+        got = tc.codex_sessions("/w", root=self.root)
+        self.assertEqual([(s["id"][0], s["title"], s["ts"]) for s in got],
+                         [("b", "second job", 200), ("a", "first job", 100)])
+
+    def test_codex_reads_every_rollout_not_only_the_newest(self):
+        for i in range(400):                     # another project's, newer
+            self.codex("%036d" % i, "/other", "elsewhere", 1000 + i)
+        self.codex("e" * 36, "/w", "old one here", 10)
+        self.assertEqual([s["title"] for s in tc.codex_sessions("/w", root=self.root)], ["old one here"])
+
+    def test_a_long_session_meta_is_still_read(self):
+        # the folder and id come first; the instructions after them run long
+        path = os.path.join(self.root, "2026", "11", "05", "rollout-x-%s.jsonl" % ("f" * 36))
+        self.write(path, [{"type": "session_meta", "payload": {"id": "f" * 36, "cwd": "/w",
+                                                               "base_instructions": {"text": "x" * 50000}}},
+                          {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+                              "type": "UserMessage", "id": "u", "content": [{"type": "text", "text": "hi"}]}}}], 5)
+        self.assertEqual([s["id"] for s in tc.codex_sessions("/w", root=self.root)], ["f" * 36])
+
+    def test_grok_lists_one_conversation_once(self):
+        real = os.path.join(self.root, "real")
+        os.makedirs(real)
+        link = os.path.join(self.root, "link")
+        os.symlink(real, link)
+        for folder in (link, real):
+            self.write(os.path.join(self.root, "g", urllib.parse.quote(folder, safe=""), "1" * 36, "updates.jsonl"),
+                       [{"method": "session/update", "params": {"update": {
+                           "sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": "hi"}}}}], 5)
+        self.assertEqual(len(tc.grok_sessions(link, root=os.path.join(self.root, "g"))), 1)
+
+    def test_grok_lists_the_folders_conversations(self):
+        def grok(sid, said, mtime, hidden=False):
+            self.write(os.path.join(self.root, urllib.parse.quote("/w", safe=""), sid, "updates.jsonl"),
+                       [{"method": "session/update", "params": {"update": {
+                           "sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": said},
+                           "_meta": {"hideFromScrollback": hidden}}}}], mtime)
+        grok("1" * 36, "hello grok", 100)
+        grok("2" * 36, "a note Grok wrote itself", 200, hidden=True)
+        self.assertEqual([(s["id"], s["title"]) for s in tc.grok_sessions("/w", root=self.root)],
+                         [("1" * 36, "hello grok")])
+        self.assertEqual(tc.grok_sessions("/nowhere", root=self.root), [])
+
+
 class GrokMirrorTest(Base):
     """A chat that shows a Grok tab: its bubbles come from the session's updates.jsonl."""
 
@@ -1728,8 +1800,43 @@ class TabSyncTest(Base):
         tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "cli": "codex"})
         self.assertEqual(next(o for o in self.ops if o[0] == "new")[2]["account"], "")
         self.ops.clear()
-        code, _ = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "cli": "grok"})
+        code, _ = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "cli": "agy"})
         self.assertEqual((code, self.ops), (400, []))
+
+    def test_a_new_chat_can_open_a_grok_tab(self):
+        self.mgr.accounts = lambda: [("Work", FAKE)]
+        code, out = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "cli": "grok"})
+        self.assertEqual(code, 200, out)
+        body = next(o for o in self.ops if o[0] == "new")[2]
+        self.assertEqual((body["cli"], body["account"]), ("grok", ""))
+        self.ops.clear()
+        code, _ = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "cli": "grok",
+                                                "account": "Work"})
+        self.assertEqual((code, self.ops), (400, []))      # Grok's login is set in its tab
+
+    def test_a_new_chat_can_go_on_with_a_conversation_picked(self):
+        sid = "01a14318-e1a5-7552-8ddb-5427756b9cfd"
+        tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "cli": "grok", "resume": sid})
+        self.assertEqual(next(o for o in self.ops if o[0] == "new")[2]["resume"], sid)
+        self.ops.clear()
+        tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir})
+        self.assertNotIn("resume", next(o for o in self.ops if o[0] == "new")[2])
+        self.ops.clear()
+        code, _ = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "resume": "--continue"})
+        self.assertEqual((code, self.ops), (400, []))
+
+    def test_the_page_asks_for_a_folders_conversations(self):
+        got = {}
+        def ops(op, target=None, body=None):
+            got[op] = body
+            return 200, {"sessions": [{"id": "x", "title": "fix it", "ts": 1}]}
+        self.mgr.tab_ops = ops
+        code, out = tc.api(self.mgr, "POST", ["sessions"], {"cli": "codex", "cwd": "~/x"})
+        self.assertEqual((code, out["sessions"][0]["title"]), (200, "fix it"))
+        self.assertEqual(got["sessions"], {"cli": "codex", "cwd": os.path.expanduser("~/x")})
+        code, _ = tc.api(self.mgr, "POST", ["sessions"], {"cli": "agy", "cwd": "~"})
+        self.assertEqual(code, 400)
+
 
     def test_the_page_is_told_which_ais_there_are(self):
         code, out = tc.api(self.mgr, "GET", [], None)

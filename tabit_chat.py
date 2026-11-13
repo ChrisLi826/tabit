@@ -22,6 +22,7 @@ import subprocess
 import textwrap
 import threading
 import time
+import urllib.parse
 import uuid
 
 CHAT_DIR = os.path.expanduser("~/.local/share/tabit/chats")
@@ -474,6 +475,93 @@ def grok_events(raw):
 
 GROK_PERIODS = {"USAGE_PERIOD_TYPE_WEEKLY": "7d", "USAGE_PERIOD_TYPE_MONTHLY": "30d",
                 "USAGE_PERIOD_TYPE_DAILY": "1d"}
+
+
+def _first_typed(path, events_of, head=512 << 10):
+    """The first thing typed in a session file, read from its head, or ""."""
+    try:
+        with open(path, "rb") as f:
+            blob = f.read(head)
+    except OSError:
+        return ""
+    for line in blob.split(b"\n"):
+        try:
+            raw = json.loads(line)
+        except ValueError:
+            continue
+        for e in events_of(raw):
+            if e["t"] == "user" and (e.get("text") or "").strip():
+                return " ".join(e["text"].split())[:80]
+    return ""
+
+
+def _folders(cwd):
+    """A folder as typed and as it really is: a session names either."""
+    return list(dict.fromkeys((cwd, os.path.realpath(cwd))))
+
+
+def codex_sessions(cwd, root=None, limit=20, head=8192):
+    """[{"id", "title", "ts"}] of the Codex conversations in a folder that
+    someone typed in, newest first. Each rollout's folder and id come from
+    its first `head` bytes, where session_meta names them before its long
+    instructions; only a match is read further."""
+    root = root or os.path.join(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex"), "sessions")
+    files = []
+    for path in glob.glob(os.path.join(root, "*", "*", "*", "rollout-*.jsonl")):
+        try:
+            files.append((os.path.getmtime(path), path))
+        except OSError:
+            pass
+    want, out = _folders(cwd), []
+    for mtime, path in sorted(files, reverse=True):
+        try:
+            with open(path, "rb") as f:
+                top = f.read(head).decode("utf-8", "replace")
+        except OSError:
+            continue
+        where = re.search(r'"cwd"\s*:\s*("(?:[^"\\]|\\.)*")', top)
+        sid = re.search(r'"id"\s*:\s*"([0-9a-f-]{36})"', top)
+        try:
+            if not where or not sid or json.loads(where.group(1)) not in want:
+                continue
+        except ValueError:
+            continue
+        title = _first_typed(path, codex_events)
+        if title:
+            out.append({"id": sid.group(1), "title": title, "ts": mtime})
+            if len(out) >= limit:
+                break
+    return out
+
+
+def grok_sessions(cwd, root=None, limit=20):
+    """[{"id", "title", "ts"}] of the Grok conversations in a folder that
+    someone typed in, newest first."""
+    root = root or os.path.expanduser("~/.grok/sessions")
+    found = []
+    for folder in _folders(cwd):
+        d = os.path.join(root, urllib.parse.quote(folder, safe=""))
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for sid in names:
+            path = os.path.join(d, sid, "updates.jsonl")
+            try:
+                found.append((os.path.getmtime(path), sid, path))
+            except OSError:
+                pass
+    out, seen = [], set()
+    for mtime, sid, path in sorted(found, reverse=True):
+        if sid in seen:              # a folder and its real path both hold it
+            continue
+        seen.add(sid)
+        title = _first_typed(path, grok_events)
+        if title:
+            out.append({"id": sid, "title": title, "ts": mtime})
+            if len(out) >= limit:
+                break
+    return out
 
 
 def grok_limits(billing):
@@ -1932,6 +2020,493 @@ class Group(_Log):
 
 # --- all chats --------------------------------------------------------------
 
+# --- Nearby: send text and files to another tabit on the same LAN -----------
+# Like AirDrop. Receiving is off by default and turns itself off again after
+# the time picked; while it is on, a second, tiny HTTP server on the LAN takes
+# only POST /drop, holds what came as an offer, and keeps it only if you
+# accept. It never touches the chats, the tabs or any other route. Peers are
+# found with mDNS through avahi, which ufw lets through by default; the drop
+# port needs `sudo ufw allow <port>/tcp` once on a machine that receives.
+NEARBY_PORT = 47820
+NEARBY_TYPE = "_tabit-drop._tcp"
+NEARBY_TIMES = {"10m": 600, "1h": 3600, "8h": 8 * 3600}
+NEARBY_MAX = 25 << 20        # the files of one offer, in bytes
+NEARBY_FILES = 20            # ... and how many
+NEARBY_PENDING = 3           # offers waiting for an answer at once
+NEARBY_WAIT = 120            # seconds an offer waits for one
+NEARBY_COOL = 3              # seconds between offers from one address
+NEARBY_KEEP = 20             # things received that the page lists
+UPLOAD_DIR = os.path.expanduser("~/.local/share/tabit/uploads")
+NEARBY_SKIP_IF = r"(lo|docker|br-|veth|virbr|tailscale|tun|tap|wg|zt)"   # not the LAN
+NEARBY_RULE = "tabit nearby"  # the comment on the ufw rule tabit adds, and takes away
+
+
+def ufw(*args):
+    """Run `sudo -n ufw <args>` in English: (exit code, output); (None, "")
+    when sudo would ask for a password or ufw is not there."""
+    try:
+        # sudo keeps LANGUAGE, which Python gettext reads first, and drops
+        # LC_ALL: set all three on the far side
+        r = subprocess.run(["sudo", "-n", "env", "LANGUAGE=C", "LC_ALL=C", "LANG=C", "ufw"] + list(args),
+                           capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None, ""
+    if r.returncode != 0 and "password" in (r.stderr or "").lower():
+        return None, ""
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+def nearby_name():
+    """Who this tabit is to its neighbours: user@host."""
+    import getpass
+    import socket
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = "someone"
+    return "%s@%s" % (user, socket.gethostname())
+
+
+def _avahi_unescape(text):
+    """avahi-browse -p writes ; and every byte over 127 as \DDD: put the
+    bytes back together, so a UTF-8 name ("陳@電腦") reads as it was."""
+    raw = re.sub(r"\\(\d{3})", lambda m: chr(int(m.group(1)) & 0xFF), text)
+    try:
+        return raw.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return raw
+
+
+def nearby_parse_browse(out, own_id=""):
+    """[{"name", "address", "port", "id"}] of the tabits avahi-browse -rpt
+    resolved: IPv4 on a real network card only, one per tabit, this one left
+    out. A Docker or VPN interface would give an address the LAN cannot
+    reach, or one that on another machine is that machine itself."""
+    found = {}
+    for line in out.splitlines():
+        f = line.split(";")
+        if len(f) < 10 or f[0] != "=" or f[2] != "IPv4" or re.match(NEARBY_SKIP_IF, f[1]):
+            continue
+        txt = dict(re.findall(r'"(\w+)=([^"]*)"', ";".join(f[9:])))
+        pid = txt.get("id", "")
+        if not pid or pid == own_id or pid in found:
+            continue
+        try:
+            port = int(f[8])
+        except ValueError:
+            continue
+        found[pid] = {"name": _avahi_unescape(f[3]), "address": f[7], "port": port, "id": pid}
+    return sorted(found.values(), key=lambda p: p["name"].lower())
+
+
+def save_upload(folder, name, data):
+    """Write bytes under folder with a safe name, never over another file
+    (a taken name gets -1, -2 ...); gives the path."""
+    name = re.sub(r"[^\w.\-]", "_", os.path.basename((name or "").replace("\\", "/")).strip()).lstrip("._")[:100] or "file"
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    stem, ext = os.path.splitext(name)
+    for n in range(1000):
+        path = os.path.join(folder, "%s-%d%s" % (stem, n, ext) if n else name)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        return path
+    raise OSError("too many files with that name")
+
+
+class Nearby:
+    """Receiving (on for a while, then off by itself), the offers waiting
+    for an answer, what was received, and sending to a neighbour."""
+
+    def __init__(self, port=NEARBY_PORT, uploads=UPLOAD_DIR, name=None, host="0.0.0.0",
+                 publish=True, browse=None, firewall=None):
+        self.port, self.uploads, self.host = port, uploads, host
+        self.name = name or nearby_name()
+        self.id = uuid.uuid4().hex[:12]
+        self.publish = publish       # False in tests: no avahi
+        self.browse = browse         # () -> avahi-browse output, for tests
+        self.ufw = firewall or (ufw if publish else (lambda *a: (None, "")))
+        self.firewall = ""           # "opened" (by tabit) | "already" | "manual" | "none"
+        self.cond = threading.Condition()
+        self.slots = threading.BoundedSemaphore(NEARBY_PENDING)   # offers being read or waiting
+        self._fw = threading.Lock()  # one firewall change at a time, in order
+        self.until = 0.0
+        self.srv = None
+        self._pub = None             # (wrapper process, write end of its pipe)
+        self.offers = {}             # id -> offer, waiting for an answer
+        self.got = []                # what was accepted, newest first
+        self._last = {}              # address -> when it last offered
+        self._peers = (0.0, [])
+
+    # receiving on and off
+    def turn_on(self, secs):
+        with self._fw:               # on and off, one at a time, in order
+            self._turn_on(secs)
+
+    def _turn_on(self, secs):
+        started = False
+        with self.cond:
+            if self.srv is None:
+                started = True
+                handler = type("DropHandler", (_DropHandler,), {"nearby": self})
+                srv = _DropServer((self.host, self.port), handler)
+                self.srv = srv
+                self.port = srv.server_address[1]
+                threading.Thread(target=srv.serve_forever, daemon=True).start()
+                if self.publish:
+                    self._start_publish()
+                threading.Thread(target=self._watch, args=(srv,), daemon=True).start()
+            self.until = time.time() + secs
+        if started and not self.firewall:      # the port is known now: let the LAN in on it
+            self.firewall = self._open_port()
+
+    def turn_off(self, expired=False):
+        """Stop receiving. expired: only if the time is still up, as Turn on
+        for longer may have come just now."""
+        with self._fw:
+            with self.cond:
+                if expired and time.time() < self.until:
+                    return
+            self._turn_off()
+
+    def _turn_off(self):
+        with self.cond:
+            srv, self.srv, self.until = self.srv, None, 0.0
+            for o in self.offers.values():
+                o["answer"] = o["answer"] or "off"
+            self.cond.notify_all()
+            pub, self._pub = self._pub, None
+        if pub:
+            os.close(pub[1])         # the wrapper reads EOF and stops avahi-publish
+            try:
+                pub[0].wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                try:                 # the shell and avahi-publish: one group
+                    os.killpg(pub[0].pid, signal.SIGTERM)
+                except OSError:
+                    pass
+                pub[0].wait(timeout=3)
+        if srv:
+            srv.shutdown()
+            srv.server_close()
+        if self.firewall == "opened":
+            self.ufw("delete", "allow", "%d/tcp" % self.port)
+        self.firewall = ""
+
+    def _rule(self):
+        """(ufw on, the line of a rule for this port or "") from ufw status."""
+        code, out = self.ufw("status")
+        if code is None:
+            return None, ""
+        if "Status: active" not in out:
+            return False, ""
+        line = next((ln for ln in out.splitlines()
+                     if re.match(r"%d(/tcp)?(\s+\(v6\))?\s+ALLOW" % self.port, ln)), "")
+        return True, line
+
+    def _open_port(self):
+        """Let the LAN in on the drop port while receiving, when ufw is on:
+        "opened" (tabit added the rule and takes it away again), "already"
+        (a rule of yours: left alone), "none" (ufw off) or "manual" (sudo
+        wants a password: the page shows the command)."""
+        on, line = self._rule()
+        if on is None:
+            return "manual"
+        if not on:
+            return "none"
+        if line:
+            return "opened" if NEARBY_RULE in line else "already"
+        code, _out = self.ufw("allow", "%d/tcp" % self.port, "comment", NEARBY_RULE)
+        return "opened" if code == 0 else "manual"
+
+    def clean_left_rule(self):
+        """At start: take away the rule a tabit that died while receiving
+        left open."""
+        with self._fw:
+            if self.srv is None:
+                on, line = self._rule()
+                if on and NEARBY_RULE in line:
+                    self.ufw("delete", "allow", "%d/tcp" % self.port)
+
+    def _watch(self, srv):
+        """Ends with its own server: an Off and On within a second starts a
+        new watch, and this one must not run on beside it."""
+        while True:
+            time.sleep(1)
+            with self.cond:
+                if self.srv is not srv:
+                    return
+                late = time.time() >= self.until
+                for o in self.offers.values():
+                    if not o["answer"] and time.time() - o["ts"] > NEARBY_WAIT:
+                        o["answer"] = "expired"
+                        self.cond.notify_all()
+            if late:
+                self.turn_off(expired=True)
+                if self.srv is not srv:
+                    return
+
+    def _start_publish(self):
+        """avahi-publish under a shell that stops it when tabit is gone: it
+        reads a pipe whose other end only tabit holds, and closes with it
+        (also on an in-place restart, as the end does not survive exec)."""
+        r, w = os.pipe()
+        try:
+            proc = subprocess.Popen(
+                ["sh", "-c", 'avahi-publish -s "$0" "$1" "$2" "id=$3" >/dev/null 2>&1 & p=$!; '
+                             'cat >/dev/null; kill $p 2>/dev/null', self.name, NEARBY_TYPE,
+                 str(self.port), self.id], stdin=r, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError:
+            os.close(w)
+            return
+        finally:
+            os.close(r)
+        self._pub = (proc, w)
+
+    def on(self):
+        return self.srv is not None
+
+    def status(self):
+        with self.cond:
+            return {"on": self.on(), "until": self.until if self.on() else 0, "name": self.name,
+                    "port": self.port, "times": list(NEARBY_TIMES), "firewall": self.firewall,
+                    "offers": [{k: o[k] for k in ("id", "from", "address", "text", "files", "ts")}
+                               for o in self.offers.values() if not o["answer"]],
+                    "got": self.got[:NEARBY_KEEP]}
+
+    # an offer that came
+    def offer(self, address, body):
+        """Hold what a neighbour sent until it is answered; gives (status,
+        object) for the neighbour."""
+        files = body.get("files") or []
+        text = body.get("text") or ""
+        who = " ".join(str(body.get("from") or "").split())[:80] or address
+        if not isinstance(text, str) or not isinstance(files, list) or len(files) > NEARBY_FILES \
+                or not (text.strip() or files):
+            return 400, {"error": "send text or files"}
+        got = []
+        import base64
+        try:
+            for f in files:
+                data = base64.b64decode(f["data"], validate=True)
+                got.append((str(f["name"]), data))
+        except (KeyError, TypeError, ValueError):
+            return 400, {"error": "files are {name, data (base64)}"}
+        if sum(len(d) for _, d in got) > NEARBY_MAX:
+            return 413, {"error": "more than 25 MB"}
+        with self.cond:
+            busy = self.busy(address)
+            if busy:
+                return busy
+            now = time.time()
+            self._last[address] = now
+            oid = uuid.uuid4().hex[:12]
+            o = {"id": oid, "from": who, "address": address, "text": text[:MAX_SEND],
+                 "files": [{"name": n, "size": len(d)} for n, d in got], "ts": now,
+                 "answer": None, "_data": got}
+            self.offers[oid] = o
+            self.cond.notify_all()
+            self.cond.wait_for(lambda: o["answer"], timeout=NEARBY_WAIT + 5)
+            self.offers.pop(oid, None)
+            answer = o["answer"] or "expired"
+        return 200, {"answer": answer}
+
+    def busy(self, address):
+        """(status, object) when an offer from there is not taken now, else None."""
+        with self.cond:
+            if not self.on():
+                return 503, {"error": "not receiving"}
+            if time.time() - self._last.get(address, 0) < NEARBY_COOL:
+                return 429, {"error": "wait a moment"}
+            if sum(1 for o in self.offers.values() if not o["answer"]) >= NEARBY_PENDING:
+                return 429, {"error": "too many offers waiting"}
+        return None
+
+    def answer(self, oid, accept):
+        with self.cond:
+            o = self.offers.get(oid)
+            if not o or o["answer"]:
+                return 404, {"error": "that offer is gone"}
+            saved = []
+            if accept:
+                folder = os.path.join(self.uploads, time.strftime("%Y-%m-%d"))
+                try:
+                    saved = [save_upload(folder, n, d) for n, d in o["_data"]]
+                except OSError as e:
+                    o["answer"], o["_data"] = "failed", []      # the sender hears now
+                    self.cond.notify_all()
+                    return 500, {"error": "could not save: %s" % e}
+                self.got.insert(0, {"id": oid, "from": o["from"], "text": o["text"],
+                                    "files": saved, "ts": time.time()})
+                del self.got[NEARBY_KEEP:]
+            o["answer"] = "accepted" if accept else "declined"
+            o["_data"] = []
+            self.cond.notify_all()
+        return 200, {"ok": True, "files": saved}
+
+    # sending
+    def peers(self):
+        """The tabits on the LAN that receive now, asked of avahi at most
+        every 3 seconds."""
+        if time.time() - self._peers[0] < 3:
+            return self._peers[1]
+        try:
+            out = self.browse() if self.browse else subprocess.run(
+                ["avahi-browse", "-rpt", NEARBY_TYPE], capture_output=True, text=True,
+                timeout=6, check=False).stdout
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        self._peers = (time.time(), nearby_parse_browse(out, self.id))
+        return self._peers[1]
+
+    def send(self, address, port, text, paths):
+        """Offer text and files (paths under the upload folder) to a
+        neighbour, and wait for its answer: (status, object)."""
+        import base64
+        import ipaddress
+        import urllib.error
+        import urllib.request
+        try:
+            if not ipaddress.ip_address(address).is_private:
+                return 400, {"error": "only to this LAN"}
+        except ValueError:
+            return 400, {"error": "no such address"}
+        files, total = [], 0
+        root = os.path.realpath(self.uploads)
+        for p in paths or []:
+            real = os.path.realpath(os.path.expanduser(str(p)))
+            if not real.startswith(root + os.sep) or not os.path.isfile(real):
+                return 400, {"error": "a file to send must be one uploaded to tabit"}
+            total += os.path.getsize(real)
+            if total > NEARBY_MAX:
+                return 413, {"error": "more than 25 MB"}
+            with open(real, "rb") as f:
+                files.append({"name": os.path.basename(real), "data": base64.b64encode(f.read()).decode()})
+        body = json.dumps({"v": 1, "id": self.id, "from": self.name, "text": text or "",
+                           "files": files}).encode()
+        req = urllib.request.Request("http://%s:%d/drop" % (address, int(port)), data=body,
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=NEARBY_WAIT + 15) as r:
+                return 200, json.load(r)
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, json.load(e)
+            except ValueError:
+                return e.code, {"error": "HTTP %d" % e.code}
+        except (OSError, ValueError) as e:
+            return 502, {"error": "could not reach it: %s" % getattr(e, "reason", e)}
+
+
+import http.server  # noqa: E402  (only Nearby uses it)
+
+
+NEARBY_CONNS = 16             # connections open at once on the drop port
+
+
+class _DropServer(http.server.ThreadingHTTPServer):
+    """One thread per connection, but at most NEARBY_CONNS, and only from
+    private addresses: a host that opens many and sends nothing ties up
+    Nearby for a minute, not tabit."""
+    daemon_threads = True
+    allow_reuse_address = True
+    block_on_close = False       # Turn off does not wait for a slow sender
+
+    def __init__(self, *a, **k):
+        self.conns = threading.BoundedSemaphore(NEARBY_CONNS)
+        super().__init__(*a, **k)
+
+    def verify_request(self, request, client_address):
+        import ipaddress
+        try:
+            return ipaddress.ip_address(client_address[0]).is_private
+        except ValueError:
+            return False
+
+    def process_request(self, request, client_address):
+        if not self.conns.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.conns.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.conns.release()
+
+
+class _DropHandler(http.server.BaseHTTPRequestHandler):
+    """The LAN side of Nearby: POST /drop and nothing else."""
+    nearby = None
+    timeout = 60                 # a sender that stops mid-body lets go of its thread
+
+    def log_message(self, *_a):
+        pass
+
+    def _out(self, code, obj):
+        data = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        self._out(404, {"error": "not found"})
+
+    do_PUT = do_DELETE = do_HEAD = do_GET
+
+    def do_POST(self):
+        import ipaddress
+        if self.path != "/drop":
+            self._out(404, {"error": "not found"})
+            return
+        address = self.client_address[0]
+        if not ipaddress.ip_address(address).is_private:
+            self._out(403, {"error": "LAN only"})
+            return
+        try:
+            size = int(self.headers.get("Content-Length") or -1)
+        except ValueError:
+            size = -1
+        if size <= 0:
+            self._out(400, {"error": "empty"})
+            return
+        if size > NEARBY_MAX * 4 // 3 + (1 << 20):
+            self._out(413, {"error": "more than 25 MB"})
+            return
+        busy = self.nearby.busy(address)     # before reading what may be 30 MB
+        if busy:
+            self._out(*busy)
+            return
+        # a slot from reading to the answer: many connections at once cannot
+        # each read 30 MB before the pending cap says no
+        if not self.nearby.slots.acquire(blocking=False):
+            self._out(429, {"error": "too many offers at once"})
+            return
+        try:
+            try:
+                body = json.loads(self.rfile.read(size))
+            except ValueError:
+                self._out(400, {"error": "not JSON"})
+                return
+            if not isinstance(body, dict):
+                self._out(400, {"error": "not an offer"})
+                return
+            self._out(*self.nearby.offer(address, body))
+        finally:
+            self.nearby.slots.release()
+
+
 class ChatManager:
     def __init__(self, accounts=None, env_drop=(), root=CHAT_DIR, claude=None, auth=None,
                  tab_hook=None, extra_env=None, tabs_hook=None, tab_ops=None, roster_dir=None,
@@ -1957,6 +2532,7 @@ class ChatManager:
         self._move_failed = {}       # chat id -> tries to move it into a tab that failed
         self._tab_keys = {}          # tab id -> its hook key, where its usage file is
         self._usage = {}             # "cli/account" -> {"windows", "ts"}, kept in usage.json
+        self.nearby = Nearby()       # off until the page turns it on
         try:
             with open(os.path.join(root, "usage.json"), encoding="utf-8") as f:
                 got = json.load(f)
@@ -2383,20 +2959,38 @@ class ChatManager:
                 room.swap_member(chat, new)
             self._retire(chat)
 
+    def sessions(self, body):
+        """(status, {"sessions": [...]}): a folder's past conversations of one
+        AI that no tab holds, newest first, for the new chat form."""
+        cli = body.get("cli") or "claude"
+        if cli not in MIRROR_CLIS:
+            return 400, {"error": "the AI is one of: " + ", ".join(MIRROR_CLIS)}
+        if not self.tab_ops:
+            return 200, {"sessions": []}
+        cwd = os.path.expanduser((body.get("cwd") or "").strip() or "~")
+        return self.tab_ops("sessions", None, {"cli": cli, "cwd": cwd})
+
     def new_tab_chat(self, body):
-        """(status, object): open a Claude or Codex tab in tabit, in the group
-        asked for (none: no group), and a chat that mirrors it."""
+        """(status, object): open a Claude, Codex or Grok tab in tabit, in the
+        group asked for (none: no group), and a chat that mirrors it.
+        resume: the id of a past conversation of the folder to go on with."""
         if not self.tab_ops:
             return 400, {"error": "no tabs here"}
         cwd = os.path.expanduser((body.get("cwd") or "").strip() or "~")
         title = " ".join(str(body.get("title") or "").split())[:80]
         cli = body.get("cli") or "claude"
-        if cli not in CHAT_CLIS:
-            return 400, {"error": "the AI is one of: " + ", ".join(CHAT_CLIS)}
+        if cli not in MIRROR_CLIS:
+            return 400, {"error": "the AI is one of: " + ", ".join(MIRROR_CLIS)}
         want = {"kind": "ai", "cli": cli, "cwd": cwd, "group": body.get("group") or ""}
-        # picked in the form; else the default
+        resume = body.get("resume")
+        if resume is not None:
+            if not (isinstance(resume, str) and re.fullmatch(r"[0-9a-f-]{36}", resume)):
+                return 400, {"error": "resume is a conversation id"}
+            want["resume"] = resume
+        # picked in the form; else the default. Grok's login is set in its tab.
         account = body.get("account", self.account if cli == "claude" else "")
-        if account not in [""] + [n for n, _ in self.accounts_of(cli)]:
+        logins = [n for n, _ in self.accounts_of(cli)] if cli in CHAT_CLIS else []
+        if account not in [""] + logins:
             return 400, {"error": f"no such {cli.capitalize()} account"}
         want["account"] = account
         if title:
@@ -2592,6 +3186,65 @@ def tab_send(mgr, chat, method, parts, body):
     return code, out
 
 
+def nearby_message(sender, text, files):
+    """What an accepted offer types into the chat you picked."""
+    head = "📡 From %s (Nearby):" % sender
+    tail = ("\n\nFiles:\n" + "\n".join(files)) if files else ""
+    room = max(0, MAX_SEND - len(head) - len(tail) - 2)
+    body = ("\n" + text[:room]) if text.strip() else ""
+    return head + body + tail
+
+
+def nearby_api(mgr, method, parts, body):
+    """/api/chats/nearby[/peers|on|off|answer|send] for the page."""
+    nb = mgr.nearby
+    op = parts[0] if parts else ""
+    if method == "GET" and not op:
+        return 200, nb.status()
+    if method == "GET" and op == "peers":
+        return 200, {"peers": nb.peers()}
+    if method != "POST":
+        return 405, {"error": "POST"}
+    if op == "on":
+        secs = NEARBY_TIMES.get(body.get("for"))
+        if not secs:
+            return 400, {"error": "for is one of " + ", ".join(NEARBY_TIMES)}
+        try:
+            nb.turn_on(secs)
+        except OSError as e:
+            return 409, {"error": "cannot listen on port %d: %s" % (nb.port, e.strerror or e)}
+        return 200, nb.status()
+    if op == "off":
+        nb.turn_off()
+        return 200, nb.status()
+    if op == "answer":
+        into = str(body.get("chat") or "")
+        if into and body.get("accept") is True and mgr.get(into) is None:
+            return 404, {"error": "no such chat"}
+        oid = str(body.get("id") or "")
+        with nb.cond:
+            o = nb.offers.get(oid) or {}
+            sender, text = o.get("from", ""), o.get("text", "")
+        code, out = nb.answer(oid, body.get("accept") is True)
+        if code == 200 and into and body.get("accept") is True:
+            # what you accepted goes on to that chat's AI, as if you typed it
+            sent = api(mgr, "POST", [into, "send"], {"text": nearby_message(sender, text, out["files"])})
+            out = dict(out, sent=sent[0] == 200, error=None if sent[0] == 200 else sent[1].get("error"))
+        return code, out
+    if op == "send":
+        to = body.get("to") or {}
+        if not isinstance(to, dict):
+            return 400, {"error": "to is a peer"}
+        files = body.get("files") or []
+        if not isinstance(files, list):
+            return 400, {"error": "files is a list of paths"}
+        port = to.get("port") or NEARBY_PORT
+        if not isinstance(port, int) or not 0 < port < 65536:
+            return 400, {"error": "port is a number"}
+        return nb.send(str(to.get("address") or ""), port, str(body.get("text") or ""), files)
+    return 404, {"error": "unknown action"}
+
+
 def api(mgr, method, parts, body):
     """(status, object) for /api/chats/<parts>; the caller has checked who and
     that typing from the phone is on."""
@@ -2601,18 +3254,23 @@ def api(mgr, method, parts, body):
             if mgr.tab_ops:
                 code, out = mgr.tab_ops("groups")
                 tabgroups = out if code == 200 else {}
-            clis = [c for c in CHAT_CLIS if c == "claude" or shutil.which(c)]
+            clis = [c for c in MIRROR_CLIS if c == "claude" or shutil.which(c)]
             return 200, dict({"chats": mgr.listing(),
                               "groups": [g.summary() for g in mgr.groups.values()],
                               "tabgroups": tabgroups,
                               "accounts": mgr.account_choices(), "account": mgr.account,
                               "modes": list(MODES), "models": list(MODELS),
-                              "efforts": list(EFFORTS), "clis": clis, "usage": mgr.usage()},
+                              "efforts": list(EFFORTS), "clis": clis, "usage": mgr.usage(),
+                              "nearby": mgr.nearby.on()},
                              **({"codex_accounts": mgr.account_choices("codex"),
                                  "codex_models": codex_models()} if "codex" in clis else {}))
         if method == "POST":
             return mgr.new_tab_chat(body) if body.get("kind") == "tab" else mgr.create(body)
         return 405, {"error": "GET or POST"}
+    if parts and parts[0] == "nearby":
+        return nearby_api(mgr, method, parts[1:], body or {})
+    if parts == ["sessions"]:
+        return mgr.sessions(body or {}) if method == "POST" else (405, {"error": "POST"})
     chat = mgr.get(parts[0])
     if chat is None:
         return 404, {"error": "no such chat"}

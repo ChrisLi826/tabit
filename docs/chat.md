@@ -215,9 +215,18 @@ same as a menu in a Claude tab: a tap presses that option's number in the tab.
   group under it, with the group's colour. Rename the chat and the tab is
   renamed. Rename or regroup the tab and the chat follows within 10 seconds.
 - **New chat** opens a Claude tab in the group you pick, in the folder you
-  pick. With no group picked, the tab is in no group. When Codex is
-  installed, the form asks which AI: Claude or Codex. It remembers the last
-  pick. With more than one login for that AI, it also asks which account.
+  pick. With no group picked, the tab is in no group. When Codex or Grok is
+  installed, the form asks which AI: Claude, Codex or Grok. It remembers the
+  last pick. With more than one login for Claude or Codex, it also asks which
+  account (a Grok tab uses Grok's own login). **Conversation** is **New
+  conversation**, or one of that AI's past conversations in the folder,
+  newest first, with how long ago and its first words (or its name, for a
+  Claude one). The tab goes on with the one picked (`claude --resume <id>`,
+  `codex resume <id>`, `grok --resume <id>`). A conversation another tab
+  has open is not listed, and Start refuses one opened since. The list is
+  read again when the AI or the folder changes. Claude's and Codex's
+  conversations are shared by all their logins, so the account picked does
+  not change the list.
 - **Delete.** Deleting a chat closes its tab. The chat asks first. The last
   tab in tabit cannot be closed from the phone, so that chat stays. Closing a
   tab removes its chat after about a minute.
@@ -345,6 +354,46 @@ A group puts two or more chats in one room.
 
 Turning off **Allow typing into tabs** stops new messages, but a chat that is
 working goes on until it is done. Press **Stop** first if you want it to end.
+
+## Nearby
+
+**📡 Nearby** (next to ＋) sends text and files to another tabit on the same
+LAN, and gets them from one, like AirDrop.
+
+- **Receiving is off** by default and after every start of tabit. Turn it on
+  for **10 minutes**, **1 hour** or **8 hours**; it turns itself off when the
+  time is up, or with **Turn off**. Sending works while it is off.
+- **Send to** lists the tabits on the LAN that receive now (found with mDNS
+  through avahi; ↻ looks again). Write text, pick files (25 MB in all), and
+  **Send**. The sheet says when the other side accepts or declines.
+- **Every offer asks first.** A box shows who sends (`user@host`, and its
+  address), the text and the file names and sizes: **Accept** or **Decline**.
+  An offer not answered in 2 minutes is dropped. Accepted files go to
+  `~/.local/share/tabit/uploads/<date>/` with safe names, never over another
+  file; the text and the files show under **Received** (the last 20, until
+  tabit restarts), as plain text.
+- **Put it in** a chat, picked in the same box: that chat's AI then gets the
+  text and the files' paths, as if you typed them (`📡 From ann@pc
+  (Nearby): ...`), and the chat opens. Left at **Just keep it**, nothing is
+  typed anywhere. The sender never sees your chats: you pick, when you accept.
+- **Firewall.** Others reach you on TCP port 47820. When ufw is on, turning
+  receiving on adds `ufw allow 47820/tcp` (with the comment `tabit nearby`)
+  through `sudo -n`, and turning it off, or the time running out, takes the
+  rule away again. A rule for that port you made yourself is left alone.
+  When sudo asks for a password, tabit cannot do it: the sheet shows the
+  command to run once. A rule left by a tabit that died while receiving is
+  taken away when tabit starts. Finding each other needs no rule: ufw lets
+  mDNS through by default.
+
+While receiving is on, a second small HTTP server listens on the LAN. It
+answers only `POST /drop`, from private addresses, and reaches nothing else
+of tabit: no chats, no tabs, no files. It takes at most 16 connections at
+once (more are closed unread), at most 3 offers are read or wait at once,
+one address may offer once every 3 seconds, and an offer over 25 MB is
+refused before it is read. Quitting tabit turns receiving off. `avahi-publish` runs under a shell that reads a pipe only
+tabit holds, so it stops when tabit quits or restarts. There is no
+encryption and no check of who sends: anyone on the LAN can offer you
+something, and you decide.
 
 ## How it works
 

@@ -173,6 +173,7 @@ class TestSessionList(unittest.TestCase):
             _claude_active_sessions=lambda: list(active),
             _claude_session_title=T._claude_session_title,
             _claude_session_last=T._claude_session_last)
+        app._ai_tab_session_ids = lambda: T._ai_tab_session_ids(app)
         app._ai_session_ids_in_use = lambda: T._ai_session_ids_in_use(app)
         return app
 
@@ -204,6 +205,33 @@ class TestSessionList(unittest.TestCase):
         self.assertEqual(T._ai_newest_free_session(app, "claude", self.folder)[0], B)
         self.assertIsNone(T._ai_newest_free_session(app, "codex", self.folder))
         self.assertIsNone(T._ai_newest_free_session(app, "claude", "/no/such/folder"))
+
+    def test_a_grok_tab_holds_the_conversation_its_folder_names(self):
+        # Grok's transcript is <id>/updates.jsonl: the id is the folder
+        with open(os.path.join(tabit.AGENT_HOOK_DIR, "ai-grok-x-1"), "w") as f:
+            f.write(f"idle\n/home/u/.grok/sessions/%2Fp/{A}/updates.jsonl\n0\n\n\n")
+        app = self.app([], tmux=[("ai-grok-x-1", "grok", "/p", False)])
+        self.assertIn(A, T._ai_session_ids_in_use(app))
+
+    def test_a_codex_tab_holds_the_session_its_notify_named_last(self):
+        with open(os.path.join(tabit.AGENT_HOOK_DIR, "ai-codex-x-1"), "w") as f:
+            f.write("idle\n\n0\n\n\n")
+        with open(os.path.join(tabit.AGENT_HOOK_DIR, "ai-codex-x-1.codex"), "w") as f:
+            f.write(f"{B}\n{A}\n")
+        app = self.app([], tmux=[("ai-codex-x-1", "codex", "/p", False)])
+        held = T._ai_session_ids_in_use(app)
+        self.assertIn(A, held)
+        self.assertNotIn(B, held)                 # an earlier one the tab has left
+
+    def test_the_new_chat_form_lists_grok_without_held_ones(self):
+        app = self.app([])
+        app._claude_free_sessions = lambda *a, **k: []
+        app._ai_session_ids_in_use = lambda: {A}
+        listed = [{"id": A, "title": "held", "ts": 2}, {"id": B, "title": "free", "ts": 1}]
+        with mock.patch.dict(sys.modules, {"tabit_chat": types.SimpleNamespace(
+                grok_sessions=lambda folder: listed, codex_sessions=lambda folder: [])}):
+            self.assertEqual([s["id"] for s in T._ai_folder_sessions(app, "grok", "/p")], [B])
+            self.assertEqual(T._ai_folder_sessions(app, "agy", "/p"), [])
 
     def test_running_sessions_are_left_out(self):
         # open in another terminal, or running in the background
