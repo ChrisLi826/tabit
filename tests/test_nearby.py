@@ -285,18 +285,18 @@ class NearbyTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {"PATH": self.tmp.name + ":" + os.environ["PATH"]}):
                 fake = os.path.join(self.tmp.name, "avahi-publish")
                 with open(fake, "w") as f:
-                    f.write("#!/bin/sh\nexec sleep 30\n")
+                    f.write("#!/bin/sh\nexec sleep 31.4159\n")  # a time no other program sleeps
                 os.chmod(fake, 0o755)
                 nb.turn_on(60)
                 proc = nb._pub[0]
                 argv = popen.call_args.args[0]
         self.assertEqual(argv[3:], ["t", tc.NEARBY_TYPE, str(nb.port), nb.id])
         self.assertTrue(wait_until(lambda: tc.subprocess.run(
-            ["pgrep", "-f", "^sleep 30$"], capture_output=True).returncode == 0))
+            ["pgrep", "-f", "^sleep 31\\.4159$"], capture_output=True).returncode == 0))
         nb.turn_off()
         self.assertIsNotNone(proc.poll())        # the wrapper ended with the pipe
         self.assertTrue(wait_until(lambda: tc.subprocess.run(
-            ["pgrep", "-f", "^sleep 30$"], capture_output=True).returncode != 0))   # and took avahi-publish along
+            ["pgrep", "-f", "^sleep 31\\.4159$"], capture_output=True).returncode != 0))   # and took avahi-publish along
 
     def test_an_accepted_offer_can_go_on_to_a_chat(self):
         self.you.turn_on(60)

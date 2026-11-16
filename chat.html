@@ -654,7 +654,9 @@ const status = (msg, bad) => { const s = $("status"); s.textContent = msg || "";
 // the state as a bubble on the picture: "" when idle
 function bub(r) {
   const st = r.asks ? "waiting" : r.state;
-  const glyph = { working: "<i></i><i></i><i></i>", waiting: "?", ready: "✓", background: "<span class=\"spin\">↻</span>", exited: "×" }[st];
+  // the list is redrawn every 5 s; start the spin where the clock says, so it does not jump back
+  const spin = `<span class="spin" style="animation-delay:-${Date.now() % 1600}ms">↻</span>`;
+  const glyph = { working: "<i></i><i></i><i></i>", waiting: "?", ready: "✓", background: spin, exited: "×" }[st];
   // body, then the tail at its lower left, pointing down at the picture
   return glyph ? `<span class="bub ${st}" title="${esc(st)}"><svg viewBox="0 0 30 26" aria-hidden="true"><path
     d="M7 1 H23 A6 6 0 0 1 29 7 V13 A6 6 0 0 1 23 19 H12 L5 25 L7 19 A6 6 0 0 1 1 13 V7 A6 6 0 0 1 7 1 Z"/></svg><b>${glyph}</b></span>` : "";
