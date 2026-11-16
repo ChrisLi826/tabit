@@ -3,6 +3,7 @@
 
 A fake claude (tests/fake_claude.py) stands in for the real one. No GTK here.
 """
+import base64
 import json
 import os
 import shutil
@@ -58,6 +59,23 @@ class TestTranslate(unittest.TestCase):
         for r in self.raw:
             for e in tc.translate(r):
                 self.assertNotIn("thinking", json.dumps(e))
+
+    def test_narration_is_shown_as_text(self):
+        # a real progress note, as Claude Code saves it: a thinking block whose
+        # signature is tagged "narration"; the terminal shows it as "● … · summary"
+        sig = base64.b64encode(b"\x08\x04\x12\xd1\x0e\n\x11\x08\x13\x18\x028\x01B\tnarration" + b"\x00" * 40).decode()
+        raw = {"type": "assistant", "message": {"content": [
+            {"type": "thinking", "thinking": "The test restarted; results in 8 minutes.\n\n", "signature": sig}]}}
+        self.assertEqual(tc.translate(raw), [{"t": "text", "text": "The test restarted; results in 8 minutes.", "note": True}])
+
+    def test_real_thinking_stays_hidden_even_with_words(self):
+        sig = base64.b64encode(b"\x08\x04\x12\xd1\x0e\n\x11\x08\x13\x18\x028\x01B\x08thinking" + b"\x00" * 40).decode()
+        for block in ({"type": "thinking", "thinking": "let me think", "signature": sig},
+                      {"type": "thinking", "thinking": "hmm", "signature": ""},
+                      {"type": "thinking", "thinking": "hmm", "signature": "not base64!"},
+                      {"type": "thinking", "thinking": "", "signature": sig}):
+            raw = {"type": "assistant", "message": {"content": [block]}}
+            self.assertEqual(tc.translate(raw), [], block)
 
     def test_sub_agent_lines_are_dropped(self):
         raw = {"type": "assistant", "parent_tool_use_id": "x",
@@ -489,6 +507,15 @@ class TestGroup(Base):
         self.assertTrue(wait(lambda: any(e["t"] == "user" for e in b.events)))
         self.assertEqual(self.says(group)[0], ("alice", "@bob: for the group"))
         self.assertTrue(wait(lambda: any(e["t"] == "text" for e in b.events)))   # bob is done
+
+    def test_a_members_progress_note_stays_in_its_own_chat(self):
+        group, (a, b) = self.group()
+        a.owners.append(group.id)                           # answering the group
+        group._on_member(a, {"t": "text", "text": "@bob: checking the log", "note": True})
+        self.assertEqual(self.says(group), [])
+        self.assertFalse(any(e["t"] == "relay" for e in group.events))
+        group._on_member(a, {"t": "text", "text": "the answer"})     # its answer still goes
+        self.assertEqual(self.says(group), [("alice", "the answer")])
 
     def test_a_member_writing_now_shows_only_for_the_group(self):
         group, (a, b) = self.group()

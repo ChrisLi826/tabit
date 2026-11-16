@@ -7,6 +7,8 @@ events (text, tool cards, permission questions) that tabit_chat.html shows.
 
 No GTK in this file. tabit.py serves the routes; this file owns the chats.
 """
+import base64
+import binascii
 import collections
 import datetime
 import difflib
@@ -101,6 +103,25 @@ def tool_summary(inp):
     return ""
 
 
+def _narration(block):
+    """The words of a thinking block that is a progress note for the user.
+
+    Claude Code saves its short "what I am doing" notes as thinking blocks
+    whose signature carries the tag "narration"; the terminal shows them as
+    "● … · summary". Real thinking is saved empty or tagged otherwise,
+    and stays hidden.
+    """
+    text = (block.get("thinking") or "").strip()
+    sig = block.get("signature") or ""
+    if not text or not isinstance(sig, str):
+        return ""
+    try:
+        head = base64.b64decode(sig[:64] + "=" * (-len(sig[:64]) % 4))
+    except (binascii.Error, ValueError):
+        return ""
+    return text if b"narration" in head else ""
+
+
 def translate(raw):
     """Chat events for one raw stream-json line, as a list of dicts.
 
@@ -124,6 +145,8 @@ def translate(raw):
                 continue
             if block.get("type") == "text" and (block.get("text") or "").strip():
                 out.append({"t": "text", "text": block["text"]})
+            elif block.get("type") == "thinking" and _narration(block):
+                out.append({"t": "text", "text": _narration(block), "note": True})
             elif block.get("type") == "tool_use":
                 inp = block.get("input")
                 out.append({"t": "tool", "id": block.get("id"),
@@ -1911,8 +1934,8 @@ class Group(_Log):
     def _on_member(self, chat, ev):
         with self.cond:
             self.cond.notify_all()
-        if not ev or ev.get("replay"):  # a mirror reading its tab's past: history, not news
-            return
+        if not ev or ev.get("replay") or ev.get("note"):  # a mirror reading its tab's past, or
+            return                      # a progress note: they stay in the chat
         if (ev["t"] in ("text", "error") and not self._ours(chat)) or ev.get("unsent"):
             return               # it answers what was asked in its own chat: it stays there
                                  # (a group's own message that did not go says so itself)
