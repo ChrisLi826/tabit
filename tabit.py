@@ -13525,6 +13525,7 @@ if (data !== null) {{
                             tab_hook=self._chat_tab_hook,
                             tabs_hook=self._chat_tabs_hook,
                             tab_ops=self._chat_tab_ops,
+                            screen_hook=self._chat_screen_ansi,
                             extra_env=self._chat_tool_env,
                             roster_dir=AGENT_HOOK_DIR)
                         self._chat_manager.retire_default()
@@ -13700,6 +13701,23 @@ if (data !== null) {{
         if acts and not isinstance(res, tuple):
             return 500, res                 # the exception text
         return res
+
+    def _chat_screen_ansi(self, tab_id):
+        """An AI tab's screen with its colours, for the chat to find Claude's
+        guess at the next message; "" when it has none. Only a tab in tmux:
+        this VTE does not say which letters are faint. The screen comes with
+        the typing switch, as on the phone page. Not on the GTK thread."""
+        if not self._remote_send_on:
+            return ""
+
+        def work():
+            row = self._tg_row_by_id(tab_id)
+            if row is None or not _is_ai_icon(getattr(row, "icon_name", None)):
+                return None
+            return self._row_tmux_session(row)
+        name = self._remote_call(work)
+        pane = name and self._tmux_pane_ansi(name)
+        return pane["ansi"] if pane else ""
 
     def _remote_page(self, name=REMOTE_PAGE):
         for d in self._agent_detect_roots():

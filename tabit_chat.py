@@ -795,6 +795,75 @@ def screen_prompt(lines):
             "numbers": numbers, "selected": chosen}
 
 
+_SGR = re.compile(r"(\x1b\[[0-9;]*m)")
+
+
+def screen_suggestion(ansi):
+    """What Claude guesses one types next, read from its screen with colours
+    (tmux capture-pane -e), or "". After a reply Claude shows it in the box
+    where one types, faint (SGR 2), between two lines of ─. Text one typed
+    is not faint, so a box with any of it has no guess; nor has the
+    'Try "..."' hint of a new session."""
+    if not isinstance(ansi, str):
+        return ""
+    lines = ansi.split("\n")
+    plain = [_SGR.sub("", x) for x in lines]
+    at = next((i for i in range(len(plain) - 1, 0, -1)
+               if plain[i].startswith("❯\xa0") and "──" in plain[i - 1]), None)
+    if at is None:
+        return ""
+    dim = inv = False
+    parts = []
+    for n, line in enumerate(lines[at:at + 8]):
+        if n and "──" in plain[at + n]:
+            break
+        skip = 2 if n == 0 else 0           # the ❯ and its space
+        got = ""
+        for tok in _SGR.split(line):
+            if _SGR.fullmatch(tok):
+                ps = [int(p) if p else 0 for p in tok[2:-1].split(";")]
+                i = 0
+                while i < len(ps):
+                    p = ps[i]
+                    if p in (38, 48, 58):   # a colour: its numbers are not attributes
+                        i += 3 if ps[i + 1:i + 2] == [5] else 5
+                        continue
+                    if p == 0:
+                        dim = inv = False
+                    elif p == 2:
+                        dim = True
+                    elif p == 22:
+                        dim = False
+                    elif p == 7:
+                        inv = True      # Claude's own cursor
+                    elif p == 27:
+                        inv = False
+                    i += 1
+                continue
+            for ch in tok:
+                if skip:
+                    skip -= 1
+                elif ch.isspace():
+                    got += " "
+                elif dim or inv:
+                    got += ch
+                else:
+                    return ""           # typed: no guess
+        got = got.strip()
+        if got:
+            parts.append(got)
+    else:
+        return ""                       # no line under it: not the box
+    text = ""
+    for p in parts:                     # a long guess goes on in the next line
+        glue = " " if text and text[-1].isascii() and text[-1].isalnum() \
+            and p[0].isascii() and p[0].isalnum() else ""
+        text += glue + p
+    if re.fullmatch(r'Try ".*"', text):
+        return ""
+    return text[:1000]
+
+
 def transcript_model(path):
     """The model that answered last in a Claude or Codex transcript (its tail), or None."""
     try:
@@ -987,6 +1056,8 @@ class Chat(_Log):
         self.live_ver = 0
         self.pending = {}            # request id -> {"ev", "input", "suggest"}
         self.tab_state = "idle"      # a mirrored chat: what its tab is doing
+        self.suggest = ""            # a mirrored chat: what Claude guesses one types next
+        self.watchers = 0            # pages open on this chat
         self.held = []               # lines sent while the tab showed a screen: (key, text)
         self._esc_at = 0             # when Stop last pressed Esc in the tab
         self._tab_answered = set()   # tool ids of the tab's questions answered from here
@@ -1141,6 +1212,7 @@ class Chat(_Log):
         """What a page needs besides events: state, open questions, meta."""
         with self.cond:
             return {"state": self.state, "live": self.live, "seq": self.seq,
+                    "suggest": self.suggest,
                     "pending": [p["ev"] for p in self.pending.values()],
                     "queued": self.queued(), "meta": self.summary()}
 
@@ -1344,8 +1416,23 @@ class Chat(_Log):
                     self.push()
             self._mirror_read(info["transcript"])
         self._sync_question(info)
+        self._sync_suggest(info)
         if self.held:
             self._send_held()
+
+    def _sync_suggest(self, info):
+        """Claude's guess at what one types next, while a page shows this chat
+        and the tab waits for a message. Read off the tab's screen."""
+        s = ""
+        if self.watchers and self.mgr.screen_hook \
+                and (self.meta["tab"].get("cli") or "claude") == "claude" \
+                and info.get("status") not in ("working", "blocked", "exited"):
+            s = screen_suggestion(self.mgr.screen_hook(self.meta["tab"]["id"]))
+        if s != self.suggest:
+            with self.cond:
+                self.suggest = s
+                self.live_ver += 1
+                self.cond.notify_all()
 
     def _sync_question(self, info):
         """While the tab waits on a question, the chat holds it as a card with
@@ -2533,7 +2620,7 @@ class _DropHandler(http.server.BaseHTTPRequestHandler):
 class ChatManager:
     def __init__(self, accounts=None, env_drop=(), root=CHAT_DIR, claude=None, auth=None,
                  tab_hook=None, extra_env=None, tabs_hook=None, tab_ops=None, roster_dir=None,
-                 codex_accounts=None, claude_usage=None, grok_usage=None):
+                 codex_accounts=None, claude_usage=None, grok_usage=None, screen_hook=None):
         self.accounts = accounts or (lambda: [])     # [(name, cli)]
         self.codex_accounts = codex_accounts or (lambda: [])   # the same, for Codex tabs
         self.claude_usage = claude_usage   # fn(account) -> windows or None: asks Anthropic
@@ -2547,6 +2634,7 @@ class ChatManager:
         self.tab_hook = tab_hook     # (tab id, text=None, key=None, queue=False), from tabit
         self.tabs_hook = tabs_hook   # () -> [{"id", "title", "group"}] for the Claude tabs, or None
         self.tab_ops = tab_ops       # (op, tab id, body) -> (code, body): groups | new | close | rename
+        self.screen_hook = screen_hook   # (tab id) -> its screen with colours, or ""
         self._tabs_lock = threading.Lock()   # a tab and its chat are made together
         self.roster_dir = roster_dir # where each tab's roster goes for its prompt hook
         self._rosters = {}           # hook key -> the roster text written
@@ -3576,6 +3664,20 @@ def _edit(chat, body):
 
 
 def stream(chat, since, write, stop, kicked, tail=None):
+    """_stream, with the chat knowing a page is open on it."""
+    mine = hasattr(chat, "watchers")
+    if mine:
+        with chat.cond:
+            chat.watchers += 1
+    try:
+        _stream(chat, since, write, stop, kicked, tail)
+    finally:
+        if mine:
+            with chat.cond:
+                chat.watchers -= 1
+
+
+def _stream(chat, since, write, stop, kicked, tail=None):
     """Server-sent events for one chat until the page goes, stop or kicked is
     set. write(bytes) raises OSError when the page has gone away.
 

@@ -150,6 +150,15 @@ Code shows "Press up to edit queued messages"); with your own text in it,
 take the line back in the tab. Lines another tab passed on (`[from @name]`)
 are not shown. A Codex tab reads a line at once, so nothing waits there.
 
+**Claude's guess at your next message.** After a reply, Claude Code may
+show a faint guess in the tab's message box. The chat shows it faint in its
+empty box too: **Tab** (or a tap on it, on a phone) puts it in, to send or
+change. tabit reads it off the tab's screen every 2 seconds while a page
+shows the chat. It needs the tab in tmux (the default for AI tabs: this VTE
+does not say which letters are faint) and typing on (**Settings… →
+Remote**), like the tab's screen. Text you typed in the tab is not faint, so
+it is never shown as a guess.
+
 **Slash commands and skills.** Typing `/` at the start of the message box
 lists the AI's commands and skills; type more to filter, tap one (or Enter,
 Tab) and it goes into the box, ready for its words. Sending types it into

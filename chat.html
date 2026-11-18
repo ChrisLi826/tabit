@@ -209,7 +209,11 @@
   #atlist .cmd b { font: 600 13.5px ui-monospace, Menlo, monospace; color: var(--cyan); flex: none; }
   #atlist .ctag { flex: none; font-size: calc(11px * var(--fs, 1)); padding: 1px 7px; border-radius: 99px; background: #ffffff14; color: var(--dim); }
   #atlist .hint { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #row { display: flex; gap: 6px; align-items: flex-end; }
+  #row { display: flex; gap: 6px; align-items: flex-end; position: relative; }
+  #ghost { position: absolute; display: flex; align-items: baseline; gap: 8px; color: var(--dim); font-size: calc(16px * var(--fs, 1)); cursor: pointer; }
+  #ghost[hidden] { display: none; }
+  #ghost span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  #ghost kbd { flex: none; font: calc(11px * var(--fs, 1)) ui-monospace, Menlo, monospace; padding: 0 5px; border: 1px solid var(--line); border-radius: 5px; }
   #text { scrollbar-width: none; flex: 1; min-height: 44px; max-height: 40vh; resize: none; font-size: calc(16px * var(--fs, 1)); border-radius: 22px; padding: 11px 16px; }
   #text::-webkit-scrollbar { display: none; }
   #row button { height: 44px; flex: none; border-radius: 22px; }
@@ -434,6 +438,7 @@
         <button id="attach" type="button" title="attach a file or photo">📎</button>
         <input id="file" type="file" hidden>
         <textarea id="text" rows="1" placeholder="Message"></textarea>
+        <div id="ghost" hidden><span></span><kbd></kbd></div>
         <button id="stop" type="button" class="danger" hidden>Stop</button>
         <button id="send" type="button" class="primary" title="send">↑</button>
       </div>
@@ -852,12 +857,14 @@ function take(me, d) {
   me.lastSeq = Math.max(me.lastSeq, d.seq);
   me.live = d.live;
   me.queued = d.queued || [];
+  me.suggest = d.suggest || "";
   paintLive(me);
   // a message waits for a screen open in the tab: show that screen, so it
   // can be seen and closed (it may have been opened at the desk, or left)
   if (me.kind === "chats" && me.queued.some((q) => q.held) && $("scr").hidden) screenOpen("the tab's screen", false);
   paintAsks(me);
   header(me);
+  paintGhost();
   // not looking: another window or app in front counts, not only a hidden page,
   // since a desktop shows a page behind other windows as visible
   if (finished && (document.hidden || !document.hasFocus()) && bellOn()) {
@@ -1153,7 +1160,32 @@ $("msgs").addEventListener("scroll", () => {
 $("jump").onclick = () => { const b = $("msgs"); b.scrollTop = b.scrollHeight; };
 
 // --- typing -----------------------------------------------------------------
-function grow() { const t = $("text"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, window.innerHeight * 0.4) + "px"; }
+function grow() { const t = $("text"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, window.innerHeight * 0.4) + "px"; paintGhost(); }
+// Claude's guess at the next message, as its tab shows it (faint, in the
+// box): shown faint in the empty box here too. Tab, or a tap on it, puts it in.
+function paintGhost() {
+  const g = $("ghost"), t = $("text");
+  const s = cur && cur.kind === "chats" && cur.meta && cur.meta.tab ? cur.suggest || "" : "";
+  const show = !!s && !t.value && $("atlist").hidden;
+  g.hidden = !show; t.placeholder = show ? "" : "Message";
+  if (!show) return;
+  g.firstChild.textContent = s;
+  g.lastChild.textContent = matchMedia("(pointer: coarse)").matches ? "tap" : "Tab";
+  const cs = getComputedStyle(t), px = (v) => parseFloat(v) || 0;
+  g.style.left = t.offsetLeft + px(cs.borderLeftWidth) + px(cs.paddingLeft) + "px";
+  g.style.top = t.offsetTop + px(cs.borderTopWidth) + px(cs.paddingTop) + "px";
+  g.style.maxWidth = t.clientWidth - px(cs.paddingLeft) - px(cs.paddingRight) + "px";
+  g.style.lineHeight = cs.lineHeight;
+}
+function takeGhost() {
+  if ($("ghost").hidden) return false;
+  const t = $("text");
+  t.value = cur.suggest; t.dispatchEvent(new Event("input"));
+  t.focus(); t.setSelectionRange(t.value.length, t.value.length);
+  return true;
+}
+$("ghost").onclick = takeGhost;
+addEventListener("resize", paintGhost);
 $("text").addEventListener("input", () => { grow(); if (cur) localStorage.setItem("draft:" + cur.id, $("text").value); });
 $("text").addEventListener("keydown", (e) => {
   if (atHit && !e.isComposing) {
@@ -1162,6 +1194,7 @@ $("text").addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); atPut(atPick); return; }
     if (e.key === "Escape") { e.preventDefault(); atHit = null; $("atlist").hidden = true; return; }
   }
+  if (e.key === "Tab" && !e.shiftKey && !e.isComposing && takeGhost()) { e.preventDefault(); return; }
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); send(); }
 });
 $("send").onclick = send;
@@ -1340,6 +1373,7 @@ async function send() {
     await api(`${base(cur.kind)}/${cur.id}/send`, { text, reply: replyTo ? replyTo.seq : undefined });
     if (opens) setTimeout(() => screenOpen(word[0]), 800);
     setReply(null);
+    cur.suggest = "";                        // the tab takes it from here
     t.value = ""; localStorage.removeItem("draft:" + cur.id); grow(); markChips();
     const b = $("msgs"); b.scrollTop = b.scrollHeight;
   } catch (e) { status(e.message, true); }
