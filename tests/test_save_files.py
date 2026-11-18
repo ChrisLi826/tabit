@@ -2,8 +2,10 @@
 """sessions.json and settings.json: never a half file, never lost to a bad one."""
 import json
 import os
+import shutil
 import sys
 import tempfile
+import types
 import unittest
 import unittest.mock
 
@@ -15,6 +17,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
 
 import tabit  # noqa: E402
+from gi.repository import Gtk  # noqa: E402
 
 
 class TestSaveFiles(unittest.TestCase):
@@ -157,6 +160,60 @@ class TestRestoreSafety(TestSaveFiles):
         code, _ = tabit.Tabit._remote_manage_op(app, "close", "t", {})
         self.assertEqual(code, 409)
         app._close_session.assert_not_called()
+
+
+class TestCloseUnsavedNoteFromThePhone(unittest.TestCase):
+    """The phone may close a note with unsaved changes after it asks; tabit
+    keeps the text in CLOSED_NOTES_DIR first."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        patch = unittest.mock.patch.object(tabit, "CLOSED_NOTES_DIR", os.path.join(self.dir, "closed"))
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.buf = Gtk.TextBuffer()
+        self.buf.set_text("half a thought\n第二行")
+        self.row = types.SimpleNamespace(kind="note", buffer=self.buf, file_path=None)
+        self.app = unittest.mock.Mock()
+        self.app._tg_row_by_id = lambda _t: self.row
+        self.app._session_rows = lambda: [self.row, object()]
+        self.app._keep_closed_note = tabit.Tabit._keep_closed_note
+        self.app._close_session.side_effect = lambda r: self.assertFalse(r.buffer.get_modified())
+
+    def test_unsaved_asks_first(self):
+        for body in ({}, None, {"discard": "yes"}):
+            code, out = tabit.Tabit._remote_manage_op(self.app, "close", "t", body)
+            self.assertEqual((code, out.get("unsaved")), (409, True), body)
+        self.app._close_session.assert_not_called()
+        self.assertFalse(os.path.exists(tabit.CLOSED_NOTES_DIR))
+
+    def test_discard_keeps_a_copy_then_closes(self):
+        code, out = tabit.Tabit._remote_manage_op(self.app, "close", "t", {"discard": True})
+        self.assertEqual(code, 200)
+        self.app._close_session.assert_called_once_with(self.row)
+        with open(out["kept"], encoding="utf-8") as f:
+            self.assertEqual(f.read(), "half a thought\n第二行")
+        self.assertTrue(out["kept"].endswith("-untitled"))
+        self.assertEqual(os.stat(out["kept"]).st_mode & 0o777, 0o600)
+        # a second one in the same second gets its own file
+        self.buf.set_text("other")
+        self.row.file_path = "/x/my notes.md"
+        _, out2 = tabit.Tabit._remote_manage_op(self.app, "close", "t", {"discard": True})
+        self.assertNotEqual(out["kept"], out2["kept"])
+        self.assertTrue(out2["kept"].endswith("my_notes.md"))
+
+    def test_no_copy_no_close(self):
+        with open(tabit.CLOSED_NOTES_DIR, "w"):         # a file where the folder goes
+            pass
+        code, out = tabit.Tabit._remote_manage_op(self.app, "close", "t", {"discard": True})
+        self.assertEqual(code, 500)
+        self.app._close_session.assert_not_called()
+        self.assertTrue(self.buf.get_modified())
+
+    def test_a_saved_note_closes_without_asking(self):
+        self.buf.set_modified(False)
+        self.assertEqual(tabit.Tabit._remote_manage_op(self.app, "close", "t", {})[1], {"ok": True})
 
 
 if __name__ == "__main__":

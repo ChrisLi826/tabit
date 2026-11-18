@@ -32,10 +32,13 @@ import signal
 import struct
 import queue
 import subprocess
+import secrets
 import sys
 
 import shutil
 import socketserver
+import hmac
+import http.cookies
 import http.server
 import tarfile
 import termios
@@ -401,10 +404,10 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.3.0.1"
+APP_VERSION = "v2.3.1"
 # Taiwan main dish of the major version + a fresh snack or drink, picked at
 # release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
-APP_CODENAME = "Sesame Oil Chicken + Gua Bao"
+APP_CODENAME = "Sesame Oil Chicken + Brown Sugar Cake"
 _VERSION_CODENAME_SEP = " · "
 
 
@@ -922,6 +925,8 @@ CONNECT_LAST_FILE = os.path.join(CONFIG_DIR, "connect_last.json")
 # Remote: tabit serves a status page + API on a unix socket, and Tailscale
 # Serve publishes it to this user's own devices only (tailnet, HTTPS).
 REMOTE_SOCK = os.path.join(GLib.get_user_runtime_dir(), "tabit-remote.sock")
+REMOTE_LOCAL_PORT = 47810           # Remote for a browser on this computer, 127.0.0.1 only
+LOCAL_COOKIE = "tabit_key"
 REMOTE_PAGE = "remote.html"
 # Claude and Grok AI tabs report their status through hooks: each event
 # writes the state to a file named after the tab, and tabit reads it there
@@ -939,6 +944,8 @@ CODEX_NOTIFY_ARG = 'notify=["%s"]' % CODEX_NOTIFY_FILE
 # status line the user set in their own settings.json.
 CLAUDE_STATUSLINE_FILE = os.path.expanduser("~/.local/share/tabit/claude-statusline.py")
 GROK_HOOK_SCRIPT = os.path.expanduser("~/.local/share/tabit/grok_status_hook.py")
+# what an unsaved note held when it was closed from the phone without saving
+CLOSED_NOTES_DIR = os.path.expanduser("~/.local/share/tabit/closed-notes")
 GROK_HOOKS_FILE = os.path.expanduser("~/.grok/hooks/tabit-status.json")
 # Claude keeps each folder's sessions here, one <id>.jsonl per session
 CLAUDE_PROJECTS_DIR = os.path.join(
@@ -2130,6 +2137,13 @@ class _RemoteServer(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
 
 
+class _LocalServer(socketserver.ThreadingTCPServer):
+    """The same pages on 127.0.0.1 for a browser on this computer, so Remote
+    works without Tailscale too. Its handler has local_key set."""
+    daemon_threads = True
+    allow_reuse_address = True
+
+
 class _RemoteHandler(http.server.BaseHTTPRequestHandler):
     """GET / (page), /api/status (snapshot), /api/events (SSE on change).
 
@@ -2139,6 +2153,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
     app = None                      # the Tabit window
     stop = None                     # threading.Event, set when serving ends
     owner = None                    # Tailscale login allowed in; None = nobody
+    local_key = None                # the 127.0.0.1 door: the secret its link carries
     timeout = 30                    # an idle peer cannot hold a thread forever
 
     def log_message(self, *_a):     # a unix peer has no address to print
@@ -2155,7 +2170,52 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _origin(self):
+        """The page's own origin: https://<host>.ts.net, or http://127.0.0.1:<port>."""
+        if self.local_key:
+            return "http://" + (self.headers.get("Host") or "")
+        return self.app._remote_url.rstrip("/")
+
+    def _local_allowed(self):
+        """The 127.0.0.1 door. Any program or web page on this computer can
+        reach the port, so a viewer needs the secret: once in the link from
+        Settings (?key=...), which turns into a cookie, then the cookie. The
+        Host must be this port's own name, so a site that points its own
+        name at 127.0.0.1 (DNS rebinding) is refused."""
+        port = self.server.server_address[1]
+        if self.headers.get("Host") not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+            self._send(403, "text/plain", b"not your tabit")
+            return False
+        jar = http.cookies.SimpleCookie()
+        try:
+            jar.load(self.headers.get("Cookie") or "")
+        except http.cookies.CookieError:
+            pass
+        got = jar.get(LOCAL_COOKIE)
+        if got and hmac.compare_digest(got.value.encode(), self.local_key.encode()):
+            return True
+        path, _, query = self.path.partition("?")
+        if self.command == "GET" and (path in REMOTE_ICONS or path.endswith(".webmanifest")):
+            return True                     # fetched without the cookie; nothing private
+
+        q = urllib.parse.parse_qs(query)
+        key = (q.pop("key", None) or [""])[0]
+        if self.command == "GET" and hmac.compare_digest(key.encode(), self.local_key.encode()):
+            rest = urllib.parse.urlencode(q, doseq=True)
+            self.send_response(303)         # the key leaves the address bar
+            self.send_header("Location", path + ("?" + rest if rest else ""))
+            self.send_header("Set-Cookie", f"{LOCAL_COOKIE}={self.local_key}; Path=/; "
+                             "Max-Age=31536000; HttpOnly; SameSite=Strict")
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return False
+        self._send(403, "text/plain", b"open the link in tabit's Settings, Remote")
+        return False
+
     def _allowed(self):
+        if self.local_key:
+            return self._local_allowed()
         # Serve puts the viewer's login here; only tailscaled reaches the
         # socket, so it can be trusted. Tagged devices send none: refused.
         if not self.owner or self.headers.get("Tailscale-User-Login") != self.owner:
@@ -2177,7 +2237,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         if not self._allowed():
             return
         origin = self.headers.get("Origin")
-        ours = self.app._remote_url.rstrip("/")     # https://<host>.ts.net
+        ours = self._origin()
         upload = self.path.split("?", 1)[0] == "/api/upload"
         ctype = self.headers.get("Content-Type") or ""
         if (self.headers.get("X-Tabit") != "1"
@@ -2840,6 +2900,8 @@ class Tabit(Gtk.Window):
         adders.pack_start(system_box, False, False, 0)
         self._remote_srv = None
         self._remote_url = ""
+        self._local_srv = None
+        self._local_url = ""
         self._chat_manager = None
         self._chat_lock = threading.Lock()
         self._remote_send_on = False
@@ -5453,6 +5515,7 @@ if (data !== null) {{
         # tabs/groups + tmux sessions must resume/Attach.
         self._shutting_down = True
         self._remote_stop(unpublish=False)  # keep the Tailscale mapping for next start
+        self._local_stop()
         # Nearby: take its firewall rule away; tabs survive, a LAN door should not
         nearby = getattr(getattr(self, "_chat_manager", None), "nearby", None)
         if nearby is not None and nearby.on():
@@ -12432,14 +12495,22 @@ if (data !== null) {{
         if row is None:
             return 404, {"error": "that tab is gone"}
         if op == "close":
-            if getattr(row, "kind", None) == "note" and row.buffer.get_modified():
-                # the save question is a modal dialog here: answer it at the desk
-                return 409, {"error": "that note has unsaved changes; close it in tabit"}
             if len(self._session_rows()) == 1:
                 # the last tab closes tabit, and the phone cannot start it again
                 return 409, {"error": "that is the last tab; closing it quits tabit, do it in tabit"}
+            kept = None
+            if getattr(row, "kind", None) == "note" and row.buffer.get_modified():
+                # the save question is a modal dialog here, which nobody at
+                # the phone can answer: the page asks, then sends discard
+                if (body or {}).get("discard") is not True:
+                    return 409, {"error": "that note has unsaved changes", "unsaved": True}
+                try:
+                    kept = self._keep_closed_note(row)
+                except OSError as e:
+                    return 500, {"error": f"could not keep a copy, so it stays open: {e}"}
+                row.buffer.set_modified(False)
             self._close_session(row)
-            return 200, {"ok": True}
+            return 200, {"ok": True, "kept": kept} if kept else {"ok": True}
         if op == "group":
             color = body.get("color")
             if color is not None and color not in GROUP_COLORS:
@@ -13173,6 +13244,26 @@ if (data !== null) {{
                 if login else None,
                 "update": dict(self._remote_update) if self._remote_update else None}
 
+    @staticmethod
+    def _keep_closed_note(row):
+        """GTK thread: write a note's unsaved text to CLOSED_NOTES_DIR before
+        it is closed without saving; the copy's path."""
+        start, end = row.buffer.get_bounds()
+        text = row.buffer.get_text(start, end, True)
+        name = re.sub(r"[^\w.-]+", "_", os.path.basename(row.file_path or "untitled"))[:80]
+        os.makedirs(CLOSED_NOTES_DIR, mode=0o700, exist_ok=True)
+        stamp = time.strftime("%Y-%m-%d-%H%M%S")
+        for n in range(100):
+            path = os.path.join(CLOSED_NOTES_DIR, f"{stamp}-{n}-{name}" if n else f"{stamp}-{name}")
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                continue
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            return path
+        raise OSError("no free name in " + CLOSED_NOTES_DIR)
+
     def _remote_unsaved_notes(self):
         """GTK thread: the name of a note with unsaved changes, or None.
         Closing asks about it in a dialog nobody at the phone can answer."""
@@ -13185,7 +13276,7 @@ if (data !== null) {{
         note = self._remote_call(self._remote_unsaved_notes)
         if note:
             return 409, {"error": f"“{note}” has unsaved changes: save it at "
-                                  "the computer first"}
+                                  "the computer, or close it here first (its ⋯, Close)"}
         # answer first: closing stops this server
         GLib.timeout_add(500, lambda: self._restart_self() and False)
         return 200, {"ok": True}
@@ -13334,7 +13425,7 @@ if (data !== null) {{
                     return False
                 state["started"] = True
             try:
-                if self._remote_srv is not None:    # not on a closed window
+                if self._remote_srv is not None or self._local_srv is not None:   # not on a closed window
                     box.append(fn())
             except Exception as e:
                 box.append({"error": f"{type(e).__name__}: {e}"})
@@ -13582,6 +13673,10 @@ if (data !== null) {{
         if not want:
             self._remote_fresh()
         self._remote_want = want
+        if want:
+            self._local_start()             # this computer's browser: no Tailscale needed
+        else:
+            self._local_stop()
         if want and self._remote_srv is None:
             self._remote_start()
         elif not want and getattr(self, "_remote_tried", False):
@@ -13622,6 +13717,56 @@ if (data !== null) {{
                 job()
 
         threading.Thread(target=run, daemon=True).start()
+
+    @staticmethod
+    def _local_key():
+        """The secret in the 127.0.0.1 link; kept, so a bookmark and the
+        browser's cookie still work after a restart."""
+        path = os.path.join(CONFIG_DIR, "remote-local-key")
+        try:
+            with open(path, encoding="ascii") as f:
+                key = f.read().strip()
+            if len(key) >= 32:
+                return key
+        except (OSError, ValueError):
+            pass
+        key = secrets.token_urlsafe(32)
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="ascii") as f:
+            f.write(key)
+        os.replace(path + ".tmp", path)
+        return key
+
+    def _local_start(self):
+        """Serve the Remote pages on 127.0.0.1 too, whatever Tailscale does."""
+        if self._local_srv is not None:
+            return
+        handler = type("LocalHandler", (_RemoteHandler,),
+                       {"app": self, "stop": threading.Event(), "owner": None,
+                        "_streams": [], "_chat_streams": [],
+                        "_streams_lock": threading.Lock()})
+        try:
+            handler.local_key = self._local_key()
+            try:
+                srv = _LocalServer(("127.0.0.1", REMOTE_LOCAL_PORT), handler)
+            except OSError:                 # the port is taken: any free one
+                srv = _LocalServer(("127.0.0.1", 0), handler)
+        except OSError as e:
+            print(f"tabit: local Remote did not start: {e}", file=sys.stderr)
+            return
+        srv.handler_cls = handler
+        self._local_srv = srv
+        self._local_url = f"http://127.0.0.1:{srv.server_address[1]}/?key={handler.local_key}"
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    def _local_stop(self):
+        srv, self._local_srv = self._local_srv, None
+        self._local_url = ""
+        if srv is not None:
+            srv.handler_cls.stop.set()      # ends open streams
+            srv.shutdown()
+            srv.server_close()
 
     def _remote_start(self):
         self._remote_tried = True
@@ -18491,7 +18636,7 @@ if (data !== null) {{
         acct_refresh()
 
         remote_on = Gtk.CheckButton(
-            label="Show tabit on my Tailscale devices")
+            label="Show tabit in a browser: this computer and my Tailscale devices")
         remote_on.set_active(bool(s.get("remote_enabled")))
         remote_on.set_tooltip_text(
             "A read-only status page (groups, tabs, AI status) for your "
@@ -18544,6 +18689,22 @@ if (data !== null) {{
             remote_link.pack_start(link_lbl, False, False, 0)
             remote_link.pack_start(self._copy_name_button(link_url, "Copy the link"),
                                    False, False, 0)
+        # this computer's own address: works without Tailscale; its key opens it
+        local_link = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4,
+                             margin_start=22)
+        if self._local_url:
+            loc_lbl = Gtk.Label(xalign=0)
+            loc_lbl.set_line_wrap(True)
+            loc_lbl.set_max_width_chars(52)
+            loc_lbl.set_markup("On this computer: " + self._link_markup(
+                self._local_url, self._local_url.split("?")[0]))
+            loc_lbl.set_tooltip_text("Works without Tailscale. The link carries a "
+                                     "key; the browser keeps it after the first open.")
+            loc_lbl.connect("activate-link",
+                            lambda _l, uri: (self._open_uri(uri), True)[1])
+            local_link.pack_start(loc_lbl, False, False, 0)
+            local_link.pack_start(self._copy_name_button(self._local_url, "Copy the link (with its key)"),
+                                  False, False, 0)
         # which Tailscale account Remote lets in, and a way to change it
         ts_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
                          margin_start=22)
@@ -18678,7 +18839,8 @@ if (data !== null) {{
                "Needs Tailscale on the phone too, logged in to the same "
                "account.")) + "\n")
             + "Only your own login can open "
-            "it. tabit takes over Tailscale Serve on port 443 of this host.")
+            "it. tabit takes over Tailscale Serve on port 443 of this host. "
+            "The link for this computer works without Tailscale.")
 
         ver_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         
@@ -18721,7 +18883,7 @@ if (data !== null) {{
             # out when Telegram is off, which is when somebody needs it.
             ("Telegram", (tg_on, tg_grid, tg_help)),
         ) + (("Remote", (remote_on, remote_send, remote_files, ts_row,
-                          remote_link, remote_note)),) + (
+                          remote_link, local_link, remote_note)),) + (
             ("About", (ver_box,)),
         )
         for name, widgets in pages:

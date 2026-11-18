@@ -14,6 +14,17 @@ const SET_LABELS = {
   ai_fresh_on_restore: "New AI tabs start fresh after tabit reopens",
 };
 let setTimer = 0;
+// text size: this browser's own choice, kept in it; both pages scale their
+// fonts by --fs (not the terminal screen, which fits its own columns)
+const TEXT_SIZES = [["S", 0.875], ["M", 1], ["L", 1.15], ["XL", 1.3], ["XXL", 1.5]];
+const textSize = () => { try { return +localStorage.getItem("textsize") || 1; } catch (e) { return 1; } };
+const setTextSize = (v) => {
+  document.documentElement.style.setProperty("--fs", String(v));
+  try { if (v === 1) localStorage.removeItem("textsize"); else localStorage.setItem("textsize", String(v)); } catch (e) {}
+};
+setTextSize(textSize());
+const sizeChips = () => TEXT_SIZES.map(([name, v]) =>
+  `<button type="button" data-fs="${v}"${v === textSize() ? ' class="sel"' : ""}>${name}</button>`).join("");
 async function admin(op, body) {
   const res = await fetch(`api/admin/${op}`, {
     method: "POST", headers: { "Content-Type": "application/json", "X-Tabit": "1" },
@@ -28,8 +39,13 @@ function settingsMsg(text, err) {
   if (m) { m.textContent = text || ""; m.className = err ? "err" : "smsg"; }
 }
 window.openTabitSettings = (sheet, close) => {
-  sheet(`<h3>Settings</h3><div id="sbody" class="dim">Loading…</div><div id="smsg" class="smsg"></div>
+  sheet(`<h3>Settings</h3><label>Text size (this browser)</label><div class="tsize" id="sfs">${sizeChips()}</div>
+    <div id="sbody" class="dim">Loading…</div><div id="smsg" class="smsg"></div>
     <div class="row"><button id="sclose" type="button">Close</button></div>`);
+  for (const b of $("sfs").querySelectorAll("button")) b.onclick = () => {
+    setTextSize(+b.dataset.fs);
+    for (const x of $("sfs").querySelectorAll("button")) x.classList.toggle("sel", x === b);
+  };
   $("sclose").onclick = () => { clearTimeout(setTimer); close(); };
   drawSettings();
 };

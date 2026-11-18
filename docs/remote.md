@@ -26,6 +26,16 @@ address alone opens [Tabit Chat](chat.md) when typing is allowed). On a phone,
 in the address bar opens it in its own window. The other device needs the
 Tailscale app, signed in to the same account.
 
+**On this computer, without Tailscale.** While Remote is on, tabit also serves
+the same pages at `http://127.0.0.1:47810/` (another free port when that one
+is taken), whatever Tailscale is doing. Settings… → Remote shows the link,
+with a copy button. The link carries a key (`?key=...`): the first open turns
+it into a browser cookie and drops it from the address, so a bookmark of the
+plain address works after that. Without the key, other programs and web pages
+on this computer get 403. Only this computer can reach the port. The key is
+kept in `~/.config/tabit/remote-local-key`; delete that file and restart to
+get a new one.
+
 ## Turning it on
 
 **Settings… → Remote.** Turning it on gets Tailscale ready on this computer
@@ -72,8 +82,10 @@ console, that is a remote shell from your phone.
   blank connect password keeps the one saved on this machine; the page
   never receives it. Each tab's ⋯ renames it,
   sets its group, moves it or closes it. Closing an AI tab stops its agent
-  and its tmux session, after you confirm. The last tab cannot be closed
-  from the page, because that would quit tabit.
+  and its tmux session, after you confirm. Closing a note with unsaved
+  changes asks once more; tabit then keeps its text in
+  `~/.local/share/tabit/closed-notes/` and closes it. The last tab cannot be
+  closed from the page, because that would quit tabit.
 - Manage groups: a group's ⋯ asks whether to open a new tab in that group
   (you can still change the group) or to change the group: rename, colour,
   collapse or expand in tabit, move, or remove. The ⋯ on **No group** opens
@@ -84,7 +96,9 @@ console, that is a remote shell from your phone.
 - An AI tab in tmux that the desktop is not showing fits its pane to the
   phone while you look at it, and gets its own size back about 45 seconds
   after you leave it.
-- ⚙ Settings: the three AI defaults (tmux, Claude bypass, fresh after
+- ⚙ Settings: **Text size** (S to XXL) for this browser, on both pages; the
+  screen keeps its own A− / A+. The ⚙ shows even with typing off, and then
+  holds only the text size. Then the three AI defaults (tmux, Claude bypass, fresh after
   reopening); Claude accounts, and Codex accounts when Codex is installed,
   with their login state, **Add**, and **Log in**: for Claude tabit runs
   `claude auth login` itself, the page shows the login link, and you paste

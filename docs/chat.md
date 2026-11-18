@@ -46,7 +46,7 @@ Screen** makes it an app of its own.
 - **🔔** tells you when the AI is done while you are not looking at the page
   (another window or app in front counts). 🔕 means it is off; tap to turn it on.
 - **⚙** (next to ⌨ on the list) opens tabit's Settings, the same sheet as in
-  the terminal view: the AI defaults for new tabs, the Claude accounts (add
+  the terminal view: **Text size** for this browser, the AI defaults for new tabs, the Claude accounts (add
   one, log in), Check for updates and Restart tabit.
 - **History.** Chats and their history stay on this computer in
   `~/.local/share/tabit/chats/`. Close the page, come back later, and it goes
