@@ -37,6 +37,7 @@ import sys
 
 import shutil
 import socketserver
+import gzip
 import hmac
 import http.cookies
 import http.server
@@ -46,6 +47,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import zlib
 import uuid
 
 import gi
@@ -2137,6 +2139,52 @@ class _RemoteServer(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
 
 
+class _GzipStream:
+    """A response body gzipped as it is written. Each write is flushed
+    whole, so a stream's event reaches the page at once; a phone behind a
+    Tailscale relay gets about a third of the bytes."""
+
+    def __init__(self, raw):
+        self.raw = raw
+        self.zip = zlib.compressobj(6, zlib.DEFLATED, 31)     # 31: gzip framing
+
+    @property
+    def closed(self):
+        return self.raw.closed
+
+    def write(self, data):
+        self.raw.write(self.zip.compress(data) + self.zip.flush(zlib.Z_SYNC_FLUSH))
+        return len(data)
+
+    def flush(self):
+        self.raw.flush()
+
+    def close(self):
+        try:
+            if not self.raw.closed:
+                self.raw.write(self.zip.flush())
+        except (OSError, ValueError):
+            pass
+        self.raw.close()
+
+
+def _wants_gzip(accept):
+    """Whether an Accept-Encoding header takes gzip."""
+    for part in (accept or "").split(","):
+        name, _, q = part.strip().partition(";")
+        if name.strip().lower() == "gzip":
+            q = q.strip().removeprefix("q=").strip()
+            try:
+                return float(q or 1) > 0
+            except ValueError:
+                return False
+    return False
+
+
+GZIP_TYPES = ("text/", "application/json", "application/manifest+json",
+              "image/svg+xml")
+
+
 class _LocalServer(socketserver.ThreadingTCPServer):
     """The same pages on 127.0.0.1 for a browser on this computer, so Remote
     works without Tailscale too. Its handler has local_key set."""
@@ -2161,6 +2209,11 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
 
     def _send(self, code, ctype, body):
         self.send_response(code)
+        if (len(body) > 1024 and ctype.startswith(GZIP_TYPES)
+                and _wants_gzip(self.headers.get("Accept-Encoding"))):
+            body = gzip.compress(body, 6)
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -2222,6 +2275,15 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             self._send(403, "text/plain", b"not your tabit")
             return False
         return True
+
+    def _gzip_stream(self):
+        """End a stream's headers; gzip what follows when the page takes it."""
+        zipped = _wants_gzip(self.headers.get("Accept-Encoding"))
+        if zipped:
+            self.send_header("Content-Encoding", "gzip")
+        self.end_headers()
+        if zipped:
+            self.wfile = _GzipStream(self.wfile)
 
     def _json(self, code, obj):
         self._send(code, "application/json", json.dumps(obj).encode())
@@ -2428,7 +2490,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
-        self.end_headers()
+        self._gzip_stream()
 
         def write(data):
             self.wfile.write(data)
@@ -2725,7 +2787,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
-        self.end_headers()
+        self._gzip_stream()
         last = None
         try:
             while True:
