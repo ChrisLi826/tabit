@@ -2842,5 +2842,120 @@ class PastedTest(unittest.TestCase):
                              ["hi", 'see <pasted_content id="ab12">\nx\n</pasted_content id="ab12">'])
 
 
+BORDER = "\x1b[38;5;244m" + "─" * 40
+BELOW = "\x1b[39m  \x1b[38;5;105m◆\x1b[38;5;246m Opus 5.5\x1b[39m"
+
+
+def pane(*box):
+    """A Claude screen as tmux -e gives it: talk, then the box between two borders."""
+    return "\n".join(["\x1b[39m● Done.", "", BORDER, *box, BORDER, BELOW, ""])
+
+
+class ScreenSuggestionTest(unittest.TestCase):
+    """Claude's guess at the next message: faint text in the box after a reply.
+    The samples are lines tmux gave for real tabs."""
+
+    def test_a_faint_guess(self):
+        self.assertEqual(tc.screen_suggestion(pane(
+            "\x1b[39m❯\xa0\x1b[2m可以commit\x1b[0m\x1b[39m\x1b[49m")), "可以commit")
+
+    def test_words_with_plain_spaces_between(self):
+        # Claude writes each word faint and the spaces between them plain
+        self.assertEqual(tc.screen_suggestion(pane(
+            "\x1b[39m❯\xa0\x1b[2m給我\x1b[0m\x1b[39m\x1b[49m \x1b[2mDoctor's\x1b[0m\x1b[39m\x1b[49m"
+            " \x1b[2mBest\x1b[0m\x1b[39m\x1b[49m \x1b[2m的連結\x1b[0m\x1b[39m\x1b[49m")),
+            "給我 Doctor's Best 的連結")
+
+    def test_typed_text_is_no_guess(self):
+        self.assertEqual(tc.screen_suggestion(pane("\x1b[39m❯\xa0fix the bug")), "")
+        self.assertEqual(tc.screen_suggestion(pane(
+            "\x1b[39m❯\xa0fix \x1b[2mthe bug\x1b[0m")), "")
+
+    def test_an_empty_box(self):
+        self.assertEqual(tc.screen_suggestion(pane("\x1b[39m❯\xa0")), "")
+
+    def test_the_hint_of_a_new_session_is_no_guess(self):
+        self.assertEqual(tc.screen_suggestion(pane(
+            '\x1b[39m❯\xa0\x1b[2mTry "fix lint errors"\x1b[0m')), "")
+
+    def test_a_colour_is_not_read_as_faint(self):
+        # 38;2;r;g;b holds a 2: a colour, not the faint attribute
+        self.assertEqual(tc.screen_suggestion(pane(
+            "\x1b[39m❯\xa0\x1b[38;2;200;200;200mtyped\x1b[39m")), "")
+
+    def test_claudes_cursor_on_the_first_letter(self):
+        self.assertEqual(tc.screen_suggestion(pane(
+            "\x1b[39m❯\xa0\x1b[7mr\x1b[27m\x1b[2mun the tests\x1b[0m")), "run the tests")
+
+    def test_a_long_guess_goes_on_in_the_next_line(self):
+        self.assertEqual(tc.screen_suggestion(pane(
+            "\x1b[39m❯\xa0\x1b[2mcommit the fix and\x1b[0m",
+            "  \x1b[2mpush it\x1b[0m")), "commit the fix and push it")
+
+    def test_an_old_message_above_is_not_the_box(self):
+        # the talk shows what was sent with ❯ too, but not under a border
+        screen = "\n".join(["\x1b[39m❯\xa0\x1b[2mold\x1b[0m", "", BORDER,
+                            "\x1b[39m❯\xa0", BORDER, BELOW])
+        self.assertEqual(tc.screen_suggestion(screen), "")
+
+    def test_no_box(self):
+        for s in (None, "", "$ ls\nfoo\n"):
+            self.assertEqual(tc.screen_suggestion(s), "")
+
+
+class SuggestTest(Base):
+    """A tab's chat passes the guess on while a page shows the chat."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, tc, "MIRROR_EVERY", tc.MIRROR_EVERY)
+        tc.MIRROR_EVERY = 3600
+        self.status = "ready"
+        self.cli = "claude"
+        self.looked = []
+        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False, screen=False: {
+            "title": "MOT", "status": self.status, "transcript": "", "cli": self.cli}
+
+        def screen(tab):
+            self.looked.append(tab)
+            return pane("\x1b[39m❯\xa0\x1b[2mcommit it\x1b[0m")
+        self.mgr.screen_hook = screen
+        code, out = self.mgr.create({"tab": {"id": "t1", "title": "x", "cli": self.cli}})
+        self.assertEqual(code, 200, out)
+        self.chat = self.mgr.get(out["chat"]["id"])
+
+    def test_shown_while_a_page_watches(self):
+        self.chat.watchers = 1
+        self.chat.mirror_poll()
+        self.assertEqual(self.chat.view()["suggest"], "commit it")
+
+    def test_no_look_without_a_page(self):
+        self.chat.mirror_poll()
+        self.assertEqual(self.looked, [])
+        self.assertEqual(self.chat.view()["suggest"], "")
+
+    def test_gone_while_the_tab_works(self):
+        self.chat.watchers = 1
+        self.chat.mirror_poll()
+        ver = self.chat.live_ver
+        self.status = "working"
+        self.looked.clear()
+        self.chat.mirror_poll()
+        self.assertEqual(self.chat.view()["suggest"], "")
+        self.assertEqual(self.looked, [])
+        self.assertGreater(self.chat.live_ver, ver)      # pushed to the page
+
+    def test_the_stream_counts_its_page(self):
+        stop, kick = threading.Event(), threading.Event()
+        seen = []
+
+        def write(b):
+            seen.append(self.chat.watchers)
+            stop.set()
+        tc.stream(self.chat, 0, write, stop, kick)
+        self.assertEqual(seen, [1])
+        self.assertEqual(self.chat.watchers, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
