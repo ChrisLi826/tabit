@@ -210,6 +210,8 @@
   #atlist .ctag { flex: none; font-size: calc(11px * var(--fs, 1)); padding: 1px 7px; border-radius: 99px; background: #ffffff14; color: var(--dim); }
   #atlist .hint { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #row { display: flex; gap: 6px; align-items: flex-end; position: relative; }
+  #row.drop::after { content: "Drop to attach"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    border: 2px dashed var(--blue); border-radius: 22px; background: var(--bg); color: var(--blue); font-size: calc(15px * var(--fs, 1)); pointer-events: none; }
   #ghost { position: absolute; display: flex; align-items: baseline; gap: 8px; color: var(--dim); font-size: calc(16px * var(--fs, 1)); cursor: pointer; }
   #ghost[hidden] { display: none; }
   #ghost span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
@@ -436,7 +438,7 @@
       <div id="status"></div>
       <div id="row">
         <button id="attach" type="button" title="attach a file or photo">📎</button>
-        <input id="file" type="file" hidden>
+        <input id="file" type="file" multiple hidden>
         <textarea id="text" rows="1" placeholder="Message"></textarea>
         <div id="ghost" hidden><span></span><kbd></kbd></div>
         <button id="stop" type="button" class="danger" hidden>Stop</button>
@@ -463,7 +465,7 @@ const ANIMALS = ["🦊", "🐼", "🐯", "🐸", "🐙", "🦄", "🐧", "🦁",
 const WORK = ["📷", "🎥", "📡", "📶", "🌐", "🔌", "🔧", "🛠️", "💻", "🖥️", "🤖", "🧠", "✨", "🔒", "🔑", "🧱", "☁️", "💾", "🗄️", "📦", "🧪", "🔬", "🛰️", "💡", "📊", "🐛", "⚙️", "🕹️"];
 const RIDES = ["🚗", "🚕", "🚌", "🚓", "🚑", "🚒", "🚚", "🚜", "🏎️", "🏍️", "🚲", "🛴", "✈️", "🚁", "🚀", "🛸", "🚂", "🚄", "🚇", "⛵", "🚤", "🚢", "🛶", "🚡", "🛺", "🛻", "🚐", "🛵"];
 const SPORT = ["🏃", "🏃‍♀️", "🏃‍♂️", "👟", "🎽", "🥾", "⏱️", "🏅", "🥇", "🏆", "🚴", "🏊", "⛰️", "🧗"];
-// the animals also choose a chat's own picture (by its id) and are what the dice rolls: keep that list as it is
+// the animals also choose a chat's own picture (by its id): keep that list as it is
 const PICK = [["Animals", ANIMALS], ["Work", WORK], ["Rides", RIDES], ["Sport", SPORT]];
 const HUES = [0, 40, 90, 150, 200, 250, 300];     // how far the emoji's own colour is turned
 const emo = (f) => `<span class="em" style="filter:${f.f}">${esc(f.e)}</span>`;
@@ -480,12 +482,13 @@ function avOf(r) {
   if (r.members.length > 4) dots.push(`<i class="more">+${r.members.length - 3}</i>`);
   return { cls: "gav n" + dots.length, style: "", html: dots.join("") };
 }
-// the animal and colour chooser; get() says what is shown on top. The dice rolls a
-// new animal and colour: a new chat starts with one rolled, and Start keeps it.
+// the picture and colour chooser; get() says what is shown on top. A new chat starts
+// with one rolled from every shelf, and Start keeps it; the dice rolls from the shelf shown.
 function picker(host, r) {
   const pick = { emoji: r.emoji || "", hue: Number.isInteger(r.hue) ? r.hue : null };
-  const roll = () => { pick.emoji = ANIMALS[Math.floor(Math.random() * ANIMALS.length)]; pick.hue = HUES[Math.floor(Math.random() * HUES.length)]; };
-  if (r.roll) roll();
+  const any = (list) => list[Math.floor(Math.random() * list.length)];
+  const roll = (list) => { pick.emoji = any(list); pick.hue = any(HUES); };
+  if (r.roll) roll(PICK.flatMap(([, list]) => list));
   host.innerHTML = `<div class="pk"><div class="av big" id="pk-prev"></div>
     <div class="pk-tabs">${PICK.map(([name]) => `<button type="button" data-c="${name}">${name}</button>`).join("")}</div>
     <div class="pk-animals"></div>
@@ -503,7 +506,7 @@ function picker(host, r) {
   };
   host.onclick = (e) => {
     const b = e.target.closest("button"); if (!b) return;
-    if (b.dataset.roll !== undefined) roll();
+    if (b.dataset.roll !== undefined) roll(PICK.find(([name]) => name === cat)[1]);
     if (b.dataset.c !== undefined) cat = b.dataset.c;
     if (b.dataset.e !== undefined) pick.emoji = b.dataset.e;
     if (b.dataset.h !== undefined) pick.hue = +b.dataset.h;
@@ -971,7 +974,10 @@ function clock(ts) {                     // 14:05 today; "11/01 14:05" on anothe
   return d.toDateString() === new Date().toDateString() ? t : `${d.getMonth() + 1}/${d.getDate()} ${t}`;
 }
 function draw(me, ev) {
+  if (ev.t === "relay" && joinRelay(me, ev)) return null;
   const el = drawOne(me, ev);
+  // the message a relay that follows belongs to; null when something else came between
+  if (el) me.lastB = ev.t === "say" || ev.t === "text" ? { el, from: ev.t === "say" ? ev.name : "", to: [] } : null;
   if (el && ev.ts && el.classList.contains("b")) el.insertAdjacentHTML("beforeend", `<div class="ts">${clock(ev.ts)}</div>`);
   if (el && REPLYABLE.has(ev.t) && ev.text) {
     el.dataset.seq = ev.seq;
@@ -980,6 +986,18 @@ function draw(me, ev) {
     el.insertAdjacentHTML("beforeend", '<button type="button" class="rp">↩ Reply</button>');
   }
   return el;
+}
+// "a → b" shows on the message that was passed on, not on a line of its own
+function joinRelay(me, ev) {
+  const m = me.lastB;
+  if (!m || (m.from && m.from !== ev.from)) return false;
+  if (!m.to.includes(ev.to)) m.to.push(ev.to);
+  let who = m.el.querySelector(":scope > .who");
+  if (!who) { who = document.createElement("div"); who.className = "who"; m.el.prepend(who); }
+  const name = (n) => `<span style="color:${colorOf(n)}">${esc(n)}</span>`;
+  who.style.color = "var(--dim)";
+  who.innerHTML = `${name(ev.from)} → ${m.to.map(name).join(", ")}`;
+  return true;
 }
 // "[from @name]: text" is what another AI tab sends: [name, text], or null
 function fromTab(text) {
@@ -1145,7 +1163,9 @@ async function loadOlder() {
     if (!events.length) { $("older")?.remove(); return; }
     const box = $("msgs"), h = box.scrollHeight, anchor = $("older");
     const holder = document.createElement("div"); holder.style.display = "contents";
+    const last = me.lastB;           // older messages: a relay still to come joins the newest one
     for (const ev of events) { const el = draw(me, ev); if (el) holder.append(el); }
+    me.lastB = last;
     anchor.after(holder);
     me.firstSeq = events[0].seq;
     box.scrollTop += box.scrollHeight - h;
@@ -1396,13 +1416,33 @@ async function upload(file) {
   } catch (e) { status("upload: " + e.message, true); }
 }
 $("attach").onclick = () => $("file").click();
-$("file").onchange = () => { const f = $("file").files[0]; $("file").value = ""; if (f) upload(f); };
+$("file").onchange = async () => {          // several at once: each goes in, in order
+  const files = [...$("file").files]; $("file").value = "";
+  for (const f of files) await upload(f);
+};
 $("text").addEventListener("paste", (e) => {
   const f = [...(e.clipboardData?.files || [])][0];
   if (f) { e.preventDefault(); upload(f); }
 });
-document.addEventListener("dragover", (e) => e.preventDefault());
-document.addEventListener("drop", (e) => { const f = e.dataTransfer?.files[0]; if (f && cur) { e.preventDefault(); upload(f); } });
+// files dragged over the page: the box says it takes them (with a chat
+// open), and each one dropped goes in, in order. Without a chat a drop does
+// nothing: the browser would open the file in place of the page.
+let dropOff = null;
+document.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  if (![...(e.dataTransfer?.types || [])].includes("Files")) return;
+  e.dataTransfer.dropEffect = cur ? "copy" : "none";
+  $("row").classList.toggle("drop", !!cur);
+  clearTimeout(dropOff);                     // dragover comes every ~50 ms: its end is the drag leaving
+  dropOff = setTimeout(() => $("row").classList.remove("drop"), 200);
+});
+document.addEventListener("drop", async (e) => {
+  const files = [...(e.dataTransfer?.files || [])];
+  if (!files.length) return;
+  e.preventDefault();
+  $("row").classList.remove("drop");
+  if (cur) for (const f of files) await upload(f);
+});
 
 // 🔔 on, 🔕 off: the button says which
 const bellOn = () => localStorage.getItem("notify") === "1" && Notification.permission === "granted";

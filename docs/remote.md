@@ -75,6 +75,12 @@ console, that is a remote shell from your phone.
 - Attach files: 📎 on a phone, or drag and drop / paste a screenshot on a
   computer. They are saved to `~/.local/share/tabit/uploads/<date>/` (never
   overwritten, at most 25 MB), and the path goes into the text box.
+  They stay until deleted. **Uploads** in ⚙ Settings, and in tabit's
+  **Settings… → Remote**, shows how much the folder holds (Nearby's files
+  too) and deletes the day folders older than a number of days: now, with
+  **Delete them now**, or every hour, with its check box (off by default; it
+  runs at once when turned on). Only folders named like a day go; a chat
+  that shows a deleted file can no longer open it.
 - Manage tabs: ＋ opens a Terminal, an AI (from tabit's AI list, in tmux, a
   fresh session), or a Serial session. Connect is there too when this
   machine has the connect tool. You name it and pick a group. Terminal and

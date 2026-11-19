@@ -14,6 +14,8 @@ const SET_LABELS = {
   ai_fresh_on_restore: "New AI tabs start fresh after tabit reopens",
 };
 let setTimer = 0;
+const fmtSize = (b) => b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB`
+  : b < 1073741824 ? `${(b / 1048576).toFixed(1)} MB` : `${(b / 1073741824).toFixed(2)} GB`;
 // text size: this browser's own choice, kept in it; both pages scale their
 // fonts by --fs (not the terminal screen, which fits its own columns)
 const TEXT_SIZES = [["S", 0.875], ["M", 1], ["L", 1.15], ["XL", 1.3], ["XXL", 1.5]];
@@ -120,6 +122,11 @@ async function drawSettings() {
     ${login}
     <div class="pathline">${progs.length > 1 ? `<select id="snewcli">${progs.map((p) => `<option value="${p}">${PROG[p] || p}</option>`).join("")}</select>` : ""}<input id="snewacct" placeholder="new account name, e.g. work" autocapitalize="off"
       autocorrect="off" spellcheck="false"><button id="saddacct">Add</button></div>
+    ${st.uploads ? `<label>Uploads (photos and files sent from the pages, and Nearby)</label>
+    <div class="dim">${fmtSize(st.uploads.bytes)} in ${st.uploads.files} files, ${st.uploads.days} days · ~/.local/share/tabit/uploads</div>
+    <div class="pathline"><label class="check"><input type="checkbox" id="supauto" style="flex:none"${st.uploads.auto ? " checked" : ""}> Every hour, delete files older than</label>
+      <input id="supdays" type="number" min="1" max="3650" inputmode="numeric" value="${st.uploads.keep_days}" style="flex:none;width:5em"><span>days</span></div>
+    <div class="row"><button id="supclean">Delete them now</button></div>` : ""}
     <label>tabit ${esc(st.version)}</label>
     ${upd}
     <div class="row"><button id="srestart">Restart tabit</button></div>`;
@@ -131,6 +138,37 @@ async function drawSettings() {
     try { await admin("set", { [c.dataset.k]: c.checked }); settingsMsg("saved"); }
     catch (e) { c.checked = !c.checked; settingsMsg(e.message || String(e), true); }
   };
+  if ($("supauto")) {
+    const days = () => { const n = +$("supdays").value; return Number.isInteger(n) && n >= 1 && n <= 3650 ? n : 0; };
+    const kept = st.uploads.keep_days;
+    $("supauto").onchange = async () => {
+      const on = $("supauto").checked, n = days();
+      if (on && (!n || !confirm(`Delete files older than ${n} days now, and every hour from now on?`))) {
+        $("supauto").checked = false; if (!n) settingsMsg("days: a whole number, 1 to 3650", true); return;
+      }
+      try { await admin("set", on ? { uploads_auto_clean: true, uploads_keep_days: n } : { uploads_auto_clean: false }); settingsMsg("saved"); }
+      catch (e) { $("supauto").checked = !on; settingsMsg(e.message || String(e), true); }
+      drawSettings();
+    };
+    $("supdays").onchange = async () => {
+      const n = days();
+      if (!n) { $("supdays").value = kept; settingsMsg("days: a whole number, 1 to 3650", true); return; }
+      if ($("supauto").checked && n < kept && !confirm(`Files older than ${n} days are deleted now. Go on?`)) { $("supdays").value = kept; return; }
+      try { await admin("set", { uploads_keep_days: n }); settingsMsg("saved"); }
+      catch (e) { $("supdays").value = kept; settingsMsg(e.message || String(e), true); }
+      drawSettings();
+    };
+    $("supclean").onclick = async () => {
+      const n = days();
+      if (!n) { settingsMsg("days: a whole number, 1 to 3650", true); return; }
+      if (!confirm(`Delete uploads older than ${n} days now?\n\nChats that show them can no longer open them.`)) return;
+      try {
+        const r = await admin("uploads-clean", { days: n });
+        settingsMsg(r.deleted.files ? `Deleted ${r.deleted.files} files (${fmtSize(r.deleted.bytes)}).` : `Nothing older than ${n} days.`);
+      } catch (e) { settingsMsg(e.message || String(e), true); }
+      drawSettings();
+    };
+  }
   for (const b of $("sbody").querySelectorAll(".slogin")) b.onclick = () => run(() => admin("login-start", { cli: b.dataset.c, name: b.dataset.n }));
   $("saddacct").onclick = () => run(() => admin("account-add", { cli: $("snewcli") ? $("snewcli").value : "claude", name: $("snewacct").value.trim() }));
   if ($("scodego")) $("scodego").onclick = () => run(() => admin("login-code", { code: $("scode").value.trim() }));
