@@ -406,10 +406,10 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.3.2"
+APP_VERSION = "v2.3.3"
 # Taiwan main dish of the major version + a fresh snack or drink, picked at
 # release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
-APP_CODENAME = "Sesame Oil Chicken + Tofu Pudding"
+APP_CODENAME = "Sesame Oil Chicken + Nougat"
 _VERSION_CODENAME_SEP = " · "
 
 
@@ -878,6 +878,83 @@ def _strip_url_tail(url):
     if not url:
         return None
     return url.rstrip(TERM_URL_TRAILING) or url
+
+
+def _keep_days_ok(v):
+    """A number of days to keep uploads: a whole number, 1..3650."""
+    return type(v) is int and 1 <= v <= 3650
+
+
+def _keep_days(settings):
+    v = settings.get("uploads_keep_days")
+    return v if _keep_days_ok(v) else 30
+
+
+UPLOAD_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _upload_days(root):
+    """The day folders in the uploads folder: (name, path). Only real
+    folders named like a day; a link or anything else is left alone."""
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        path = os.path.join(root, name)
+        if UPLOAD_DAY.fullmatch(name) and not os.path.islink(path) and os.path.isdir(path):
+            out.append((name, path))
+    return out
+
+
+def _folder_size(path):
+    """(bytes, files) under a folder, not following links."""
+    total = files = 0
+    for d, _subs, names in os.walk(path):
+        for n in names:
+            try:
+                total += os.lstat(os.path.join(d, n)).st_size
+            except OSError:
+                continue
+            files += 1
+    return total, files
+
+
+def _size_label(b):
+    """1536 -> "1.5 KB"."""
+    for unit, n in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
+        if b >= n:
+            return f"{b / n:.1f} {unit}"
+    return f"{b} B"
+
+
+def uploads_usage(root=None):
+    """What the uploads folder holds: {"bytes", "files", "days"}. Files the
+    pages upload and Nearby receives, one folder per day."""
+    days = _upload_days(root or REMOTE_UPLOAD_DIR)
+    total = files = 0
+    for _name, path in days:
+        b, n = _folder_size(path)
+        total, files = total + b, files + n
+    return {"bytes": total, "files": files, "days": len(days)}
+
+
+def uploads_clean(days, root=None, today=None):
+    """Delete the day folders more than `days` days old (30: today's folder
+    and the 30 before it stay). What went: {"files", "bytes", "days"}."""
+    cut = ((today or datetime.date.today()) - datetime.timedelta(days=days)).isoformat()
+    gone = {"files": 0, "bytes": 0, "days": 0}
+    for name, path in _upload_days(root or REMOTE_UPLOAD_DIR):
+        if name >= cut:
+            continue
+        b, n = _folder_size(path)
+        shutil.rmtree(path, ignore_errors=True)
+        left_b, left_n = _folder_size(path) if os.path.exists(path) else (0, 0)
+        gone["bytes"] += b - left_b
+        gone["files"] += n - left_n
+        gone["days"] += not os.path.exists(path)
+    return gone
 
 
 def _tmux_exact(name):
@@ -1816,6 +1893,8 @@ DEFAULT_SETTINGS = {
     "remote_enabled": False,     # serve the status page to my Tailscale devices
     "remote_send": False,        # ...and let that page type into AI tabs
     "remote_files": False,       # ...and open files under home and /tmp
+    "uploads_auto_clean": False,  # delete uploads older than uploads_keep_days
+    "uploads_keep_days": 30,      # ...hourly, when on
     "ai_fresh_on_restore": False,  # +AI default: tab starts fresh after restart
     "ai_use_tmux": True,           # +AI dialog: run inside tmux (can uncheck)
     "ai_claude_bypass": False,     # +AI: launch claude with --dangerously-skip-permissions
@@ -3183,6 +3262,10 @@ class Tabit(Gtk.Window):
         GLib.timeout_add_seconds(60, _reap_tick, True)
         _tmux_apply_user_conf()
         GLib.idle_add(self._check_weekly_auto_update)
+        # old uploads go, when Settings > Remote says so: now, then hourly
+        self._uploads_cleaning = False
+        GLib.timeout_add_seconds(20, lambda: self._uploads_tick() and False)
+        GLib.timeout_add_seconds(3600, self._uploads_tick)
         # Tabit Chat runs from the start, not from the first /chat: it carries
         # @name messages between AI tabs. Off the GTK thread: it asks tabit.
         GLib.timeout_add_seconds(5, lambda: threading.Thread(
@@ -13250,11 +13333,25 @@ if (data !== null) {{
         if op == "state":
             return 200, self._remote_admin_state()
         if op == "set":
-            if not body or any(k not in self._REMOTE_SETTINGS or not isinstance(v, bool)
-                               for k, v in body.items()):
-                return 400, {"error": "only the AI defaults, true or false"}
+            def fits(k, v):
+                if k in self._REMOTE_SETTINGS or k == "uploads_auto_clean":
+                    return isinstance(v, bool)
+                return k == "uploads_keep_days" and _keep_days_ok(v)
+            if not body or not all(fits(k, v) for k, v in body.items()):
+                return 400, {"error": "only the AI defaults (true or false) and "
+                                      "the upload cleaning (1..3650 days)"}
             self._save_settings(dict(body))
+            if body.get("uploads_auto_clean") or "uploads_keep_days" in body:
+                self._uploads_tick()            # on now: the old ones go at once
             return 200, {"ok": True}
+        if op == "uploads-clean":
+            days = body.get("days") if isinstance(body, dict) else None
+            if not _keep_days_ok(days):
+                return 400, {"error": "days must be 1..3650"}
+            gone = uploads_clean(days)
+            print(f"[uploads] deleted {gone['files']} files older than {days} days "
+                  f"(from the page)", file=sys.stderr)
+            return 200, {"deleted": gone, "uploads": uploads_usage()}
         prog = body.get("cli") if isinstance(body, dict) and body.get("cli") == "codex" else "claude"
         if op in ("account-add", "login-start") and not isinstance(body.get("name", ""), str):
             return 400, {"error": "name is text"}
@@ -13287,6 +13384,29 @@ if (data !== null) {{
             return self._remote_admin_restart()
         return 404, {"error": "not found"}
 
+    def _uploads_tick(self, wait=False):
+        """Hourly, and when the setting turns on: delete uploads older than
+        the days kept, if Settings > Remote says so. The deleting runs on a
+        thread of its own. True: a GLib timer goes on."""
+        s = self._load_settings()
+        if s.get("uploads_auto_clean") and not self._uploads_cleaning:
+            self._uploads_cleaning = True
+            days = _keep_days(s)
+
+            def run():
+                try:
+                    gone = uploads_clean(days)
+                    if gone["files"]:
+                        print(f"[uploads] deleted {gone['files']} files older than "
+                              f"{days} days", file=sys.stderr)
+                finally:
+                    self._uploads_cleaning = False
+            t = threading.Thread(target=run, daemon=True)
+            t.start()
+            if wait:
+                t.join()
+        return True
+
     def _remote_admin_state(self):
         s = self._load_settings()
         accounts = []
@@ -13301,6 +13421,8 @@ if (data !== null) {{
         login = self._remote_login or {}
         return {"version": _get_version_display(),
                 "settings": {k: bool(s.get(k)) for k in self._REMOTE_SETTINGS},
+                "uploads": dict(uploads_usage(), auto=bool(s.get("uploads_auto_clean")),
+                                keep_days=_keep_days(s)),
                 "accounts": accounts,
                 "login": {k: login.get(k) for k in ("cli", "account", "state", "url", "code", "msg")}
                 if login else None,
@@ -18746,6 +18868,73 @@ if (data !== null) {{
         remote_on.connect("toggled",
                           lambda b: remote_files.set_sensitive(b.get_active()))
         remote_files.set_sensitive(remote_on.get_active())
+        # the uploads folder: its size, and deleting the old ones
+        def up_text():
+            u = uploads_usage()
+            return (f"Uploads from the pages and Nearby: {_size_label(u['bytes'])} in "
+                    f"{u['files']} files, {u['days']} days (~/.local/share/tabit/uploads)")
+        up_lbl = Gtk.Label(label=up_text(), xalign=0)
+        up_lbl.set_line_wrap(True)
+        up_lbl.set_max_width_chars(60)
+        up_auto = Gtk.CheckButton(label="Every hour, delete files older than")
+        up_auto.set_active(bool(s.get("uploads_auto_clean")))
+        up_auto.set_tooltip_text("Chats that show a deleted file can no longer "
+                                 "open it. Applies after Save.")
+        # − days +: GTK's SpinButton puts both buttons after the number
+        up_days = Gtk.Entry()
+        up_days.set_width_chars(5)
+        up_days.set_alignment(0.5)
+        up_days.set_input_purpose(Gtk.InputPurpose.DIGITS)
+        up_days.set_text(str(_keep_days(s)))
+
+        def days_val():
+            t = up_days.get_text().strip()
+            return min(3650, max(1, int(t))) if t.isdigit() else _keep_days(s)
+
+        def bump(step):
+            up_days.set_text(str(min(3650, max(1, days_val() + step))))
+        up_days.connect("focus-out-event",
+                        lambda *_a: up_days.set_text(str(days_val())) or False)
+        up_minus, up_plus = Gtk.Button(label="−"), Gtk.Button(label="+")
+        up_minus.connect("clicked", lambda _b: bump(-1))
+        up_plus.connect("clicked", lambda _b: bump(1))
+        up_spin = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        up_spin.get_style_context().add_class("linked")
+        for w in (up_minus, up_days, up_plus):
+            up_spin.pack_start(w, False, False, 0)
+        up_now = Gtk.Button(label="Delete them now")
+        up_now.set_tooltip_text("Delete the files older than these days now")
+
+        def on_up_now(_b):
+            days = days_val()
+            up_days.set_text(str(days))
+            ask = Gtk.MessageDialog(transient_for=dialog, modal=True,
+                                    message_type=Gtk.MessageType.QUESTION,
+                                    buttons=Gtk.ButtonsType.OK_CANCEL,
+                                    text=f"Delete uploads older than {days} days now?")
+            ask.format_secondary_text("Chats that show them can no longer open them.")
+            go = ask.run() == Gtk.ResponseType.OK
+            ask.destroy()
+            if not go:
+                return
+            up_now.set_sensitive(False)
+
+            def run():
+                gone = uploads_clean(days)
+
+                def done():
+                    up_lbl.set_text(up_text() + (
+                        f"\nDeleted {gone['files']} files ({_size_label(gone['bytes'])})."
+                        if gone["files"] else f"\nNothing older than {days} days."))
+                    up_now.set_sensitive(True)
+                GLib.idle_add(done)
+            threading.Thread(target=run, daemon=True).start()
+        up_now.connect("clicked", on_up_now)
+        up_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        up_row.pack_start(up_auto, False, False, 0)
+        up_row.pack_start(up_spin, False, False, 0)
+        up_row.pack_start(Gtk.Label(label="days"), False, False, 0)
+        up_row.pack_start(up_now, False, False, 12)
         remote_note = Gtk.Label(xalign=0, margin_start=22)
         remote_note.set_line_wrap(True)
         remote_note.set_max_width_chars(52)
@@ -18963,7 +19152,8 @@ if (data !== null) {{
             # out when Telegram is off, which is when somebody needs it.
             ("Telegram", (tg_on, tg_grid, tg_help)),
         ) + (("Remote", (remote_on, remote_send, remote_files, ts_row,
-                          remote_link, local_link, remote_note)),) + (
+                          remote_link, local_link, remote_note,
+                          up_lbl, up_row)),) + (
             ("About", (ver_box,)),
         )
         for name, widgets in pages:
@@ -19019,6 +19209,8 @@ if (data !== null) {{
                                      "remote_enabled": remote_on.get_active(),
                                      "remote_send": remote_send.get_active(),
                                      "remote_files": remote_files.get_active(),
+                                     "uploads_auto_clean": up_auto.get_active(),
+                                     "uploads_keep_days": days_val(),
                                      "ui_font_size": ui_sz,
                                      "term_font": t_font,
                                      "term_font_size": t_sz,
@@ -19033,6 +19225,7 @@ if (data !== null) {{
                     self._tg_msg_row = {}
                 self._remote_fresh()            # Save is a fresh go: may ask again
                 self._remote_sync()
+                self._uploads_tick()            # on now: the old ones go at once
                 self._sidebar_position = side_id
                 self._apply_sidebar_layout()
                 self._apply_note_wrap_setting(wrap.get_active())

@@ -3151,6 +3151,12 @@ class ChatManager:
         rows.sort(key=lambda r: (not r["default"], -r["updated"]))
         return rows
 
+    def group_listing(self):
+        """The groups, the newest message first, as the chats."""
+        with self.lock:
+            groups = list(self.groups.values())
+        return sorted((g.summary() for g in groups), key=lambda r: -r["updated"])
+
     def retire_default(self):
         """The main chat older tabits made (the owl) is gone from the list:
         its folder stays as <id>.retired, history and all."""
@@ -3367,7 +3373,7 @@ def api(mgr, method, parts, body):
                 tabgroups = out if code == 200 else {}
             clis = [c for c in MIRROR_CLIS if c == "claude" or shutil.which(c)]
             return 200, dict({"chats": mgr.listing(),
-                              "groups": [g.summary() for g in mgr.groups.values()],
+                              "groups": mgr.group_listing(),
                               "tabgroups": tabgroups,
                               "accounts": mgr.account_choices(), "account": mgr.account,
                               "modes": list(MODES), "models": list(MODELS),
@@ -3453,7 +3459,7 @@ def group_api(mgr, method, parts, body):
     """(status, object) for /api/chat-groups/<parts>."""
     if not parts:
         if method == "GET":
-            return 200, {"groups": [g.summary() for g in mgr.groups.values()]}
+            return 200, {"groups": mgr.group_listing()}
         return mgr.create_group(body) if method == "POST" else (405, {"error": "GET or POST"})
     group = mgr.groups.get(parts[0])
     if group is None:

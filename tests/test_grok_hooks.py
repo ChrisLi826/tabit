@@ -81,7 +81,7 @@ class TestGrokHookCommand(unittest.TestCase):
         self.cmd = tabit._grok_hook_command(self.dir, SCRIPT)
 
     def run_hook(self, payload, env=None):
-        e = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+        e = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE", "CLAUDECODE")}
         e.update(env or {"TABIT_AGENT": "k1"})
         r = subprocess.run(
             ["/bin/sh", "-c", self.cmd],
@@ -160,6 +160,14 @@ class TestGrokHookCommand(unittest.TestCase):
                        "subagentType": "explore", "transcript_path": self.tx})
         self.assertEqual(self.state()[0], "working")
         self.assertEqual(self.state()[4], "p1")
+
+    def test_a_grok_that_claude_runs_does_not_change_the_tab(self):
+        # Claude in a tab runs "grok -p ..." for a review: that Grok gets the
+        # tab's TMUX_PANE or TABIT_AGENT, but the tab is still Claude's
+        self.run_hook({"hook_event_name": "UserPromptSubmit", "promptId": "p1",
+                       "transcript_path": self.tx},
+                      env={"TABIT_AGENT": "k1", "CLAUDECODE": "1"})
+        self.assertEqual(os.listdir(self.dir), ["s.jsonl"])
 
     def test_session_start_is_idle(self):
         self.run_hook({"hook_event_name": "UserPromptSubmit", "promptId": "p1",

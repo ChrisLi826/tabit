@@ -4,7 +4,8 @@
 Grok runs this on a hook. Stdin is one JSON object. The tab key is
 TABIT_AGENT, or the tmux session when TMUX_PANE is set. The file is five
 lines: state, transcript, size, an empty field, and the newest prompt id.
-A child agent's event (subagentType) does not change the parent. A report
+A child agent's event (subagentType) does not change the parent, nor
+does a Grok that Claude runs in its tab (CLAUDECODE is set). A report
 for an older prompt does not cover a newer turn. Exit 0 always: a Stop
 hook that fails or exits 2 would keep Grok working.
 """
@@ -166,6 +167,8 @@ def apply(hook_dir, key, payload):
 
 
 def _tab_key():
+    if os.environ.get("CLAUDECODE"):
+        return ""   # Claude in the tab runs this Grok: the tab stays Claude's
     key = os.environ.get("TABIT_AGENT") or ""
     pane = os.environ.get("TMUX_PANE") or ""
     if not pane:

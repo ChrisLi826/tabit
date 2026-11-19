@@ -36,13 +36,18 @@ Screen** makes it an app of its own.
   the quote with your message. Tap the quote in a bubble to jump back to the
   message it answers.
 - **Pictures.** Every chat has an animal and a colour, picked from its id.
-  New chat starts with a rolled one; tap another animal or colour, or 🎲 for
-  a new roll. A chat's settings change it later. A group shows the pictures
+  New chat starts with a picture and colour rolled from every shelf (Animals,
+  Work, Rides, Sport); tap another picture or colour, or 🎲 for a new roll
+  from the shelf shown. A chat's settings change it later. A group shows the pictures
   of its members together.
 - **Folders.** **Browse…** walks the folders on this computer. **＋ New
   folder** makes one inside the folder shown: one plain name, no `/`.
 - **Files and photos.** 📎, paste or drag and drop. The file goes to
   `~/.local/share/tabit/uploads/<date>/` and its path goes into your message.
+  📎 takes several files or photos at once.
+  Drag files anywhere on an open chat: the message box says "Drop to
+  attach", and each file dropped goes in, in order. Without a chat open, a
+  drop does nothing.
 - **🔔** tells you when the AI is done while you are not looking at the page
   (another window or app in front counts). 🔕 means it is off; tap to turn it on.
 - **⚙** (next to ⌨ on the list) opens tabit's Settings, the same sheet as in
@@ -336,6 +341,7 @@ A group puts two or more chats in one room.
 - A chat can talk to another: when its reply has a line that starts with
   `@name:` (the name and a colon), tabit passes that message on. `@name`
   with no colon only mentions it. This is how chats talk to each other.
+  The message shows who sent it to whom, such as `ann → ben`.
 - After 8 such passes the group stops and waits for you, so two chats can never
   talk forever. Anything you say starts the count again.
 - A chat that is a tab joins like any other: the group's messages are typed

@@ -663,6 +663,18 @@ class TestGroup(Base):
         names = [m["alias"] for m in out["group"]["members"]]
         self.assertEqual(sorted(names), ["dev", "dev-2"])
 
+    def test_groups_list_the_newest_message_first(self):
+        a, b = self.new(title="Ann"), self.new(title="Ben")
+        old = self.mgr.groups[self.mgr.create_group({"title": "Old", "members": [a.id, b.id]})[1]["group"]["id"]]
+        new = self.mgr.groups[self.mgr.create_group({"title": "New", "members": [a.id, b.id]})[1]["group"]["id"]]
+        old.meta["created"], new.meta["created"] = 100, 200
+        self.assertEqual([g["title"] for g in tc.group_api(self.mgr, "GET", [], {})[1]["groups"]],
+                         ["New", "Old"])
+        old.events.append({"t": "say", "text": "hi", "name": "ann", "ts": 300})   # a reply wakes it up
+        self.assertEqual([g["title"] for g in tc.group_api(self.mgr, "GET", [], {})[1]["groups"]],
+                         ["Old", "New"])
+        self.assertEqual([g["title"] for g in self.mgr.group_listing()], ["Old", "New"])
+
     def test_a_long_title_keeps_its_whole_name(self):
         a, b = self.new(title="new-marathon-planner"), self.new(title="x" * 60)
         code, out = self.mgr.create_group({"members": [a.id, b.id]})
