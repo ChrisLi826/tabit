@@ -20,6 +20,20 @@ That same string appears in:
 - In-app **Update** dialog (`New version: …`)
 - **Settings** version line (About)
 
+## Version numbers
+
+`vA.B.C.D`: which digit goes up depends on the size of the change.
+
+| Digit | When |
+|---|---|
+| 1st (A) | A big change to how tabit is built, such as a new architecture or language |
+| 2nd (B) | A big new feature |
+| 3rd (C) | A small new feature |
+| 4th (D) | A hotfix: bugs fixed, no new feature |
+
+A digit going up sets the ones after it to 0, and a 4th digit of 0 is left
+out (`v2.3.4` → `v2.4.0`, `v2.3.4` → `v2.3.4.1`).
+
 ## Naming rules
 
 | Rule | Detail |
