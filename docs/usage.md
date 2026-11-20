@@ -61,6 +61,31 @@ or killed. tabit sets `status off`, window-title passthrough and prefix
 `C-a` on those sessions, so the AI status icons keep working and `Ctrl+B`
 still reaches the agent.
 
+Each of those agents starts in a systemd scope of its own,
+`tabit-<session>.scope`, and a tmux server tabit starts goes in
+`tabit-tmux.scope`. When memory runs low, systemd-oomd kills a whole scope:
+this way it takes one tab, not tabit and every agent with it. Without
+`systemd-run` or a user systemd, the agents start as before. A scope of the
+same name that is still running (leftovers of the old agent) is left alone,
+and the agent then starts without one.
+
+**Sleep when memory is low** (Settings… → AI, on by default). tabit reads
+the memory pressure systemd-oomd watches (PSI `full avg10` of your user's
+systemd) every 5 seconds. When it stays at 20% or more for two looks in a
+row, tabit puts one AI tab to sleep: the one whose agent last worked, or
+whose conversation last changed, longest ago. Then it waits 30 seconds
+before the next one. systemd-oomd kills at 50% for 20 seconds, so this
+comes first.
+
+- Only a tab that waits for you (idle or done), is not on screen, and
+  whose command resumes the session it is in. A tab that is working, asks
+  something, or has background work is never put to sleep.
+- A sleeping tab stays in the list, marked 💤. Its agent has stopped, and
+  its conversation is saved. Open the tab and it wakes: it goes on with
+  the same conversation.
+- It stays asleep across a tabit restart, until you open it.
+- Typing into it from the phone says it is asleep; open it in tabit first.
+
 Closing a tab ends the tmux session only when tabit made it for that tab
 (an AI tab's `ai-…` session). A session of your own, opened with **+ tmux**,
 is only detached: it keeps running, and you can attach to it again.
