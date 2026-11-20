@@ -35,6 +35,10 @@ Screen** makes it an app of its own.
   **↩ Reply**. A bar over the text box shows what you answer, and Claude gets
   the quote with your message. Tap the quote in a bubble to jump back to the
   message it answers.
+- **What it answers.** Scrolled up in a long reply, your message that the
+  replies at the top answer shows top right. Tap it to go to it. It goes
+  when that message is in view, or at the bottom of the chat. Only your own
+  messages show, not what another chat passed on.
 - **Pictures.** Every chat has an animal and a colour, picked from its id.
   New chat starts with a picture and colour rolled from every shelf (Animals,
   Work, Rides, Sport); tap another picture or colour, or 🎲 for a new roll
