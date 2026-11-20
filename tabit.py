@@ -957,6 +957,19 @@ def uploads_clean(days, root=None, today=None):
     return gone
 
 
+def _ai_scopes_on():
+    """Whether AI tabs can each start in a systemd scope: systemd-run is
+    there and so is a user systemd to ask."""
+    run = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    return bool(shutil.which("systemd-run")
+                and os.path.exists(os.path.join(run, "systemd", "private")))
+
+
+def _ai_scope_unit(session):
+    """The scope of an AI tab's tmux session, named as ai-scopes names it."""
+    return "tabit-%s.scope" % re.sub(r"[^A-Za-z0-9:_.-]", "_", session)
+
+
 def _tmux_exact(name):
     """A -t target that names exactly this session.
 
@@ -16158,9 +16171,31 @@ if (data !== null) {{
                    f" >/dev/null 2>&1; ")
         # keep ";" a separate word — glued to the quoted command it becomes
         # part of that token and the unwrap parses "claude;" as the CLI name
+        if not _ai_scopes_on():
+            return ["/bin/sh", "-c",
+                    f"{src}tmux has-session -t {tgt} 2>/dev/null"
+                    f" || tmux new-session -d -s {name} {inner} ;"
+                    f" {opts}"
+                    f" exec tmux attach-session -t {tgt}"]
+        # systemd-oomd kills a whole cgroup: each agent gets a scope of its
+        # own, and a tmux server this starts goes in tabit-tmux.scope, not
+        # in tabit's (unit names as ai-scopes gives them). A scope that is
+        # still up (an old agent's leftovers) is left alone: the agent then
+        # starts without one. Two tabs starting the server at once: the one
+        # whose scope is refused starts its session plainly.
+        unit = shlex.quote(_ai_scope_unit(session))
+        run = "systemd-run --user --scope -q --collect --slice=app.slice -p Delegate=yes"
         return ["/bin/sh", "-c",
-                f"{src}tmux has-session -t {tgt} 2>/dev/null"
-                f" || tmux new-session -d -s {name} {inner} ;"
+                f"{src}tmux has-session -t {tgt} 2>/dev/null || {{"
+                f" set -- /bin/sh -c {inner} ;"
+                f" systemctl --user reset-failed {unit} tabit-tmux.scope >/dev/null 2>&1 ;"
+                f" systemctl --user is-active --quiet {unit}"
+                f' || set -- {run} --unit={unit} -- "$@" ;'
+                f" tmux list-sessions >/dev/null 2>&1"
+                f" || {run} --unit=tabit-tmux.scope --"
+                f' tmux new-session -d -s {name} "$@" ;'
+                f" tmux has-session -t {tgt} 2>/dev/null"
+                f' || tmux new-session -d -s {name} "$@" ; }} ;'
                 f" {opts}"
                 f" exec tmux attach-session -t {tgt}"]
 
@@ -16390,7 +16425,11 @@ if (data !== null) {{
             toks = shlex.split(argv[2])
             i = toks.index("new-session")
             j = toks.index("-s", i)
-            return ["/bin/sh", "-c", toks[j + 2].rstrip(";")], toks[j + 1]
+            cmd = toks[j + 2]
+            if cmd == "$@":         # in a scope: "set -- /bin/sh -c <cmd>"
+                k = toks.index("set")
+                cmd = toks[k + 4]
+            return ["/bin/sh", "-c", cmd.rstrip(";")], toks[j + 1]
         except (ValueError, IndexError):
             return argv, None
 

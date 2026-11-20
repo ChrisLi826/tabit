@@ -61,6 +61,14 @@ or killed. tabit sets `status off`, window-title passthrough and prefix
 `C-a` on those sessions, so the AI status icons keep working and `Ctrl+B`
 still reaches the agent.
 
+Each of those agents starts in a systemd scope of its own,
+`tabit-<session>.scope`, and a tmux server tabit starts goes in
+`tabit-tmux.scope`. When memory runs low, systemd-oomd kills a whole scope:
+this way it takes one tab, not tabit and every agent with it. Without
+`systemd-run` or a user systemd, the agents start as before. A scope of the
+same name that is still running (leftovers of the old agent) is left alone,
+and the agent then starts without one.
+
 Closing a tab ends the tmux session only when tabit made it for that tab
 (an AI tab's `ai-…` session). A session of your own, opened with **+ tmux**,
 is only detached: it keeps running, and you can attach to it again.
