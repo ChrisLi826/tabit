@@ -122,6 +122,33 @@ class TestHookCommand(unittest.TestCase):
                                   "background_tasks": self.RUNNING})
             self.assertEqual(self.state()[0], "background", event)
 
+    def test_stop_keeps_what_still_runs_and_drops_it_when_nothing_does(self):
+        bg = os.path.join(self.dir, "k1.bg")
+        self.run_hook("Stop", {"transcript_path": self.tx, "background_tasks": self.RUNNING})
+        with open(bg) as f:
+            self.assertEqual(json.load(f)["background_tasks"], self.RUNNING)
+        row = types.SimpleNamespace(argv=[], _agent_key="k1")
+        with mock.patch.object(tabit, "AGENT_HOOK_DIR", self.dir):
+            self.assertEqual(T._agent_hook_bg(row), ["subagent: x [general-purpose] (a1)"])
+        self.run_hook("Stop", {"transcript_path": self.tx, "background_tasks": []})
+        self.assertFalse(os.path.exists(bg))
+        with mock.patch.object(tabit, "AGENT_HOOK_DIR", self.dir):
+            self.assertEqual(T._agent_hook_bg(row), [])
+
+    def test_task_lines(self):
+        long = "x" * 100
+        self.assertEqual(tabit._bg_task_lines([
+            {"id": "b1", "type": "shell", "status": "running", "description": "wait",
+             "command": "sleep 9"},
+            {"id": "b2", "type": "shell", "status": "running", "command": "sleep  9\n"},
+            {"id": "b3", "type": "shell", "status": "completed", "description": "done"},
+            {"id": "m1", "type": "monitor", "status": "running", "description": long},
+            {"id": "z", "type": "subagent", "status": "running"},
+            "junk"]),
+            ["shell: wait (b1)", "shell: sleep 9 (b2)",
+             "monitor: " + "x" * 79 + "… (m1)", "subagent (z)"])
+        self.assertEqual(tabit._bg_task_lines(None), [])
+
     def test_stop_with_a_shell_or_monitor_running_is_background(self):
         # Claude Code 2.1.318: a shell or a monitor it started wakes it again too
         for kind in ("shell", "monitor"):

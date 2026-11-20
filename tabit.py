@@ -2065,8 +2065,12 @@ def _claude_hooks_settings(hook_dir):
     # the turn is over, but claude goes on by itself once its background
     # sub-agents, shells or monitors are done
     run = ['*\'"type":"%s","status":"running"\'*' % t for t in ("subagent", "shell", "monitor")]
+    # <key>.bg keeps what claude handed over, to tell which work still runs
     stop = now + ('s=idle; case "$p" in ' + "|".join(run) + ') '
-                  's=background;; esac; ' + keep)
+                  's=background;; esac; '
+                  f'if [ "$s" = background ]; then printf %s "$p" >{d}/"$k".bg.tmp '
+                  f'&& mv -f {d}/"$k".bg.tmp {d}/"$k".bg; else rm -f {d}/"$k".bg; fi 2>/dev/null; '
+                  + keep)
     return {"hooks": {
         # not "compact": claude compacts in the middle of a turn. These two
         # start afresh: no question can be up when a prompt was typed
@@ -2173,6 +2177,23 @@ def _ensure_codex_notify():
         os.chmod(CODEX_NOTIFY_FILE, 0o755)
     except OSError as e:
         print(f"[tabit] cannot write {CODEX_NOTIFY_FILE}: {e}", file=sys.stderr)
+
+
+def _bg_task_lines(tasks):
+    """One line per task claude's Stop hook says still runs, as
+    "shell: <what> (<id>)"."""
+    out = []
+    for t in tasks if isinstance(tasks, list) else []:
+        if not isinstance(t, dict) or t.get("status") != "running":
+            continue
+        kind = str(t.get("type") or "task")
+        what = " ".join(str(t.get("description") or t.get("command") or "").split())
+        if len(what) > 80:
+            what = what[:79] + "…"
+        if t.get("agent_type"):
+            what = f"{what} [{t['agent_type']}]"
+        out.append(f"{kind}: {what} ({t.get('id', '?')})" if what else f"{kind} ({t.get('id', '?')})")
+    return out
 
 
 def _ensure_claude_hooks():
@@ -7556,6 +7577,19 @@ if (data !== null) {{
     _AGENT_INTERRUPTED = b'"text":"[Request interrupted by user'
 
     @classmethod
+    def _agent_hook_bg(cls, row):
+        """What claude said still runs after its turn ("shell: …"), from
+        the <key>.bg its Stop hook keeps."""
+        key = cls._agent_hook_key(row)
+        if not key:
+            return []
+        try:
+            with open(os.path.join(AGENT_HOOK_DIR, key + ".bg")) as f:
+                return _bg_task_lines(json.load(f).get("background_tasks"))
+        except (OSError, ValueError, AttributeError):
+            return []
+
+    @classmethod
     def _agent_hook_raw(cls, row):
         """working / blocked / idle / background (done, work still
         running) from the tab's hooks, or None when it has none
@@ -9922,6 +9956,8 @@ if (data !== null) {{
             "unknown": "Status unknown",
         }
         tip = tips.get(status, status)
+        if status == "background":
+            tip = "\n".join([tip] + ["• " + x for x in self._agent_hook_bg(row)])
 
         # play/pause: themed media icons; ?/check/cross: bold glyphs.
         # Only ONE may be visible — keep the other no_show_all so listbox
@@ -13869,6 +13905,8 @@ if (data !== null) {{
                         "transcript": self._codex_rollout(
                             list(row.argv or []) + self._codex_notified(row)) if cli == "codex"
                         else getattr(row, "_agent_hook_tx", "") or ""}
+                if status == "background":
+                    info["bg"] = self._agent_hook_bg(row)    # which work still runs
                 term = getattr(row, "term", None)
                 if (status == "blocked" or screen) and term is not None and self._remote_send_on:
                     # the menu the tab waits on, so the chat can show it (typing switch: as the screen)
