@@ -406,10 +406,10 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.3.3"
+APP_VERSION = "v2.3.4"
 # Taiwan main dish of the major version + a fresh snack or drink, picked at
 # release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
-APP_CODENAME = "Sesame Oil Chicken + Nougat"
+APP_CODENAME = "Sesame Oil Chicken + Egg Roll"
 _VERSION_CODENAME_SEP = " · "
 
 
