@@ -335,6 +335,9 @@ def _queue_text(content):
     return content if isinstance(content, str) else ""
 
 
+CALM = ("idle", "ready", "background", "exited")     # a tab's statuses that hold no queued line
+
+
 def queue_step(queue, raw):
     """Follow Claude Code's queue of lines typed while it works, one
     transcript line at a time: enqueue adds, dequeue takes the first (a new
@@ -1062,6 +1065,7 @@ class Chat(_Log):
         self._esc_at = 0             # when Stop last pressed Esc in the tab
         self._tab_answered = set()   # tool ids of the tab's questions answered from here
         self._model_looked = False   # the tab's model was looked for in its transcript
+        self._calm = 0               # looks in a row the tab was not working: see mirror_poll
         self.inflight = 0            # messages sent that have no "done" yet
         self.owners = collections.deque()   # who sent each of those: a group's id, or None
         self.proc = None
@@ -1400,12 +1404,24 @@ class Chat(_Log):
         """One look at the tab: its state, and what its transcript gained."""
         info = self.mgr.tab_hook(self.meta["tab"]["id"]) if self.mgr.tab_hook else {"error": "x"}
         if info.get("error"):
+            self._calm = 0
             self._set_tab_state("idle")
             return
         # every status but idle shows: done with a new reply, agents still
         # running after the reply, the tab gone
         self._set_tab_state({"working": "working", "blocked": "waiting", "ready": "ready",
                              "background": "background", "exited": "exited"}.get(info["status"], "idle"))
+        # a tab that is not working holds nothing: Claude takes a queued line
+        # as its turn ends. A queue step read wrong (Claude does not always
+        # take the first) would show a line as queued for good, so the second
+        # calm look in a row clears the queue: one look can be wrong. Before
+        # the new lines are read, so a line queued in them stays.
+        self._calm = self._calm + 1 if info.get("status") in CALM else 0
+        have = self.meta.get("mirror") or {}
+        if self._calm >= 2 and have.get("queue"):
+            self.meta["mirror"] = dict(have, queue=[])
+            self._save_meta()
+            self.push()
         if info.get("transcript"):
             if not self._model_looked and not self.meta["tab"].get("model"):
                 self._model_looked = True            # once: a transcript read from its end would miss it
