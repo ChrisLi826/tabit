@@ -965,6 +965,31 @@ def _ai_scopes_on():
                 and os.path.exists(os.path.join(run, "systemd", "private")))
 
 
+# Memory pressure (PSI "full avg10": % of time every task waited for memory)
+# at which an idle AI tab is put to sleep. systemd-oomd kills a whole scope
+# at 50% for 20 s: this acts at a lower mark held for two looks in a row,
+# then waits for the average to come down before the next one.
+AI_SLEEP_PRESSURE = 20.0
+AI_SLEEP_POLL_SEC = 5
+AI_SLEEP_WAIT_SEC = 30
+
+
+def _mem_pressure():
+    """The memory pressure systemd-oomd watches, in %: this user's systemd,
+    else the whole machine. None when neither can be read."""
+    uid = os.getuid()
+    for path in (f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/memory.pressure",
+                 "/proc/pressure/memory"):
+        try:
+            with open(path) as f:
+                for line in f:
+                    if line.startswith("full "):
+                        return float(line.split("avg10=")[1].split()[0])
+        except (OSError, IndexError, ValueError):
+            continue
+    return None
+
+
 def _ai_scope_unit(session):
     """The scope of an AI tab's tmux session, named as ai-scopes names it."""
     return "tabit-%s.scope" % re.sub(r"[^A-Za-z0-9:_.-]", "_", session)
@@ -1897,6 +1922,7 @@ DEFAULT_SETTINGS = {
     "note_wrap": True,
     "shell_inherit_cwd": False,  # new shell opens in the focused tab's path
     "ai_notify": True,           # desktop popup when an agent wants you
+    "ai_sleep_on_pressure": True,  # memory low: idle AI tabs sleep, longest idle first
     "ai_notify_urgency": "critical",  # critical | normal | low
     "telegram_enabled": False,   # also send the same news to a Telegram bot
     "telegram_when": "away",     # away | always
@@ -3216,7 +3242,9 @@ class Tabit(Gtk.Window):
                         sub = self._ai_account_sub(argv, sub)
                     r = self._add_session(s["label"], argv, s["icon"],
                                           sub, s.get("cwd"),
-                                          s.get("track_cwd", False))
+                                          s.get("track_cwd", False),
+                                          asleep=bool(s.get("asleep"))
+                                          and _is_ai_icon(s.get("icon")))
                 if r is not None and s.get("tg"):
                     r.tg_id = s["tg"]
                 if r is not None and s.get("hunt"):
@@ -3279,6 +3307,10 @@ class Tabit(Gtk.Window):
         self._uploads_cleaning = False
         GLib.timeout_add_seconds(20, lambda: self._uploads_tick() and False)
         GLib.timeout_add_seconds(3600, self._uploads_tick)
+        # memory low: idle AI tabs sleep before systemd-oomd kills something
+        self._mem_high = 0
+        self._mem_wait = 0.0
+        GLib.timeout_add_seconds(AI_SLEEP_POLL_SEC, self._ai_sleep_tick)
         # Tabit Chat runs from the start, not from the first /chat: it carries
         # @name messages between AI tabs. Off the GTK thread: it asks tabit.
         GLib.timeout_add_seconds(5, lambda: threading.Thread(
@@ -3389,7 +3421,8 @@ class Tabit(Gtk.Window):
             return
         data = []
         for r in self._session_rows():  # skip group-header rows
-            if getattr(r, "dead", False) and not getattr(r, "_died_young", False):
+            if (getattr(r, "dead", False) and not getattr(r, "_died_young", False)
+                    and not getattr(r, "_asleep", False)):
                 # Exited tabs must not resurrect as live processes on restart
                 continue
             entry = {"label": r.title_text, "sub": r.sub_text,
@@ -3419,6 +3452,8 @@ class Tabit(Gtk.Window):
                 entry["tgname"] = r.tg_name
             if getattr(r, "ai_hunt", False):
                 entry["hunt"] = True
+            if getattr(r, "_asleep", False):
+                entry["asleep"] = True      # restored asleep: it wakes when opened
             data.append(entry)
         # entries the restore could not open stay as they were
         data += getattr(self, "_unrestored", [])
@@ -3672,9 +3707,10 @@ class Tabit(Gtk.Window):
         self._apply_editor_font()
 
     def _add_session(self, label, argv, icon_name, sub=None, cwd=None,
-                     track_cwd=False, launch_argv=None):
+                     track_cwd=False, launch_argv=None, asleep=False):
         """argv is what the tab keeps and runs again after a restart;
-        launch_argv, when given, is what runs this first time instead."""
+        launch_argv, when given, is what runs this first time instead.
+        asleep: an AI tab put to sleep for memory, started when opened."""
         term = Vte.Terminal()
         term.set_hexpand(True)
         term.set_vexpand(True)
@@ -3787,6 +3823,9 @@ class Tabit(Gtk.Window):
             row.argv = argv
             if launch_argv:
                 launch_argv = self._ai_ensure_codex_notify(self._ai_ensure_grok_minimal(launch_argv))
+        if asleep:
+            self._ai_mark_asleep(row)
+            return row
         run = launch_argv or argv
         self._spawn_term(row, run, workdir)
         return row
@@ -6564,6 +6603,10 @@ if (data !== null) {{
         if getattr(row, "_respawn", None):
             self._ai_respawn(row)          # an account switch: start the new one
             return
+        if getattr(row, "_asleep", False):
+            self._ai_mark_asleep(row)      # put to sleep for memory: it comes back
+            self._save_sessions_soon()
+            return
         row.dead = True
         # Gone at once (its folder or program missing after a restore, a
         # serial device unplugged): it never ran, so keep it in sessions.json
@@ -8211,6 +8254,8 @@ if (data !== null) {{
             return "that tab is gone"
         if not _is_ai_icon(getattr(row, "icon_name", None)):
             return "that is not an AI tab"
+        if getattr(row, "_asleep", False):
+            return "that tab is asleep to free memory: open it in tabit to wake it"
         if getattr(row, "dead", False) or getattr(row, "term", None) is None:
             return "that tab has exited"
         if getattr(row, "agent_status", None) in cls._TG_NOT_AGENT:
@@ -9859,6 +9904,8 @@ if (data !== null) {{
             return
         prev_status = getattr(row, "agent_status", None)
         row.agent_status = status
+        if status in ("working", "blocked"):
+            row._last_busy = time.time()    # which tab sleeps first
         if notify:
             self._notify_agent_status(row, prev_status, status)
         self._follow_toast_status(row, status)
@@ -10024,6 +10071,8 @@ if (data !== null) {{
             GLib.timeout_add(50, self._scroll_to_row, row)
             return
         self._start_tab_dwell(row)  # only real tab switches reach here
+        if getattr(row, "_asleep", False):
+            self._ai_wake(row)
         # Which pane receives this tab: keyboard nav sets _nav_pane; otherwise
         # follow current focus when split (right focus → update right, etc.).
         nav_pane = getattr(self, "_nav_pane", None)
@@ -13286,6 +13335,8 @@ if (data !== null) {{
             return "that tab is gone"
         if getattr(row, "kind", None) != "term" or getattr(row, "term", None) is None:
             return "that is not a terminal tab"
+        if getattr(row, "_asleep", False):
+            return "that tab is asleep to free memory: open it in tabit to wake it"
         if getattr(row, "dead", False):
             return "that tab has exited"
         return None
@@ -15539,6 +15590,107 @@ if (data !== null) {{
         row.term.feed(b"\r\n\x1b[2m[tabit] switching account\x1b[0m\r\n")
         self._set_agent_status(row, "unknown")
         self._spawn_term(row, launch, path if os.path.isdir(path) else GLib.get_home_dir())
+        self._save_sessions_soon()
+
+    # --- sleep when memory is low ----------------------------------------
+    def _ai_last_used(self, row):
+        """When this AI tab last worked, or its conversation last changed."""
+        t = getattr(row, "_last_busy", 0) or 0
+        tx = getattr(row, "_agent_hook_tx", "") or ""
+        if tx:
+            try:
+                t = max(t, os.path.getmtime(tx))
+            except OSError:
+                pass
+        return t
+
+    def _ai_can_sleep(self, row):
+        """Whether this AI tab can stop now and later go on with the same
+        conversation: it waits for you, is not on screen, and its command
+        resumes the session it is in."""
+        if (getattr(row, "kind", None) != "term" or getattr(row, "term", None) is None
+                or not _is_ai_icon(getattr(row, "icon_name", None))
+                or getattr(row, "dead", False) or getattr(row, "_asleep", False)
+                or getattr(row, "_respawn", None)
+                or row in (getattr(self, "_left_row", None), getattr(self, "_right_row", None))
+                or getattr(row, "agent_status", None) not in ("idle", "ready")):
+            return False
+        argv = getattr(row, "argv", None) or []
+        sid = self._ai_session_of(row)
+        got = self._ai_cli_path_of(argv)
+        if not sid or not got or sid not in " ".join(argv):
+            return False
+        # claude saves a session with its first message: none, nothing to resume
+        return not self._ai_is_claude(got[0]) or self._claude_session_saved(got[1], sid)
+
+    def _ai_sleep_tick(self):
+        """Every few seconds: with memory pressure high for a while, the
+        idle AI tab used longest ago sleeps; one, then a wait."""
+        try:
+            if not self._load_settings().get("ai_sleep_on_pressure", True):
+                self._mem_high = 0
+                return True
+            p = _mem_pressure()
+            if p is None or p < AI_SLEEP_PRESSURE:
+                self._mem_high = 0
+                return True
+            self._mem_high += 1
+            now = time.monotonic()
+            if self._mem_high < 2 or now < self._mem_wait:
+                return True
+            rows = [r for r in self._session_rows() if self._ai_can_sleep(r)]
+            if rows:
+                self._ai_sleep(min(rows, key=self._ai_last_used), p)
+                self._mem_wait = now + AI_SLEEP_WAIT_SEC
+        except Exception as e:
+            print(f"[tabit] memory watch: {e!r}", file=sys.stderr)
+        return True
+
+    def _ai_sleep(self, row, pressure):
+        """Stop this AI tab's agent to free memory; the tab stays, and
+        opening it goes on with the same conversation."""
+        print(f"[tabit] memory pressure {pressure:.0f}%: "
+              f"{getattr(row, 'title_text', '?')} sleeps", file=sys.stderr)
+        row._asleep = True
+        old_tmux = getattr(row, "_live_tmux", None)
+        if old_tmux:
+            _tmux_kill_session(old_tmux)    # its attach ends: child-exited
+        elif getattr(row, "pid", None):
+            try:
+                os.killpg(row.pid, signal.SIGHUP)
+            except OSError:
+                os.kill(row.pid, signal.SIGHUP)
+        self._save_sessions_soon()
+
+    def _ai_mark_asleep(self, row):
+        row._asleep = True
+        row.dead = True
+        row.pid = None
+        row.get_style_context().add_class("dead")
+        row.dot.hide()
+        row.subtitle.set_text("💤 asleep to free memory · open to wake")
+        row.subtitle.set_no_show_all(False)
+        row.subtitle.show()
+        self._set_agent_status(row, "exited", notify=False)
+        row.term.feed(b"\r\n\x1b[2m[tabit] asleep to free memory: "
+                      b"open this tab to wake it\x1b[0m\r\n")
+
+    def _ai_wake(self, row):
+        """Start a sleeping AI tab again: its command resumes the session."""
+        row._asleep = False
+        row.dead = False
+        row._died_young = False
+        row.get_style_context().remove_class("dead")
+        row.subtitle.set_text(row.sub_text or "")
+        as_ = self._agent_status_mod()
+        if as_ is not None:
+            row._agent_episode = as_.Episode()
+            row._agent_display = as_.Display(ui="unknown")
+        self._set_agent_status(row, "unknown", notify=False)
+        row.term.feed(b"\x1b[2m[tabit] waking up\x1b[0m\r\n")
+        path = self._ai_cd_path(row.argv)
+        self._spawn_term(row, row.argv,
+                         path if path and os.path.isdir(path) else GLib.get_home_dir())
         self._save_sessions_soon()
 
     @staticmethod
@@ -18544,6 +18696,15 @@ if (data !== null) {{
             "to needs-input, or to replied with background work still running, "
             "with a button that switches to it. Nothing "
             "pops for the tab you are looking at. Default is on.")
+        ai_sleep = Gtk.CheckButton(
+            label="Memory low: put idle AI tabs to sleep, longest idle first")
+        ai_sleep.set_active(bool(s.get("ai_sleep_on_pressure", True)))
+        ai_sleep.set_tooltip_text(
+            "When memory pressure stays high, tabit stops the agent of the AI "
+            "tab used longest ago, one at a time, before the system kills "
+            "something itself. Only a tab that waits for you, is not on "
+            "screen, and resumes its conversation. The tab stays: open it "
+            "and it goes on with the same conversation. Default is on.")
         urg_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         urg_lbl = Gtk.Label(label="Notification urgency:", xalign=0)
         urg_combo = Gtk.ComboBoxText()
@@ -19186,7 +19347,7 @@ if (data !== null) {{
                             term_size_box, term_spacing_box, demo_frame,
                             side_box)),
             ("Sessions", (wrap, inherit)),
-            ("AI", (ai_fresh, ai_tmux, ai_notify, urg_box, ai_bypass, acct_box)),
+            ("AI", (ai_fresh, ai_tmux, ai_notify, urg_box, ai_sleep, ai_bypass, acct_box)),
             # tg_help sits outside the grid on purpose: the grid greys
             # out when Telegram is off, which is when somebody needs it.
             ("Telegram", (tg_on, tg_grid, tg_help)),
@@ -19235,6 +19396,7 @@ if (data !== null) {{
                                      "ai_fresh_on_restore": ai_fresh.get_active(),
                                      "ai_use_tmux": ai_tmux.get_active(),
                                      "ai_notify": ai_notify.get_active(),
+                                     "ai_sleep_on_pressure": ai_sleep.get_active(),
                                      "ai_notify_urgency":
                                          urg_combo.get_active_id()
                                          or "critical",
