@@ -35,6 +35,8 @@ Screen** makes it an app of its own.
   **↩ Reply**. A bar over the text box shows what you answer, and Claude gets
   the quote with your message. Tap the quote in a bubble to jump back to the
   message it answers.
+- **Copy.** A code block in a reply has **Copy** at its top right: one tap
+  puts the whole block on the clipboard.
 - **What it answers.** Scrolled up in a long reply, your message that the
   replies at the top answer shows top right, even one older than the part
   the chat has loaded (it looks up to 10 pages back). Tap it to go to it. It goes
