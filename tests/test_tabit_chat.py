@@ -2539,10 +2539,13 @@ class HeldLineTest(Base):
         self.screen = ["─" * 20, self.HINT, "─" * 20]
         self.keys, self.typed = [], []
         self.pops = True             # Up brings the held lines back
+        self.status = "working"
 
         def hook(tab, text=None, key=None, queue=False, screen=False):
             if text is None and key is None:
-                info = {"title": "MOT", "status": "working", "transcript": self.path, "cli": "claude"}
+                if self.status == "error":
+                    return {"error": "x"}
+                info = {"title": "MOT", "status": self.status, "transcript": self.path, "cli": "claude"}
                 if screen:
                     info["screen"] = self.screen
                 return info
@@ -2649,6 +2652,78 @@ class HeldLineTest(Base):
         key = self.chat.view()["queued"][0]["key"]
         self.assertEqual(self.chat.unqueue(key)[0], 409)
         self.assertEqual(self.typed, [])
+
+
+    def saved(self):
+        return self.chat.meta["mirror"]["queue"]
+
+    def test_a_missed_step_is_cleared_when_the_tab_is_calm(self):
+        # as seen: Claude took a newer note first, so the head stayed for good,
+        # and a line Claude had answered still showed as queued
+        for op, text in (("enqueue", "<task-notification>1"), ("enqueue", "<task-notification>2"),
+                         ("enqueue", "<task-notification>3"), ("dequeue", None),
+                         ("remove", "<task-notification>2"), ("remove", "<task-notification>1"),
+                         ("enqueue", "x"), ("dequeue", None)):
+            self.op(op, text)
+        self.assertEqual(self.shown(), ["x"])
+        self.status = "ready"
+        self.assertEqual(self.shown(), ["x"])             # one calm look is not enough
+        self.assertEqual(self.shown(), [])
+        self.assertEqual(self.saved(), [])
+
+    def test_a_tab_that_is_not_calm_keeps_its_queue(self):
+        self.op("enqueue", "x")
+        for status in ("working", "blocked", "unknown", "error"):
+            self.status = status
+            self.assertEqual(self.shown(), ["x"], status)
+            self.assertEqual(self.shown(), ["x"], status)
+        for status in ("idle", "background", "exited"):
+            self.status, self.chat._calm = status, 0
+            self.op("enqueue", "x")
+            self.chat.mirror_poll()
+            self.chat.mirror_poll()
+            self.assertEqual(self.saved(), [], status)
+
+    def test_a_calm_look_between_two_busy_ones_clears_nothing(self):
+        self.op("enqueue", "late")
+        self.status = "ready"
+        self.assertEqual(self.shown(), ["late"])
+        self.status = "working"
+        self.assertEqual(self.shown(), ["late"])
+        self.status = "ready"
+        self.assertEqual(self.shown(), ["late"])
+
+    def test_a_line_queued_in_the_clearing_read_stays(self):
+        self.op("enqueue", "old")
+        self.status = "ready"
+        self.chat.mirror_poll()
+        self.op("enqueue", "new")              # read in the same look that clears
+        self.chat.mirror_poll()
+        self.assertEqual(self.saved(), ["new"])
+
+    def test_after_a_clear_take_back_says_it_was_read(self):
+        self.op("enqueue", "x")
+        self.chat.mirror_poll()
+        key = self.chat.view()["queued"][0]["key"]
+        self.status = "ready"
+        self.chat.mirror_poll()
+        self.chat.mirror_poll()
+        self.assertEqual(self.chat.unqueue(key)[0], 409)
+        self.assertEqual(self.keys, [])
+
+    def test_held_lines_survive_a_clear(self):
+        self.chat.held = [("k", "wait for the screen")]
+        self.pops = False
+        self.chat._screen_open = lambda: True
+        self.status = "ready"
+        self.chat.mirror_poll()
+        self.chat.mirror_poll()
+        self.assertEqual([q["text"] for q in self.chat.view()["queued"]], ["wait for the screen"])
+
+    def test_a_dequeue_on_an_empty_queue_does_nothing(self):
+        q = []
+        self.assertTrue(tc.queue_step(q, {"type": "queue-operation", "operation": "dequeue"}))
+        self.assertEqual(q, [])
 
 
 class SlashCommandTest(Base):
