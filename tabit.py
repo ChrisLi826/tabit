@@ -2198,8 +2198,9 @@ def _bg_task_lines(tasks):
 
 def _ensure_claude_hooks():
     """Write the hooks file a claude AI tab needs: without it claude does
-    not start. Only when it changed: claude notices a settings file that
-    changes under a running session."""
+    not start. Only when it changed. A running claude read it once, at its
+    start (Claude Code 2.1.329: neither a rename nor an in-place write nor
+    /hooks reloads it), so a change reaches the claudes started after it."""
     want = _claude_hooks_settings(AGENT_HOOK_DIR)
     try:
         os.makedirs(AGENT_HOOK_DIR, mode=0o700, exist_ok=True)
