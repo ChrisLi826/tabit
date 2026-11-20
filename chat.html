@@ -1190,21 +1190,44 @@ $("msgs").addEventListener("scroll", () => {
 let pinFrame = 0;
 function paintPin() {
   pinFrame = 0;
-  const box = $("msgs"), pin = $("pin"), r = box.getBoundingClientRect();
+  const me = cur, box = $("msgs"), pin = $("pin"), r = box.getBoundingClientRect();
   const mine = [...box.querySelectorAll(".b.me[data-seq]")];
-  let at = null;
+  let at = null, above = false;
   for (let i = mine.length - 1; i >= 0; i--) {
     const b = mine[i].getBoundingClientRect();
-    if (b.top < r.top) { at = b.bottom <= r.top + 4 ? mine[i] : null; break; }
+    if (b.top < r.top) { above = true; at = b.bottom <= r.top + 4 ? { seq: mine[i].dataset.seq, snip: mine[i].dataset.snip } : null; break; }
+  }
+  // the replies at the top answer a message not loaded yet: look for it in the history
+  if (!above && me && $("older")) {
+    if (me.pinOld?.upTo !== me.firstSeq) findOlderMine(me);
+    else if (me.pinOld.seq) at = me.pinOld;
   }
   if (!at || box.scrollHeight - box.scrollTop - box.clientHeight < 90) { pin.style.display = "none"; return; }
-  pin.dataset.go = at.dataset.seq;
-  pin.innerHTML = `<span class="pw">You</span><span class="pt">${esc(at.dataset.snip)}</span>`;
+  pin.dataset.go = at.seq;
+  pin.innerHTML = `<span class="pw">You</span><span class="pt">${esc(at.snip)}</span>`;
   pin.style.top = r.top + 8 + "px";
   pin.style.right = window.innerWidth - r.right + 18 + "px";
   pin.style.display = "block";
 }
 $("pin").onclick = () => jumpTo(+$("pin").dataset.go);
+// your last message before the loaded part, read from up to 10 pages of the
+// history without drawing them; tapping the pin loads them, as a quote does
+async function findOlderMine(me) {
+  const upTo = me.firstSeq;
+  me.pinOld = { upTo, seq: 0 };
+  let before = upTo, hit = null;
+  try {
+    for (let page = 0; page < 10 && before > 1 && !hit; page++) {
+      const { events } = await api(`${base(me.kind)}/${me.id}/history?before=${before}`);
+      if (!events.length) break;
+      hit = events.findLast((ev) => ev.t === "user" && ev.text && !fromTab(ev.text));
+      before = events[0].seq;
+    }
+  } catch (e) { /* no pin: the page goes on */ }
+  if (me.pinOld.upTo !== upTo) return;          // older ones were loaded meanwhile
+  if (hit) me.pinOld = { upTo, seq: hit.seq, snip: hit.text.replace(/\s+/g, " ").trim().slice(0, 140) };
+  if (cur === me) paintPin();
+}
 $("jump").onclick = () => { const b = $("msgs"); b.scrollTop = b.scrollHeight; };
 
 // --- typing -----------------------------------------------------------------
