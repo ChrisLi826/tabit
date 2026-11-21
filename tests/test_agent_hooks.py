@@ -176,8 +176,12 @@ class TestHookCommand(unittest.TestCase):
             got = tabit._bg_tasks_alive(tasks, "s1")
         # b2 ended; b3 has no file to tell by, a sub-agent none at all
         self.assertEqual([t["id"] for t in got], ["b1", "b3", "a1"])
-        with mock.patch.object(tabit, "_claude_live_outputs") as scan:
+        # a monitor holds no file of its own: it always counts
+        mon = [{"id": "m1", "type": "monitor", "status": "running", "command": "x"}]
+        with mock.patch.object(tabit, "_claude_live_outputs") as scan, \
+                mock.patch.object(tabit.glob, "glob", return_value=["/f"]):
             self.assertEqual(tabit._bg_tasks_alive(tasks[3:], "s1"), tasks[3:])
+            self.assertEqual(tabit._bg_tasks_alive(mon, "s1"), mon)
             scan.assert_not_called()                # nothing to look up
 
     def test_an_artifact_comment_watch_is_no_work(self):

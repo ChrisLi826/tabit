@@ -2182,8 +2182,8 @@ def _ensure_codex_notify():
 
 def _claude_live_outputs():
     """The task output files of claude (/tmp/claude-<uid>/.../tasks/<id>.output)
-    that a process still holds open: a background shell or monitor keeps
-    its own open as stdout and stderr until it ends."""
+    that a process still holds open: a background shell keeps its own open
+    as stdout and stderr until it ends."""
     pre = f"/tmp/claude-{os.getuid()}/"
     live = set()
     for pid in os.listdir("/proc"):
@@ -2210,11 +2210,13 @@ _CLAUDE_ARTIFACT_WATCH = "live updates for artifact "
 
 
 def _bg_tasks_alive(tasks, session):
-    """The running tasks claude listed at Stop, less the shells and
-    monitors that have ended. Claude Code can keep a task it lost as
+    """The running tasks claude listed at Stop, less the shells that
+    have ended. Claude Code can keep a task it lost as
     running for good (seen on 2.1.329: a shell killed while the box ran
     out of memory); then the tab would say "background" forever. A task
-    whose output file is gone, or another kind (a sub-agent), is kept.
+    whose output file is gone, or another kind, is kept: a monitor writes
+    to claude through a socket and claude writes its file (2.1.330), and a
+    sub-agent runs inside claude.
     Nor does the watch claude keeps on an artifact it published count: it
     only waits for comments, for as long as the session lasts, and comes
     back after a resume."""
@@ -2225,7 +2227,7 @@ def _bg_tasks_alive(tasks, session):
     if session and "/" not in session:
         for t in run:
             tid = str(t.get("id") or "")
-            if t.get("type") in ("shell", "monitor") and tid and "/" not in tid:
+            if t.get("type") == "shell" and tid and "/" not in tid:
                 hit = glob.glob(f"/tmp/claude-{os.getuid()}/*/{session}/tasks/{tid}.output")
                 if hit:
                     files[id(t)] = hit[0]
