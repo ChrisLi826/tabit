@@ -122,6 +122,63 @@ class TestHookCommand(unittest.TestCase):
                                   "background_tasks": self.RUNNING})
             self.assertEqual(self.state()[0], "background", event)
 
+    def test_stop_keeps_what_still_runs_and_drops_it_when_nothing_does(self):
+        bg = os.path.join(self.dir, "k1.bg")
+        self.run_hook("Stop", {"transcript_path": self.tx, "background_tasks": self.RUNNING})
+        with open(bg) as f:
+            self.assertEqual(json.load(f)["background_tasks"], self.RUNNING)
+        row = types.SimpleNamespace(argv=[], _agent_key="k1")
+        with mock.patch.object(tabit, "AGENT_HOOK_DIR", self.dir):
+            self.assertEqual(T._agent_hook_bg(row), ["subagent: x [general-purpose] (a1)"])
+        self.run_hook("Stop", {"transcript_path": self.tx, "background_tasks": []})
+        self.assertFalse(os.path.exists(bg))
+        with mock.patch.object(tabit, "AGENT_HOOK_DIR", self.dir):
+            self.assertEqual(T._agent_hook_bg(row), [])
+
+    def test_a_new_session_or_prompt_drops_the_old_list(self):
+        bg = os.path.join(self.dir, "k1.bg")
+        for event in ("SessionStart", "UserPromptSubmit"):
+            self.run_hook("Stop", {"transcript_path": self.tx, "background_tasks": self.RUNNING})
+            self.assertTrue(os.path.exists(bg))
+            self.run_hook(event, {"transcript_path": self.tx})
+            self.assertFalse(os.path.exists(bg), event)
+
+    def test_a_new_list_with_the_same_state_reaches_the_tooltip(self):
+        # still background, but other work runs now: the tooltip follows
+        img = mock.Mock()
+        img.get_visible.return_value = True
+        row = mock.Mock(agent_status="background", agent_status_lbl=img,
+                        agent_status_glyph=None, _agent_bg=["shell: a (b1)"])
+        row.get_tooltip_text.return_value = "tab · agent: old"
+        app = mock.Mock(_agent_bg_tip=T._agent_bg_tip, _set_row_agent_tip=T._set_row_agent_tip)
+        app._agent_hook_bg.return_value = ["shell: b (b2)"]
+        T._set_agent_status(app, row, "background")
+        tip = "↻ Replied — background work still running\n• shell: b (b2)"
+        img.set_tooltip_text.assert_called_once_with(tip)
+        row.set_tooltip_text.assert_called_once_with("tab · agent: " + tip)
+        self.assertEqual(row._agent_bg, ["shell: b (b2)"])
+        img.reset_mock()
+        T._set_agent_status(app, row, "background")       # nothing new: nothing done
+        img.set_tooltip_text.assert_not_called()
+        app._notify_agent_status.assert_not_called()
+
+    def test_task_lines(self):
+        long = "x" * 100
+        self.assertEqual(tabit._bg_task_lines([
+            {"id": "b1", "type": "shell", "status": "running", "description": "wait",
+             "command": "sleep 9"},
+            {"id": "b2", "type": "shell", "status": "running", "command": "sleep  9\n"},
+            {"id": "b3", "type": "shell", "status": "completed", "description": "done"},
+            {"id": "m1", "type": "monitor", "status": "running", "description": long},
+            {"id": "z", "type": "subagent", "status": "running"},
+            {"id": "y", "type": "subagent", "status": "running", "agent_type": "Explore"},
+            {"id": None, "type": "shell", "status": "running", "command": "ls"},
+            "junk"]),
+            ["shell: wait (b1)", "shell: sleep 9 (b2)",
+             "monitor: " + "x" * 79 + "… (m1)", "subagent (z)", "subagent (y)",
+             "shell: ls (?)"])
+        self.assertEqual(tabit._bg_task_lines(None), [])
+
     def test_stop_with_a_shell_or_monitor_running_is_background(self):
         # Claude Code 2.1.318: a shell or a monitor it started wakes it again too
         for kind in ("shell", "monitor"):

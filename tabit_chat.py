@@ -1059,6 +1059,7 @@ class Chat(_Log):
         self.live_ver = 0
         self.pending = {}            # request id -> {"ev", "input", "suggest"}
         self.tab_state = "idle"      # a mirrored chat: what its tab is doing
+        self.tab_bg = []             # ...and, in background, the work still running
         self.suggest = ""            # a mirrored chat: what Claude guesses one types next
         self.watchers = 0            # pages open on this chat
         self.held = []               # lines sent while the tab showed a screen: (key, text)
@@ -1216,7 +1217,7 @@ class Chat(_Log):
         """What a page needs besides events: state, open questions, meta."""
         with self.cond:
             return {"state": self.state, "live": self.live, "seq": self.seq,
-                    "suggest": self.suggest,
+                    "suggest": self.suggest, "bg": self.tab_bg,
                     "pending": [p["ev"] for p in self.pending.values()],
                     "queued": self.queued(), "meta": self.summary()}
 
@@ -1410,7 +1411,8 @@ class Chat(_Log):
         # every status but idle shows: done with a new reply, agents still
         # running after the reply, the tab gone
         self._set_tab_state({"working": "working", "blocked": "waiting", "ready": "ready",
-                             "background": "background", "exited": "exited"}.get(info["status"], "idle"))
+                             "background": "background", "exited": "exited"}.get(info["status"], "idle"),
+                            info.get("bg") or [])
         # a tab that is not working holds nothing: Claude takes a queued line
         # as its turn ends. A queue step read wrong (Claude does not always
         # take the first) would show a line as queued for good, so the second
@@ -1552,11 +1554,13 @@ class Chat(_Log):
             if code != 200:
                 raise RuntimeError(out.get("error") or "the tab did not take the key")
 
-    def _set_tab_state(self, state):
-        if state == self.tab_state:
+    def _set_tab_state(self, state, bg=()):
+        bg = list(bg) if state == "background" else []
+        if state == self.tab_state and bg == self.tab_bg:
             return
         with self.cond:
             self.tab_state = state
+            self.tab_bg = bg
             self.live_ver += 1       # a push to the pages, like a change of live text
             self.cond.notify_all()
         self._changed(None)

@@ -192,6 +192,7 @@
   .ask .verdict { color: var(--dim); font-size: calc(13px * var(--fs, 1)); }
   .note { align-self: center; font-size: calc(12.5px * var(--fs, 1)); color: var(--dim); text-align: center; max-width: 90%; }
   .note.err { color: var(--red); }
+  .note .bgt { font-family: ui-monospace, monospace; font-size: .92em; overflow-wrap: anywhere; }
   .dots span { display: inline-block; width: 7px; height: 7px; margin: 0 2px; border-radius: 50%; background: var(--dim); animation: bl 1.2s infinite; }
   .dots span:nth-child(2) { animation-delay: .2s; } .dots span:nth-child(3) { animation-delay: .4s; }
   @keyframes bl { 0%, 80%, 100% { opacity: .25 } 40% { opacity: 1 } }
@@ -848,6 +849,7 @@ function take(me, d) {
   // a tab's chat has no "done" event: the tab turning ready (a new reply) is its end
   const tabDone = d.meta.tab && me.lastSeq && me.state !== "ready" && d.state === "ready";
   me.state = d.state;
+  me.bg = d.bg;
   me.meta = d.meta;
   if (d.state === "ready" && d.meta.tab && !document.hidden)
     api(`api/tabs/${encodeURIComponent(d.meta.tab.id)}/ack`, {}).catch(() => {});
@@ -969,7 +971,10 @@ function paintLive(me) {
     html += `<div class="b ai${me.codex.has(cid) ? " cx" : ""}">${who ? `<div class="who" style="color:${colorOf(who)}">${esc(who)}</div>` : ""}${md(text)}</div>`;
   }
   if (!html && me.state === "working") html = '<div class="b ai"><span class="dots"><span></span><span></span><span></span></span></div>';
-  if (!html && me.state === "background") html = '<div class="note">↻ Background work still running</div>';
+  // what Claude said still runs, one line each: "shell: … (id)"
+  if (!html && me.state === "background")
+    html = '<div class="note">↻ Background work still running' +
+      (me.bg || []).map((x) => `<br><span class="bgt">${esc(x)}</span>`).join("") + '</div>';
   // what the tab's Claude holds while it works: it reads it after its current step
   for (const q of me.queued || [])
     html += `<div class="b me queued">${esc(q.text)}<div class="qn">${q.held ? "Queued: the tab shows a screen (below); sent when it closes" : "Queued: Claude reads it after its current step"}` +

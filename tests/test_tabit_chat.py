@@ -2540,12 +2540,15 @@ class HeldLineTest(Base):
         self.keys, self.typed = [], []
         self.pops = True             # Up brings the held lines back
         self.status = "working"
+        self.bg = None
 
         def hook(tab, text=None, key=None, queue=False, screen=False):
             if text is None and key is None:
                 if self.status == "error":
                     return {"error": "x"}
                 info = {"title": "MOT", "status": self.status, "transcript": self.path, "cli": "claude"}
+                if self.bg is not None:
+                    info["bg"] = self.bg
                 if screen:
                     info["screen"] = self.screen
                 return info
@@ -2719,6 +2722,20 @@ class HeldLineTest(Base):
         self.chat.mirror_poll()
         self.chat.mirror_poll()
         self.assertEqual([q["text"] for q in self.chat.view()["queued"]], ["wait for the screen"])
+
+    def test_background_says_which_work_still_runs(self):
+        self.status, self.bg = "background", ["shell: wait (b1)"]
+        self.chat.mirror_poll()
+        self.assertEqual((self.chat.view()["state"], self.chat.view()["bg"]),
+                         ("background", ["shell: wait (b1)"]))
+        self.bg = ["shell: wait (b1)", "subagent: review (a1)"]
+        ver = self.chat.live_ver
+        self.chat.mirror_poll()
+        self.assertGreater(self.chat.live_ver, ver)          # a new list reaches the pages
+        self.assertEqual(len(self.chat.view()["bg"]), 2)
+        self.status, self.bg = "ready", None
+        self.chat.mirror_poll()
+        self.assertEqual(self.chat.view()["bg"], [])
 
     def test_a_dequeue_on_an_empty_queue_does_nothing(self):
         q = []

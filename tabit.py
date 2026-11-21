@@ -406,7 +406,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.3.5"
+APP_VERSION = "v2.3.5.1"
 # Taiwan main dish of the major version + a fresh snack or drink, picked at
 # release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
 APP_CODENAME = "Sesame Oil Chicken + Iron Egg"
@@ -2065,13 +2065,18 @@ def _claude_hooks_settings(hook_dir):
     # the turn is over, but claude goes on by itself once its background
     # sub-agents, shells or monitors are done
     run = ['*\'"type":"%s","status":"running"\'*' % t for t in ("subagent", "shell", "monitor")]
+    # <key>.bg keeps what claude handed over, to tell which work still runs
     stop = now + ('s=idle; case "$p" in ' + "|".join(run) + ') '
-                  's=background;; esac; ' + keep)
+                  's=background;; esac; '
+                  f'if [ "$s" = background ]; then printf %s "$p" >{d}/"$k".bg.tmp '
+                  f'&& mv -f {d}/"$k".bg.tmp {d}/"$k".bg; else rm -f {d}/"$k".bg; fi 2>/dev/null; '
+                  + keep)
     return {"hooks": {
         # not "compact": claude compacts in the middle of a turn. These two
         # start afresh: no question can be up when a prompt was typed
-        "SessionStart": ev("s=idle; ", "startup|resume|clear"),
-        "UserPromptSubmit": [{"hooks": [put("s=working; "), roster]}],
+        # either way the work a past turn left running is no longer known
+        "SessionStart": ev(f'rm -f {d}/"$k".bg 2>/dev/null; s=idle; ', "startup|resume|clear"),
+        "UserPromptSubmit": [{"hooks": [put(f'rm -f {d}/"$k".bg 2>/dev/null; s=working; '), roster]}],
         "PreToolUse": ev(ask, "*"),
         "PostToolUse": ev(done, "*"),
         "PostToolUseFailure": ev(done, "*"),
@@ -2175,10 +2180,29 @@ def _ensure_codex_notify():
         print(f"[tabit] cannot write {CODEX_NOTIFY_FILE}: {e}", file=sys.stderr)
 
 
+def _bg_task_lines(tasks):
+    """One line per task claude's Stop hook says still runs, as
+    "shell: <what> (<id>)"."""
+    out = []
+    for t in tasks if isinstance(tasks, list) else []:
+        if not isinstance(t, dict) or t.get("status") != "running":
+            continue
+        kind = str(t.get("type") or "task")
+        what = " ".join(str(t.get("description") or t.get("command") or "").split())
+        if len(what) > 80:
+            what = what[:79] + "…"
+        if what and t.get("agent_type"):
+            what = f"{what} [{t['agent_type']}]"
+        tid = t.get("id") or "?"
+        out.append(f"{kind}: {what} ({tid})" if what else f"{kind} ({tid})")
+    return out
+
+
 def _ensure_claude_hooks():
     """Write the hooks file a claude AI tab needs: without it claude does
-    not start. Only when it changed: claude notices a settings file that
-    changes under a running session."""
+    not start. Only when it changed. A running claude read it once, at its
+    start (Claude Code 2.1.329: neither a rename nor an in-place write nor
+    /hooks reloads it), so a change reaches the claudes started after it."""
     want = _claude_hooks_settings(AGENT_HOOK_DIR)
     try:
         os.makedirs(AGENT_HOOK_DIR, mode=0o700, exist_ok=True)
@@ -7556,6 +7580,19 @@ if (data !== null) {{
     _AGENT_INTERRUPTED = b'"text":"[Request interrupted by user'
 
     @classmethod
+    def _agent_hook_bg(cls, row):
+        """What claude said still runs after its turn ("shell: …"), from
+        the <key>.bg its Stop hook keeps."""
+        key = cls._agent_hook_key(row)
+        if not key:
+            return []
+        try:
+            with open(os.path.join(AGENT_HOOK_DIR, key + ".bg")) as f:
+                return _bg_task_lines(json.load(f).get("background_tasks"))
+        except (OSError, ValueError, AttributeError):
+            return []
+
+    @classmethod
     def _agent_hook_raw(cls, row):
         """working / blocked / idle / background (done, work still
         running) from the tab's hooks, or None when it has none
@@ -9900,8 +9937,17 @@ if (data !== null) {{
             (img.get_visible() if img is not None else False)
             or (glyph.get_visible() if glyph is not None else False)
         )
+        bg = self._agent_hook_bg(row) if status == "background" else []
         if getattr(row, "agent_status", None) == status and visible_now:
+            if bg != getattr(row, "_agent_bg", []):     # other work runs now
+                row._agent_bg = bg
+                tip = self._agent_bg_tip(bg)
+                for w in (img, glyph):
+                    if w is not None and w.get_visible():
+                        w.set_tooltip_text(tip)
+                self._set_row_agent_tip(row, tip)
             return
+        row._agent_bg = bg
         prev_status = getattr(row, "agent_status", None)
         row.agent_status = status
         if status in ("working", "blocked"):
@@ -9916,12 +9962,11 @@ if (data !== null) {{
             "idle": "⏸ Idle — waiting for prompt",
             "blocked": "? Needs input / approval",
             "ready": "✓ Done — open tab to review",
-            "background": "↻ Replied — background work still running",
             "exited": "✕ Process exited",
             "done": "✕ Process exited",
             "unknown": "Status unknown",
         }
-        tip = tips.get(status, status)
+        tip = self._agent_bg_tip(bg) if status == "background" else tips.get(status, status)
 
         # play/pause: themed media icons; ?/check/cross: bold glyphs.
         # Only ONE may be visible — keep the other no_show_all so listbox
@@ -9964,11 +10009,19 @@ if (data !== null) {{
         if getattr(row, "dot", None) is not None:
             row.dot.set_no_show_all(True)
             row.dot.hide()
+        self._set_row_agent_tip(row, tip)
+        self._schedule_ai_summary_refresh()
+
+    @staticmethod
+    def _agent_bg_tip(bg):
+        return "\n".join(["↻ Replied — background work still running"] + ["• " + x for x in bg])
+
+    @staticmethod
+    def _set_row_agent_tip(row, tip):
         base = row.get_tooltip_text() or row.session_label or ""
         if " · agent:" in base:
             base = base.split(" · agent:")[0]
         row.set_tooltip_text(f"{base} · agent: {tip}")
-        self._schedule_ai_summary_refresh()
 
     def _close_session(self, row):
         if row.get_parent() is None:
@@ -13869,6 +13922,8 @@ if (data !== null) {{
                         "transcript": self._codex_rollout(
                             list(row.argv or []) + self._codex_notified(row)) if cli == "codex"
                         else getattr(row, "_agent_hook_tx", "") or ""}
+                if status == "background":
+                    info["bg"] = self._agent_hook_bg(row)    # which work still runs
                 term = getattr(row, "term", None)
                 if (status == "blocked" or screen) and term is not None and self._remote_send_on:
                     # the menu the tab waits on, so the chat can show it (typing switch: as the screen)
