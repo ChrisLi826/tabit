@@ -2180,6 +2180,52 @@ def _ensure_codex_notify():
         print(f"[tabit] cannot write {CODEX_NOTIFY_FILE}: {e}", file=sys.stderr)
 
 
+def _claude_live_outputs():
+    """The task output files of claude (/tmp/claude-<uid>/.../tasks/<id>.output)
+    that a process still holds open: a background shell or monitor keeps
+    its own open as stdout and stderr until it ends."""
+    pre = f"/tmp/claude-{os.getuid()}/"
+    live = set()
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        d = f"/proc/{pid}/fd"
+        try:
+            fds = os.listdir(d)
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                t = os.readlink(f"{d}/{fd}")
+            except OSError:
+                continue
+            if t.startswith(pre) and t.endswith(".output"):
+                live.add(t)
+    return live
+
+
+def _bg_tasks_alive(tasks, session):
+    """The running tasks claude listed at Stop, less the shells and
+    monitors that have ended. Claude Code can keep a task it lost as
+    running for good (seen on 2.1.329: a shell killed while the box ran
+    out of memory); then the tab would say "background" forever. A task
+    whose output file is gone, or another kind (a sub-agent), is kept."""
+    run = [t for t in tasks if isinstance(t, dict) and t.get("status") == "running"] \
+        if isinstance(tasks, list) else []
+    files = {}
+    if session and "/" not in session:
+        for t in run:
+            tid = str(t.get("id") or "")
+            if t.get("type") in ("shell", "monitor") and tid and "/" not in tid:
+                hit = glob.glob(f"/tmp/claude-{os.getuid()}/*/{session}/tasks/{tid}.output")
+                if hit:
+                    files[id(t)] = hit[0]
+    if not files:
+        return run
+    live = _claude_live_outputs()
+    return [t for t in run if id(t) not in files or files[id(t)] in live]
+
+
 def _bg_task_lines(tasks):
     """One line per task claude's Stop hook says still runs, as
     "shell: <what> (<id>)"."""
@@ -7580,17 +7626,24 @@ if (data !== null) {{
     _AGENT_INTERRUPTED = b'"text":"[Request interrupted by user'
 
     @classmethod
-    def _agent_hook_bg(cls, row):
-        """What claude said still runs after its turn ("shell: …"), from
-        the <key>.bg its Stop hook keeps."""
+    def _agent_hook_bg_tasks(cls, row):
+        """The tasks claude said still run after its turn, from the
+        <key>.bg its Stop hook keeps, less those that have ended; None
+        when there is no such file (a claude started before that hook)."""
         key = cls._agent_hook_key(row)
         if not key:
-            return []
+            return None
         try:
             with open(os.path.join(AGENT_HOOK_DIR, key + ".bg")) as f:
-                return _bg_task_lines(json.load(f).get("background_tasks"))
+                p = json.load(f)
+            return _bg_tasks_alive(p.get("background_tasks"), p.get("session_id"))
         except (OSError, ValueError, AttributeError):
-            return []
+            return None
+
+    @classmethod
+    def _agent_hook_bg(cls, row):
+        """What still runs after claude's turn, one line each ("shell: …")."""
+        return _bg_task_lines(cls._agent_hook_bg_tasks(row))
 
     @classmethod
     def _agent_hook_raw(cls, row):
@@ -7615,6 +7668,8 @@ if (data !== null) {{
         # the session the hooks speak for: claude changes it on /clear,
         # /resume and a plan's "clear context"
         row._agent_hook_tx = tx
+        if state == "background" and cls._agent_hook_bg_tasks(row) == []:
+            return "idle"       # all it left running has ended
         if state == "idle" or not tx:
             return state
         # Esc or No since this event: read only what the transcript gained

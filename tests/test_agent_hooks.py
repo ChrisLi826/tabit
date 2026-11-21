@@ -162,6 +162,40 @@ class TestHookCommand(unittest.TestCase):
         img.set_tooltip_text.assert_not_called()
         app._notify_agent_status.assert_not_called()
 
+    def test_a_shell_that_ended_no_longer_counts(self):
+        # Claude Code can keep a lost shell as running; its output file,
+        # which a live shell holds open, tells it has ended
+        tasks = [{"id": "b1", "type": "shell", "status": "running", "command": "a"},
+                 {"id": "b2", "type": "shell", "status": "running", "command": "b"},
+                 {"id": "b3", "type": "shell", "status": "running", "command": "c"},
+                 {"id": "a1", "type": "subagent", "status": "running"}]
+        out = "/tmp/claude-1/x/s1/tasks/%s.output"
+        found = lambda pat: [out % pat.rsplit("/", 1)[1][:-7]] if "b3" not in pat else []
+        with mock.patch.object(tabit.glob, "glob", side_effect=found), \
+                mock.patch.object(tabit, "_claude_live_outputs", return_value={out % "b1"}):
+            got = tabit._bg_tasks_alive(tasks, "s1")
+        # b2 ended; b3 has no file to tell by, a sub-agent none at all
+        self.assertEqual([t["id"] for t in got], ["b1", "b3", "a1"])
+        with mock.patch.object(tabit, "_claude_live_outputs") as scan:
+            self.assertEqual(tabit._bg_tasks_alive(tasks[3:], "s1"), tasks[3:])
+            scan.assert_not_called()                # nothing to look up
+
+    def test_background_with_all_ended_is_idle(self):
+        self.run_hook("Stop", {"transcript_path": self.tx, "session_id": "s1",
+                               "background_tasks": [{"id": "b1", "type": "shell",
+                                                     "status": "running"}]})
+        row = types.SimpleNamespace(argv=[], _agent_key="k1")
+        with mock.patch.object(tabit, "AGENT_HOOK_DIR", self.dir), \
+                mock.patch.object(tabit.glob, "glob", return_value=["/tmp/claude-1/x/s1/tasks/b1.output"]):
+            with mock.patch.object(tabit, "_claude_live_outputs", return_value=set()):
+                self.assertEqual(T._agent_hook_raw(row), "idle")
+                self.assertEqual(T._agent_hook_bg(row), [])
+            with mock.patch.object(tabit, "_claude_live_outputs",
+                                   return_value={"/tmp/claude-1/x/s1/tasks/b1.output"}):
+                self.assertEqual(T._agent_hook_raw(row), "background")
+            os.remove(os.path.join(self.dir, "k1.bg"))      # a claude before that hook
+            self.assertEqual(T._agent_hook_raw(row), "background")
+
     def test_task_lines(self):
         long = "x" * 100
         self.assertEqual(tabit._bg_task_lines([
