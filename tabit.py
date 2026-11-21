@@ -2204,13 +2204,22 @@ def _claude_live_outputs():
     return live
 
 
+# Claude Code 2.1.330 names its artifact comment watch
+# "live updates for artifact <url> (...)"
+_CLAUDE_ARTIFACT_WATCH = "live updates for artifact "
+
+
 def _bg_tasks_alive(tasks, session):
     """The running tasks claude listed at Stop, less the shells and
     monitors that have ended. Claude Code can keep a task it lost as
     running for good (seen on 2.1.329: a shell killed while the box ran
     out of memory); then the tab would say "background" forever. A task
-    whose output file is gone, or another kind (a sub-agent), is kept."""
-    run = [t for t in tasks if isinstance(t, dict) and t.get("status") == "running"] \
+    whose output file is gone, or another kind (a sub-agent), is kept.
+    Nor does the watch claude keeps on an artifact it published count: it
+    only waits for comments, for as long as the session lasts, and comes
+    back after a resume."""
+    run = [t for t in tasks if isinstance(t, dict) and t.get("status") == "running"
+           and not str(t.get("description") or "").startswith(_CLAUDE_ARTIFACT_WATCH)] \
         if isinstance(tasks, list) else []
     files = {}
     if session and "/" not in session:

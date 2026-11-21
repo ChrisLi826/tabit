@@ -180,6 +180,14 @@ class TestHookCommand(unittest.TestCase):
             self.assertEqual(tabit._bg_tasks_alive(tasks[3:], "s1"), tasks[3:])
             scan.assert_not_called()                # nothing to look up
 
+    def test_an_artifact_comment_watch_is_no_work(self):
+        watch = {"id": "s1", "type": "monitor", "status": "running",
+                 "description": "live updates for artifact https://claude.ai/artifact/X"
+                                " (re-armed on session resume)"}
+        work = {"id": "a1", "type": "subagent", "status": "running", "description": "x"}
+        self.assertEqual(tabit._bg_tasks_alive([watch], "s"), [])
+        self.assertEqual(tabit._bg_tasks_alive([watch, work], "s"), [work])
+
     def test_background_with_all_ended_is_idle(self):
         self.run_hook("Stop", {"transcript_path": self.tx, "session_id": "s1",
                                "background_tasks": [{"id": "b1", "type": "shell",
