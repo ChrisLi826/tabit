@@ -2074,8 +2074,9 @@ def _claude_hooks_settings(hook_dir):
     return {"hooks": {
         # not "compact": claude compacts in the middle of a turn. These two
         # start afresh: no question can be up when a prompt was typed
-        "SessionStart": ev("s=idle; ", "startup|resume|clear"),
-        "UserPromptSubmit": [{"hooks": [put("s=working; "), roster]}],
+        # either way the work a past turn left running is no longer known
+        "SessionStart": ev(f'rm -f {d}/"$k".bg 2>/dev/null; s=idle; ', "startup|resume|clear"),
+        "UserPromptSubmit": [{"hooks": [put(f'rm -f {d}/"$k".bg 2>/dev/null; s=working; '), roster]}],
         "PreToolUse": ev(ask, "*"),
         "PostToolUse": ev(done, "*"),
         "PostToolUseFailure": ev(done, "*"),
@@ -2190,9 +2191,10 @@ def _bg_task_lines(tasks):
         what = " ".join(str(t.get("description") or t.get("command") or "").split())
         if len(what) > 80:
             what = what[:79] + "…"
-        if t.get("agent_type"):
+        if what and t.get("agent_type"):
             what = f"{what} [{t['agent_type']}]"
-        out.append(f"{kind}: {what} ({t.get('id', '?')})" if what else f"{kind} ({t.get('id', '?')})")
+        tid = t.get("id") or "?"
+        out.append(f"{kind}: {what} ({tid})" if what else f"{kind} ({tid})")
     return out
 
 
@@ -9935,8 +9937,17 @@ if (data !== null) {{
             (img.get_visible() if img is not None else False)
             or (glyph.get_visible() if glyph is not None else False)
         )
+        bg = self._agent_hook_bg(row) if status == "background" else []
         if getattr(row, "agent_status", None) == status and visible_now:
+            if bg != getattr(row, "_agent_bg", []):     # other work runs now
+                row._agent_bg = bg
+                tip = self._agent_bg_tip(bg)
+                for w in (img, glyph):
+                    if w is not None and w.get_visible():
+                        w.set_tooltip_text(tip)
+                self._set_row_agent_tip(row, tip)
             return
+        row._agent_bg = bg
         prev_status = getattr(row, "agent_status", None)
         row.agent_status = status
         if status in ("working", "blocked"):
@@ -9951,14 +9962,11 @@ if (data !== null) {{
             "idle": "⏸ Idle — waiting for prompt",
             "blocked": "? Needs input / approval",
             "ready": "✓ Done — open tab to review",
-            "background": "↻ Replied — background work still running",
             "exited": "✕ Process exited",
             "done": "✕ Process exited",
             "unknown": "Status unknown",
         }
-        tip = tips.get(status, status)
-        if status == "background":
-            tip = "\n".join([tip] + ["• " + x for x in self._agent_hook_bg(row)])
+        tip = self._agent_bg_tip(bg) if status == "background" else tips.get(status, status)
 
         # play/pause: themed media icons; ?/check/cross: bold glyphs.
         # Only ONE may be visible — keep the other no_show_all so listbox
@@ -10001,11 +10009,19 @@ if (data !== null) {{
         if getattr(row, "dot", None) is not None:
             row.dot.set_no_show_all(True)
             row.dot.hide()
+        self._set_row_agent_tip(row, tip)
+        self._schedule_ai_summary_refresh()
+
+    @staticmethod
+    def _agent_bg_tip(bg):
+        return "\n".join(["↻ Replied — background work still running"] + ["• " + x for x in bg])
+
+    @staticmethod
+    def _set_row_agent_tip(row, tip):
         base = row.get_tooltip_text() or row.session_label or ""
         if " · agent:" in base:
             base = base.split(" · agent:")[0]
         row.set_tooltip_text(f"{base} · agent: {tip}")
-        self._schedule_ai_summary_refresh()
 
     def _close_session(self, row):
         if row.get_parent() is None:
