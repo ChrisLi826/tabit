@@ -14,6 +14,15 @@ never ends, such as a server, keeps the tab at `↻`, as Claude's own
 footer keeps saying `1 shell`. Claude reads these hooks when it starts, so a Claude that
 was already running keeps the old ones until it starts again.
 
+The tooltip of `↻`, and the note under the last reply in Tabit Chat, say
+what still runs, one line each: `shell: npm test (b1)`. Two things do not
+count. One is the watch Claude keeps on an artifact it published ("live
+updates for artifact …"): it only waits for comments, for as long as the
+session lasts. The other is a shell Claude still lists after it has ended
+(seen after the machine ran out of memory): a live background shell holds
+its output file open, so a listed shell whose file no process holds is
+left out. With nothing left, the tab is idle.
+
 Esc, Ctrl+C and No run no hook. For those tabit reads the session's
 transcript for the interrupt, and after an Esc or Ctrl+C pressed in the
 tab (in tabit, or on the Remote page) the turn is over once Claude's busy
