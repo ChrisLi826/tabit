@@ -4,6 +4,10 @@ Tabit Chat is Remote as a conversation. You talk to Claude on this computer
 from a phone or another computer, in chat bubbles, not in a terminal. Back to
 [Remote](remote.md).
 
+<p align="center">
+  <img src="../assets/chat-hero.png" alt="Tabit Chat on a desktop browser and on a phone" width="900">
+</p>
+
 Open `https://<this-host>.<tailnet>.ts.net/`: the address opens the chat
 (`/chat` still works). It needs the same switch as typing into tabs
 (**Settings… → Remote → Allow typing into tabs**), because a chat can run

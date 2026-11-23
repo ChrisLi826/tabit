@@ -57,6 +57,10 @@ serves a page to your own devices only. On a phone, add it to the home screen.
 **Tabit Chat** is what the address opens, once typing is allowed: talk to
 Claude on this computer in chat bubbles, not in a terminal.
 
+<p align="center">
+  <img src="assets/chat-hero.png" alt="Tabit Chat on a desktop browser and on a phone: chats with their status, a reply with code, and the background work still running" width="900">
+</p>
+
 - **Chats**: each chat is a Claude tab in a folder you pick. Replies stream
   in, and Markdown and code show properly.
 - **Questions**: Allow / Deny cards for commands and edits, choices as
