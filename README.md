@@ -55,14 +55,15 @@ Turn it on in **Settings… → Remote**. tabit sets up Tailscale for you, then
 serves a page to your own devices only. On a phone, add it to the home screen.
 
 **Tabit Chat** is what the address opens, once typing is allowed: talk to
-Claude on this computer in chat bubbles, not in a terminal.
+the AI agents on this computer (Claude, Codex or Grok) in chat bubbles, not
+in a terminal.
 
 <p align="center">
-  <img src="assets/chat-hero.png" alt="Tabit Chat on a desktop browser and on a phone: chats with their status, a reply with code, and the background work still running" width="900">
+  <img src="assets/chat-hero.png" alt="Tabit Chat on a desktop browser and on a phone: Claude, Codex and Grok chats with their status, a reply with code, and the background work still running" width="900">
 </p>
 
-- **Chats**: each chat is a Claude tab in a folder you pick. Replies stream
-  in, and Markdown and code show properly.
+- **Chats**: each chat is an AI tab (Claude, Codex or Grok) in a folder you
+  pick. Replies stream in, and Markdown and code show properly.
 - **Questions**: Allow / Deny cards for commands and edits, choices as
   buttons, and **Stop** to end a turn.
 - **Files and photos**: attach with 📎, paste or drag and drop; tap a path
@@ -124,7 +125,7 @@ to install it when you turn Remote on.
 - [Using tabit](docs/usage.md): every button, key and shortcut; restore, tmux, two panes
 - [AI agent status](docs/ai-status.md): the popup and the count row
 - [Remote](docs/remote.md): setup, the three switches, what the page can do
-- [Tabit Chat](docs/chat.md): talk to Claude on this computer in chat bubbles, from any device
+- [Tabit Chat](docs/chat.md): talk to Claude, Codex or Grok on this computer in chat bubbles, from any device
 - [Telegram](docs/telegram.md): pushes to your phone, and tasks sent back to an agent
 - [Releasing](docs/releasing.md): versions and codenames (for maintainers)
 

@@ -1,7 +1,8 @@
 # Tabit Chat
 
-Tabit Chat is Remote as a conversation. You talk to Claude on this computer
-from a phone or another computer, in chat bubbles, not in a terminal. Back to
+Tabit Chat is Remote as a conversation. You talk to the AI agents on this
+computer (Claude, Codex or Grok) from a phone or another computer, in chat
+bubbles, not in a terminal. Back to
 [Remote](remote.md).
 
 <p align="center">
@@ -140,7 +141,7 @@ reply is typed into the other tab as it is, even into a tab in Bypass.
 
 ## Chats are tabs
 
-Every Claude tab in tabit has a chat, and every new chat is a Claude tab. The
+Every AI tab in tabit (Claude, Codex or Grok) has a chat, and every new chat is an AI tab. The
 chat shows that tab's conversation, and what you type goes into the tab. A tab
 that is working takes your line too: Claude reads it at its next step, in the
 same turn, and the chat shows it.
@@ -239,7 +240,7 @@ same as a menu in a Claude tab: a tap presses that option's number in the tab.
 - **One name, one group.** The chat has the tab's name and shows the tab's
   group under it, with the group's colour. Rename the chat and the tab is
   renamed. Rename or regroup the tab and the chat follows within 10 seconds.
-- **New chat** opens a Claude tab in the group you pick, in the folder you
+- **New chat** opens an AI tab in the group you pick, in the folder you
   pick. With no group picked, the tab is in no group. When Codex or Grok is
   installed, the form asks which AI: Claude, Codex or Grok. It remembers the
   last pick. With more than one login for Claude or Codex, it also asks which
