@@ -38,8 +38,12 @@ Then every tab works the same way:
 
 - **Colour groups**: one colour per project; collapse what you are not using.
 - **Status at a glance**: an AI tab shows ▶ working, ❚❚ idle, ? needs you, ✔ ready,
-  ↻ replied with sub-agents still running.
-  A popup says when an agent finishes or wants you.
+  ↻ replied with work still running (sub-agents, shells or monitors; hover to
+  see which). A popup says when an agent finishes or wants you.
+- **Safe when memory runs low**: each agent runs in a systemd scope of its own,
+  so the system's out-of-memory killer takes one tab, not tabit with all of
+  them. Before it gets there, tabit puts the idle AI tab used longest ago to
+  sleep; open it and it goes on with the same conversation.
 - **Two side by side**: pin any tab to a right pane.
 - **Remembered**: the next start brings back the same tabs. tmux-backed agents
   are reattached in the middle of what they were doing.
@@ -63,6 +67,8 @@ serves a page to your own devices only. On a phone, add it to the home screen.
   Attach a file or a screenshot.
 - **Manage**: open, rename, move and close tabs and groups from the page.
 - **Read files** (a second switch): tap a path to read the file.
+- **Chat**: talk to a Claude tab in chat bubbles instead of a terminal. More:
+  [docs/chat.md](docs/chat.md).
 
 On a laptop browser the page looks like tabit itself. More: [docs/remote.md](docs/remote.md).
 
@@ -98,6 +104,7 @@ to install it when you turn Remote on.
 - [Using tabit](docs/usage.md): every button, key and shortcut; restore, tmux, two panes
 - [AI agent status](docs/ai-status.md): the popup and the count row
 - [Remote](docs/remote.md): setup, the three switches, what the page can do
+- [Tabit Chat](docs/chat.md): talk to Claude on this computer in chat bubbles, from any device
 - [Telegram](docs/telegram.md): pushes to your phone, and tasks sent back to an agent
 - [Releasing](docs/releasing.md): versions and codenames (for maintainers)
 
