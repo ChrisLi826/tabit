@@ -964,6 +964,24 @@ class MirrorTest(Base):
         tc.api(self.mgr, "POST", [chat2.id, "answer"], {"rid": "tab-tu9", "allow": False})
         self.assertEqual([k for _t, k, _q in self.calls], ["esc"])
 
+    def test_a_question_with_previews_takes_enter_after_its_number(self):
+        # with previews Claude shows them side by side: a number only moves
+        # to the option, Enter picks it (seen in Claude Code 2.1.330)
+        color = dict(self.QUESTIONS[0], options=[
+            {"label": "Red", "preview": "[red]"}, {"label": "Blue", "preview": "[blue]"},
+            {"label": "Green", "preview": "[green]"}])
+        chat = self.asking([color])
+        tc.api(self.mgr, "POST", [chat.id, "answer"],
+               {"rid": "tab-tu9", "allow": True, "answers": {"Pick a color": "Green"}})
+        self.assertEqual([k for _t, k, _q in self.calls], ["3", "enter"])
+        self.calls.clear()
+        self.ask_in_tab([color, self.QUESTIONS[1]])
+        chat2 = self.asking([color, self.QUESTIONS[1]])
+        tc.api(self.mgr, "POST", [chat2.id, "answer"], {
+            "rid": "tab-tu9", "allow": True,
+            "answers": {"Pick a color": "Blue", "Pick a size": "Large"}})
+        self.assertEqual([k for _t, k, _q in self.calls], ["2", "enter", "2", "1"])
+
     def test_a_wrong_answer_is_refused_and_the_card_stays(self):
         chat = self.asking()
         code, out = tc.api(self.mgr, "POST", [chat.id, "answer"], {

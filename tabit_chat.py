@@ -1521,6 +1521,8 @@ class Chat(_Log):
                 if label not in labels:
                     raise RuntimeError("pick one of the options for: %s" % q["question"])
                 keys.append(str(labels.index(label) + 1))
+                if any(o.get("preview") for o in q["options"]):
+                    keys.append("enter")     # with previews a number only moves there
             if len(qs) > 1:
                 keys.append("1")
         self._press(tab, keys)

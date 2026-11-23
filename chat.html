@@ -186,6 +186,10 @@
   .ask .opts { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
   .ask .opts button.on { background: var(--blue); color: #111; border: 0; }
   .ask .q { font-weight: 600; margin-top: 6px; white-space: pre-line; }
+  /* an option's preview is drawn with box lines: it must not wrap, so it scrolls sideways */
+  .ask .pv { margin: 0 0 8px; } .ask .pv .hint { margin: 0 0 4px; }
+  .ask .pv pre { margin: 0; overflow-x: auto; white-space: pre; font: calc(12px * var(--fs, 1))/1.35 ui-monospace, Menlo, monospace;
+                 background: #0003; border-radius: 8px; padding: 8px 10px; }
   .ask.closed { border-color: var(--line); background: none; opacity: .7; }
   .ask.closed h3 { color: var(--dim); }
   .ask.closed .opts button:not(.on) { opacity: .5; }
@@ -1076,6 +1080,17 @@ function drawOne(me, ev) {
   return null;
 }
 
+// an AskUserQuestion option's preview, with its description above it
+function pvBox(o) {
+  return `<div class="pv">${o.description ? `<div class="hint">${esc(o.description)}</div>` : ""}${o.preview ? `<pre>${esc(o.preview)}</pre>` : ""}</div>`;
+}
+
+// under a question whose options have previews: the picked one's (open: the first, as in the tab)
+function pvOf(q, open, answers) {
+  const os = q.options || [], o = open ? os[0] : os.find((x) => x.label === (answers || {})[q.question]);
+  return os.some((x) => x.preview) && o ? pvBox(o) : "";
+}
+
 // permission cards: buttons only while the question is open on the server
 function paintAsks(me) {
   document.querySelectorAll("#msgs .ask").forEach((card) => {
@@ -1091,7 +1106,7 @@ function paintAsks(me) {
     if (ev.questions) {
       // a menu read off a tab's screen brings the whole prompt: a long command is what you say yes to
       body = (ev.detail ? `<pre class="prompt">${esc(ev.detail)}</pre>` : "") + ev.questions.map((q, i) => `<div class="q">${esc(q.question)}</div><div class="opts" data-q="${i}">${(q.options || []).map((o) =>
-        `<button type="button" data-l="${esc(o.label)}" title="${esc(o.description || "")}"${!open && (ev.answers || {})[q.question] === o.label ? ' class="on"' : ""}>${esc(o.label)}</button>`).join("")}</div>`).join("");
+        `<button type="button" data-l="${esc(o.label)}" title="${esc(o.description || "")}"${!open && (ev.answers || {})[q.question] === o.label ? ' class="on"' : ""}>${esc(o.label)}</button>`).join("")}</div>${pvOf(q, open, ev.answers)}`).join("");
       body += open ? '<div class="row"><button class="primary" data-act="answerq" disabled>Answer</button><button data-act="deny">Skip</button></div>' : "";
     } else {
       body = (ev.plan ? `<div class="what">${md(ev.plan)}</div>` : `<div class="what">${esc(ev.summary || "")}</div>`) +
@@ -1137,7 +1152,11 @@ $("msgs").addEventListener("click", async (e) => {
   const opt = e.target.closest(".ask:not(.closed) .opts button");      // a closed card only shows the picks
   if (opt) {
     opt.parentElement.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b === opt));
-    const card = opt.closest(".ask");
+    const card = opt.closest(".ask"), pv = opt.parentElement.nextElementSibling;
+    if (pv && pv.classList.contains("pv") && cur) {
+      const o = cur.asks.get(card.dataset.rid).questions[opt.parentElement.dataset.q].options.find((x) => x.label === opt.dataset.l);
+      pv.outerHTML = pvBox(o);
+    }
     card.querySelector('[data-act="answerq"]').disabled = card.querySelectorAll(".opts").length !== card.querySelectorAll(".opts .on").length;
     return;
   }
