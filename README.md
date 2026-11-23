@@ -15,8 +15,9 @@ tabit is a Linux GTK terminal. Shells, serial consoles, SSH, AI agents, tmux
 sessions, notes and files all live in one tab list down the left of one
 window. Tabs sit in colour groups, and every AI tab shows its status.
 
-**Remote** puts the same list on your phone or laptop, live, over Tailscale.
-You can also type into a tab from there.
+**Remote** lets you talk to your AI tabs from your phone or laptop, as a
+chat, over Tailscale. The same tab list is there too, live, and you can type
+into any tab.
 
 Native GTK + VTE. No Electron, no pip. One install script.
 
@@ -48,18 +49,35 @@ Then every tab works the same way:
 - **Remembered**: the next start brings back the same tabs. tmux-backed agents
   are reattached in the middle of what they were doing.
 
-## Remote: your tabs on your phone
-
-<p align="center">
-  <img src="assets/remote-phone.png" alt="Remote on a phone: Needs you, groups, tabs and AI status" width="300">
-</p>
-
-<p align="center">
-  <img src="assets/remote-laptop.png" alt="Remote in a laptop browser: the tab list on the left, a blocked AI agent on the right" width="900">
-</p>
+## Remote: your AI tabs on your phone
 
 Turn it on in **Settings… → Remote**. tabit sets up Tailscale for you, then
 serves a page to your own devices only. On a phone, add it to the home screen.
+
+**Tabit Chat** is what the address opens, once typing is allowed: talk to
+Claude on this computer in chat bubbles, not in a terminal.
+
+- **Chats**: each chat is a Claude tab in a folder you pick. Replies stream
+  in, and Markdown and code show properly.
+- **Questions**: Allow / Deny cards for commands and edits, choices as
+  buttons, and **Stop** to end a turn.
+- **Files and photos**: attach with 📎, paste or drag and drop; tap a path
+  in a reply to open the file.
+- **Status**: see which chats work, need you, or still have background work
+  running; 🔔 tells you when one is done.
+
+More: [docs/chat.md](docs/chat.md).
+
+**The terminal view** (⌨ in the chat, or `/terminal`) is your tab list
+itself, live:
+
+<p align="center">
+  <img src="assets/remote-phone.png" alt="The terminal view on a phone: Needs you, groups, tabs and AI status" width="300">
+</p>
+
+<p align="center">
+  <img src="assets/remote-laptop.png" alt="The terminal view in a laptop browser: the tab list on the left, a blocked AI agent on the right" width="900">
+</p>
 
 - **See**: every group and tab, and which agents need you, updated live.
 - **Type** (a switch, off by default): read a tab's screen and type into it:
@@ -67,10 +85,8 @@ serves a page to your own devices only. On a phone, add it to the home screen.
   Attach a file or a screenshot.
 - **Manage**: open, rename, move and close tabs and groups from the page.
 - **Read files** (a second switch): tap a path to read the file.
-- **Chat**: talk to a Claude tab in chat bubbles instead of a terminal. More:
-  [docs/chat.md](docs/chat.md).
 
-On a laptop browser the page looks like tabit itself. More: [docs/remote.md](docs/remote.md).
+On a laptop browser it looks like tabit itself. More: [docs/remote.md](docs/remote.md).
 
 ## Install
 

@@ -1,6 +1,8 @@
 # Remote
 
-Remote shows your tabit on your phone or another computer: every group and
+Remote shows your tabit on your phone or another computer. Its address opens
+[Tabit Chat](chat.md), where you talk to Claude in chat bubbles. This page is
+about the **terminal view** (⌨ in the chat, or `/terminal`): every group and
 tab, with live AI status. With the extra switches on, you can also type into
 tabs, manage them and read files. Back to the [README](../README.md).
 
@@ -11,8 +13,6 @@ tabs, manage them and read files. Back to the [README](../README.md).
 <p align="center">
   <img src="../assets/remote-laptop.png" alt="Remote in a laptop browser: tabs on the left, the open tab on the right" width="900">
 </p>
-
-Want it as a chat instead of a terminal? See [Tabit Chat](chat.md).
 
 ## How it reaches you
 
