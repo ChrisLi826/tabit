@@ -406,7 +406,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.3.5.1"
+APP_VERSION = "v2.3.5.2"
 # Taiwan main dish of the major version + a fresh snack or drink, picked at
 # release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
 APP_CODENAME = "Sesame Oil Chicken + Iron Egg"
@@ -2178,6 +2178,63 @@ def _ensure_codex_notify():
         os.chmod(CODEX_NOTIFY_FILE, 0o755)
     except OSError as e:
         print(f"[tabit] cannot write {CODEX_NOTIFY_FILE}: {e}", file=sys.stderr)
+
+
+def _claude_live_outputs():
+    """The task output files of claude (/tmp/claude-<uid>/.../tasks/<id>.output)
+    that a process still holds open: a background shell keeps its own open
+    as stdout and stderr until it ends."""
+    pre = f"/tmp/claude-{os.getuid()}/"
+    live = set()
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        d = f"/proc/{pid}/fd"
+        try:
+            fds = os.listdir(d)
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                t = os.readlink(f"{d}/{fd}")
+            except OSError:
+                continue
+            if t.startswith(pre) and t.endswith(".output"):
+                live.add(t)
+    return live
+
+
+# Claude Code 2.1.330 names its artifact comment watch
+# "live updates for artifact <url> (...)"
+_CLAUDE_ARTIFACT_WATCH = "live updates for artifact "
+
+
+def _bg_tasks_alive(tasks, session):
+    """The running tasks claude listed at Stop, less the shells that
+    have ended. Claude Code can keep a task it lost as
+    running for good (seen on 2.1.329: a shell killed while the box ran
+    out of memory); then the tab would say "background" forever. A task
+    whose output file is gone, or another kind, is kept: a monitor writes
+    to claude through a socket and claude writes its file (2.1.330), and a
+    sub-agent runs inside claude.
+    Nor does the watch claude keeps on an artifact it published count: it
+    only waits for comments, for as long as the session lasts, and comes
+    back after a resume."""
+    run = [t for t in tasks if isinstance(t, dict) and t.get("status") == "running"
+           and not str(t.get("description") or "").startswith(_CLAUDE_ARTIFACT_WATCH)] \
+        if isinstance(tasks, list) else []
+    files = {}
+    if session and "/" not in session:
+        for t in run:
+            tid = str(t.get("id") or "")
+            if t.get("type") == "shell" and tid and "/" not in tid:
+                hit = glob.glob(f"/tmp/claude-{os.getuid()}/*/{session}/tasks/{tid}.output")
+                if hit:
+                    files[id(t)] = hit[0]
+    if not files:
+        return run
+    live = _claude_live_outputs()
+    return [t for t in run if id(t) not in files or files[id(t)] in live]
 
 
 def _bg_task_lines(tasks):
@@ -7580,17 +7637,24 @@ if (data !== null) {{
     _AGENT_INTERRUPTED = b'"text":"[Request interrupted by user'
 
     @classmethod
-    def _agent_hook_bg(cls, row):
-        """What claude said still runs after its turn ("shell: …"), from
-        the <key>.bg its Stop hook keeps."""
+    def _agent_hook_bg_tasks(cls, row):
+        """The tasks claude said still run after its turn, from the
+        <key>.bg its Stop hook keeps, less those that have ended; None
+        when there is no such file (a claude started before that hook)."""
         key = cls._agent_hook_key(row)
         if not key:
-            return []
+            return None
         try:
             with open(os.path.join(AGENT_HOOK_DIR, key + ".bg")) as f:
-                return _bg_task_lines(json.load(f).get("background_tasks"))
+                p = json.load(f)
+            return _bg_tasks_alive(p.get("background_tasks"), p.get("session_id"))
         except (OSError, ValueError, AttributeError):
-            return []
+            return None
+
+    @classmethod
+    def _agent_hook_bg(cls, row):
+        """What still runs after claude's turn, one line each ("shell: …")."""
+        return _bg_task_lines(cls._agent_hook_bg_tasks(row))
 
     @classmethod
     def _agent_hook_raw(cls, row):
@@ -7615,6 +7679,8 @@ if (data !== null) {{
         # the session the hooks speak for: claude changes it on /clear,
         # /resume and a plan's "clear context"
         row._agent_hook_tx = tx
+        if state == "background" and cls._agent_hook_bg_tasks(row) == []:
+            return "idle"       # all it left running has ended
         if state == "idle" or not tx:
             return state
         # Esc or No since this event: read only what the transcript gained
