@@ -31,7 +31,7 @@ Native GTK + VTE. No Electron, no pip. One install script.
 |---|---|
 | A board on a USB serial port | **+ Serial**: `screen`, `kermit` or `picocom`; or `ssh` / `telnet` to a console server |
 | A shell, here or over SSH | **+ Terminal**, or **+ Command** for any command line (`ssh root@192.168.1.1`) |
-| An AI agent: Claude, Codex, Grok and more | **+ AI**: in a folder you pick; it can run inside tmux, so it keeps working while tabit is closed |
+| An AI agent: Claude, Codex, Grok and more | **+ AI**: in a folder you pick, under the account you pick; it can run inside tmux, so it keeps working while tabit is closed |
 | A long-running tmux session | **+ tmux**: attach to one or make one |
 | A note, a Markdown file, an image or a PDF | **+ Open**: an editor with a Markdown preview; images and PDFs open rendered |
 
@@ -41,6 +41,9 @@ Then every tab works the same way:
 - **Status at a glance**: an AI tab shows ▶ working, ❚❚ idle, ? needs you, ✔ ready,
   ↻ replied with work still running (sub-agents, shells or monitors; hover to
   see which). A popup says when an agent finishes or wants you.
+- **Account, model and effort per AI tab**: each Claude or Codex tab has its
+  own login, model and thinking effort, and several logins stay signed in at
+  once. Switch any of them and the tab goes on with the same conversation.
 - **Safe when memory runs low**: each agent runs in a systemd scope of its own,
   so the system's out-of-memory killer takes one tab, not tabit with all of
   them. Before it gets there, tabit puts the idle AI tab used longest ago to
@@ -64,6 +67,9 @@ in a terminal.
 
 - **Chats**: each chat is an AI tab (Claude, Codex or Grok) in a folder you
   pick. Replies stream in, and Markdown and code show properly.
+- **Account, model and effort**: switch a Claude or Codex chat's login,
+  model or thinking effort from its ⋯ settings; it goes on with the same
+  conversation.
 - **Questions**: Allow / Deny cards for commands and edits, choices as
   buttons, and **Stop** to end a turn.
 - **Files and photos**: attach with 📎, paste or drag and drop; tap a path
