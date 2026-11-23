@@ -1,7 +1,7 @@
 # Tabit Chat
 
 Tabit Chat is Remote as a conversation. You talk to the AI agents on this
-computer (Claude, Codex or Grok) from a phone or another computer, in chat
+computer (Claude, Codex, Grok or Antigravity) from a phone or another computer, in chat
 bubbles, not in a terminal. Back to
 [Remote](remote.md).
 
@@ -114,6 +114,12 @@ also works with the search box, and it is gone after a page reload.
 - **Grok** tells its usage to no file and no status line. While a Grok tab
   is open, tabit asks a Grok with no screen for it, as Grok's `/usage` does:
   one window, the share of the login's credits used this week or month.
+- **Antigravity** answers `agy -p /usage` without a model call and without
+  keeping a conversation; tabit asks it every 10 minutes at most while an
+  Antigravity chat is open. It has a 5h and a 7d limit for each group of
+  models (Gemini, Claude/GPT, and some models of their own). The row shows
+  the group of the model its chats use (Gemini's when they use both), as
+  `Antigravity · Gemini`; the others are in the row's tooltip.
 - The last reading of each login is kept in
   `~/.local/share/tabit/chats/usage.json`, so it shows again after a restart.
 
@@ -141,7 +147,7 @@ reply is typed into the other tab as it is, even into a tab in Bypass.
 
 ## Chats are tabs
 
-Every AI tab in tabit (Claude, Codex or Grok) has a chat, and every new chat is an AI tab. The
+Every AI tab in tabit (Claude, Codex, Grok or Antigravity) has a chat, and every new chat is an AI tab. The
 chat shows that tab's conversation, and what you type goes into the tab. A tab
 that is working takes your line too: Claude reads it at its next step, in the
 same turn, and the chat shows it.
@@ -241,14 +247,18 @@ same as a menu in a Claude tab: a tap presses that option's number in the tab.
   group under it, with the group's colour. Rename the chat and the tab is
   renamed. Rename or regroup the tab and the chat follows within 10 seconds.
 - **New chat** opens an AI tab in the group you pick, in the folder you
-  pick. With no group picked, the tab is in no group. When Codex or Grok is
-  installed, the form asks which AI: Claude, Codex or Grok. It remembers the
+  pick. With no group picked, the tab is in no group. When Codex, Grok or
+  Antigravity is installed, the form asks which AI. It remembers the
   last pick. With more than one login for Claude or Codex, it also asks which
-  account (a Grok tab uses Grok's own login). **Conversation** is **New
+  account (a Grok or Antigravity tab uses its own login). **Model** and
+  **Thinking effort** list what that AI offers (for Codex and Antigravity,
+  only the efforts the model takes); the last pick for each AI comes first,
+  and "default" leaves it to the program. A Grok tab's model is set in the
+  tab. **Conversation** is **New
   conversation**, or one of that AI's past conversations in the folder,
   newest first, with how long ago and its first words (or its name, for a
   Claude one). The tab goes on with the one picked (`claude --resume <id>`,
-  `codex resume <id>`, `grok --resume <id>`). A conversation another tab
+  `codex resume <id>`, `grok --resume <id>`, `agy --conversation <id>`). A conversation another tab
   has open is not listed, and Start refuses one opened since. The list is
   read again when the AI or the folder changes. Claude's and Codex's
   conversations are shared by all their logins, so the account picked does
@@ -275,6 +285,11 @@ same as a menu in a Claude tab: a tap presses that option's number in the tab.
   the program's own setting. Not while Claude works, asks something
   or still runs agents. Claude's own settings are not touched. The tab shows
   the model that answered last, read from its transcript.
+  An Antigravity tab has Model and Thinking effort, from `agy models`
+  (asked once an hour): agy names a model and its effort as one id
+  (`gemini-4-neon-high`), so the chat lists each model once with the efforts
+  it takes, and restarts the tab with `--conversation <id> --model
+  gemini-4-neon --effort high`.
 - A **Grok** tab has a chat too, read from its session's `updates.jsonl`:
   what you typed, what Grok said, and its tools with their results. Its
   thinking, its own notes and its sub-agents' work are left out. Its login,
@@ -284,7 +299,16 @@ same as a menu in a Claude tab: a tap presses that option's number in the tab.
   (`grok agent stdio`, as its `/usage` asks) every 10 minutes at most. No
   prompt is sent, so asking costs nothing. A line you type at the desk while Grok works is
   not marked as waiting, as with Codex.
-- Tabs of other tools (agy) have no chat.
+- An **Antigravity** (`agy`) tab has a chat too, read from its
+  conversation's `transcript.jsonl` (under
+  `~/.gemini/antigravity-cli/brain/<id>/`): what you typed, what it said,
+  and its tools with their results. Its thinking and its own notes are left
+  out. tabit finds the conversation the tab's agy holds open (it looks every
+  5 seconds). **Stop** presses Esc. Its permission menu
+  (`1. Yes, run command` … `4. No, cancel`) shows as a card like Claude's.
+  Its status comes from its screen: agy has hooks, but in one file it
+  shares with other apps, so tabit leaves it alone.
+- Tabs of other tools have no chat.
 - When the tab starts a new conversation, the chat says so and goes on with
   the new one.
 - **Menus on the tab's screen.** A tab that waits on a menu (the trust
@@ -319,8 +343,8 @@ under the sending tab's picture and name, not as one you typed.
 - Every Claude tab is told, with each prompt, its own name and the other
   tabs it can call, through tabit's hooks. A tab that is alone is told
   nothing.
-- A Codex or Grok tab can be called too, and a line of its reply that starts
-  with `@name:` is passed on the same way. Codex and Grok are not told the
+- A Codex, Grok or Antigravity tab can be called too, and a line of its reply that starts
+  with `@name:` is passed on the same way. They are not told the
   names (tabit has no such hook for them), so they call only when a message
   asks them to.
 - Only replies written from now on count: what a tab said before is not sent.

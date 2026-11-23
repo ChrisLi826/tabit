@@ -60,6 +60,13 @@ Every other tab is read from its screen: codex and other CLIs, a Claude
 tab opened before this release, and a Grok that was already running.
 Open a new Claude tab, or start that Grok again, to give it the hooks.
 
+Each CLI has its own screen rules (`agent-detection/*.toml`). Which one a
+tab gets is told by the program it runs, not by a name somewhere else in
+its command, so an Antigravity tab in a folder named `claude-…` is still
+read as Antigravity. An **Antigravity** (`agy`) tab uses its own rules
+only: while it works its footer reads "esc to cancel", which the rules
+shared with Claude take for a question.
+
 ## The popup
 
 When an AI tab stops working — it finished, it replied while its
