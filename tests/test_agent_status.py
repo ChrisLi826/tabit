@@ -225,5 +225,29 @@ class TestBlockedBeatsIdlePrompt(unittest.TestCase):
         self.assertEqual(raw, "blocked")
 
 
+
+class OwnMenuAgentTest(unittest.TestCase):
+    """agy 1.5 reads "esc to cancel" under its box while it works. That is
+    in the shared blocked chrome (Claude's dialogs), so an agy tab looked
+    like it asked a question all through its turn."""
+
+    WORK = "\n".join(["> do it", "⣽  Running command...", "─" * 40, ">", "─" * 40,
+                       "esc to cancel                         auto · Gemini 3.8 Flash · high"])
+
+    def raw(self, chrome, state="working"):
+        ev = as_.gather_evidence(self.WORK, manifest_state=state, chrome_blocked=chrome)
+        return as_.detect_raw(ev, as_.Episode(), 0.0, text=self.WORK, chrome_blocked=chrome)
+
+    def test_its_working_footer_is_no_question(self):
+        self.assertEqual(self.raw(True), "blocked")          # the shared chrome is fooled
+        self.assertEqual(self.raw(False), "working")
+
+    def test_its_manifest_still_says_when_it_asks(self):
+        self.assertEqual(self.raw(False, state="blocked"), "blocked")
+
+    def test_the_fallback_does_not_read_the_chrome_either(self):
+        self.assertEqual(as_.heuristic_fallback(self.WORK, chrome_blocked=True), "blocked")
+        self.assertNotEqual(as_.heuristic_fallback(self.WORK, chrome_blocked=False), "blocked")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

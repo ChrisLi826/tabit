@@ -308,6 +308,24 @@ class TestSwitchAccount(AccountDirs):
                 self.assertIn(why, self.app._ai_switch_account(row, name) or "")
             kill.assert_not_called()
 
+    def test_an_agy_tab_gets_another_model_on_the_same_conversation(self):
+        conv = "cccccccc-1111-2222-3333-444444444444"
+        stored = T._ai_launch_pair("agy", self.tmp, [], tmux=True, resume_id=A)[1]
+        r = types.SimpleNamespace(kind="term", argv=stored, agent_status="idle", dead=False,
+                                  pid=4321, title_text="agy", _live_tmux=T._ai_tmux_unwrap(stored)[1])
+        self.app._tg_row_id = lambda row: "t9"
+        # the conversation its agy holds open now, not the one it was started on
+        self.app._agy_tab_transcript = lambda *a: tabit.AGY_TRANSCRIPT % conv
+        self.assertIn("login is set in the tab", self.app._ai_switch_account(r, "work") or "")
+        with mock.patch.object(tabit, "_tmux_kill_session"):
+            self.assertIsNone(self.app._ai_switch_account(r, "", "gemini-4-neon", "low"))
+        launch = T._ai_tmux_unwrap(r._respawn[0])[0][2]
+        self.assertIn("--conversation %s --model gemini-4-neon --effort low" % conv, launch)
+        self.assertEqual((T._ai_model_of(r.argv), T._ai_effort_of(r.argv)), ("gemini-4-neon", "low"))
+        r._respawn = None
+        self.app._agy_tab_transcript = lambda *a: ""             # it has not spoken yet
+        self.assertIn("send one message", self.app._ai_switch_account(r, "", "gemini-4-argon", "") or "")
+
     def test_the_old_one_ending_starts_the_new_one(self):
         r = self.row()
         with mock.patch.object(tabit, "_tmux_kill_session"):

@@ -964,6 +964,24 @@ class MirrorTest(Base):
         tc.api(self.mgr, "POST", [chat2.id, "answer"], {"rid": "tab-tu9", "allow": False})
         self.assertEqual([k for _t, k, _q in self.calls], ["esc"])
 
+    def test_a_question_with_previews_takes_enter_after_its_number(self):
+        # with previews Claude shows them side by side: a number only moves
+        # to the option, Enter picks it (seen in Claude Code 2.1.330)
+        color = dict(self.QUESTIONS[0], options=[
+            {"label": "Red", "preview": "[red]"}, {"label": "Blue", "preview": "[blue]"},
+            {"label": "Green", "preview": "[green]"}])
+        chat = self.asking([color])
+        tc.api(self.mgr, "POST", [chat.id, "answer"],
+               {"rid": "tab-tu9", "allow": True, "answers": {"Pick a color": "Green"}})
+        self.assertEqual([k for _t, k, _q in self.calls], ["3", "enter"])
+        self.calls.clear()
+        self.ask_in_tab([color, self.QUESTIONS[1]])
+        chat2 = self.asking([color, self.QUESTIONS[1]])
+        tc.api(self.mgr, "POST", [chat2.id, "answer"], {
+            "rid": "tab-tu9", "allow": True,
+            "answers": {"Pick a color": "Blue", "Pick a size": "Large"}})
+        self.assertEqual([k for _t, k, _q in self.calls], ["2", "enter", "2", "1"])
+
     def test_a_wrong_answer_is_refused_and_the_card_stays(self):
         chat = self.asking()
         code, out = tc.api(self.mgr, "POST", [chat.id, "answer"], {
@@ -1595,6 +1613,311 @@ class GrokMirrorTest(Base):
         self.assertIn(("[from @fox]: @beta: can you look?", None, True), self.calls)
 
 
+AGY_PERMISSION_SCREEN = [
+    "> Run exactly this shell command: `date +%m`",
+    "● Ran (date +%m) (ctrl+o to expand)",
+    "Command",
+    "────────────────────────────────────────────────────────────────────────────",
+    "Requesting permission for:",
+    "   date +%m",
+    "Run this command?",
+    "> 1. Yes, run command",
+    "  2. Yes, and always allow in this conversation for commands that start with",
+    "'date'",
+    "  3. Yes, and always allow for commands that start with 'date' (Persist to",
+    "settings.json)",
+    "  4. No, cancel",
+    "  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command",
+    "esc to cancel                                        Gemini 3.8 Flash · high",
+]
+
+
+class AgyMirrorTest(Base):
+    """A chat that shows an Antigravity (agy) tab: its bubbles come from the
+    conversation's transcript.jsonl."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, tc, "MIRROR_EVERY", tc.MIRROR_EVERY)
+        self.addCleanup(setattr, tc, "ANSWER_STEP", tc.ANSWER_STEP)
+        tc.MIRROR_EVERY = 3600       # the tests look by hand
+        tc.ANSWER_STEP = 0
+        self.path = os.path.join(self.dir, "transcript.jsonl")
+        shutil.copy(os.path.join(os.path.dirname(__file__), "fixtures", "chat",
+                                 "agy_transcript.jsonl"), self.path)
+        self.status, self.screen, self.calls = "idle", [], []
+
+        def hook(tab, text=None, key=None, queue=False, screen=False):
+            if text is None and key is None:
+                info = {"title": "Owl", "status": self.status, "transcript": self.path, "cli": "agy"}
+                if self.status == "blocked" or screen:
+                    info["screen"] = self.screen
+                return info
+            self.calls.append((text, key, queue))
+            return 200, {"ok": True}
+        self.mgr.tab_hook = hook
+        self.mgr.tabs_hook = lambda: [{"id": "t1", "title": "Owl", "cli": "agy"}]
+
+    mirror = MirrorTest.mirror
+    texts = MirrorTest.texts
+
+    def test_the_converter_keeps_what_was_said(self):
+        with open(self.path) as f:
+            got = [e for line in f for e in tc.transcript_events(json.loads(line), "agy")]
+        # its thinking, the notes it adds to a prompt and its system notes are not shown
+        self.assertEqual([(e["t"], e.get("text") or e.get("name")) for e in got],
+                         [("user", "fix the bug"), ("text", "Looking now."),
+                          ("tool", "Bash"), ("tool", "Read"),
+                          ("result", "Command exited with code 0.\n\nCommand output:\na.txt"),
+                          ("result", "file does not exist"),
+                          ("tool", "Edit"), ("result", "Edited file."),
+                          ("text", "Fixed."), ("user", "and this one"),
+                          ("notice", "Interrupted.")])
+        tools = [e for e in got if e["t"] == "tool"]
+        results = [e for e in got if e["t"] == "result"]
+        # a tool's result is the step right after it, in order
+        self.assertEqual([e["id"] for e in tools], [e["id"] for e in results])
+        self.assertEqual([e["summary"] for e in tools], ["ls", "/home/u/proj/b.txt", "/home/u/proj/a.txt"])
+        self.assertEqual([e["error"] for e in results], [False, True, False])
+        self.assertEqual(tools[0]["detail"], "ls")
+        self.assertEqual(json.loads(tools[2]["detail"])["file_path"], "/home/u/proj/a.txt")
+        self.assertEqual(got[0]["ts"], 1795417736)          # created_at, in UTC
+
+    def test_other_errors_are_a_note(self):
+        raw = {"type": "ERROR_MESSAGE", "error": "API error (attempt 1): UNAVAILABLE (code 503)\nmore"}
+        self.assertEqual(tc.agy_events(raw), [
+            {"t": "notice", "text": "Antigravity: API error (attempt 1): UNAVAILABLE (code 503)"}])
+
+    def test_the_model_comes_from_the_last_answer(self):
+        self.assertEqual(tc.transcript_model(self.path), "gemini-4-neon")
+
+    def test_an_agy_tab_gets_a_chat_that_shows_it(self):
+        self.mgr.sync_tabs()
+        chat = next(c for c in self.mgr.chats.values() if c.mirrored)
+        self.assertEqual(chat.meta["tab"]["cli"], "agy")
+        chat.mirror_poll()
+        self.assertEqual(self.texts(chat)[:2], [("user", "fix the bug"), ("text", "Looking now.")])
+        self.assertEqual(chat.meta["tab"].get("model"), "gemini-4-neon")
+        with open(self.path, "a") as f:                 # it goes on: only the new step comes
+            f.write(json.dumps({"step_index": 11, "type": "PLANNER_RESPONSE", "content": "Done.",
+                                "created_at": "2026-11-23T07:10:00Z"}) + "\n")
+        chat.mirror_poll()
+        self.assertEqual(self.texts(chat)[-1], ("text", "Done."))
+        self.assertEqual(sum(1 for t in self.texts(chat) if t == ("text", "Fixed.")), 1)
+
+    def test_a_message_is_typed_into_the_tab(self):
+        chat = self.mirror()
+        self.assertEqual(tc.api(self.mgr, "POST", [chat.id, "send"], {"text": "go on"})[0], 200)
+        self.assertEqual(self.calls, [("go on", None, True)])
+
+    def test_stop_presses_esc_while_it_works(self):
+        chat = self.mirror()
+        self.assertFalse(chat.interrupt())              # idle: nothing to stop
+        self.status = "working"
+        self.assertTrue(chat.interrupt())
+        self.assertEqual(self.calls, [(None, "esc", False)])
+
+    def test_its_permission_menu_is_read(self):
+        menu = tc.screen_prompt(AGY_PERMISSION_SCREEN, "agy")
+        self.assertEqual(menu["question"], "Run this command?")
+        self.assertEqual(menu["numbers"], [1, 2, 3, 4])
+        self.assertEqual(menu["options"], [
+            "Yes, run command",
+            "Yes, and always allow in this conversation for commands that start with 'date'",
+            "Yes, and always allow for commands that start with 'date' (Persist to settings.json)",
+            "No, cancel"])
+        self.assertEqual(menu["selected"], 0)
+        self.assertIn("date +%m", menu["detail"])
+        self.assertTrue(menu["detail"].startswith("Requesting permission for:"), menu["detail"])
+        # another row picked: the arrows moved it
+        moved = [r.replace("> 1.", "  1.") if r.startswith("> 1.") else
+                 "> " + r.lstrip() if r.lstrip().startswith("3.") else r for r in AGY_PERMISSION_SCREEN]
+        self.assertEqual(tc.screen_prompt(moved, "agy")["selected"], 2)
+        # Claude's reading does not take it, nor agy's the others
+        self.assertIsNone(tc.screen_prompt(AGY_PERMISSION_SCREEN))
+
+    def test_its_box_and_its_lists_are_no_menu(self):
+        box = ["────", "> 1. fix the build", "────", "? for shortcuts      Gemini 3.8 Flash · high"]
+        self.assertIsNone(tc.screen_prompt(box, "agy"))
+        said = ["  Steps:", "> 1. one", "  2. two", "", "> "]
+        self.assertIsNone(tc.screen_prompt(said, "agy"))
+
+    def test_its_permission_menu_is_a_card_answered_with_a_number(self):
+        chat = self.mirror()
+        self.status, self.screen = "blocked", AGY_PERMISSION_SCREEN
+        chat.mirror_poll()
+        ev = next(iter(chat.view()["pending"]))
+        self.assertEqual(ev["questions"][0]["question"], "Run this command?")
+        self.assertTrue(chat.answer(ev["rid"], True, answers={"Run this command?": "Yes, run command"}))
+        self.assertEqual(self.calls, [(None, "1", False)])
+        self.calls.clear()
+        self.status = "working"
+        chat.mirror_poll()
+        self.status = "blocked"
+        chat.mirror_poll()
+        ev = next(iter(chat.view()["pending"]))
+        chat.answer(ev["rid"], False)
+        self.assertEqual(self.calls, [(None, "4", False)])     # its No
+
+
+AGY_MODELS_OUT = """gemini-4-neon-high\tGemini 4 Neon (High)
+gemini-4-neon-low\tGemini 4 Neon (Low)
+gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)
+gemini-pro-orchestrator-neon\tOrchestrator (Neon)
+gemini-3.8-flash-high\tGemini 3.8 Flash (High)
+gpt-oss-120b-medium\tGPT-OSS 120B (Medium)
+Fetching available models...
+"""
+
+
+class AgyModelTest(Base):
+    """An agy tab's model and effort: what agy offers, and a switch from the chat."""
+
+    def test_its_models_are_families_with_their_efforts(self):
+        rows = tc.agy_model_rows(AGY_MODELS_OUT)
+        self.assertEqual(rows[0], {"name": "", "label": "default", "efforts": [""]})
+        self.assertEqual(rows[1:], [
+            {"name": "gemini-4-neon", "label": "Gemini 4 Neon", "efforts": ["", "low", "high", "xhigh"]},
+            {"name": "gemini-pro-orchestrator-neon", "label": "Orchestrator (Neon)", "efforts": [""]},
+            {"name": "gemini-3.8-flash", "label": "Gemini 3.8 Flash", "efforts": ["", "high"]},
+            {"name": "gpt-oss-120b", "label": "GPT-OSS 120B", "efforts": ["", "medium"]}])
+        self.assertEqual(tc.agy_split("gemini-4-neon-xhigh"), ("gemini-4-neon", "xhigh"))
+        self.assertEqual(tc.agy_split("gemini-pro-orchestrator-neon"), ("gemini-pro-orchestrator-neon", ""))
+
+    def test_its_quota_is_the_share_used(self):
+        got = tc.agy_limits("Gemini Models\tWeekly Limit Remaining\t98%\t2026-11-30T07:08:57Z\n"
+                            "Gemini Models\tFive Hour Limit Remaining\t60%\t2026-11-23T12:08:57Z\n"
+                            "Claude and GPT models\tWeekly Limit Remaining\t100%\t2026-11-30T07:47:02Z\n"
+                            "Gemini 4 Argon\tGemini 4 Argon Weekly Limit\t100%\tsoon\n"
+                            "Remaining credits\t0\n")
+        self.assertEqual([(w["pool"], w["name"], w["pct"]) for w in got],
+                         [("Gemini", "7d", 2), ("Gemini", "5h", 40), ("Claude/GPT", "7d", 0),
+                          ("Gemini 4 Argon", "7d", 0)])
+        self.assertEqual(got[0]["resets"], 1796022537)
+        self.assertIsNone(got[3]["resets"])
+
+    def test_its_row_shows_the_pool_its_chats_use(self):
+        ws = [{"name": "7d", "pool": "Gemini", "pct": 2}, {"name": "5h", "pool": "Gemini", "pct": 3},
+              {"name": "5h", "pool": "Claude/GPT", "pct": 9}, {"name": "7d", "pool": "Gemini 4 Argon", "pct": 0}]
+        shown, more = tc.agy_shown(ws, ["gemini-4-neon-high", ""])
+        self.assertEqual([(w["name"], w["pct"]) for w in shown], [("5h", 3), ("7d", 2)])   # 5h first
+        self.assertEqual([w["name"] for w in more], ["Claude/GPT 5h", "Gemini 4 Argon 7d"])
+        self.assertEqual([w["pool"] for w in tc.agy_shown(ws, ["claude-opus-5-5-high"])[0]], ["Claude/GPT"])
+        self.assertEqual(tc.agy_shown(ws, ["claude-opus-5-5", "gemini-4-neon"])[0], [ws[1], ws[0]])   # both: Gemini's
+        self.assertEqual(tc.agy_shown(ws, [])[0], [ws[1], ws[0]])
+        self.assertEqual(tc.agy_shown(ws[2:3], [])[0], ws[2:3])     # no Gemini row: all of them
+
+    def test_the_usage_row_is_one_pool_with_the_rest_in_more(self):
+        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False, screen=False: {
+            "title": "Owl", "status": "idle", "transcript": "", "cli": "agy"}
+        self.mgr.create({"tab": {"id": "t1", "title": "Owl"}})
+        self.mgr.note_usage("agy", "", [{"name": "5h", "pool": "Gemini", "pct": 3, "resets": 0},
+                                        {"name": "5h", "pool": "Claude/GPT", "pct": 0, "resets": 0}], 1)
+        u = next(u for u in self.mgr.usage() if u["cli"] == "agy")
+        self.assertEqual((u["label"], [w["pct"] for w in u["windows"]]), ("Gemini", [3]))
+        self.assertEqual(u["more"][0]["name"], "Claude/GPT 5h")
+
+    def test_a_reading_from_before_pools_is_asked_again(self):
+        self.mgr.agy_usage = lambda: [{"name": "5h", "pool": "Gemini", "pct": 4, "resets": 0}]
+        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False, screen=False: {
+            "title": "Owl", "status": "idle", "transcript": "", "cli": "agy"}
+        self.mgr.create({"tab": {"id": "t1", "title": "Owl"}})
+        self.mgr.note_usage("agy", "", [{"name": "Gemini 5h", "pct": 2, "resets": 0}], time.time())
+        self.mgr.usage()
+        self.assertTrue(wait(lambda: (self.mgr._usage.get("agy/") or {}).get("windows", [{}])[0].get("pct") == 4))
+        with self.mgr.lock:
+            pass
+
+    def test_an_agy_chat_shows_its_quota(self):
+        asked = []
+        self.mgr.agy_usage = lambda: asked.append(1) or [{"name": "Gemini 5h", "pct": 3, "resets": 0}]
+        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False, screen=False: {
+            "title": "Owl", "status": "idle", "transcript": "", "cli": "agy"}
+        self.mgr.create({"tab": {"id": "t1", "title": "Owl"}})
+        self.mgr.usage()
+        self.assertTrue(wait(lambda: self.mgr._usage.get("agy/")))
+        with self.mgr.lock:          # its file is written under the lock: done when it is free
+            pass
+        self.mgr.usage()                     # fresh: not asked again
+        got = [u for u in self.mgr.usage() if u["cli"] == "agy"]
+        self.assertEqual(got[0]["windows"], [{"name": "Gemini 5h", "pct": 3, "resets": 0}])
+        self.assertEqual(len(asked), 1)
+
+    def test_the_page_gets_its_models_when_it_is_installed(self):
+        self.mgr.agy_models = lambda block=False: tc.agy_model_rows(AGY_MODELS_OUT)
+        with mock.patch.object(tc.shutil, "which", lambda c: "/bin/" + c):
+            got = tc.api(self.mgr, "GET", [], None)[1]
+        self.assertIn("agy", got["clis"])
+        self.assertEqual(got["agy_models"][1]["name"], "gemini-4-neon")
+        with mock.patch.object(tc.shutil, "which", lambda c: None):
+            self.assertNotIn("agy_models", tc.api(self.mgr, "GET", [], None)[1])
+
+    def switch_chat(self, model="gemini-3.8-flash-high", effort=""):
+        self.ops = []
+        self.mgr.tab_ops = lambda op, target=None, body=None: self.ops.append((op, target, body)) or (200, {"ok": True})
+        self.mgr.tab_hook = lambda tab, text=None, key=None, queue=False, screen=False: {
+            "title": "Owl", "status": "idle", "transcript": "", "cli": "agy"}
+        code, out = self.mgr.create({"tab": {"id": "t1", "title": "Owl"}})
+        chat = self.mgr.get(out["chat"]["id"])
+        chat.meta["tab"] = dict(chat.meta["tab"], model=model, effort=effort)
+        return chat
+
+    def test_the_model_and_effort_go_to_tabit_together(self):
+        chat = self.switch_chat()
+        with mock.patch.object(self.mgr, "agy_models", lambda block=False: tc.agy_model_rows(AGY_MODELS_OUT)):
+            # the same as now: nothing to do
+            self.assertEqual(tc.api(self.mgr, "POST", [chat.id, "edit"],
+                                    {"model": "gemini-3.8-flash", "effort": "high"})[0], 200)
+            self.assertEqual(self.ops, [])
+            code, out = tc.api(self.mgr, "POST", [chat.id, "edit"], {"model": "gemini-4-neon", "effort": "low"})
+            self.assertEqual(code, 200, out)
+            self.assertEqual(self.ops, [("model", "t1", {"model": "gemini-4-neon", "effort": "low"})])
+            self.assertEqual((chat.meta["tab"]["model"], chat.meta["tab"]["effort"]), ("gemini-4-neon", "low"))
+            self.ops.clear()
+            # only the effort: its model goes with it
+            tc.api(self.mgr, "POST", [chat.id, "edit"], {"effort": "xhigh"})
+            self.assertEqual(self.ops, [("model", "t1", {"model": "gemini-4-neon", "effort": "xhigh"})])
+
+    def test_what_agy_would_refuse_is_refused_here(self):
+        chat = self.switch_chat()
+        with mock.patch.object(self.mgr, "agy_models", lambda block=False: tc.agy_model_rows(AGY_MODELS_OUT)):
+            for body in ({"model": "gemini-9"}, {"model": "gemini-3.8-flash", "effort": "xhigh"},
+                         {"account": "Work"}):
+                self.assertEqual(tc.api(self.mgr, "POST", [chat.id, "edit"], body)[0], 400, body)
+        self.assertEqual(self.ops, [])
+
+
+class AgySessionListTest(unittest.TestCase):
+    """The new chat form lists a folder's past Antigravity conversations."""
+
+    def test_a_folders_conversations_newest_first(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as root:
+            con = sqlite3.connect(os.path.join(root, "conversation_summaries.db"))
+            con.execute("CREATE TABLE conversation_summaries (conversation_id text, title text,"
+                        " preview text, workspace_uris text, last_modified_time datetime,"
+                        " parent_conversation_id text)")
+            a, b, c, d = ("%s0000000-0000-0000-0000-000000000000" % x for x in "abcd")
+            con.executemany("INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?)", [
+                (a, "Old one", "", '["file:///home/u/my%20proj"]', "2026-11-01 10:00:00.5+00:00", ""),
+                (b, "", "fix the  build", '["file:///home/u/my proj"]', "2026-11-02 10:00:00+00:00", ""),
+                (c, "Its helper", "", '["file:///home/u/my proj"]', "2026-11-03 10:00:00+00:00", a),
+                (d, "Elsewhere", "", '["file:///home/u/other"]', "2026-11-04 10:00:00+00:00", ""),
+            ])
+            con.commit()
+            con.close()
+            got = tc.agy_sessions("/home/u/my proj", root=root)
+        self.assertEqual([(s["id"], s["title"]) for s in got], [(b, "fix the build"), (a, "Old one")])
+        self.assertEqual(got[0]["ts"], 1793613600)
+
+    def test_no_list_is_no_conversations(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.assertEqual(tc.agy_sessions("/p", root=root), [])
+            with open(os.path.join(root, "conversation_summaries.db"), "w") as f:
+                f.write("not a database")
+            self.assertEqual(tc.agy_sessions("/p", root=root), [])
+
+
 class TabSyncTest(Base):
     """A chat and a Claude tab are one: same name, same group, made and closed together."""
 
@@ -1839,7 +2162,7 @@ class TabSyncTest(Base):
         tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "cli": "codex"})
         self.assertEqual(next(o for o in self.ops if o[0] == "new")[2]["account"], "")
         self.ops.clear()
-        code, _ = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "cli": "agy"})
+        code, _ = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "cli": "gemini"})
         self.assertEqual((code, self.ops), (400, []))
 
     def test_a_new_chat_can_open_a_grok_tab(self):
@@ -1852,6 +2175,28 @@ class TabSyncTest(Base):
         code, _ = tc.api(self.mgr, "POST", [], {"kind": "tab", "cwd": self.dir, "cli": "grok",
                                                 "account": "Work"})
         self.assertEqual((code, self.ops), (400, []))      # Grok's login is set in its tab
+
+    def test_a_new_chat_starts_on_the_model_and_effort_picked(self):
+        def new(**kw):
+            self.ops.clear()
+            code, out = tc.api(self.mgr, "POST", [], dict({"kind": "tab", "cwd": self.dir}, **kw))
+            body = next((o[2] for o in self.ops if o[0] == "new"), None)
+            return code, body
+        code, body = new(cli="claude", model="opus", effort="high")
+        self.assertEqual((code, body["model"], body["effort"]), (200, "opus", "high"))
+        code, body = new(cli="claude")
+        self.assertNotIn("model", body)                       # the AI's default
+        with mock.patch.object(self.mgr, "agy_models", lambda block=False: tc.agy_model_rows(AGY_MODELS_OUT)):
+            code, body = new(cli="agy", model="gemini-4-neon", effort="xhigh")
+            self.assertEqual((code, body["model"], body["effort"]), (200, "gemini-4-neon", "xhigh"))
+            self.assertEqual(new(cli="agy", model="gemini-3.8-flash", effort="xhigh"), (400, None))
+        with mock.patch.object(tc, "codex_models", return_value=[
+                {"name": "", "label": "default", "efforts": [""]},
+                {"name": "gpt-5.6", "label": "GPT-5.6", "efforts": ["", "low", "high"]}]):
+            self.assertEqual(new(cli="codex", model="gpt-5.6", effort="low")[0], 200)
+            self.assertEqual(new(cli="codex", model="gpt-9")[0], 400)
+        self.assertEqual(new(cli="claude", model="gpt-5.6"), (400, None))
+        self.assertEqual(new(cli="grok", model="grok-4"), (400, None))      # set in its tab
 
     def test_a_new_chat_can_go_on_with_a_conversation_picked(self):
         sid = "01a14318-e1a5-7552-8ddb-5427756b9cfd"
@@ -1873,7 +2218,7 @@ class TabSyncTest(Base):
         code, out = tc.api(self.mgr, "POST", ["sessions"], {"cli": "codex", "cwd": "~/x"})
         self.assertEqual((code, out["sessions"][0]["title"]), (200, "fix it"))
         self.assertEqual(got["sessions"], {"cli": "codex", "cwd": os.path.expanduser("~/x")})
-        code, _ = tc.api(self.mgr, "POST", ["sessions"], {"cli": "agy", "cwd": "~"})
+        code, _ = tc.api(self.mgr, "POST", ["sessions"], {"cli": "gemini", "cwd": "~"})
         self.assertEqual(code, 400)
 
 

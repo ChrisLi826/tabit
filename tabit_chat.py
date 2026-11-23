@@ -61,7 +61,7 @@ HINT = ("The user reads you in a phone chat page, not a terminal. Reply in "
 
 MIRROR_EVERY = 2             # seconds between looks at a mirrored tab
 CHAT_CLIS = ("claude", "codex")    # the AIs whose login and model a chat picks
-MIRROR_CLIS = CHAT_CLIS + ("grok",)    # the AIs a chat can show, and a new chat start
+MIRROR_CLIS = CHAT_CLIS + ("grok", "agy")    # the AIs a chat can show, and a new chat start
 MIRROR_TAIL = 1 << 20        # the first look reads this many bytes from the end
 MIRROR_FIRST = 300           # ... and keeps at most this many events of them
 MIRROR_STEP = 4 << 20        # one look reads at most this much
@@ -590,6 +590,249 @@ def grok_sessions(cwd, root=None, limit=20):
     return out
 
 
+# Antigravity CLI (agy) 1.5: each conversation keeps a transcript.jsonl, one
+# step per line. A model step lists its tool calls; their results are the
+# steps right after it, in the same order. Tool arguments are JSON text.
+AGY_DIR = os.path.expanduser("~/.gemini/antigravity-cli")
+AGY_TOOLS = {"run_command": "Bash", "read_file": "Read", "view_file": "Read",
+             "edit_file": "Edit", "replace_file_content": "Edit",
+             "multi_replace_file_content": "Edit", "write_file": "Write",
+             "write_to_file": "Write", "list_dir": "LS", "grep_search": "Grep",
+             "find_by_name": "Glob", "search_web": "WebSearch",
+             "read_url_content": "WebFetch", "invoke_subagent": "Agent"}
+_AGY_STAMP = re.compile(r"\A(?:(?:Created|Completed) At: [^\n]*\n)+")
+_AGY_ASKED = re.compile(r"<USER_REQUEST>\n?(.*?)\n?</USER_REQUEST>", re.S)
+
+
+def agy_transcript(sid, root=None):
+    """The transcript of one Antigravity conversation."""
+    return os.path.join(root or AGY_DIR, "brain", sid, ".system_generated", "logs",
+                        "transcript.jsonl")
+
+
+def _agy_args(args):
+    """A tool call's arguments, each one read back from its JSON text."""
+    out = {}
+    for k, v in (args if isinstance(args, dict) else {}).items():
+        try:
+            out[k] = json.loads(v) if isinstance(v, str) else v
+        except ValueError:
+            out[k] = v
+    return out
+
+
+def agy_events(raw):
+    """Chat events for one line of an Antigravity transcript: what you typed,
+    what it said, its tools and their results. Its thinking, its own system
+    notes and checkpoints are left out."""
+    if not isinstance(raw, dict):
+        return []
+    kind, step = raw.get("type"), raw.get("step_index")
+    text = raw.get("content") if isinstance(raw.get("content"), str) else ""
+    if kind == "USER_INPUT":
+        m = _AGY_ASKED.search(text)
+        typed = (m.group(1) if m else text).strip()
+        return [_typed_event(typed)] if typed and not typed.startswith(NOT_TYPED) else []
+    if kind == "PLANNER_RESPONSE":
+        out = [{"t": "text", "text": text}] if text.strip() else []
+        for i, call in enumerate(raw.get("tool_calls") or []):
+            if not isinstance(call, dict) or not isinstance(step, int):
+                continue
+            args = _agy_args(call.get("args"))
+            name = AGY_TOOLS.get(call.get("name")) or call.get("name") or "tool"
+            what = next((args[k] for k in ("CommandLine", "AbsolutePath", "Path", "TargetFile",
+                                           "DirectoryPath", "SearchPath", "Url", "query",
+                                           "Query", "Pattern", "Prompt", "toolSummary")
+                         if isinstance(args.get(k), str) and args[k].strip()), "")
+            if name in FILE_TOOLS:       # the chat's file list reads file_path
+                args = dict(args, file_path=what)
+            out.append({"t": "tool", "id": str(step + 1 + i), "name": name,
+                        "summary": what.strip().splitlines()[0][:200] if what.strip() else "",
+                        "detail": _cut(args.get("CommandLine") if name == "Bash" and what
+                                       else json.dumps(args, ensure_ascii=False, indent=1))})
+        return out
+    if kind == "GENERIC" and isinstance(step, int):
+        failed = raw.get("status") in ("ERROR", "INVALID")
+        said = _AGY_STAMP.sub("", text).strip()
+        if failed and raw.get("error"):
+            said = str(raw["error"])
+        return [{"t": "result", "id": str(step), "text": _cut(said), "error": failed}]
+    if kind == "ERROR_MESSAGE":
+        why = str(raw.get("error") or text or "an error").strip()
+        if why.startswith("The stream was interrupted"):       # Esc
+            return [{"t": "notice", "text": "Interrupted."}]
+        return [{"t": "notice", "text": "Antigravity: " + why.splitlines()[0][:300]}]
+    return []
+
+
+AGY_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+AGY_ASK = 600            # seconds between asking agy for its login's quota
+AGY_MODELS_KEEP = 3600   # seconds its model list is kept
+
+
+def agy_split(model):
+    """(family, effort) of an agy model id: gemini-4-neon-high is
+    ("gemini-4-neon", "high"). agy takes the two as --model and --effort."""
+    m = re.fullmatch(r"(.+)-(%s)" % "|".join(AGY_EFFORTS), model or "")
+    return (m.group(1), m.group(2)) if m else (model or "", "")
+
+
+def agy_model_rows(text):
+    """[{"name", "label", "efforts"}] from what `agy models` prints (one
+    "id<TAB>Label (Effort)" per line): one row per family, its efforts in
+    order; agy's default first."""
+    rows, fam = [{"name": "", "label": "default", "efforts": [""]}], {}
+    for line in (text or "").splitlines():
+        mid, _tab, label = line.partition("\t")
+        mid, label = mid.strip(), label.strip()
+        if not _tab or not re.fullmatch(r"[a-z0-9][\w.-]*", mid):
+            continue
+        name, effort = agy_split(mid)
+        named = re.fullmatch(r"(.+?)\s*\((\w+)\)", label)
+        if effort and named and named.group(2).lower() == effort:
+            label = named.group(1)
+        elif effort:                 # "-high" that is not its effort
+            name, effort = mid, ""
+        row = fam.get(name)
+        if row is None:
+            row = fam[name] = {"name": name, "label": label or name, "efforts": [""]}
+            rows.append(row)
+        if effort and effort not in row["efforts"]:
+            row["efforts"].append(effort)
+    for r in rows:
+        r["efforts"].sort(key=lambda e: AGY_EFFORTS.index(e) + 1 if e else 0)
+    return rows
+
+
+_agy_models = {"ts": 0.0, "rows": None, "asking": False}
+_agy_models_lock = threading.Lock()
+
+
+def agy_models(block=False, agy="agy", wait=30):
+    """The rows of agy_model_rows() for the agy on PATH. `agy models` asks
+    Google and takes seconds, so the list is kept AGY_MODELS_KEEP seconds
+    and asked again in the background; block: wait for it when none is
+    kept. [] when there is none."""
+    def ask():
+        try:
+            out = subprocess.run([agy, "models"], capture_output=True, text=True, timeout=wait,
+                                 cwd=os.path.expanduser("~"), stdin=subprocess.DEVNULL).stdout
+            rows = agy_model_rows(out)
+        except (OSError, subprocess.SubprocessError):
+            rows = None
+        with _agy_models_lock:
+            if rows and len(rows) > 1:
+                _agy_models.update(rows=rows, ts=time.time())
+            _agy_models["asking"] = False
+    with _agy_models_lock:
+        rows, old = _agy_models["rows"], time.time() - _agy_models["ts"] > AGY_MODELS_KEEP
+        start = old and not _agy_models["asking"]
+        if start:
+            _agy_models["asking"] = True
+    if start and block and rows is None:
+        ask()
+        return _agy_models["rows"] or []
+    if start:
+        threading.Thread(target=ask, daemon=True).start()
+    return rows or []
+
+
+def agy_limits(text):
+    """[{"name", "pool", "pct", "resets"}] from what `agy -p /usage` prints:
+    one "group<TAB>limit<TAB>NN%<TAB>reset time" per line, NN the share
+    left. pool is the group of models a limit is for ("Gemini",
+    "Claude/GPT"), name its span ("5h", "7d"). pct is the share used, as
+    for the other AIs."""
+    out = []
+    for line in (text or "").splitlines():
+        parts = [p.strip() for p in line.split("\t")]
+        left = re.fullmatch(r"(\d+(?:\.\d+)?)%", parts[2]) if len(parts) == 4 else None
+        if not left:
+            continue
+        group, limit, _l, when = parts
+        span = "5h" if re.search(r"five.?hour|5.?hour", limit, re.I) else \
+            "7d" if re.search(r"week", limit, re.I) else "1d" if re.search(r"dai|day", limit, re.I) else ""
+        who = re.sub(r"\s+models?$", "", group, flags=re.I).replace(" and ", "/")
+        try:
+            resets = datetime.datetime.fromisoformat(when.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            resets = None
+        out.append({"name": span or limit, "pool": who,
+                    "pct": max(0, min(100, round(100 - float(left.group(1))))), "resets": resets})
+    return out
+
+
+def agy_pool(model):
+    """The quota group an agy model counts against: Claude and GPT models
+    have their own, every other model is Gemini's."""
+    return "Claude/GPT" if re.match(r"(claude|gpt)-", model or "") else "Gemini"
+
+
+def agy_shown(windows, models):
+    """(the windows the usage row shows, the others): one pool's, so the row
+    is as short as the other AIs'. The pool of the models its chats use;
+    Gemini's when they use both or none yet."""
+    pools = {agy_pool(m) for m in models if m}
+    pool = pools.pop() if len(pools) == 1 else "Gemini"
+    span = {"5h": 0, "1d": 1, "7d": 2}            # the short one first, as Claude's row
+    mine = sorted((w for w in windows if w.get("pool") == pool), key=lambda w: span.get(w["name"], 3))
+    if not mine:
+        return windows, []
+    return mine, [dict(w, name="%s %s" % (w.get("pool"), w["name"])) for w in windows if w not in mine]
+
+
+def agy_usage(agy="agy", wait=40):
+    """The agy login's quota, as agy_limits() gives it, or None. Its print
+    mode answers /usage without a model call and keeps no conversation."""
+    try:
+        out = subprocess.run([agy, "-p", "/usage"], capture_output=True, text=True, timeout=wait,
+                             cwd=os.path.expanduser("~"), stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return agy_limits(out) or None
+
+
+def agy_sessions(cwd, root=None, limit=20):
+    """[{"id", "title", "ts"}] of the Antigravity conversations in a folder,
+    newest first, from the list it keeps of them. Not its sub-agents' own."""
+    db = os.path.join(root or AGY_DIR, "conversation_summaries.db")
+    if not os.path.exists(db):
+        return []
+    want = {"file://" + urllib.parse.quote(f) for f in _folders(cwd)} | \
+        {"file://" + f for f in _folders(cwd)}
+    try:
+        import sqlite3
+        con = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(db), uri=True, timeout=2)
+        try:
+            rows = con.execute(
+                "SELECT conversation_id, title, preview, workspace_uris, last_modified_time"
+                " FROM conversation_summaries WHERE parent_conversation_id = ''"
+                " ORDER BY last_modified_time DESC LIMIT 500").fetchall()
+        finally:
+            con.close()
+    except Exception:        # its own file: a new layout must not break the form
+        return []
+    out = []
+    for sid, title, preview, where, when in rows:
+        try:
+            if not want & set(json.loads(where or "[]")):
+                continue
+        except (ValueError, TypeError):
+            continue
+        name = " ".join(str(title or preview or "").split())[:80]
+        if not name or not re.fullmatch(r"[0-9a-f-]{36}", str(sid)):
+            continue
+        try:
+            ts = datetime.datetime.fromisoformat(str(when)[:19]).replace(
+                tzinfo=datetime.timezone.utc).timestamp()
+        except ValueError:
+            ts = 0
+        out.append({"id": sid, "title": name, "ts": ts})
+        if len(out) >= limit:
+            break
+    return out
+
+
 def grok_limits(billing):
     """[{"name", "pct", "resets"}] from the answer to Grok's _x.ai/billing:
     the share of the login's credits used in this period, and when it ends."""
@@ -708,6 +951,8 @@ def raw_model(raw):
         said = (u.get("_meta") or {}).get("modelId") if u.get("sessionUpdate") == "user_message_chunk" else None
     elif raw.get("type") == "turn_context":
         said = (raw.get("payload") or {}).get("model")
+    elif raw.get("type") == "PLANNER_RESPONSE":            # Antigravity: each model step names it
+        said = raw.get("model")
     else:
         return None
     return said if isinstance(said, str) and said and not said.startswith("<") else None
@@ -715,11 +960,11 @@ def raw_model(raw):
 
 def transcript_events(raw, cli="claude"):
     """The chat events of one transcript line, each stamped with the time the
-    line was written. cli: whose transcript, "claude", "codex" or "grok"."""
+    line was written. cli: whose transcript, "claude", "codex", "grok" or "agy"."""
     out = (codex_events(raw) if cli == "codex" else grok_events(raw) if cli == "grok"
-           else _transcript_events(raw))
+           else agy_events(raw) if cli == "agy" else _transcript_events(raw))
     try:
-        ts = raw["timestamp"]                       # Grok: epoch seconds
+        ts = raw["created_at"] if cli == "agy" else raw["timestamp"]      # Grok: epoch seconds
         if not isinstance(ts, (int, float)):
             ts = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
     except (KeyError, TypeError, ValueError, AttributeError):
@@ -732,16 +977,19 @@ def transcript_events(raw, cli="claude"):
 SCREEN_ROWS = 40             # the lines of a waiting tab's screen tabit hands over
 
 
-def screen_prompt(lines):
+def screen_prompt(lines, cli="claude"):
     """The menu a tab waits on, read from its screen: {"id", "question",
     "options", "numbers", "selected"}, or None. A menu is two rows or more, the
     chosen one marked with ❯ (Claude) or › (Codex) and the others indented two
     more spaces; a row too long for the screen goes on, indented more. A
     numbered one (a permission question) or one that says "Enter to confirm"
-    (the trust question) counts, so the box where one types does not."""
+    (the trust question) counts, so the box where one types does not.
+    cli "agy": Antigravity's menu, see _agy_menu."""
     if not isinstance(lines, list):
         return None
     rows = [x if isinstance(x, str) else "" for x in lines]
+    if cli == "agy":
+        return _agy_menu(rows)
     marked = [i for i in range(len(rows) - 1, -1, -1) if re.match(r"^\s*[❯›]\s+\S", rows[i])]
     # Codex marks its box with › too: a numbered row is the menu
     sel = next((i for i in marked if re.match(r"^\s*[❯›]\s+\d+\.\s", rows[i])),
@@ -780,6 +1028,11 @@ def screen_prompt(lines):
     numbered = all(n is not None for n in numbers)
     if len(picks) < 2 or not (numbered or "Enter to confirm" in tail):
         return None
+    return _menu_card(rows, top, picks, numbers, chosen)
+
+
+def _menu_card(rows, top, picks, numbers, chosen):
+    """A menu found on the screen at row `top`, as screen_prompt gives it."""
     # the whole prompt above it, up to the box line: a long command is what
     # the person says yes to, so all of it goes on the card
     above, i = [], top - 1
@@ -796,6 +1049,43 @@ def screen_prompt(lines):
     key = hashlib.md5((detail + "|".join(picks)).encode()).hexdigest()[:10]
     return {"id": "scr-" + key, "question": question, "detail": detail, "options": picks,
             "numbers": numbers, "selected": chosen}
+
+
+def _agy_menu(rows):
+    """Antigravity's permission menu (agy 1.5): numbered rows, the chosen one
+    marked with >, the others indented two spaces. A row too long for the
+    screen goes on at the left edge; the menu ends at its "↑/↓ Navigate"
+    line. Its box, where one types, is marked with > too, but has no number."""
+    opt = re.compile(r"^\s*(>\s+)?(\d+)\.\s+\S")
+    sel = next((i for i in range(len(rows) - 1, -1, -1)
+                if re.match(r"^\s*>\s+\d+\.\s+\S", rows[i])), None)
+    if sel is None:
+        return None
+    top = sel
+    while top > 0 and not re.match(r"^\s*(>\s+)?1\.\s", rows[top]):
+        top -= 1
+    if not opt.match(rows[top]):
+        return None
+    picks, numbers, chosen = [], [], 0
+    for at in range(top, len(rows)):
+        r = rows[at]
+        if "↑/↓" in r:
+            break
+        if not r.strip():
+            return None          # a gap: a list in a reply, not a menu
+        m = opt.match(r)
+        if m:
+            numbers.append(int(m.group(2)))
+            picks.append(re.sub(r"^\s*(>\s+)?\d+\.\s+", "", r).rstrip())
+            if at == sel:
+                chosen = len(picks) - 1
+        elif picks:
+            picks[-1] += " " + r.strip()
+    else:
+        return None              # no hint line under it: not a menu
+    if len(picks) < 2:
+        return None
+    return _menu_card(rows, top, [p[:200] for p in picks], numbers, chosen)
 
 
 _SGR = re.compile(r"(\x1b\[[0-9;]*m)")
@@ -1469,7 +1759,7 @@ class Chat(_Log):
         if q:
             card = {"rid": "tab-" + q["id"], "id": q["id"], "questions": q["questions"]}
         elif self.tab_state == "waiting":
-            sp = screen_prompt(info.get("screen"))
+            sp = screen_prompt(info.get("screen"), self.meta["tab"].get("cli") or "claude")
             if sp and sp["id"] not in self._tab_answered:
                 card = {"rid": sp["id"], "id": sp["id"], "screen": sp, "questions": [
                     {"question": sp["question"], "header": "", "multiSelect": False,
@@ -1492,18 +1782,18 @@ class Chat(_Log):
     def _answer_tab(self, held, allow, answers):
         """Press the keys that answer the tab's question: a number picks an
         option and moves on; with more than one question a last "1" submits."""
-        tab = self.meta["tab"]["id"]
+        tab, cli = self.meta["tab"]["id"], self.meta["tab"].get("cli") or "claude"
         # The desk may have answered it since the last look: then a number
         # would land in the next prompt, and Esc would stop Claude.
         info = self.mgr.tab_hook(tab)
         if held.get("screen"):
-            now = screen_prompt(info.get("screen")) if info.get("status") == "blocked" else None
+            now = screen_prompt(info.get("screen"), cli) if info.get("status") == "blocked" else None
             if not now or now["id"] != held["ev"]["id"]:
                 raise _Gone("that question is no longer open in the tab")
 
             def still_there():       # between two keys too: the desk may answer meanwhile
                 info = self.mgr.tab_hook(tab)
-                again = screen_prompt(info.get("screen")) if info.get("status") == "blocked" else None
+                again = screen_prompt(info.get("screen"), cli) if info.get("status") == "blocked" else None
                 if not again or again["id"] != held["ev"]["id"]:
                     raise _Gone("that question is no longer open in the tab")
             return self._press(tab, self._screen_keys(now, held, allow, answers), still_there)
@@ -1521,6 +1811,8 @@ class Chat(_Log):
                 if label not in labels:
                     raise RuntimeError("pick one of the options for: %s" % q["question"])
                 keys.append(str(labels.index(label) + 1))
+                if any(o.get("preview") for o in q["options"]):
+                    keys.append("enter")     # with previews a number only moves there
             if len(qs) > 1:
                 keys.append("1")
         self._press(tab, keys)
@@ -2640,11 +2932,14 @@ class _DropHandler(http.server.BaseHTTPRequestHandler):
 class ChatManager:
     def __init__(self, accounts=None, env_drop=(), root=CHAT_DIR, claude=None, auth=None,
                  tab_hook=None, extra_env=None, tabs_hook=None, tab_ops=None, roster_dir=None,
-                 codex_accounts=None, claude_usage=None, grok_usage=None, screen_hook=None):
+                 codex_accounts=None, claude_usage=None, grok_usage=None, screen_hook=None,
+                 agy_usage=None, agy_models=None):
         self.accounts = accounts or (lambda: [])     # [(name, cli)]
         self.codex_accounts = codex_accounts or (lambda: [])   # the same, for Codex tabs
         self.claude_usage = claude_usage   # fn(account) -> windows or None: asks Anthropic
         self.grok_usage = grok_usage       # fn() -> windows or None: asks a grok with no screen
+        self.agy_usage = agy_usage         # fn() -> windows or None: asks agy in print mode
+        self.agy_models = agy_models or (lambda block=False: [])   # fn(block) -> agy's model rows
         self._usage_asked = {}             # account -> when it was last asked
         self.auth = auth                             # fn(cli) -> {"email", "subscriptionType"}
         self._labels = {}                            # cli -> (when, rows)
@@ -2994,9 +3289,23 @@ class ChatManager:
                     and now - self._usage_asked.get("grok/", 0) > GROK_ASK):
                 self._usage_asked["grok/"] = now
                 threading.Thread(target=self._ask_grok_usage, daemon=True).start()
+            kept = self._usage.get("agy/") or {}
+            if (cli == "agy" and self.agy_usage
+                    and (now - kept.get("ts", 0) > AGY_ASK     # or kept before limits had a pool
+                         or any("pool" not in w for w in kept.get("windows") or []))
+                    and now - self._usage_asked.get("agy/", 0) > AGY_ASK):
+                self._usage_asked["agy/"] = now
+                threading.Thread(target=self._ask_agy_usage, daemon=True).start()
         inuse.sort(key=lambda p: (p[0] != "claude", p[0], p[1] != "", p[1]))
-        return [dict({"cli": cli, "account": acct, "windows": [], "ts": 0},
-                     **self._usage.get("%s/%s" % (cli, acct), {})) for cli, acct in inuse]
+        out = [dict({"cli": cli, "account": acct, "windows": [], "ts": 0},
+                    **self._usage.get("%s/%s" % (cli, acct), {})) for cli, acct in inuse]
+        for u in out:
+            if u["cli"] == "agy" and u["windows"]:
+                models = [(c.meta.get("tab") or {}).get("model") for c in list(self.chats.values())
+                          if (c.meta.get("tab") or {}).get("cli") == "agy"]
+                u["windows"], u["more"] = agy_shown(u["windows"], models)
+                u["label"] = u["windows"][0].get("pool") or ""
+        return out
 
     def _ask_grok_usage(self):
         try:
@@ -3005,6 +3314,14 @@ class ChatManager:
             windows = None
         if windows:
             self.note_usage("grok", "", windows, time.time())
+
+    def _ask_agy_usage(self):
+        try:
+            windows = self.agy_usage()
+        except Exception:
+            windows = None
+        if windows:
+            self.note_usage("agy", "", windows, time.time())
 
     def _ask_usage(self, account):
         try:
@@ -3102,7 +3419,7 @@ class ChatManager:
         return self.tab_ops("sessions", None, {"cli": cli, "cwd": cwd})
 
     def new_tab_chat(self, body):
-        """(status, object): open a Claude, Codex or Grok tab in tabit, in the
+        """(status, object): open a Claude, Codex, Grok or Antigravity tab in tabit, in the
         group asked for (none: no group), and a chat that mirrors it.
         resume: the id of a past conversation of the folder to go on with."""
         if not self.tab_ops:
@@ -3118,12 +3435,16 @@ class ChatManager:
             if not (isinstance(resume, str) and re.fullmatch(r"[0-9a-f-]{36}", resume)):
                 return 400, {"error": "resume is a conversation id"}
             want["resume"] = resume
-        # picked in the form; else the default. Grok's login is set in its tab.
+        # picked in the form; else the default. Grok's and Antigravity's login is set in its tab.
         account = body.get("account", self.account if cli == "claude" else "")
         logins = [n for n, _ in self.accounts_of(cli)] if cli in CHAT_CLIS else []
         if account not in [""] + logins:
             return 400, {"error": f"no such {cli.capitalize()} account"}
         want["account"] = account
+        err = _new_model(self, cli, body.get("model") or "", body.get("effort") or "")
+        if err:
+            return 400, {"error": err}
+        want.update({k: body[k] for k in ("model", "effort") if body.get(k)})
         if title:
             want["name"] = title
         with self._tabs_lock:
@@ -3214,7 +3535,7 @@ class ChatManager:
             if info.get("error"):
                 return 400, {"error": info["error"]}
             if info.get("cli") not in MIRROR_CLIS:
-                return 400, {"error": "only a Claude, Codex or Grok tab can be mirrored"}
+                return 400, {"error": "only a Claude, Codex, Grok or Antigravity tab can be mirrored"}
             tie["tab"]["title"], tie["tab"]["cli"] = info["title"], info["cli"]
             meta.update(tie)
             if not title:
@@ -3400,7 +3721,8 @@ def api(mgr, method, parts, body):
                               "efforts": list(EFFORTS), "clis": clis, "usage": mgr.usage(),
                               "nearby": mgr.nearby.on()},
                              **({"codex_accounts": mgr.account_choices("codex"),
-                                 "codex_models": codex_models()} if "codex" in clis else {}))
+                                 "codex_models": codex_models()} if "codex" in clis else {}),
+                             **({"agy_models": mgr.agy_models()} if "agy" in clis else {}))
         if method == "POST":
             return mgr.new_tab_chat(body) if body.get("kind") == "tab" else mgr.create(body)
         return 405, {"error": "GET or POST"}
@@ -3586,12 +3908,62 @@ def codex_models():
     return rows
 
 
+def _new_model(mgr, cli, model, effort):
+    """Why a new tab of `cli` cannot start with this model and thinking
+    effort ("" each: the AI's default), or None. Claude takes any effort;
+    Codex and agy say per model which they take. Grok's is set in its tab."""
+    if not isinstance(model, str) or not isinstance(effort, str):
+        return "model and effort are names"
+    if not model and not effort:
+        return None
+    if cli == "claude":
+        if model not in MODELS:
+            return "no such model"
+        return None if effort in EFFORTS else "no such effort"
+    rows = codex_models() if cli == "codex" else mgr.agy_models(block=True) if cli == "agy" else None
+    if rows is None:
+        return "a %s tab's model is set in the tab" % cli.capitalize()
+    row = next((r for r in rows if r["name"] == model), None)
+    if row is None:
+        return "no such model"
+    return None if effort in row["efforts"] else "that model has no such effort"
+
+
+def _edit_agy_tab(chat, body):
+    """An agy tab's model and thinking effort: tabit restarts its agy on the
+    same conversation with --model <family> --effort <effort>. Both go
+    together: agy refuses an effort its model has not, and a full id with
+    an effort too. Its login is set in the tab."""
+    mgr, tab = chat.mgr, chat.meta["tab"]
+    if "account" in body and body["account"] != tab.get("account", ""):
+        return 400, {"error": "an Antigravity tab's login is set in the tab"}
+    now, now_effort = agy_split(tab.get("model"))
+    now_effort = tab.get("effort") or now_effort
+    model, effort = body.get("model", now), body.get("effort", now_effort)
+    if (model, effort) == (now, now_effort):
+        return None
+    row = next((r for r in mgr.agy_models(block=True) if r["name"] == model), None)
+    if row is None:
+        return 400, {"error": "no such model"}
+    if effort not in row["efforts"]:
+        return 400, {"error": "that model has no such effort"}
+    if not mgr.tab_ops:
+        return 400, {"error": "no tabs here"}
+    code, out = mgr.tab_ops("model", tab["id"], {"model": model, "effort": effort})
+    if code != 200:
+        return code, out
+    chat.meta["tab"] = dict(tab, model=model, effort=effort)    # the next answer says the full id
+    return None
+
+
 def _edit_tab(chat, body):
     """The login and the model of a chat that is a tab: tabit restarts the
     tab's claude or codex on the same conversation, once for both. None when
     it went well, else (status, object)."""
     mgr, tab = chat.mgr, chat.meta["tab"]
     cli = tab.get("cli") or "claude"
+    if cli == "agy":
+        return _edit_agy_tab(chat, body)
     if cli not in CHAT_CLIS:
         if any(k in body and body[k] != tab.get(k, "") for k in ("account", "model", "effort")):
             return 400, {"error": "a %s tab's login and model are set in the tab" % cli.capitalize()}

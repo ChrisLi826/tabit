@@ -23,7 +23,8 @@ class TestNewTabContinue(unittest.TestCase):
         pair = mock.Mock(return_value=(["launch"], ["stored"], "icon"))
         with tempfile.TemporaryDirectory() as cwd, \
                 mock.patch.object(app, "_load_ai_clis", return_value=[{"cli": "grok", "try": ["--continue"]}, {"cli": "codex", "try": ["resume --last"]},
-                                                                     {"cli": "claude", "try": ["--continue"]}], create=True), \
+                                                                     {"cli": "claude", "try": ["--continue"]},
+                                                                     {"cli": "agy", "try": ["-c"]}], create=True), \
                 mock.patch.object(app, "_load_settings", return_value={}, create=True), \
                 mock.patch.object(app, "_ai_takes_new_id", return_value=True, create=True), \
                 mock.patch.object(app, "_ai_launch_pair", pair, create=True), \
@@ -55,6 +56,18 @@ class TestNewTabContinue(unittest.TestCase):
         got = self.launch({"cli": "claude"})
         self.assertIs(got["continue_now"], False)
         self.assertTrue(got["new_sid"])
+
+    def test_a_model_and_effort_picked_go_to_the_tab(self):
+        got = self.launch({"cli": "agy", "model": "gemini-4-neon", "effort": "low"})
+        self.assertEqual((got["model"], got["effort"]), ("gemini-4-neon", "low"))
+        got = self.launch({"cli": "claude"})
+        self.assertEqual((got["model"], got["effort"]), ("", ""))
+
+    def test_a_model_is_a_name_and_not_for_grok(self):
+        for body in ({"cli": "claude", "model": "opus; rm -rf ~"}, {"cli": "claude", "effort": 3},
+                     {"cli": "grok", "model": "grok-4"}):
+            code, _ = self.launch(body, result=True)
+            self.assertEqual(code, 400, body)
 
     def test_a_resume_must_be_an_id(self):
         code, _ = self.launch({"cli": "grok", "resume": "--last"}, result=True)

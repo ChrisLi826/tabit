@@ -33,8 +33,11 @@ console.log("ok");
 
     def test_the_sheet_sends_only_the_name_for_grok(self):
         src = _page()
-        self.assertIn('<div ${grok ? "hidden" : ""}><label>Account</label>', src)
+        self.assertIn('<div ${grok ? "hidden" : ""}><div ${agy ? "hidden" : ""}><label>Account</label>', src)
         self.assertIn("const asked = () => grok ? { title: $(\"e-title\").value, ...look.get() }", src)
+        # Antigravity: its model and effort, never an account
+        self.assertIn('agy ? { title: $("e-title").value, model: $("e-model").value, '
+                      'effort: $("e-effort").value, ...look.get() }', src)
 
     def test_the_new_chat_form_offers_grok_and_past_conversations(self):
         src = _page()

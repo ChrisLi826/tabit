@@ -1,7 +1,7 @@
 # Remote
 
 Remote shows your tabit on your phone or another computer. Its address opens
-[Tabit Chat](chat.md), where you talk to Claude, Codex or Grok in chat bubbles. This page is
+[Tabit Chat](chat.md), where you talk to Claude, Codex, Grok or Antigravity in chat bubbles. This page is
 about the **terminal view** (⌨ in the chat, or `/terminal`): every group and
 tab, with live AI status. With the extra switches on, you can also type into
 tabs, manage them and read files. Back to the [README](../README.md).
