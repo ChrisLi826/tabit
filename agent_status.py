@@ -359,10 +359,13 @@ def gather_evidence(
     matched_rule: Optional[str] = None,
     flags: Optional[Dict[str, Any]] = None,
     patterns: Optional[PatternPack] = None,
+    chrome_blocked: bool = True,
 ) -> Evidence:
     """Build hard flags from screen + optional herdr evaluate() result.
 
     Detection does not call ManifestStore itself so tests stay free of I/O.
+    chrome_blocked=False: only the agent's manifest says it asks, not the
+    shared blocked chrome (agy's working footer reads "esc to cancel").
     """
     p = patterns or get_patterns()
     flags = flags or {}
@@ -378,7 +381,7 @@ def gather_evidence(
     hard_blocked = bool(
         manifest_state == "blocked"
         or flags.get("visible_blocker")
-        or bottom_blocked(text, p)
+        or (chrome_blocked and bottom_blocked(text, p))
     )
     hard_idle = hard_idle_prompt(text, p) and not hard_blocked
     if manifest_state == "idle" and matched_rule and hard_idle:
@@ -436,6 +439,7 @@ def detect_raw(
     patterns: Optional[PatternPack] = None,
     argv: Optional[list] = None,
     text: str = "",
+    chrome_blocked: bool = True,
 ) -> str:
     """Map evidence → raw status.
 
@@ -459,13 +463,15 @@ def detect_raw(
     if state in ("idle", "blocked", "unknown"):
         return "idle" if state != "blocked" else "blocked"
 
-    return heuristic_fallback(text, argv=argv, patterns=patterns)
+    return heuristic_fallback(text, argv=argv, patterns=patterns,
+                              chrome_blocked=chrome_blocked)
 
 
 def heuristic_fallback(
     text: str,
     argv: Optional[list] = None,
     patterns: Optional[PatternPack] = None,
+    chrome_blocked: bool = True,
 ) -> str:
     """Bottom-of-screen heuristics when no hard flags / no useful manifest."""
     p = patterns or get_patterns()
@@ -480,7 +486,7 @@ def heuristic_fallback(
     bottom = "\n".join(lines[-16:])
     last = next((ln for ln in reversed(lines) if ln.strip()), "")
 
-    is_blocked = bool(p.blocked.search(bottom))
+    is_blocked = chrome_blocked and bool(p.blocked.search(bottom))
     is_working = bool(p.working.search(bottom))
     turn_done = bool(p.turn_done.search(bottom))
 

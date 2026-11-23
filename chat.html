@@ -532,8 +532,8 @@ function picker(host, r) {
 }
 // "Mirror a tab" chooser: the Claude tabs open in tabit; get() is null or {id, title}
 // opus, sonnet, haiku or fable for a model id such as claude-opus-4-5; "" (default) otherwise
-// who answers in a chat: a Codex or Grok tab's chat is Codex or Grok, every other chat is Claude
-const AI_NAMES = { codex: "Codex", grok: "Grok" };
+// who answers in a chat: a Codex, Grok or Antigravity tab's chat is that AI, every other chat is Claude
+const AI_NAMES = { codex: "Codex", grok: "Grok", agy: "Antigravity" };
 const aiName = (meta) => (meta && meta.tab && AI_NAMES[meta.tab.cli]) || "Claude";
 const aliasOf = (id) => (cfg?.models || []).find((a) => a && String(id || "").includes(a)) || "";
 // the colours tabit gives its tab groups
@@ -706,7 +706,8 @@ const useCount = (chats) => (chats || []).filter((r) => !r.default).reduce((n, r
 function usageHtml(list, counts) {
   return (list || []).map((u) => {
     const n = (counts && counts.get(useKey(u.cli, u.account))) || 0;
-    const who = `${AI_NAMES[u.cli] || "Claude"} · ${esc(u.account || "Default")} <span class="n" title="${n} chat${n === 1 ? "" : "s"}">(${n})</span>`;
+    // label: what the row is for when an AI has no logins of its own (Antigravity: one quota group)
+    const who = `${AI_NAMES[u.cli] || "Claude"} · ${esc(u.label || u.account || "Default")} <span class="n" title="${n} chat${n === 1 ? "" : "s"}">(${n})</span>`;
     const now = Date.now() / 1000;
     const ws = (u.windows || []).map((w) => {
       const fresh = w.resets && w.resets < now;      // the window started again since this reading
@@ -715,7 +716,9 @@ function usageHtml(list, counts) {
       return `<span class="w${pct >= 80 ? " hot" : pct >= 50 ? " mid" : ""}" title="${esc(w.name)} limit: ${pct}% used${w.resets ? ", starts again in " + untilT(w.resets) : ""}">${esc(w.name)} <span class="bar"><i style="width:${pct}%"></i></span> ${pct}%${w.resets ? " ↺" + untilT(w.resets) : ""}</span>`;
     }).join("");
     const k = useKey(u.cli, u.account);
-    return `<div class="u${only.has(k) ? " on" : ""}" data-use="${esc(k)}" role="button" title="${only.has(k) ? "its chats are shown: tap to drop them. " : "tap to show its chats. "}${u.ts ? "as of " + (timeAgo(u.ts) === "now" ? "now" : timeAgo(u.ts) + " ago") : ""}"><span class="who">${who}</span>${ws || '<span class="w">— shows after its next reply</span>'}</div>`;
+    // the limits the row leaves out, in its tooltip
+    const more = (u.more || []).map((w) => `\n${w.name}: ${Math.max(0, Math.min(100, w.pct))}% used${w.resets ? ", starts again in " + untilT(w.resets) : ""}`).join("");
+    return `<div class="u${only.has(k) ? " on" : ""}" data-use="${esc(k)}" role="button" title="${only.has(k) ? "its chats are shown: tap to drop them. " : "tap to show its chats. "}${u.ts ? "as of " + (timeAgo(u.ts) === "now" ? "now" : timeAgo(u.ts) + " ago") : ""}${esc(more)}"><span class="who">${who}</span>${ws || '<span class="w">— shows after its next reply</span>'}</div>`;
   }).join("");
 }
 async function loadList() {
@@ -1569,11 +1572,11 @@ async function newChat() {
   const tg = cfg?.tabgroups || {};
   const others = tg.groups || [];
   // each AI's logins: more than one, and the form asks which; the last pick comes first
-  const acctsOf = (cli) => (cli === "codex" ? cfg?.codex_accounts : cli === "claude" ? cfg?.accounts : []) || [];   // Grok's login is set in its tab
+  const acctsOf = (cli) => (cli === "codex" ? cfg?.codex_accounts : cli === "claude" ? cfg?.accounts : []) || [];   // Grok's and Antigravity's login is set in its tab
   const acctKey = (cli) => (cli === "codex" ? "lastacct-codex" : "lastacct");
   const lastAcctOf = (cli) => { const kept = localStorage.getItem(acctKey(cli));
     return acctsOf(cli).some((a) => a.name === kept) ? kept : cli === "claude" ? cfg?.account || "" : ""; };
-  const clis = cfg?.clis || ["claude"];       // Codex and Grok too, when they are installed
+  const clis = cfg?.clis || ["claude"];       // Codex, Grok and Antigravity too, when they are installed
   const lastCli = clis.includes(localStorage.getItem("lastcli")) ? localStorage.getItem("lastcli") : "claude";
   sheet(`<h2>New chat</h2>
     <div id="n-look"></div>
@@ -1582,6 +1585,8 @@ async function newChat() {
     <select id="n-group"><option value="">No group</option>${others.map((g) => `<option value="${esc(g.color)}">${esc(g.name)}</option>`).join("")}</select>
     ${clis.length > 1 ? `<label>AI</label><select id="n-cli">${clis.map((c) => `<option value="${c}"${c === lastCli ? " selected" : ""}>${AI_NAMES[c] || "Claude"}</option>`).join("")}</select>` : ""}
     <div id="n-acctbox" hidden><label>Account</label><select id="n-account"></select></div>
+    <div id="n-modelbox" hidden><label>Model</label><select id="n-model"></select>
+    <label>Thinking effort</label><select id="n-effort"></select></div>
     <label>Folder on this computer</label>
     <input id="n-cwd" value="${esc(last)}" autocapitalize="off" autocorrect="off" spellcheck="false">
     <div class="chips"><button id="n-browse" type="button">Browse…</button>${recent.map((c) => `<button type="button" data-cwd="${esc(c)}">${esc(tilde(c))}</button>`).join("")}</div>
@@ -1597,6 +1602,22 @@ async function newChat() {
     $("n-acctbox").hidden = list.length < 2;
     $("n-account").innerHTML = list.map((a) => `<option value="${esc(a.name)}"${a.name === last ? " selected" : ""}>${esc(a.label)}</option>`).join("");
   };
+  // the models of the AI picked, and the efforts the model picked takes; the
+  // last ones picked for that AI come first. Grok's model is set in its tab.
+  const modelsOf = (cli) => (cli === "codex" ? cfg?.codex_models : cli === "agy" ? cfg?.agy_models
+    : cli === "claude" ? (cfg?.models || []).map((x) => ({ name: x, label: x || "default", efforts: cfg?.efforts || [""] })) : null) || [];
+  const effortShown = (first) => {
+    const cli = cliOf(), list = (modelsOf(cli).find((x) => x.name === $("n-model").value) || {}).efforts || [""];
+    const want = first ? localStorage.getItem("lasteffort-" + cli) || "" : $("n-effort").value;
+    $("n-effort").innerHTML = opts(list, list.includes(want) ? want : "", (x) => x || "default");
+  };
+  const modelShown = () => {
+    const cli = cliOf(), list = modelsOf(cli), want = localStorage.getItem("lastmodel-" + cli) || "";
+    $("n-modelbox").hidden = list.length < 2;
+    $("n-model").innerHTML = list.map((x) => `<option value="${esc(x.name)}"${x.name === want ? " selected" : ""}>${esc(x.label)}</option>`).join("");
+    effortShown(true);
+  };
+  $("n-model").onchange = () => effortShown(false);
   // the folder's past conversations of that AI that no tab holds, newest first
   let sessAsk = 0;
   const sessShown = async () => {
@@ -1610,8 +1631,9 @@ async function newChat() {
         : "<option disabled>No past conversations here</option>");
     } catch (e) { if (n === sessAsk) box.innerHTML = fresh; }
   };
-  if ($("n-cli")) $("n-cli").onchange = () => { acctShown(); sessShown(); };
+  if ($("n-cli")) $("n-cli").onchange = () => { acctShown(); modelShown(); sessShown(); };
   acctShown();
+  modelShown();
   sessShown();
   $("n-cancel").onclick = closeSheet;
   $("n-cwd").onchange = sessShown;
@@ -1623,10 +1645,12 @@ async function newChat() {
       const cli = cliOf();
       const account = acctsOf(cli).length > 1 ? { account: $("n-account").value } : {};
       const go = $("n-sess").value ? { resume: $("n-sess").value } : {};
-      const { chat } = await api("api/chats", { kind: "tab", cli, cwd, group: $("n-group").value, title: $("n-title").value, ...account, ...go, ...look.get() });
+      const model = $("n-modelbox").hidden ? {} : { model: $("n-model").value, effort: $("n-effort").value };
+      const { chat } = await api("api/chats", { kind: "tab", cli, cwd, group: $("n-group").value, title: $("n-title").value, ...account, ...model, ...go, ...look.get() });
       localStorage.setItem("lastcwd", cwd);
       localStorage.setItem("lastcli", cli);
       if (account.account !== undefined) localStorage.setItem(acctKey(cli), account.account);
+      if (model.model !== undefined) { localStorage.setItem("lastmodel-" + cli, model.model); localStorage.setItem("lasteffort-" + cli, model.effort); }
       closeSheet(); location.hash = "#c/" + chat.id;
     } catch (e) { $("n-err").textContent = e.message; }
   };
@@ -1751,19 +1775,23 @@ const settings = async (t = cur) => {
   } else {
     const codex = m.tab && m.tab.cli === "codex";     // Codex's own logins and models
     const grok = m.tab && m.tab.cli === "grok";       // Grok's are set in its tab
+    const agy = m.tab && m.tab.cli === "agy";         // Antigravity: its login is set in its tab, its models are its own
     const accts = (codex ? cfg.codex_accounts : cfg.accounts) || [];
-    const cmodels = (cfg.codex_models || []).slice();
-    if (codex && m.tab.model && !cmodels.some((x) => x.name === m.tab.model)) cmodels.push({ name: m.tab.model, label: m.tab.model });
+    const cmodels = ((codex ? cfg.codex_models : agy ? cfg.agy_models : null) || []).slice();
+    // agy names a model and its effort as one id (gemini-4-neon-high), and takes them as two
+    const [agyModel, agyEffort] = agy ? (/^(.+)-(low|medium|high|xhigh|max)$/.exec(m.tab.model || "") || [0, m.tab.model || "", ""]).slice(1) : ["", ""];
+    const modelNow = codex ? m.tab.model || "" : agyModel;
+    if ((codex || agy) && modelNow && !cmodels.some((x) => x.name === modelNow)) cmodels.push({ name: modelNow, label: modelNow, efforts: ["", ...(agyEffort ? [agyEffort] : [])] });
     sheet(`<h2>Chat</h2><div id="e-look"></div><div class="hint">${m.tab ? "Its tab in tabit: the name is the tab’s name" : esc(tilde(m.cwd))}</div>
       <label>Name</label><input id="e-title" value="${esc(m.title)}" maxlength="80">
-      <div ${grok ? "hidden" : ""}><label>Account</label><select id="e-account">${accts.map((a) => `<option value="${esc(a.name)}"${a.name === (m.account || "") ? " selected" : ""}>${esc(a.label)}</option>`).join("")}</select>
+      <div ${grok ? "hidden" : ""}><div ${agy ? "hidden" : ""}><label>Account</label><select id="e-account">${accts.map((a) => `<option value="${esc(a.name)}"${a.name === (m.account || "") ? " selected" : ""}>${esc(a.label)}</option>`).join("")}</select></div>
       <div ${m.tab ? "hidden" : ""}><label>When Claude wants to do something</label><select id="e-mode">${opts(cfg.modes, m.mode, (x) => MODE_NAME[x])}</select>
       <div class="hint warn" id="e-warn" ${m.mode === "bypass" ? "" : "hidden"}>Bypass: no questions asked.</div></div>
-      <label>Model</label><select id="e-model">${codex
-        ? cmodels.map((x) => `<option value="${esc(x.name)}"${x.name === (m.tab.model || "") ? " selected" : ""}>${esc(x.label)}</option>`).join("")
+      <label>Model</label><select id="e-model">${codex || agy
+        ? cmodels.map((x) => `<option value="${esc(x.name)}"${x.name === modelNow ? " selected" : ""}>${esc(x.label)}</option>`).join("")
         : opts(cfg.models, m.tab ? aliasOf(m.tab.model) : m.model, (x) => x || "default")}</select>
       <label>Thinking effort</label><select id="e-effort"></select></div>
-      <div class="hint" ${m.tab && m.tab.model ? "" : "hidden"}>${m.tab ? "Answering as " + esc(m.tab.model) + (grok ? ". Its login and model are set in its tab." : ". A new model starts with the next message, and only when the tab is not busy.") : ""}</div>
+      <div class="hint" ${m.tab && m.tab.model ? "" : "hidden"}>${m.tab ? "Answering as " + esc(m.tab.model) + (grok ? ". Its login and model are set in its tab." : (agy ? ". Its login is set in its tab." : "") + " A new model starts with the next message, and only when the tab is not busy.") : ""}</div>
       <div ${m.tab ? "hidden" : ""}><label>Connectors</label><button type="button" id="e-reload">↻ Reload Claude</button>
       <div class="hint" id="e-reloaded">Changed a connector (Gmail, Strava…)? Tap this. The chat keeps its history.</div></div>
       <div class="hint" id="e-err" style="color:var(--red)"></div>
@@ -1774,10 +1802,10 @@ const settings = async (t = cur) => {
     };
     const look = picker($("e-look"), m);
     $("e-mode").onchange = () => { $("e-warn").hidden = $("e-mode").value !== "bypass"; };
-    // the efforts the model picked takes: Codex says so per model, Claude takes them all
-    const effortNow = (m.tab ? m.tab.effort : m.effort) || "";
+    // the efforts the model picked takes: Codex and Antigravity say so per model, Claude takes them all
+    const effortNow = (m.tab ? m.tab.effort || agyEffort : m.effort) || "";
     const effortsFill = (first) => {
-      const list = codex ? ((cmodels.find((x) => x.name === $("e-model").value) || {}).efforts || [""]) : (cfg.efforts || [""]);
+      const list = codex || agy ? ((cmodels.find((x) => x.name === $("e-model").value) || {}).efforts || [""]) : (cfg.efforts || [""]);
       let want = first ? effortNow : $("e-effort").value;
       if (!first && !list.includes(want)) want = "";      // another model: one it takes
       $("e-effort").innerHTML = opts(list.includes(want) ? list : [...list, want], want, (x) => x || "default");
@@ -1785,6 +1813,7 @@ const settings = async (t = cur) => {
     effortsFill(true);
     $("e-model").onchange = () => effortsFill(false);
     const asked = () => grok ? { title: $("e-title").value, ...look.get() }
+      : agy ? { title: $("e-title").value, model: $("e-model").value, effort: $("e-effort").value, ...look.get() }
       : { title: $("e-title").value, mode: $("e-mode").value, model: $("e-model").value, effort: $("e-effort").value, ...($("e-account").value !== (m.account || "") ? { account: $("e-account").value } : {}), ...look.get() };
     $("e-save").onclick = async () => { try { await api(`api/chats/${t.id}/edit`, asked()); done(); } catch (e) { $("e-err").textContent = e.message; } };
     if ($("e-del")) $("e-del").onclick = async () => { if (!confirm(m.tab ? "Delete this chat? Its tab in tabit closes too." : "Delete this chat and its history?")) return; try { await api(`api/chats/${t.id}/delete`, {}); gone(); } catch (e) { $("e-err").textContent = e.message; } };

@@ -358,8 +358,56 @@ class CodexChatTest(unittest.TestCase):
         self.assertEqual(cli("/usr/bin/claude --continue"), "claude")
         self.assertEqual(cli("/home/u/.nvm/bin/codex resume " + A), "codex")
         self.assertEqual(cli("grok --continue"), "grok")
-        self.assertIsNone(cli("agy -c"))
+        self.assertEqual(cli("agy -c"), "agy")
+        self.assertIsNone(cli("gemini"))
         self.assertIsNone(cli(""))
+
+
+class AgyChatTest(unittest.TestCase):
+    """A chat reads an agy tab's conversation: the one its agy holds open."""
+
+    def setUp(self):
+        T._agy_looked.clear()
+        self.addCleanup(T._agy_looked.clear)
+
+    def test_the_open_conversation_first_then_the_one_resumed(self):
+        argv = ["/bin/bash", "-c", "cd /p || exit 1; exec agy --conversation " + A]
+        with mock.patch.object(T, "_ai_hunt_scan", return_value={"t1": B}) as scan:
+            self.assertEqual(T._agy_tab_transcript("t1", argv, None, 42), tabit.AGY_TRANSCRIPT % B)
+        self.assertEqual(scan.call_args[0][0], [("t1", "agy", None, 42)])
+        T._agy_looked.clear()
+        with mock.patch.object(T, "_ai_hunt_scan", return_value={}):      # none open yet
+            self.assertEqual(T._agy_tab_transcript("t1", argv, None, 42), tabit.AGY_TRANSCRIPT % A)
+            T._agy_looked.clear()
+            self.assertEqual(T._agy_tab_transcript("t2", ["agy"], "s", None), "")
+
+    def test_it_looks_only_now_and_then(self):
+        with mock.patch.object(T, "_ai_hunt_scan", return_value={"t1": B}) as scan:
+            T._agy_tab_transcript("t1", [], None, 1)
+            T._agy_tab_transcript("t1", [], None, 1)
+            self.assertEqual(scan.call_count, 1)
+            T._agy_looked["t1"] = (time.time() - tabit.AGY_LOOK_SEC - 1, "")
+            T._agy_tab_transcript("t1", [], None, 1)
+            self.assertEqual(scan.call_count, 2)
+
+
+class AgentKindTest(unittest.TestCase):
+    """Which screen rules a tab gets: its AI program, not a name in its folder."""
+
+    def kind(self, run):
+        app = types.SimpleNamespace(_ai_cli_path_of=T._ai_cli_path_of,
+                                    _HERDR_AGENT_ALIASES=T._HERDR_AGENT_ALIASES)
+        return T._ai_agent_kind(app, ["/bin/bash", "-c", run])
+
+    def test_the_program_wins_over_the_folder(self):
+        self.assertEqual(self.kind("cd /tmp/claude-1000/x || exit 1; exec agy"), "agy")
+        self.assertEqual(self.kind("cd /home/u/agy-notes || exit 1; exec claude --continue"), "claude")
+        self.assertEqual(self.kind("cd /p || exit 1; exec /opt/bin/codex resume --last"), "codex")
+
+    def test_a_command_it_cannot_read_falls_back_to_the_words(self):
+        self.assertEqual(self.kind("grok --continue"), "grok")
+        self.assertEqual(T._ai_agent_kind(types.SimpleNamespace(
+            _ai_cli_path_of=lambda a: None, _HERDR_AGENT_ALIASES=T._HERDR_AGENT_ALIASES), ["x"]), "claude")
 
 
 class CodexNotifyTest(unittest.TestCase):

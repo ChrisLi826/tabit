@@ -635,6 +635,10 @@ AI_SESSION_FILES = {
     "agy": re.compile(
         r"/antigravity-cli/conversations/(%s)\.db$" % _UUID_RE),
 }
+# what a chat reads of an agy conversation (Antigravity CLI 1.5)
+AGY_TRANSCRIPT = os.path.expanduser(
+    "~/.gemini/antigravity-cli/brain/%s/.system_generated/logs/transcript.jsonl")
+AGY_LOOK_SEC = 5        # an agy tab's open conversation is looked up this often
 # +AI "Run inside tmux": per-session options that keep the AI status icons
 # working. Measured, not guessed — without the first two tabit sees an empty
 # window title (the braille spinner rules in agent-detection/*.toml go blind)
@@ -7547,8 +7551,19 @@ if (data !== null) {{
         except Exception:
             return None
 
+    # agents whose manifest alone says when they ask: the shared blocked
+    # chrome is Claude's, and agy 1.5 shows "esc to cancel" while it works
+    _OWN_MENU_AGENTS = ("agy",)
+
     def _ai_agent_kind(self, argv):
-        """Best-effort herdr agent id from spawn argv."""
+        """Best-effort herdr agent id from spawn argv: the AI program's own
+        name first, as a folder in the command may hold another name
+        (an agy tab in /tmp/claude-1000/... is not Claude)."""
+        got = self._ai_cli_path_of(argv)
+        name = os.path.basename(got[0].rstrip("/")).lower() if got else ""
+        for needle, kind in self._HERDR_AGENT_ALIASES:
+            if name and needle in name:
+                return kind
         blob = " ".join(str(a) for a in (argv or [])).lower()
         for needle, kind in self._HERDR_AGENT_ALIASES:
             if needle in blob:
@@ -7614,15 +7629,18 @@ if (data !== null) {{
                 )
                 row._agent_episode = ep
 
+        chrome = self._ai_agent_kind(argv) not in self._OWN_MENU_AGENTS
         ev = as_.gather_evidence(
             text or "",
             osc_title=osc_title,
             manifest_state=state,
             matched_rule=matched_rule,
             flags=flags,
+            chrome_blocked=chrome,
         )
         return as_.detect_raw(
             ev, ep or as_.Episode(), now, argv=argv, text=text or "",
+            chrome_blocked=chrome,
         )
 
     @classmethod
@@ -7909,15 +7927,18 @@ if (data !== null) {{
             osc_title = getattr(row, "_agent_window_title", "") or ""
             state, matched_rule, flags = self._manifest_evaluate(
                 text, getattr(row, "argv", None), osc_title=osc_title)
+            chrome = self._ai_agent_kind(getattr(row, "argv", None)) not in self._OWN_MENU_AGENTS
             ev = as_.gather_evidence(
                 text or "",
                 osc_title=osc_title,
                 manifest_state=state,
                 matched_rule=matched_rule,
                 flags=flags,
+                chrome_blocked=chrome,
             )
             raw = as_.detect_raw(
                 ev, ep, now, argv=getattr(row, "argv", None), text=text or "",
+                chrome_blocked=chrome,
             )
         ep = as_.apply_raw_to_episode(ep, raw, now)
         row._agent_episode = ep
@@ -8421,8 +8442,8 @@ if (data !== null) {{
         self._tmux_unscroll(row)
         text = self._tg_safe_text(text)
         if (re.search(r"(?:^|\s)@\S*\Z", text.rstrip("\n"))
-                and self._chat_cli_of(row) == "grok"):
-            # an @word last opens Grok's file picker, and the Enter then
+                and self._chat_cli_of(row) in ("grok", "agy")):
+            # an @word last opens Grok's (or agy's) file picker, and the Enter then
             # picks a file instead of sending: a space closes it
             text = text.rstrip("\n") + " "
         row.term.paste_text(text)
@@ -12917,7 +12938,7 @@ if (data !== null) {{
                 account = body.get("account") if prog in ("claude", "codex") else None
                 # one exact conversation to go on with (a Tabit Chat moving to
                 # a tab, or one picked in the new chat form)
-                resume = body.get("resume") if prog in ("claude", "codex", "grok") else None
+                resume = body.get("resume") if prog in ("claude", "codex", "grok", "agy") else None
                 if resume is not None and not (isinstance(resume, str)
                                                and re.fullmatch(r"[0-9a-f-]{36}", resume)):
                     return 400, {"error": "resume is a session id"}
@@ -12926,6 +12947,13 @@ if (data !== null) {{
                     return 409, {"error": "that conversation is open in another Claude"}
                 if resume and not self._ai_is_claude(tool) and resume in self._ai_session_ids_in_use():
                     return 409, {"error": "that conversation is open in another tab"}
+                # a model and thinking effort picked in the new chat form; the
+                # chat checked them against what the AI offers
+                model, effort = body.get("model") or "", body.get("effort") or ""
+                if not all(isinstance(v, str) and re.fullmatch(r"[\w.-]{0,80}", v) for v in (model, effort)):
+                    return 400, {"error": "model and effort are names"}
+                if (model or effort) and prog not in ("claude", "codex", "agy"):
+                    return 400, {"error": f"a {prog} tab's model is set in the tab"}
                 run = tool
                 if account:
                     run = dict(self._ai_accounts(prog)).get(account)
@@ -12937,7 +12965,7 @@ if (data !== null) {{
                             or (body.get("bypass") is True and getattr(self, "_from_chat", False)))
                            and self._ai_is_claude(tool),
                     tmux=True, continue_now=bool(resume), resume_later=True,
-                    resume_id=resume or None,
+                    resume_id=resume or None, model=model, effort=effort,
                     new_sid=(str(uuid.uuid4()) if not resume and self._ai_takes_new_id(run) else None))
                 row = self._add_session(f"{tool} · {account}" if account else tool,
                                         argv, icon, sub=self._ai_sub(cwd, run),
@@ -13825,6 +13853,8 @@ if (data !== null) {{
                             codex_accounts=Tabit._codex_accounts,
                             claude_usage=Tabit._claude_usage,
                             grok_usage=tabit_chat.grok_usage,
+                            agy_usage=tabit_chat.agy_usage,
+                            agy_models=tabit_chat.agy_models,
                             env_drop=CLAUDE_SESSION_ENV,
                             auth=Tabit._ai_auth_status,
                             tab_hook=self._chat_tab_hook,
@@ -13848,7 +13878,7 @@ if (data !== null) {{
         return {"TABIT_SOCK": REMOTE_SOCK, "TABIT_OWNER": owner or ""}
 
     def _chat_tabs_hook(self):
-        """For a chat: every Claude, Codex or Grok AI tab as {"id", "title", "group",
+        """For a chat: every Claude, Codex, Grok or Antigravity AI tab as {"id", "title", "group",
         "cli", ...}, or None when tabit is busy. Runs on the GTK thread through
         _remote_call."""
         def work():
@@ -13873,14 +13903,14 @@ if (data !== null) {{
         return res if isinstance(res, list) else None
 
     def _chat_cli_of(self, row):
-        """"claude", "codex" or "grok" for an AI tab a chat can show, else None."""
+        """"claude", "codex", "grok" or "agy" for an AI tab a chat can show, else None."""
         got = self._ai_cli_path_of(getattr(row, "argv", None))
         if not got:
             return None
         if self._ai_is_claude(got[0]):
             return "claude"
         name = os.path.basename(got[0].rstrip("/"))
-        return name if name in ("codex", "grok") else None
+        return name if name in ("codex", "grok", "agy") else None
 
     def _codex_notified(self, row):
         """The session ids the tab's codex named after its turns, oldest first."""
@@ -13988,6 +14018,9 @@ if (data !== null) {{
                         "transcript": self._codex_rollout(
                             list(row.argv or []) + self._codex_notified(row)) if cli == "codex"
                         else getattr(row, "_agent_hook_tx", "") or ""}
+                if cli == "agy":         # found off the GTK thread, below
+                    info["_agy"] = (list(row.argv or []), self._ai_tmux_unwrap(row.argv or [])[1],
+                                    getattr(row, "pid", None))
                 if status == "background":
                     info["bg"] = self._agent_hook_bg(row)    # which work still runs
                 term = getattr(row, "term", None)
@@ -14007,7 +14040,29 @@ if (data !== null) {{
             return (503, {"error": "tabit busy"}) if acts else {"error": "tabit busy"}
         if acts and not isinstance(res, tuple):
             return 500, res                 # the exception text
+        if isinstance(res, dict) and "_agy" in res:
+            res["transcript"] = self._agy_tab_transcript(tab_id, *res.pop("_agy"))
         return res
+
+    _agy_looked = {}         # tab id: (when, the transcript found then)
+
+    @classmethod
+    def _agy_tab_transcript(cls, tab_id, argv, session, pid):
+        """The transcript of the conversation an agy tab holds open, or the
+        one its command resumes; "" before the first message. agy picks a
+        new id for each conversation, and the running agy holds its
+        conversations/<id>.db open. Looked up once per AGY_LOOK_SEC: it
+        reads /proc. Not on the GTK thread."""
+        when, path = cls._agy_looked.get(tab_id, (0, ""))
+        if time.time() - when < AGY_LOOK_SEC:
+            return path
+        sid = cls._ai_hunt_scan([(tab_id, "agy", session, pid)]).get(tab_id)
+        if not sid:
+            m = re.findall(r"--conversation\s+(%s)" % _UUID_RE, " ".join(argv))
+            sid = m[-1] if m else None
+        path = AGY_TRANSCRIPT % sid if sid else ""
+        cls._agy_looked[tab_id] = (time.time(), path)
+        return path
 
     def _chat_screen_ansi(self, tab_id):
         """An AI tab's screen with its colours, for the chat to find Claude's
@@ -15625,9 +15680,11 @@ if (data !== null) {{
         argv = getattr(row, "argv", None) or []
         got = self._ai_cli_path_of(argv)
         prog = os.path.basename(got[0].rstrip("/")) if got else ""
-        if getattr(row, "kind", None) != "term" or prog not in ("claude", "codex"):
+        if getattr(row, "kind", None) != "term" or prog not in ("claude", "codex", "agy"):
             return "only a Claude or Codex tab has an account"
-        who = prog.capitalize()
+        if prog == "agy" and name:
+            return "an Antigravity tab's login is set in the tab"
+        who = "Antigravity" if prog == "agy" else prog.capitalize()
         if getattr(row, "dead", False):
             return "that tab has exited"
         old = self._ai_account_of(got[0]) or ""
@@ -15657,6 +15714,11 @@ if (data !== null) {{
             # its session is named after a turn; one with a file has spoken
             tx = self._codex_rollout(list(argv) + self._codex_notified(row))
             sid = (re.findall(_UUID_RE, os.path.basename(tx)) or [None])[-1]
+        elif prog == "agy":
+            # the conversation its agy holds open; one with a file has spoken
+            tx = self._agy_tab_transcript(self._tg_row_id(row), list(argv),
+                                          self._ai_tmux_unwrap(argv)[1], getattr(row, "pid", None))
+            sid = (re.findall(_UUID_RE, tx) or [None])[-1]
         else:
             sid = self._ai_session_of(row)
         if not sid:
@@ -15664,7 +15726,7 @@ if (data !== null) {{
         old_tmux = getattr(row, "_live_tmux", None)   # what runs, not what argv says
         # A tab that never spoke has no transcript: --resume would fail. It
         # starts that same session afresh instead, and resumes it later.
-        spoke = prog == "codex" or self._claude_session_saved(got[1], sid)
+        spoke = prog in ("codex", "agy") or self._claude_session_saved(got[1], sid)
         launch, stored, _icon = self._ai_launch_pair(
             new_cli, got[1], [], resume_id=sid if spoke else None,
             tmux=self._ai_tmux_unwrap(argv)[1] is not None,
@@ -16004,16 +16066,17 @@ if (data !== null) {{
         return out
 
     def _ai_folder_sessions(self, cli, folder, used=None):
-        """[{"id", "title", "ts"}] of a folder's Claude, Codex or Grok
-        conversations that no tab holds, newest first: the new chat form's
-        list. Codex and Grok are read by tabit_chat, which knows their files."""
+        """[{"id", "title", "ts"}] of a folder's Claude, Codex, Grok or
+        Antigravity conversations that no tab holds, newest first: the new
+        chat form's list. The others are read by tabit_chat, which knows their files."""
         folder = os.path.expanduser(folder or "~")
         if cli == "claude":
             return [{"id": sid, "title": title, "ts": mtime}
                     for sid, title, mtime, _q, _a in self._claude_free_sessions(folder, limit=20, used=used)]
         chat = sys.modules.get("tabit_chat")
         lister = {"codex": getattr(chat, "codex_sessions", None),
-                  "grok": getattr(chat, "grok_sessions", None)}.get(cli)
+                  "grok": getattr(chat, "grok_sessions", None),
+                  "agy": getattr(chat, "agy_sessions", None)}.get(cli)
         if lister is None:
             return []
         used = self._ai_session_ids_in_use() if used is None else used
@@ -16259,11 +16322,11 @@ if (data !== null) {{
 
     @staticmethod
     def _ai_effort_tokens(cli, effort):
-        """How claude and codex are told a thinking effort."""
+        """How claude, codex and agy are told a thinking effort."""
         prog = os.path.basename(cli.rstrip("/"))
         if not effort:
             return []
-        if prog == "claude":
+        if prog in ("claude", "agy"):
             return ["--effort", effort]
         if prog == "codex":
             return ["-c", f"model_reasoning_effort={effort}"]
@@ -16276,7 +16339,7 @@ if (data !== null) {{
         d = shlex.quote(path)
         # a model and effort picked for this tab (a chat switched them): kept in the command
         model_tokens = (["--model", model] if model and os.path.basename(
-            cli.rstrip("/")) in ("claude", "codex") else []) + cls._ai_effort_tokens(cli, effort)
+            cli.rstrip("/")) in ("claude", "codex", "agy") else []) + cls._ai_effort_tokens(cli, effort)
         tail = " ".join(shlex.quote(t) for t in (
             cls._ai_bypass_tokens(cli, bypass) + cls._ai_hook_tokens(cli)
             + model_tokens + cls._ai_screen_tokens(cli)))
