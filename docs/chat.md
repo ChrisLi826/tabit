@@ -407,10 +407,101 @@ A group puts two or more chats in one room.
 Turning off **Allow typing into tabs** stops new messages, but a chat that is
 working goes on until it is done. Press **Stop** first if you want it to end.
 
+## Planner
+
+**Planner** is a list of your own to-dos and dates. A line above Chats and
+Groups says what it holds: how many are due today, how many are late (the
+line turns red), the next one with its time, and the Planner's chat with its
+state bubble. Tap the line to open the Planner, or the chat's picture to talk
+to it.
+On a phone it fills the screen, like a chat; on a wide screen it opens on the
+right and the list of chats stays on the left. The address is `#p`.
+
+- **One file.** It all lives in `~/.local/share/tabit/planner.md`, a
+  plain Markdown list you can open and edit yourself:
+
+  ```
+  - [ ] Buy milk
+  - [ ] Dentist 2026-11-27 10:00
+  - [x] Pay the power bill 2026-11-25 ✓2026-11-24
+  - [ ] Send the weekly report 2026-11-27 21:00
+    Priority: urgent
+  - [-] VBR test
+    Assigned: @video-tab
+    Waiting for the encoder fix.
+    > 2026-11-26 14:30 Ann: ask again on Monday
+  ```
+
+  An item may end with a date, or a date and a time. `[x]` is done, and
+  `✓<day>` after it says the day it was done; `[-]` is on hold. Lines
+  indented by two spaces under an item belong to it:
+  `> <day> <time> <name>: <text>` is a comment, `Assigned: @tab, @other-tab`
+  names the AI tabs working on it, `Priority: urgent` (or `important`,
+  `medium`, `low`, as in Microsoft Planner; with none it is medium) says how
+  much it matters, and any other is its description. One Assigned and one
+  Priority line each. Keep no blank line among them: a blank line ends the
+  item. A description line cannot start with `>`, `Assigned:` or
+  `Priority:`. Lines that are not items (notes, headings) stay as they are.
+  The first lines of the file say the format, so an AI that reads it knows
+  how to write it.
+- **What you see.** *Today* (with dates gone by in red), *Coming up* in date
+  order, *To-do* (no date) by priority, Urgent first, with what is on hold
+  greyed at the end (it is never late), and *Done*, folded: what was done in
+  the last 14 days, the newest first. Each item shows its priority in
+  colour (Urgent red, Important orange, Low grey; Medium shows nothing).
+  📝 marks an item with a description, 💬 its comments,
+  and `@tab` the AI tabs it is assigned to: tap one to open that tab's chat
+  (it is grey and crossed out when the tab is gone).
+  Tap the box to tick an item: it is done, and today is kept as the day; tap
+  again to open it. Tap the text to open its card in place, in the list (its words again, a tap
+  outside it, ✕ or Esc closes it; a tap inside it does not; the list waits
+  while it is open): change its words, date,
+  time, priority and description, pick the AI tabs it is assigned to, put
+  it on hold, read and write comments, or delete it with all its lines. The
+  round ＋ left of 💬 opens a box like the chat's (it turns into ✕ to
+  close it; so does Esc), with the card's fields, for a new one: what, date, time,
+  priority (Medium first), the AI tabs it is assigned to and a
+  description. Enter in What saves it.
+- **The Planner's chat.** The Planner has its own AI chat. The first tap
+  on the round 💬 button at the lower right starts it: a Claude tab named
+  Planner, in its own folder, `~/.local/share/tabit/planner-chat` (not your
+  home folder: Claude asks to trust a home folder at every start). Claude asks
+  to trust that folder the first time; answer it in the 💬 box. tabit sends it a note: where the file is,
+  and that its job is to keep it and report from it, not to do the to-dos
+  or pass them to other tabs. Then tell it things like "dentist tomorrow at
+  10", or ask it what is coming up.
+  - It lives in the Planner, not in the list of chats, and cannot be
+    deleted. The 💬 button (with the chat's state bubble, as on a picture in
+    the list) opens its conversation in a box over the Planner, which does
+    not move (on a phone, a sheet from the bottom). ✕ or the round button
+    closes it. On a wide screen, drag the box's left edge, top edge or
+    top-left corner to resize it; this browser keeps the size, and a
+    double-click there resets it.
+  - ⚙ at the top sets its model, thinking effort, name and picture, the
+    name on your comments, and how many days Done shows. The Planner's
+    settings are kept in `~/.local/share/tabit/planner.json`.
+  - It keeps running: if its AI ends, the next line sent to it starts it
+    again, going on with its conversation, and the line waits until it is
+    up. If its tab is closed, the next change from the page starts a new
+    Planner chat.
+  - Every change you make on the page goes to it as one line (what you
+    added, ticked, changed, deleted or commented on), so it can act on it.
+    A comment also goes to the AI tabs the item is assigned to. A Save that
+    changes nothing tells nobody. An `@tab` name is the tab's name in tab
+    talk: when two tabs share a name and one closes, the other may take its
+    name, so check the "Told …" line after a comment.
+- **Both at once.** The page looks at the file again every 5 seconds, so
+  what the Planner's chat writes shows up. A change from the page names the
+  item and its lines as the page saw them; if the chat changed any of them in
+  the meantime (a new comment too), the page says so and shows the file
+  again, and nothing is overwritten.
+- It needs **Allow typing into tabs**, like the chats.
+
 ## Nearby
 
-**📡 Nearby** (next to ＋) sends text and files to another tabit on the same
-LAN, and gets them from one, like AirDrop.
+**📡 Nearby** sends text and files to another tabit on the same LAN, and gets
+them from one, like AirDrop. Its button is hidden for now: `NEARBY_SHOWN` in
+`chat.html` brings it back next to ＋. What it does, below, is unchanged.
 
 - **Receiving is off** by default and after every start of tabit. Turn it on
   for **10 minutes**, **1 hour** or **8 hours**; it turns itself off when the
