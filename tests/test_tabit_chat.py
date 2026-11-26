@@ -99,6 +99,11 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = self.tmp.name
+        for name, value in (("PLANNER_FILE", os.path.join(self.dir, "planner.md")),
+                            ("PLANNER_CONF", os.path.join(self.dir, "planner.json"))):
+            p = mock.patch.object(tc, name, value)       # never the real planner
+            p.start()
+            self.addCleanup(p.stop)
         self.log = os.path.join(self.dir, "argv.log")
         os.environ["FAKE_CLAUDE_LOG"] = self.log
         self.mgr = self.make()
@@ -282,6 +287,22 @@ class TestChat(Base):
         self.assertTrue(wait(lambda: self.kinds(chat).count("done") == 2))
         self.assertEqual([e for e in chat.events if e["t"] == "text"][-1]["text"],
                          "denied: not now")
+
+    def test_headless_multi_select_joins_answers_for_claude_and_keeps_list_in_event(self):
+        chat = self.new()
+        sent = []
+        chat.proc = type("P", (), {"poll": lambda self: None})()
+        chat._write = sent.append
+        chat.pending["rq-ms"] = {
+            "ev": {"t": "ask", "rid": "rq-ms"},
+            "input": {"questions": [{"question": "Pick", "multiSelect": True,
+                                     "options": [{"label": "A"}, {"label": "B"}]}]},
+            "suggest": None,
+        }
+        self.assertTrue(chat.answer("rq-ms", True, answers={"Pick": ["A", "B"]}))
+        chat.proc = None
+        self.assertEqual(sent[-1]["response"]["response"]["updatedInput"]["answers"], {"Pick": "A, B"})
+        self.assertEqual(chat.events[-1]["answers"], {"Pick": ["A", "B"]})
 
     def test_stop_ends_the_turn_and_the_chat_goes_on(self):
         chat = self.new()
@@ -773,6 +794,7 @@ class MirrorTest(Base):
         tc.MIRROR_EVERY = 3600       # the tests look by hand
         self.path = os.path.join(self.dir, "tx.jsonl")
         self.status = "idle"
+        self.screen = []
         self.calls = []
         shutil.copy(os.path.join(os.path.dirname(__file__), "fixtures", "chat",
                                  "tab_transcript.jsonl"), self.path)
@@ -781,8 +803,11 @@ class MirrorTest(Base):
             if tab != "t1":
                 return (404, {"error": "no"}) if text or key else {"error": "no"}
             if text is None and key is None:
-                return {"title": "MOT", "status": self.status,
+                info = {"title": "MOT", "status": self.status,
                         "transcript": self.path, "cli": "claude"}
+                if self.status == "blocked" or screen:
+                    info["screen"] = self.screen
+                return info
             self.calls.append((text, key, queue))
             return 200, {"ok": True}
         self.mgr.tab_hook = hook
@@ -904,23 +929,23 @@ class MirrorTest(Base):
         {"question": "Pick a size", "header": "Size", "multiSelect": False,
          "options": [{"label": "Small"}, {"label": "Large"}]}]
 
-    def ask_in_tab(self, questions=None, answered=False):
+    def ask_in_tab(self, questions=None, answered=False, qid="tu9"):
         use = {"type": "assistant", "message": {"content": [
-            {"type": "tool_use", "id": "tu9", "name": "AskUserQuestion",
+            {"type": "tool_use", "id": qid, "name": "AskUserQuestion",
              "input": {"questions": questions or self.QUESTIONS}}]}}
         lines = [use]
         if answered:
             lines.append({"type": "user", "message": {"content": [
-                {"type": "tool_result", "tool_use_id": "tu9", "content": "done"}]}})
+                {"type": "tool_result", "tool_use_id": qid, "content": "done"}]}})
         with open(self.path, "a") as f:
             f.write("".join(json.dumps(x) + "\n" for x in lines))
 
-    def asking(self, questions=None):
+    def asking(self, questions=None, qid="tu9"):
         self.addCleanup(setattr, tc, "ANSWER_STEP", tc.ANSWER_STEP)
         tc.ANSWER_STEP = 0
         chat = self.mirror()
         chat.mirror_poll()
-        self.ask_in_tab(questions)
+        self.ask_in_tab(questions, qid=qid)
         self.status = "blocked"
         chat.mirror_poll()
         return chat
@@ -1016,16 +1041,72 @@ class MirrorTest(Base):
         self.assertEqual(self.calls, [])
         self.assertEqual(chat.pending, {})
 
-    def test_no_card_for_an_answered_or_multiple_choice_question(self):
+    def test_no_card_for_an_answered_or_oversized_question(self):
         chat = self.mirror()
         chat.mirror_poll()
         self.ask_in_tab(answered=True)
         self.status = "blocked"
         chat.mirror_poll()
         self.assertEqual(chat.pending, {})
-        many = [dict(self.QUESTIONS[0], multiSelect=True)]
-        chat2 = self.asking(many)
+        too_many = [dict(self.QUESTIONS[0], options=[{"label": str(i)} for i in range(5)])]
+        self.screen = [" Pick a color", " ❯ 1. 0", "   2. 1", " Esc to cancel"]
+        chat2 = self.asking(too_many, qid="tu10")
         self.assertEqual(chat2.pending, {})
+
+    def test_multi_select_question_card_toggles_and_submits(self):
+        multi = [dict(self.QUESTIONS[0], multiSelect=True)]
+        chat = self.asking(multi)
+        self.assertIn("tab-tu9", chat.pending)
+        code, out = tc.api(self.mgr, "POST", [chat.id, "answer"], {
+            "rid": "tab-tu9", "allow": True,
+            "answers": {"Pick a color": ["Red", "Green", "Red"]}})
+        self.assertEqual(code, 200, out)
+        # duplicate "Red" is deduplicated; Right enters the Submit tab and "1" submits
+        self.assertEqual([k for _t, k, _q in self.calls], ["1", "3", "right", "1"])
+        self.assertEqual(chat.events[-1]["answers"], {"Pick a color": ["Red", "Green", "Red"]})
+        self.calls.clear()
+        chat2 = self.asking(multi, qid="tu10")
+        self.assertEqual(tc.api(self.mgr, "POST", [chat2.id, "answer"], {
+            "rid": "tab-tu10", "allow": True, "answers": {"Pick a color": []}})[0], 409)
+        self.assertEqual(tc.api(self.mgr, "POST", [chat2.id, "answer"], {
+            "rid": "tab-tu10", "allow": True, "answers": {"Pick a color": ["Purple"]}})[0], 409)
+        self.assertIn("tab-tu10", chat2.pending)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(tc.api(self.mgr, "POST", [chat2.id, "answer"], {
+            "rid": "tab-tu10", "allow": False})[0], 200)
+        self.assertEqual([k for _t, k, _q in self.calls], ["esc"])
+
+    def test_mixed_multi_and_single_select_questions_press_right_then_submit(self):
+        mixed = [dict(self.QUESTIONS[0], multiSelect=True), self.QUESTIONS[1]]
+        chat = self.asking(mixed)
+        code, out = tc.api(self.mgr, "POST", [chat.id, "answer"], {
+            "rid": "tab-tu9", "allow": True,
+            "answers": {"Pick a color": ["Red", "Blue"], "Pick a size": "Small"}})
+        self.assertEqual(code, 200, out)
+        self.assertEqual([k for _t, k, _q in self.calls], ["1", "2", "right", "1", "1"])
+
+    def test_answered_tab_question_does_not_fall_back_to_screen_card(self):
+        self.screen = [" Pick a color", " ❯ 1. Red", "   2. Blue", " Esc to cancel"]
+        chat = self.asking(self.QUESTIONS[:1])
+        code, out = tc.api(self.mgr, "POST", [chat.id, "answer"], {"rid": "tab-tu9", "allow": False})
+        self.assertEqual(code, 200, out)
+        self.assertEqual(chat.pending, {})
+        # transcript has not caught up yet: must not pop up a duplicate scr-... card
+        chat.mirror_poll()
+        self.assertEqual(chat.pending, {})
+
+    def test_orphaned_ask_before_later_turn_does_not_block_screen_menu(self):
+        chat = self.mirror()
+        chat.mirror_poll()
+        self.ask_in_tab(self.QUESTIONS[:1])      # orphaned question (never received tool_result)
+        with open(self.path, "a") as f:
+            f.write(json.dumps({"type": "user", "message": {"content": "continue"}}) + "\n")
+        self.status = "blocked"
+        self.screen = PERMISSION_SCREEN
+        chat.mirror_poll()
+        self.assertEqual(len(chat.pending), 1)
+        ev = next(iter(chat.pending.values()))["ev"]
+        self.assertTrue(ev["rid"].startswith("scr-"))
 
     def test_typing_waits_while_the_card_is_open(self):
         chat = self.asking()
@@ -2500,6 +2581,28 @@ class ScreenMenuTest(Base):
         self.chat.answer(ev["rid"], False)
         self.assertEqual(self.keys, ["3"])
 
+    def test_skip_on_a_numbered_menu_without_no_presses_esc(self):
+        self.screen = [
+            " Would you like to proceed?",
+            " ❯ 1. Yes, clear context",
+            "   2. Yes, manually approve edits",
+            "   3. Type here to tell Claude what to change",
+            " Esc to cancel",
+        ]
+        ev = self.card()
+        self.chat.answer(ev["rid"], False)
+        self.assertEqual(self.keys, ["esc"])
+
+    def test_multi_select_checkbox_screen_is_no_menu(self):
+        self.assertIsNone(tc.screen_prompt([
+            " Pick changes",
+            " ❯ 1. [ ] First",
+            "   2. [ ] Second",
+            "   3. [ ] Type something",
+            "     Next",
+            " Enter to select · Esc to cancel",
+        ]))
+
     def test_the_whole_prompt_shows_however_long(self):
         cmd = ["   line %d of a long command" % i for i in range(12)]
         self.screen = ["────────", " Bash command", ""] + cmd + ["", " Do you want to proceed?",
@@ -3233,6 +3336,69 @@ class HeldWhileScreenTest(Base):
         self.assertEqual(self.typed, ["one", "two"])
         self.assertEqual(self.chat.view()["queued"], [])
 
+    def test_the_planner_chat_wakes_and_the_line_waits_for_it(self):
+        status, ops = ["exited"], []
+
+        def hook(tab, text=None, key=None, queue=False, screen=False):
+            if text is None and key is None:
+                return {"title": "x", "status": status[0], "transcript": self.path, "cli": "claude", "screen": self.BOX}
+            self.typed.append(text)
+            return 200, {"ok": True}
+        self.mgr.tab_hook = hook
+        self.mgr.tab_ops = lambda op, target=None, body=None: (ops.append((op, target)), (200, {"ok": True}))[1]
+        conf = os.path.join(self.dir, "planner.json")
+        with open(conf, "w") as f:
+            json.dump({"manager": self.chat.id}, f)
+        with mock.patch.object(tc, "PLANNER_CONF", conf):
+            self.assertEqual(self.chat.mirror_send("one")[1].get("held"), True)
+            self.assertEqual((ops, self.typed), ([("wake", "t1")], []))
+            status[0] = "unknown"                  # still starting: it waits
+            self.chat._send_held()
+            self.assertEqual(self.typed, [])
+            status[0] = "idle"
+            self.chat._send_held()
+            self.assertEqual(self.typed, ["one"])
+            # woken, but it ended again: the line stays, the chat says so, and the next line wakes it again
+            status[0] = "exited"
+            self.chat.mirror_send("two")
+            self.assertEqual(len(ops), 2)
+            self.chat._send_held()
+            self.assertEqual(self.typed, ["one"])
+            self.assertEqual(self.chat._waking, 0)
+            self.assertIn("did not start again", self.chat.events[-1]["text"])
+            # the next looks keep it while the tab is still ended: never typed into a dead tab
+            self.chat._send_held()
+            self.chat._send_held()
+            self.assertEqual((self.typed, [t for _k, t in self.chat.held]), (["one"], ["two"]))
+            self.chat.mirror_send("three")
+            self.assertEqual(len(ops), 3)
+            status[0] = "idle"
+            self.chat._send_held()
+            self.assertEqual(self.typed, ["one", "two", "three"])
+            # another chat whose AI ended is not woken
+            with open(conf, "w") as f:
+                json.dump({"manager": "other"}, f)
+            status[0] = "exited"
+            self.chat.mirror_send("four")
+            self.assertEqual(len(ops), 3)
+
+    def test_a_held_line_the_tab_refuses_waits_again(self):
+        answers = [(200, {"ok": True}), (409, {"error": "busy"})]
+
+        def hook(tab, text=None, key=None, queue=False, screen=False):
+            if text is None and key is None:
+                return {"title": "x", "status": "idle", "transcript": self.path, "cli": "claude", "screen": self.BOX}
+            self.typed.append(text)
+            return answers.pop(0) if answers else (200, {"ok": True})
+        self.mgr.tab_hook = hook
+        self.chat.held = [("a", "one"), ("b", "two"), ("c", "three")]
+        self.chat._send_held()
+        self.assertEqual(self.typed, ["one", "two"])
+        self.assertEqual([t for _k, t in self.chat.held], ["two", "three"])     # in order, nothing lost
+        self.chat._send_held()
+        self.assertEqual(self.typed, ["one", "two", "two", "three"])
+        self.assertEqual(self.chat.held, [])
+
     def test_a_waiting_line_is_taken_back(self):
         self.chat.mirror_send("oops")
         key = self.chat.view()["queued"][0]["key"]
@@ -3404,6 +3570,371 @@ class SuggestTest(Base):
         tc.stream(self.chat, 0, write, stop, kick)
         self.assertEqual(seen, [1])
         self.assertEqual(self.chat.watchers, 0)
+
+
+
+PLAN = """<!-- rules -->
+- [ ] Buy milk
+- [ ] Dentist 2026-11-27 10:00
+a note the manager wrote
+- [x] Pay the power bill 2026-11-25
+- [ ] Call mum 2026-11-28
+"""
+
+
+class PlannerParseTest(unittest.TestCase):
+    def test_items_dates_and_other_lines(self):
+        items = tc.planner_parse(PLAN)
+        self.assertEqual([(x["i"], x["done"], x["text"], x["date"], x["time"]) for x in items], [
+            (1, False, "Buy milk", "", ""),
+            (2, False, "Dentist", "2026-11-27", "10:00"),
+            (4, True, "Pay the power bill", "2026-11-25", ""),
+            (5, False, "Call mum", "2026-11-28", "")])
+        self.assertEqual(items[1]["line"], "- [ ] Dentist 2026-11-27 10:00")
+
+    def test_a_time_in_the_text_is_text(self):
+        self.assertEqual(tc.planner_parse("- [X] Meet at 10:00\n")[0]["text"], "Meet at 10:00")
+
+    def test_add_to_an_empty_file_writes_the_rules_first(self):
+        out = tc.planner_apply("", "add", {"text": "  Buy\n bread ", "date": "2026-12-01", "time": "9:30"})
+        self.assertTrue(out.startswith(tc.PLANNER_HEAD))
+        self.assertTrue(out.endswith("- [ ] Buy bread 2026-12-01 9:30\n"))
+        self.assertEqual(tc.planner_parse(out)[-1]["time"], "9:30")
+
+    def test_toggle_edit_delete_touch_one_line(self):
+        it = tc.planner_parse(PLAN)[1]
+        ref = {"i": it["i"], "block": it["block"]}
+        out = tc.planner_apply(PLAN, "toggle", ref, today="2026-11-26")
+        self.assertEqual(out.splitlines()[2], "- [x] Dentist 2026-11-27 10:00 ✓2026-11-26")
+        self.assertEqual(out.splitlines()[3], "a note the manager wrote")
+        out = tc.planner_apply(PLAN, "edit", dict(ref, text="Dentist (Dr. Lin)", date="2026-11-29"))
+        self.assertEqual(out.splitlines()[2], "- [ ] Dentist (Dr. Lin) 2026-11-29")
+        out = tc.planner_apply(PLAN, "delete", ref)
+        self.assertNotIn("Dentist", out)
+        self.assertEqual(len(out.splitlines()), len(PLAN.splitlines()) - 1)
+
+    def test_done_date_and_on_hold(self):
+        text = PLAN + "## Old heading\n- [ ] Ship it\n- [-] VBR test 2026-11-20\n\n- [x] Old one ✓2026-11-01\n"
+        items = {x["text"]: x for x in tc.planner_parse(text)}
+        self.assertEqual((items["VBR test"]["state"], items["VBR test"]["date"]), ("paused", "2026-11-20"))
+        self.assertEqual((items["Old one"]["state"], items["Old one"]["donedate"]), ("done", "2026-11-01"))
+        self.assertEqual(items["Pay the power bill"]["donedate"], "")       # done before the ✓ format
+        # a tick on an item on hold makes it done; a tick on a done one opens it and drops the day
+        hold = items["VBR test"]
+        out = tc.planner_apply(text, "toggle", {"i": hold["i"], "block": hold["block"]}, today="2026-11-26")
+        self.assertIn("- [x] VBR test 2026-11-20 ✓2026-11-26", out)
+        old = items["Old one"]
+        out = tc.planner_apply(text, "toggle", {"i": old["i"], "block": old["block"]})
+        self.assertIn("- [ ] Old one\n", out)
+        # edit sets or clears on hold, and keeps a done item's day
+        ship = items["Ship it"]
+        out = tc.planner_apply(text, "edit", {"i": ship["i"], "block": ship["block"], "text": "Ship it", "paused": True})
+        self.assertIn("- [-] Ship it\n", out)
+        out = tc.planner_apply(text, "edit", {"i": old["i"], "block": old["block"], "text": "Old", "paused": True})
+        self.assertIn("- [x] Old ✓2026-11-01\n", out)
+        # add goes after the last line that is not blank; a ## line is just another line
+        out = tc.planner_apply(text + "\n\n", "add", {"text": "Last"}).splitlines()
+        self.assertEqual(out[out.index("- [ ] Last") - 1], "- [x] Old one ✓2026-11-01")
+        self.assertIn("## Old heading", out)
+
+    def test_priority(self):
+        text = ("- [ ] Plain\n"
+                "- [ ] Hot\n  Priority: Urgent\n  Assigned: @a\n  Priority: low\n  words\n  > 2026-11-26 14:30 Ann: hi\n"
+                "- [ ] Odd\n  Priority: high\n")
+        plain, hot, odd = tc.planner_parse(text)
+        self.assertEqual(plain["priority"], "medium")                     # none is medium
+        self.assertEqual((hot["priority"], hot["desc"], hot["assigned"]), ("urgent", "words", ["a"]))
+        self.assertEqual((odd["priority"], odd["desc"]), ("medium", "Priority: high"))   # not a priority: words
+        # edit sets it on its own line, first under the item; medium takes the line away
+        ref = {"i": plain["i"], "block": plain["block"], "text": "Plain"}
+        self.assertEqual(tc.planner_apply(text, "edit", dict(ref, priority="Important")).splitlines()[:2],
+                         ["- [ ] Plain", "  Priority: important"])
+        ref = {"i": hot["i"], "block": hot["block"], "text": "Hot"}
+        out = tc.planner_apply(text, "edit", dict(ref, priority="medium")).splitlines()
+        self.assertEqual(out[1:5], ["- [ ] Hot", "  Assigned: @a", "  words", "  > 2026-11-26 14:30 Ann: hi"])
+        out = tc.planner_apply(text, "edit", dict(ref, priority="low")).splitlines()
+        self.assertEqual(out[1:3], ["- [ ] Hot", "  Priority: low"])
+        self.assertEqual(tc.planner_apply(text, "edit", ref), text)         # not sent: left as it is
+        with self.assertRaises(ValueError):
+            tc.planner_apply(text, "edit", dict(ref, priority="high"))
+        with self.assertRaises(ValueError):
+            tc.planner_apply(text, "edit", dict(ref, desc="Priority: low"))
+        # add with everything the card has
+        out = tc.planner_apply("", "add", {"text": "Full", "date": "2026-12-01", "priority": "low",
+                                           "assigned": ["@A", "b"], "desc": "one\n\ntwo"}).splitlines()
+        self.assertEqual(out[-5:], ["- [ ] Full 2026-12-01", "  Priority: low", "  Assigned: @a, @b", "  one", "  two"])
+        with self.assertRaises(ValueError):
+            tc.planner_apply("", "add", {"text": "x", "desc": "> fake"})
+        # add with a priority; the manager hears it
+        out = tc.planner_apply("", "add", {"text": "New", "priority": "urgent"}).splitlines()
+        self.assertEqual(out[-2:], ["- [ ] New", "  Priority: urgent"])
+        self.assertEqual(tc.planner_news("add", "Ann", {"text": "New", "priority": "urgent"}, None, None),
+                         'Ann added "New" (priority Urgent).')
+        now = tc.planner_parse(tc.planner_apply(text, "edit", dict(ref, priority="low")))[1]
+        self.assertEqual(tc.planner_news("edit", "Ann", {}, hot, now), 'Ann changed "Hot": priority Low.')
+
+    def test_description_and_comments(self):
+        text = ("- [ ] #8 Disk quota 2026-11-28\n"
+                "  Ask: MB is 2^20 or 10^6?\n"
+                "  See /home/u/notes.md\n"
+                "  > 2026-11-26 14:30 Ann: ask the camera team first\n"
+                "  > 2026-11-26 15:02 bot: noted\n"
+                "- [ ] Next\n")
+        it, nxt = tc.planner_parse(text)
+        self.assertEqual((it["n"], it["date"]), (5, "2026-11-28"))
+        self.assertEqual(it["desc"], "Ask: MB is 2^20 or 10^6?\nSee /home/u/notes.md")
+        self.assertEqual(it["notes"], [{"at": "2026-11-26 14:30", "who": "Ann", "text": "ask the camera team first"},
+                                       {"at": "2026-11-26 15:02", "who": "bot", "text": "noted"}])
+        self.assertEqual((nxt["i"], nxt["desc"], nxt["notes"]), (5, "", []))
+        ref = {"i": 0, "block": it["block"]}
+        # a tick and an edit keep the lines under it; an edit with desc swaps the description only
+        out = tc.planner_apply(text, "toggle", ref, today="2026-11-27")
+        self.assertEqual(out.splitlines()[1:5], text.splitlines()[1:5])
+        out = tc.planner_apply(text, "edit", dict(ref, text="#8 Disk", date="2026-11-28", desc="One\n\nTwo"))
+        self.assertEqual(out.splitlines()[:5], ["- [ ] #8 Disk 2026-11-28", "  One", "  Two",
+                                                "  > 2026-11-26 14:30 Ann: ask the camera team first",
+                                                "  > 2026-11-26 15:02 bot: noted"])
+        out = tc.planner_apply(text, "edit", dict(ref, text="#8 Disk"))
+        self.assertEqual(out.splitlines()[1:5], text.splitlines()[1:5])
+        # a comment goes last in the block; delete takes the whole block
+        out = tc.planner_apply(text, "comment", dict(ref, text="done?", who="Ann"), now="2026-11-27 09:00")
+        self.assertEqual(out.splitlines()[5:7], ["  > 2026-11-27 09:00 Ann: done?", "- [ ] Next"])
+        self.assertEqual(tc.planner_apply(text, "delete", ref), "- [ ] Next\n")
+        # a comment the manager added since: the page's block is stale
+        with self.assertRaises(LookupError):
+            tc.planner_apply(text.replace("- [ ] Next", "  > 2026-11-27 08:00 bot: hi\n- [ ] Next"), "toggle", ref)
+
+    def test_assigned_tabs(self):
+        text = ("- [ ] Port the fix\n"
+                "  Agent：@old-style (a description line)\n"
+                "  Assigned: @tab-one, @tab-two,@tab-one\n"
+                "  > 2026-11-26 14:30 Ann: go\n"
+                "- [ ] Next\n")
+        it = tc.planner_parse(text)[0]
+        self.assertEqual(it["assigned"], ["tab-one", "tab-two"])
+        self.assertEqual(it["desc"], "Agent：@old-style (a description line)")
+        self.assertEqual(len(it["notes"]), 1)
+        ref = {"i": 0, "block": it["block"], "text": "Port the fix"}
+        # a new list goes first under the item; the description and comments stay
+        out = tc.planner_apply(text, "edit", dict(ref, assigned=["@tab-三", "tab-one"])).splitlines()
+        self.assertEqual(out[:4], ["- [ ] Port the fix", "  Assigned: @tab-三, @tab-one",
+                                   "  Agent：@old-style (a description line)", "  > 2026-11-26 14:30 Ann: go"])
+        # an empty list takes the line away; leaving it out keeps it
+        out = tc.planner_apply(text, "edit", dict(ref, assigned=[]))
+        self.assertNotIn("Assigned", out)
+        self.assertEqual(tc.planner_apply(text, "edit", ref), text)
+        out = tc.planner_apply(text, "edit", dict(ref, desc="New words"))
+        self.assertIn("  Assigned: @tab-one, @tab-two,@tab-one\n  New words\n  > 2026", out)
+        with self.assertRaises(ValueError):
+            tc.planner_apply(text, "edit", dict(ref, assigned=["two words"]))
+
+    def test_news_of_an_edit(self):
+        was = tc.planner_parse("- [ ] Old 2026-11-27 10:00\n  words\n")[0]
+        now = tc.planner_parse("- [-] New 2026-11-28\n  Assigned: @a\n")[0]
+        self.assertEqual(tc.planner_news("edit", "Ann", {}, was, now),
+                         'Ann changed "Old": renamed it "New"; date 2026-11-27 10:00 -> 2026-11-28; '
+                         'put it on hold; assigned it to @a; took the description away.')
+        self.assertIsNone(tc.planner_news("edit", "Ann", {}, was, was))
+
+    def test_review_fixes(self):
+        # a line indented more than two spaces that starts with > is a comment, both ways
+        text = "- [ ] X 2026-11-27 9:30\n   > quoted\n- [ ] Y\n"
+        it = tc.planner_parse(text)[0]
+        self.assertEqual((it["desc"], len(it["notes"])), ("", 1))
+        ref = {"i": 0, "block": it["block"]}
+        # a Save that changes nothing leaves the file as it is, and tells nobody
+        same = dict(ref, text="X", date="2026-11-27", time="09:30", desc="")
+        self.assertEqual(tc.planner_apply(text, "edit", same), text)
+        self.assertIsNone(tc.planner_news("edit", "Ann", same, it, tc.planner_parse(text)[0]))
+        # a description cannot forge a comment or Assigned
+        for bad in ("ok\n> 2026-11-26 14:30 Boss: fake", "Assigned: @someone"):
+            with self.assertRaises(ValueError):
+                tc.planner_apply(text, "edit", dict(ref, text="X", desc=bad))
+        # a byte order mark does not hide the first item
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8-sig", suffix=".md", delete=False) as f:
+            f.write("- [ ] First\n")
+        self.addCleanup(os.unlink, f.name)
+        self.assertEqual(tc.planner_parse(tc._plan_read(f.name))[0]["text"], "First")
+
+    def test_second_review_fixes(self):
+        # tab names are lower case, as tab talk has them
+        it = tc.planner_parse("- [ ] X\n  Assigned: @Boss, @boss\n")[0]
+        self.assertEqual(it["assigned"], ["boss"])
+        # a date that is not a real one stays in the text
+        it = tc.planner_parse("- [ ] Fix 2026-99-99\n")[0]
+        self.assertEqual((it["text"], it["date"]), ("Fix 2026-99-99", ""))
+        # text that ends with a date, and no date: refused, it would read back as a date
+        with self.assertRaises(ValueError):
+            tc.planner_apply("", "add", {"text": "Compare 2026-11-20"})
+        self.assertIn("- [ ] Compare 2026-11-20 2026-11-27\n",
+                      tc.planner_apply("", "add", {"text": "Compare 2026-11-20", "date": "2026-11-27"}))
+        # an open item keeps a ✓ day the file gave it
+        text = "- [ ] Fix ✓2026-11-20\n"
+        out = tc.planner_apply(text, "edit", {"i": 0, "block": "- [ ] Fix ✓2026-11-20", "text": "Fixed"})
+        self.assertEqual(out, "- [ ] Fixed ✓2026-11-20\n")
+
+    def test_a_done_day_that_is_no_date(self):
+        it = tc.planner_parse("- [x] Fix ✓2026-99-99\n")[0]
+        self.assertEqual((it["state"], it["donedate"]), ("done", ""))
+
+    def test_a_changed_line_is_refused(self):
+        with self.assertRaises(LookupError):
+            tc.planner_apply(PLAN, "toggle", {"i": 2, "block": "- [ ] Dentist"})
+        with self.assertRaises(LookupError):
+            tc.planner_apply(PLAN, "delete", {"i": 3, "block": "a note the manager wrote"})
+        with self.assertRaises(LookupError):
+            tc.planner_apply(PLAN, "delete", {"i": 99, "block": ""})
+
+    def test_bad_input_is_refused(self):
+        for body in ({"text": ""}, {"text": "x", "date": "2026-13-01"}, {"text": "x", "time": "10:00"},
+                     {"text": "x", "date": "2026-11-27", "time": "25:00"}, {"text": "x" * 501}):
+            with self.assertRaises(ValueError, msg=body):
+                tc.planner_apply(PLAN, "add", body)
+
+
+class PlannerApiTest(Base):
+    def setUp(self):
+        super().setUp()
+        self.file = os.path.join(self.dir, "planner.md")
+        self.conf = os.path.join(self.dir, "planner.json")
+        for name, value in (("PLANNER_FILE", self.file), ("PLANNER_CONF", self.conf)):
+            p = mock.patch.object(tc, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_add_then_look(self):
+        code, out = tc.planner_api(self.mgr, "GET", [], {})
+        self.assertEqual((code, out["items"], out["manager"], out["done_days"]), (200, [], None, 14))
+        code, out = tc.planner_api(self.mgr, "POST", ["add"], {"text": "Buy milk"})
+        self.assertEqual(code, 200, out)
+        self.assertEqual([x["text"] for x in out["items"]], ["Buy milk"])
+        with open(self.file) as f:
+            self.assertIn("- [ ] Buy milk", f.read())
+
+    def test_start_makes_the_planner_chat_once(self):
+        asked = []
+
+        def new_tab_chat(body):
+            asked.append(body)
+            return 200, {"chat": {"id": self.new(title=body["title"]).id}}
+        sent = []
+        with mock.patch.object(self.mgr, "new_tab_chat", new_tab_chat), \
+                mock.patch.object(tc, "api", lambda mgr, m, parts, body: (sent.append(parts[0]), (200, {}))[1]):
+            out = tc.planner_api(self.mgr, "POST", ["start"], {})[1]
+            again = tc.planner_api(self.mgr, "POST", ["start"], {})[1]
+        self.assertEqual([(b["kind"], b["cli"], b["title"]) for b in asked], [("tab", "claude", "Planner")])
+        self.assertEqual(asked[0]["cwd"], os.path.join(self.dir, "planner-chat"))     # its own folder, not home
+        self.assertTrue(os.path.isdir(asked[0]["cwd"]))
+        self.assertEqual((out["manager"]["title"], again["manager"]["id"]), ("Planner", out["manager"]["id"]))
+        self.assertEqual(sent, [out["manager"]["id"]])                     # the note went once
+        self.assertTrue(self.mgr.get(out["manager"]["id"])._waking)          # and waits until its Claude is up
+
+    def test_a_closed_planner_chat_comes_back_when_told_something(self):
+        with open(self.conf, "w") as f:
+            json.dump({"manager": "closed-tab", "intro": "closed-tab"}, f)
+        new = []
+        sent = []
+
+        def new_tab_chat(body):
+            new.append(self.new(title=body["title"]).id)
+            return 200, {"chat": {"id": new[-1]}}
+        with mock.patch.object(self.mgr, "new_tab_chat", new_tab_chat), \
+                mock.patch.object(tc, "api", lambda mgr, m, parts, body: (sent.append(parts[0]), (200, {}))[1]):
+            out = tc.planner_api(self.mgr, "POST", ["add"], {"text": "Item"})[1]
+        self.assertEqual(len(new), 1)
+        self.assertEqual(out["manager"]["id"], new[0])
+        self.assertEqual(sent, [new[0], new[0]])           # its note, then the news
+        self.assertIn("Planner", out["told"])
+
+    def test_a_planner_chat_that_cannot_start_again_says_so(self):
+        with open(self.conf, "w") as f:
+            json.dump({"manager": "closed-tab"}, f)
+        with mock.patch.object(self.mgr, "new_tab_chat", lambda body: (503, {"error": "tabit busy"})):
+            code, out = tc.planner_api(self.mgr, "POST", ["add"], {"text": "Item"})
+        self.assertEqual(code, 200)                              # the item is saved all the same
+        self.assertIn("could not start again: tabit busy", out["error"])
+
+    def test_a_stale_page_gets_409_and_the_file_stays(self):
+        with open(self.file, "w") as f:
+            f.write(PLAN)
+        code, out = tc.planner_api(self.mgr, "POST", ["toggle"], {"i": 2, "block": "- [ ] old"})
+        self.assertEqual(code, 409)
+        with open(self.file) as f:
+            self.assertEqual(f.read(), PLAN)
+        self.assertEqual(tc.planner_api(self.mgr, "POST", ["add"], {"text": ""})[0], 400)
+        self.assertEqual(tc.planner_api(self.mgr, "POST", ["nope"], {"i": 1, "block": "- [ ] Buy milk"})[0], 404)
+
+    def test_picking_a_manager_saves_it_and_tells_the_chat(self):
+        chat = self.new(title="Planner")
+        sent = []
+        real = tc.api
+
+        def fake(mgr, method, parts, body):
+            if parts[1:] == ["send"]:
+                sent.append((parts[0], body["text"]))
+                return 200, {}
+            return real(mgr, method, parts, body)
+        with mock.patch.object(tc, "api", fake):
+            code, out = tc.planner_api(self.mgr, "POST", ["settings"], {"chat": chat.id})
+            self.assertEqual(code, 200, out)
+            # the days alone: the same manager is not told again
+            self.assertEqual(tc.planner_api(self.mgr, "POST", ["settings"], {"done_days": 7})[1]["done_days"], 7)
+        self.assertEqual(len(sent), 1)
+        self.assertTrue(out["sent"])
+        self.assertEqual({k: out["manager"][k] for k in ("id", "title", "gone", "state", "asks")},
+                         {"id": chat.id, "title": "Planner", "gone": False, "state": chat.state, "asks": 0})
+        self.assertEqual(sent[0][0], chat.id)
+        self.assertIn(self.file, sent[0][1])
+        self.assertEqual(tc.planner_api(self.mgr, "GET", [], {})[1]["manager"]["id"], chat.id)
+        # the chat list names the manager, so the page keeps it in the Planner
+        with mock.patch.object(tc.shutil, "which", lambda c: None):
+            self.assertEqual(tc.api(self.mgr, "GET", [], None)[1]["planner"], chat.id)
+        self.assertEqual(tc.planner_api(self.mgr, "GET", [], {})[1]["done_days"], 7)
+        # every change from the page is told to the manager, by the name in Settings
+        self.assertEqual(tc.planner_api(self.mgr, "POST", ["settings"], {"name": "Ann"})[1]["name"], "Ann")
+        worker = self.new(title="Worker")
+        api = lambda op, body: tc.planner_api(self.mgr, "POST", [op], body)[1]
+        first = lambda: tc.planner_api(self.mgr, "GET", [], {})[1]["items"][0]
+        ref = lambda: {"i": first()["i"], "block": first()["block"]}
+        with mock.patch.object(tc, "api", fake), \
+                mock.patch.object(self.mgr, "tab_names", lambda: {"worker": worker, "boss": chat}):
+            del sent[:]
+            out = api("add", {"text": "Item", "date": "2026-12-01", "who": "x"})
+            self.assertEqual(out["told"], ["Planner"])
+            out = api("edit", dict(ref(), text="Item", date="2026-12-01", assigned=["worker", "boss"]))
+            out = api("edit", dict(ref(), text="Item", date="2026-12-01"))       # nothing changed: nobody told
+            self.assertNotIn("told", out)
+            out = api("comment", dict(ref(), text="hi"))
+            self.assertEqual(out["items"][0]["notes"][0]["who"], "Ann")
+            self.assertEqual(sorted(out["told"]), ["Planner", "Worker"])        # the manager once, not twice
+            api("toggle", ref())
+            api("delete", ref())
+        self.assertEqual([c for c, _ in sent], [chat.id, chat.id, chat.id, worker.id, chat.id, chat.id])
+        words = [w.split("\n")[0] for _, w in sent]
+        self.assertEqual(words, [
+            '[Planner] Ann added "Item" (2026-12-01).',
+            '[Planner] Ann changed "Item": assigned it to @worker, @boss.',
+            '[Planner] Ann commented on "Item": hi',
+            '[Planner] Ann commented on "Item": hi',
+            '[Planner] Ann ticked "Item": done.',
+            '[Planner] Ann deleted "Item", with its description and comments.'])
+        self.assertIn("assigned to you", sent[3][1])
+        # the intro goes again only while it has not got through
+        with mock.patch.object(tc, "api", fake):
+            del sent[:]
+            tc.planner_api(self.mgr, "POST", ["settings"], {"done_days": 7})
+            self.assertEqual(sent, [])
+            with open(self.conf, "w") as f:        # a file from before "intro": its manager was told
+                json.dump({"manager": chat.id}, f)
+            tc.planner_api(self.mgr, "POST", ["settings"], {"done_days": 5})
+            self.assertEqual(sent, [])
+        # the Planner's chat cannot be deleted
+        code, out = tc.api(self.mgr, "POST", [chat.id, "delete"], {})
+        self.assertEqual((code, out["error"]), (400, "the Planner's chat cannot be deleted"))
+        self.assertEqual(tc.planner_api(self.mgr, "POST", ["settings"], {"chat": "nosuch"})[0], 404)
+        self.assertEqual(tc.planner_api(self.mgr, "POST", ["settings"], {"done_days": 0})[0], 400)
+        code, out = tc.planner_api(self.mgr, "POST", ["settings"], {"chat": ""})
+        self.assertEqual((code, out["manager"], out["done_days"]), (200, None, 5))
 
 
 if __name__ == "__main__":

@@ -73,6 +73,8 @@ in a terminal.
   the same conversation.
 - **Questions**: Allow / Deny cards for commands and edits, choices as
   buttons, and **Stop** to end a turn.
+- **Planner**: your own to-dos and dates in one Markdown file, with its
+  own AI chat that keeps it and tells you what is coming up.
 - **Files and photos**: attach with 📎, paste or drag and drop; tap a path
   in a reply to open the file.
 - **Status**: see which chats work, need you, or still have background work

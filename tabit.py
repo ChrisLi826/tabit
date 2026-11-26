@@ -406,10 +406,10 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.3.5.2"
+APP_VERSION = "v2.4.0"
 # Taiwan main dish of the major version + a fresh snack or drink, picked at
 # release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
-APP_CODENAME = "Sesame Oil Chicken + Iron Egg"
+APP_CODENAME = "Railway Bento + Brown Sugar Ginger Tea"
 _VERSION_CODENAME_SEP = " · "
 
 
@@ -2516,7 +2516,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         parts = self.path.split("?", 1)[0].strip("/").split("/")
         manage = None                       # (op, target) for tabs and groups
         admin = None                        # the Settings sheet: /api/admin/<op>
-        chat = parts[:2] in (["api", "chats"], ["api", "chat-groups"])
+        chat = parts[:2] in (["api", "chats"], ["api", "chat-groups"], ["api", "planner"])
         if chat:
             pass                            # Tabit Chat: tabit_chat.py owns the routes
         elif parts == ["api", "dirs", "new"]:
@@ -2599,7 +2599,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 res = (code, out)
             self._json(*self._result(res))
             return
-        if parts[:2] in (["api", "chats"], ["api", "chat-groups"]):
+        if parts[:2] in (["api", "chats"], ["api", "chat-groups"], ["api", "planner"]):
             self._chat_get(parts)
         elif path in ("/", "/index.html", "/chat"):        # /chat: links from before
             page = self.app._remote_page(REMOTE_CHAT_PAGE)
@@ -2648,15 +2648,15 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             self._send(404, "text/plain", b"not found")
 
     def _chat(self, method, parts, body):
-        """(status, object) for /api/chats and /api/chat-groups, off until the
-        phone may type: a chat can run commands on this machine."""
+        """(status, object) for /api/chats, /api/chat-groups and /api/planner,
+        off until the phone may type: a chat can run commands on this machine."""
         if not getattr(self.app, "_remote_send_on", False):
             return 403, {"error": "chat is off (Settings > Remote > Allow typing into tabs)"}
         mgr = self.app._chat_mgr()
         if mgr is None:
             return 404, {"error": "tabit_chat.py is not installed"}
         mod = sys.modules["tabit_chat"]
-        fn = mod.group_api if parts[1] == "chat-groups" else mod.api
+        fn = {"chat-groups": mod.group_api, "planner": mod.planner_api}.get(parts[1], mod.api)
         return fn(mgr, method, parts[2:], body)
 
     _chat_streams = []              # stop events of open chat streams, oldest first
@@ -2763,7 +2763,12 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 os.unlink(path)
             except OSError:
                 pass
-            self._json(400, {"error": str(e)})
+            print(f"[remote] upload failed ({name}, {size - left}/{size} bytes): {e}",
+                  file=sys.stderr)
+            try:
+                self._json(400, {"error": str(e)})
+            except OSError:
+                pass
             return
         print(f"[remote] upload -> {path} ({size} bytes)", file=sys.stderr)
         self._json(200, {"path": path, "size": size})
@@ -13956,7 +13961,7 @@ if (data !== null) {{
 
     def _chat_tab_ops(self, op, target=None, body=None):
         """For a chat: manage tabs the way the phone does. op: groups | new |
-        close | rename | account | model | sessions. Gives (code, body). A new tab with
+        close | rename | account | model | sessions | wake. Gives (code, body). A new tab with
         no group asked for stays out of groups."""
         body = dict(body or {})
         if op == "model":
@@ -13981,6 +13986,13 @@ if (data !== null) {{
                 return 200, {"groups": [{"color": c, "name": n} for c, n in used.items()]}
             if op in ("new", "close", "rename", "account"):
                 return self._remote_manage(op, target, body)
+            if op == "wake":                 # an AI tab whose AI ended: start it again, going on
+                row = self._tg_row_by_id(target)
+                if row is None or not _is_ai_icon(getattr(row, "icon_name", None)):
+                    return 404, {"error": "that is not an AI tab"}
+                if getattr(row, "dead", False):
+                    self._ai_wake(row)
+                return 200, {"ok": True}
             return 404, {"error": "unknown action"}
         def from_chat():
             self._from_chat = True       # a chat may open a tab that skips permission questions; the phone page may not

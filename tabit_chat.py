@@ -34,6 +34,7 @@ MODES = {"ask": "default", "edits": "acceptEdits", "plan": "plan",
          "bypass": "bypassPermissions"}
 MODELS = ("", "opus", "sonnet", "haiku", "fable")
 EFFORTS = ("", "low", "medium", "high", "xhigh", "max")     # claude --effort; "" is its default
+WAKE_WAIT = 120          # seconds an AI started again has to come up before its held lines give up
 STOP_AGAIN = 5           # seconds after Stop pressed Esc in a tab before it presses another
 USAGE_ASK = 180          # seconds between asking Anthropic for one Claude login's usage
 GROK_ASK = 600           # ... and Grok for its: a grok without a screen starts each time
@@ -1028,6 +1029,8 @@ def screen_prompt(lines, cli="claude"):
     numbered = all(n is not None for n in numbers)
     if len(picks) < 2 or not (numbered or "Enter to confirm" in tail):
         return None
+    if any(re.match(r"(?:\[[ xX✓✔]\]|[☐☑])\s", p) for p in picks):
+        return None
     return _menu_card(rows, top, picks, numbers, chosen)
 
 
@@ -1177,11 +1180,9 @@ def transcript_model(path):
     return None
 
 
-def open_question(path):
-    """The AskUserQuestion at the end of a Claude transcript that has no answer
-    yet: {"id", "questions"}, or None. Only questions of single-choice
-    options count: a tap on the page can answer those, and the other kinds are
-    answered in the tab."""
+def _unanswered_ask(path):
+    """The AskUserQuestion at the end of a Claude transcript that has no
+    answer yet: {"id", "questions"}, or None."""
     try:
         size = os.path.getsize(path)
         start = max(0, size - MIRROR_TAIL)
@@ -1193,32 +1194,63 @@ def open_question(path):
     lines = data.splitlines()
     if start:
         lines = lines[1:]                   # the first line is cut in half
-    found, answered = None, set()
+    found, found_msg_id, answered = None, None, set()
     for line in lines:
         try:
             raw = json.loads(line)
         except ValueError:
             continue
-        content = (raw.get("message") or {}).get("content") if isinstance(raw, dict) else None
-        if raw.get("isSidechain") or not isinstance(content, list):
+        if not isinstance(raw, dict) or raw.get("isSidechain"):
             continue
+        msg = raw.get("message") or {}
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if raw.get("type") == "user":
+            if isinstance(content, str) and content.strip():
+                found, found_msg_id = None, None
+                continue
+            if isinstance(content, list):
+                has_result = False
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        answered.add(block.get("tool_use_id"))
+                        has_result = True
+                if not has_result and any(isinstance(b, dict) and b.get("type") == "text" for b in content):
+                    found, found_msg_id = None, None
+            continue
+        if not isinstance(content, list):
+            continue
+        msg_id = msg.get("id") if isinstance(msg, dict) else None
+        if raw.get("type") == "assistant" and found and msg_id and found_msg_id and msg_id != found_msg_id:
+            found, found_msg_id = None, None
         for block in content:
             if not isinstance(block, dict):
                 continue
             if block.get("type") == "tool_use" and block.get("name") == "AskUserQuestion":
                 found = {"id": block.get("id"), "questions": (block.get("input") or {}).get("questions")}
+                found_msg_id = msg_id
             elif block.get("type") == "tool_result":
                 answered.add(block.get("tool_use_id"))
     if not found or found["id"] in answered:
         return None
+    return found
+
+
+def _card_question(found):
     qs = found["questions"]
-    if (not isinstance(qs, list) or not 1 <= len(qs) <= 4 or not all(
-            isinstance(q, dict) and isinstance(q.get("question"), str) and not q.get("multiSelect")
+    return (isinstance(qs, list) and 1 <= len(qs) <= 4 and all(
+            isinstance(q, dict) and isinstance(q.get("question"), str)
             and isinstance(q.get("options"), list) and 1 <= len(q["options"]) <= 4
             and all(isinstance(o, dict) and isinstance(o.get("label"), str) for o in q["options"])
-            for q in qs)):
-        return None
-    return found
+            for q in qs))
+
+
+def open_question(path):
+    """The AskUserQuestion at the end of a Claude transcript that has no answer
+    yet: {"id", "questions"}, or None. Choice questions (single- or
+    multi-select, up to 4 questions of up to 4 options) count: a tap on the
+    page can answer those, and the other kinds are answered in the tab."""
+    found = _unanswered_ask(path)
+    return found if found and _card_question(found) else None
 
 
 def ask_of(raw):
@@ -1353,6 +1385,7 @@ class Chat(_Log):
         self.suggest = ""            # a mirrored chat: what Claude guesses one types next
         self.watchers = 0            # pages open on this chat
         self.held = []               # lines sent while the tab showed a screen: (key, text)
+        self._waking = 0             # when its AI was started (again): held lines wait till it is up
         self._esc_at = 0             # when Stop last pressed Esc in the tab
         self._tab_answered = set()   # tool ids of the tab's questions answered from here
         self._model_looked = False   # the tab's model was looked for in its transcript
@@ -1727,6 +1760,8 @@ class Chat(_Log):
         self._sync_suggest(info)
         if self.held:
             self._send_held()
+        elif self._waking and info.get("status") in ("ready", "idle"):
+            self._waking = 0                 # up again, with nothing waiting
 
     def _sync_suggest(self, info):
         """Claude's guess at what one types next, while a page shows this chat
@@ -1752,13 +1787,12 @@ class Chat(_Log):
             self._tab_answered = {i for i in self._tab_answered if not i.startswith("scr-")}
         asked = {rid: p for rid, p in self.pending.items() if p.get("tab")}
         claude = (self.meta["tab"].get("cli") or "claude") == "claude"
-        q = open_question(path) if self.tab_state == "waiting" and path and claude else None
-        if q and q["id"] in self._tab_answered:      # answered here: the transcript is not caught up yet
-            q = None
+        raw_q = _unanswered_ask(path) if self.tab_state == "waiting" and path and claude else None
+        q = raw_q if raw_q and _card_question(raw_q) and raw_q["id"] not in self._tab_answered else None
         card = None
         if q:
             card = {"rid": "tab-" + q["id"], "id": q["id"], "questions": q["questions"]}
-        elif self.tab_state == "waiting":
+        elif self.tab_state == "waiting" and not raw_q:
             sp = screen_prompt(info.get("screen"), self.meta["tab"].get("cli") or "claude")
             if sp and sp["id"] not in self._tab_answered:
                 card = {"rid": sp["id"], "id": sp["id"], "screen": sp, "questions": [
@@ -1780,8 +1814,10 @@ class Chat(_Log):
         self.emit(ev)
 
     def _answer_tab(self, held, allow, answers):
-        """Press the keys that answer the tab's question: a number picks an
-        option and moves on; with more than one question a last "1" submits."""
+        """Press the keys that answer the tab's question: a number picks or
+        toggles an option (Right moves past a multi-select question); a last "1"
+        submits when there is a review tab (more than one question, or any
+        multi-select)."""
         tab, cli = self.meta["tab"]["id"], self.meta["tab"].get("cli") or "claude"
         # The desk may have answered it since the last look: then a number
         # would land in the next prompt, and Esc would stop Claude.
@@ -1807,25 +1843,38 @@ class Chat(_Log):
             keys = []
             for q in qs:
                 labels = [o["label"] for o in q["options"]]
-                label = (answers or {}).get(q["question"])
-                if label not in labels:
-                    raise RuntimeError("pick one of the options for: %s" % q["question"])
-                keys.append(str(labels.index(label) + 1))
-                if any(o.get("preview") for o in q["options"]):
-                    keys.append("enter")     # with previews a number only moves there
-            if len(qs) > 1:
+                if q.get("multiSelect"):
+                    picked = (answers or {}).get(q["question"])
+                    if isinstance(picked, str):
+                        picked = [picked]
+                    if (not isinstance(picked, list) or not picked
+                            or not all(isinstance(x, str) and x in labels for x in picked)):
+                        raise RuntimeError("pick one or more options for: %s" % q["question"])
+                    for label in dict.fromkeys(picked):
+                        keys.append(str(labels.index(label) + 1))
+                    keys.append("right")         # move to the next question or Submit tab
+                else:
+                    label = (answers or {}).get(q["question"])
+                    if label not in labels:
+                        raise RuntimeError("pick one of the options for: %s" % q["question"])
+                    keys.append(str(labels.index(label) + 1))
+                    if any(o.get("preview") for o in q["options"]):
+                        keys.append("enter")     # with previews a number only moves there
+            if len(qs) > 1 or any(q.get("multiSelect") for q in qs):
                 keys.append("1")
         self._press(tab, keys)
 
     def _screen_keys(self, menu, held, allow, answers):
         """The keys for a menu on the screen: its number, or the arrows and Enter.
-        A skip picks a numbered No (what Esc does there); a menu without
-        numbers (the trust question, whose No and Esc both end Claude) gets
-        no key: the tab answers it."""
+        A skip picks a numbered No, or Esc when a numbered menu has no No; a menu
+        without numbers (the trust question, whose No and Esc both end Claude)
+        gets no key: the tab answers it."""
         if not allow:
             no = next((i for i, o in enumerate(menu["options"]) if re.match(r"No\b", o)), None)
             num = menu["numbers"][no] if no is not None else None
-            return [str(num)] if num is not None and num < 10 else []
+            if num is not None and num < 10:
+                return [str(num)]
+            return ["esc"] if menu["numbers"] and all(n is not None for n in menu["numbers"]) else []
         label = (answers or {}).get(held["input"]["questions"][0]["question"])
         if label not in menu["options"]:
             raise RuntimeError("pick one of the options")
@@ -1929,7 +1978,15 @@ class Chat(_Log):
             return 404, {"error": "no tabs here"}
         if any(p.get("tab") for p in self.pending.values()):
             return 409, {"error": "That tab asks a question: tap an answer on the card above."}
-        if self.held or self._screen_open():
+        if (not self._waking and self.id == _plan_conf().get("manager") and self.mgr.tab_ops
+                and self.mgr.tab_hook(self.meta["tab"]["id"]).get("status") == "exited"):
+            # the Planner's chat must be there: its AI ended, so it starts
+            # again (going on with its conversation), and this waits for it
+            code, out = self.mgr.tab_ops("wake", self.meta["tab"]["id"])
+            if code != 200:
+                return code, out
+            self._waking = time.time()
+        if self.held or self._waking or self._screen_open():
             # typed now, it would close that screen and go in at once: it
             # waits here (behind any that wait already), and goes in when
             # the screen closes
@@ -1948,13 +2005,35 @@ class Chat(_Log):
             screen_dialog_open(info.get("screen"))
 
     def _send_held(self):
-        """The screen closed: the lines that waited go in, in order."""
-        if not self.held or self._screen_open():
+        """The screen closed, or the AI that was started again is up: the
+        lines that waited go in, in order."""
+        if not self.held:
+            return
+        if self._waking:
+            status = self.mgr.tab_hook(self.meta["tab"]["id"]).get("status")
+            if status in ("ready", "idle"):
+                self._waking = 0
+            elif status == "exited" or time.time() - self._waking > WAKE_WAIT:
+                # it did not come up: the lines stay (and can be taken back);
+                # the next line sent tries again
+                self._waking = 0
+                self.emit({"t": "error", "text": "The AI did not start again. Your lines wait; send one more to try again."})
+                return
+            else:
+                return
+        # a tab that cannot take a line now (ended, asking, not up yet) keeps them
+        if self.mgr.tab_hook(self.meta["tab"]["id"]).get("status") not in ("ready", "idle", "working", "background"):
+            return
+        if self._screen_open():
             return
         with self.cond:
             held, self.held = self.held, []
-        for _key, text in held:
-            self.mgr.tab_hook(self.meta["tab"]["id"], text, queue=True)
+        for n, (_key, text) in enumerate(held):
+            code, _out = self.mgr.tab_hook(self.meta["tab"]["id"], text, queue=True)
+            if code != 200:                  # refused after all: it and the rest wait again, in order
+                with self.cond:
+                    self.held = held[n:] + self.held
+                break
         self.push()
 
     def queued(self):
@@ -2113,7 +2192,8 @@ class Chat(_Log):
         if allow:
             inp = dict(held["input"])
             if isinstance(answers, dict):
-                inp["answers"] = answers
+                inp["answers"] = {k: ", ".join(v) if isinstance(v, list) else v
+                                  for k, v in answers.items()}
             resp = {"behavior": "allow", "updatedInput": inp}
             if always and held["suggest"]:
                 resp["updatedPermissions"] = held["suggest"]
@@ -3703,6 +3783,482 @@ def nearby_api(mgr, method, parts, body):
     return 404, {"error": "unknown action"}
 
 
+# --- planner: the user's own to-dos and dates, in one Markdown file ----------
+PLANNER_FILE = os.path.expanduser("~/.local/share/tabit/planner.md")
+PLANNER_CONF = os.path.expanduser("~/.local/share/tabit/planner.json")
+PLANNER_HEAD = (
+    "<!-- tabit planner: the user's own to-dos and dates.\n"
+    "     One item per line: \"- [ ] text\"; \"- [x] text\" when it is done; \"- [-] text\" when it is on hold.\n"
+    "     End an item with a date \" 2026-11-27\", or a date and time \" 2026-11-27 10:00\".\n"
+    "     A done item ends with the day it was done: \" ✓2026-11-26\".\n"
+
+    "     Lines under an item, indented by two spaces and with no blank line between, belong to it: a comment is\n"
+    "     \"  > 2026-11-26 14:30 Name: text\", \"  Assigned: @tab, @other-tab\" names the AI tabs\n"
+    "     working on it, \"  Priority: urgent\" (or important, medium, low; none is medium) says\n"
+    "     how much it matters (one of each), any other indented line is its description.\n"
+    "     Keep this format: the Planner page in Tabit Chat reads it. Other lines are kept as they are. -->\n")
+PLANNER_TEXT = 500           # one item, in characters
+PLANNER_DONE_DAYS = 14       # the Done list shows what was done in this many days
+_PLAN_ITEM = re.compile(r"- \[([ xX-])\] (.*?)(?:\s+(\d{4}-\d{2}-\d{2})(?:\s+(\d{1,2}:\d{2}))?)?"
+                        r"(?:\s+✓(\d{4}-\d{2}-\d{2}))?\s*")
+PLANNER_PRIORITIES = ("urgent", "important", "medium", "low")      # Microsoft Planner's; medium when none
+_plan_lock = threading.Lock()
+_plan_start = threading.Lock()   # one Planner chat, however many taps
+PLANNER_CHAT = "Planner"         # the name of the Planner's own chat, made the first time
+
+
+def _plan_state(mark):
+    return "open" if mark == " " else "paused" if mark == "-" else "done"
+
+
+_PLAN_NOTE = re.compile(r"(\d{4}-\d{2}-\d{2}) (\d{1,2}:\d{2}) ([^:]{1,40}): (.*)")
+PLANNER_NOTE = 2000          # one comment, in characters
+
+
+def _plan_under(line):
+    """Whether a line is indented under the item above it."""
+    return line[:1] in (" ", "\t") and bool(line.strip())
+
+
+_PLAN_WHO = re.compile(r"Assigned:\s*(.*)", re.I)
+_PLAN_PRI = re.compile(r"Priority:\s*(%s)" % "|".join(PLANNER_PRIORITIES), re.I)
+_PLAN_TAB = re.compile(r"[^\s,@]{1,80}")
+
+
+def _plan_who(raw):
+    """The tab names in "@a, @b": no @, lower case as tab talk has them, each once."""
+    return list(dict.fromkeys(x.strip().lstrip("@").lower() for x in raw.split(",") if x.strip().lstrip("@")))
+
+
+def _plan_kind(line):
+    """What an indented line under an item is: "who", "pri", "note" or "desc"."""
+    t = line.strip()
+    return ("note" if t.startswith(">") else "who" if _PLAN_WHO.fullmatch(t)
+            else "pri" if _PLAN_PRI.fullmatch(t) else "desc")
+
+
+def _plan_body(lines):
+    """(description, comments, assigned tab names, priority) of an item
+    from its indented lines."""
+    desc, notes, who, pri = [], [], [], ""
+    for line in lines:
+        t = line[2:] if line.startswith("  ") else line.lstrip()
+        kind = _plan_kind(line)
+        if kind == "who":
+            who = who or _plan_who(_PLAN_WHO.fullmatch(t.strip())[1])
+        elif kind == "pri":
+            pri = pri or _PLAN_PRI.fullmatch(t.strip())[1].lower()
+        elif kind == "note":
+            raw = t.strip()[1:].strip()
+            m = _PLAN_NOTE.fullmatch(raw)
+            notes.append({"at": "%s %s" % (m[1], m[2]), "who": m[3].strip(), "text": m[4]} if m
+                         else {"at": "", "who": "", "text": raw})
+        else:
+            desc.append(t.rstrip())
+    return "\n".join(desc), notes, who, pri or "medium"
+
+
+def planner_parse(text):
+    """The items of a planner file: {"i": line number, "n": its lines, with
+    the indented ones under it, "block": those lines, "state" (open, done or
+    paused), "done", "text", "date", "time", "donedate", "priority", "desc",
+    "notes": [{"at", "who", "text"}], "assigned"}. Lines that are not items
+    are left out."""
+    lines, items, i = text.splitlines(), [], 0
+    while i < len(lines):
+        line = lines[i]
+        m = _PLAN_ITEM.fullmatch(line)
+        if not m:
+            i += 1
+            continue
+        j = i + 1
+        while j < len(lines) and _plan_under(lines[j]):
+            j += 1
+        state = _plan_state(m[1])
+        text, date, at = m[2], m[3] or "", m[4] or ""
+        if not _plan_when_ok(date, at):          # "Fix 2026-99-99": that is text
+            text, date, at = " ".join(x for x in (text, date, at) if x), "", ""
+        desc, notes, who, pri = _plan_body(lines[i + 1:j])
+        items.append({"i": i, "n": j - i, "block": "\n".join(lines[i:j]), "line": line,
+                      "state": state, "done": state == "done",
+                      "text": text, "date": date, "time": at,
+                      "donedate": (m[5] or "") if state == "done" and _plan_when_ok(m[5] or "", "") else "",
+                      "priority": pri,
+                      "desc": desc, "notes": notes, "assigned": who})
+        i = j
+    return items
+
+
+def _plan_when_ok(date, at):
+    try:
+        if date:
+            datetime.date.fromisoformat(date)
+        if at:
+            datetime.time.fromisoformat(at.zfill(5))
+    except ValueError:
+        return False
+    return True
+
+
+def _plan_fields(body):
+    """(text, date, time) from a request, or raises ValueError."""
+    text = " ".join(_text(body).split())
+    date, at = str(body.get("date") or ""), str(body.get("time") or "")
+    if not text:
+        raise ValueError("write something first")
+    if len(text) > PLANNER_TEXT:
+        raise ValueError("that is too long")
+    if not _plan_when_ok(date, at):
+        raise ValueError("a date is YYYY-MM-DD and a time is HH:MM")
+    if at and not date:
+        raise ValueError("a time needs a date")
+    # "Compare 2026-11-20" with no date would read back as a date: say so
+    m = re.search(r"\s(\d{4}-\d{2}-\d{2})(?:\s+\d{1,2}:\d{2})?$", text)
+    if m and not date and _plan_when_ok(m[1], ""):
+        raise ValueError("the text ends with a date: put it in the date box")
+    return text, date, at
+
+
+def planner_line(state, text, date="", at="", donedate=""):
+    mark = {"open": " ", "paused": "-", "done": "x"}[state]
+    done = "✓" + donedate if donedate else ""
+    return "- [%s] %s" % (mark, " ".join(x for x in (text, date, at, done) if x))
+
+
+def _plan_pri_line(body):
+    """The Priority line a request asks for: [] for medium, None when it
+    names none; raises ValueError for another word."""
+    pri = body.get("priority")
+    if pri is None:
+        return None
+    pri = str(pri).strip().lower()
+    if pri not in PLANNER_PRIORITIES:
+        raise ValueError("Priority is one of: " + ", ".join(PLANNER_PRIORITIES))
+    return [] if pri == "medium" else ["  Priority: " + pri]
+
+
+def _plan_desc_lines(body):
+    """The description lines a request asks for ([] for none), indented."""
+    desc = [("  " + x.rstrip()) for x in str(body.get("desc") or "").splitlines() if x.strip()]
+    if sum(len(x) for x in desc) > PLANNER_NOTE * 4:
+        raise ValueError("that description is too long")
+    if any(_plan_kind(x) != "desc" for x in desc):
+        raise ValueError('a description line cannot start with ">", "Assigned:" or "Priority:"; '
+                         "write those in their own boxes")
+    return desc
+
+
+def _plan_who_line(body):
+    """The Assigned line a request asks for ([] for no one)."""
+    names = _plan_who(",".join(str(x) for x in body.get("assigned") or []))
+    if len(names) > 20 or not all(_PLAN_TAB.fullmatch(x) for x in names):
+        raise ValueError("Assigned is a list of tab names")
+    return ["  Assigned: " + ", ".join("@" + x for x in names)] if names else []
+
+
+def planner_apply(text, op, body, today=None, now=None):
+    """The planner file after one change from the page. add puts an item
+    after the file's last line that is not blank; toggle, edit and delete
+    name a line by its number and its text as the page saw it, and refuse
+    (LookupError) if that line has changed. A tick writes the day (today, YYYY-MM-DD) it was done;
+    comment puts a line (written now, YYYY-MM-DD HH:MM) at the end of the
+    item's lines."""
+    today = today or datetime.date.today().isoformat()
+    lines = text.splitlines()
+    if op == "add":
+        if not lines:
+            lines = PLANNER_HEAD.splitlines()
+        state = "paused" if body.get("paused") is True else "open"
+        new = ([planner_line(state, *_plan_fields(body))] + (_plan_pri_line(body) or [])
+               + _plan_who_line(body) + _plan_desc_lines(body))
+        end = len(lines)
+        while end and not lines[end - 1].strip():
+            end -= 1
+        lines[end:end] = new
+        return "\n".join(lines) + "\n"
+    # the item and the lines under it, as the page saw them: a comment the
+    # manager added since makes it refuse, so nothing is overwritten
+    i, was = body.get("i"), body.get("block")
+    m = _PLAN_ITEM.fullmatch(lines[i]) if isinstance(i, int) and 0 <= i < len(lines) else None
+    j = i + 1 if m else 0
+    while m and j < len(lines) and _plan_under(lines[j]):
+        j += 1
+    if not m or "\n".join(lines[i:j]) != was:
+        raise LookupError("the planner changed; look again")
+    state, donedate = _plan_state(m[1]), m[5] or ""
+    if op == "toggle":                # open or on hold -> done -> open
+        lines[i] = (planner_line("open", m[2], m[3] or "", m[4] or "") if state == "done"
+                    else planner_line("done", m[2], m[3] or "", m[4] or "", today))
+    elif op == "edit":
+        if state != "done":
+            state = "paused" if body.get("paused") is True else "open"
+        # the lines under it: Priority, Assigned, the description, the
+        # comments; what the page did not send stays as it is
+        under = lines[i + 1:j]
+        part = lambda kind: [x for x in under if _plan_kind(x) == kind]
+        who, desc, pri = part("who")[:1], part("desc"), part("pri")[:1]
+        if isinstance(body.get("desc"), str):
+            desc = _plan_desc_lines(body)
+        if isinstance(body.get("assigned"), list):
+            who = _plan_who_line(body)
+        asked = _plan_pri_line(body)
+        if asked is not None:
+            pri = asked
+        under = pri + who + desc + part("note") if (isinstance(body.get("desc"), str) or asked is not None
+                                                     or isinstance(body.get("assigned"), list)) else under
+        text, date, at = _plan_fields(body)
+        same = (state, text, date, _plan_hhmm(at)) == (_plan_state(m[1]), " ".join(m[2].split()),
+                                                      m[3] or "", _plan_hhmm(m[4] or ""))
+        lines[i:j] = [lines[i] if same else planner_line(state, text, date, at, donedate)] + under
+    elif op == "delete":
+        del lines[i:j]
+    elif op == "comment":
+        note = " ".join(_text(body).split())
+        if not note:
+            raise ValueError("write something first")
+        if len(note) > PLANNER_NOTE:
+            raise ValueError("that comment is too long")
+        who = " ".join(str(body.get("who") or "Me").replace(":", " ").split())[:40] or "Me"
+        lines.insert(j, "  > %s %s: %s" % (now or datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), who, note))
+    else:
+        raise KeyError(op)
+    return "\n".join(lines) + "\n"
+
+
+def _plan_read(path):
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+
+
+def _plan_conf():
+    """planner.json: {"manager": chat id, "done_days": n, "name": who your
+    comments are from, "intro": the manager that got its note}, any of them
+    left out."""
+    try:
+        with open(PLANNER_CONF, encoding="utf-8") as f:
+            conf = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return conf if isinstance(conf, dict) else {}
+
+
+def _plan_manager(mgr, conf):
+    cid = str(conf.get("manager") or "")
+    chat = mgr.get(cid) if cid else None
+    if not cid:
+        return None
+    if chat is None:
+        return {"id": cid, "title": "", "gone": True}
+    look = chat.summary()          # its state and picture, for the round button
+    return dict({k: look[k] for k in ("state", "asks", "emoji", "hue")},
+                id=cid, title=chat.meta.get("title") or "", gone=False)
+
+
+def _plan_save_conf(conf):
+    try:
+        os.makedirs(os.path.dirname(PLANNER_CONF), exist_ok=True)
+        with open(PLANNER_CONF + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(conf, f)
+        os.replace(PLANNER_CONF + ".tmp", PLANNER_CONF)
+        return True
+    except OSError:
+        return False
+
+
+def _plan_name(conf):
+    name = " ".join(str(conf.get("name") or "").replace(":", " ").split())[:40]
+    return name or "Me"
+
+
+def _plan_days(conf):
+    n = conf.get("done_days")
+    return n if isinstance(n, int) and 1 <= n <= 365 else PLANNER_DONE_DAYS
+
+
+def planner_intro(path):
+    """What a new planner manager is told."""
+    return ("You now keep my planner: my own to-dos and dates, in the file %s . "
+            "Read it now; its first lines say the format, and the Planner page in "
+            "Tabit Chat shows it. When I tell you about a to-do or a date, add or "
+            "change its line there. When I ask what is coming up, read the file "
+            "and tell me. Your job is to keep it and report from it: do not do "
+            "the to-dos yourself, and do not send them to other tabs. Reply OK "
+            "when you have read it." % path)
+
+
+def planner_api(mgr, method, parts, body):
+    """(status, object) for /api/planner[/<op>]: GET the items; POST add,
+    toggle, edit or delete an item, comment on one, start (make the
+    Planner's own chat if it has none), or settings (the name on comments,
+    how many days Done shows, the chat)."""
+    def look():
+        text, conf = _plan_read(PLANNER_FILE), _plan_conf()
+        return 200, {"items": planner_parse(text),
+                     "path": PLANNER_FILE, "manager": _plan_manager(mgr, conf),
+                     "done_days": _plan_days(conf), "name": _plan_name(conf)}
+    if method == "GET" and not parts:
+        return look()
+    if method != "POST" or len(parts) != 1:
+        return 405, {"error": "GET, or POST an action"}
+    op = parts[0]
+    if op == "start":                  # the Planner's own chat: made once, then kept
+        with _plan_start:
+            m = _plan_manager(mgr, _plan_conf())
+            if m and not m["gone"]:
+                return look()
+            # its own folder, not home: Claude asks to trust a home folder at
+            # every start, which would stop the chat each time it is woken
+            folder = os.path.join(os.path.dirname(PLANNER_FILE), "planner-chat")
+            try:
+                os.makedirs(folder, exist_ok=True)
+            except OSError as e:
+                return 500, {"error": "could not make %s: %s" % (folder, e)}
+            code, made = mgr.new_tab_chat({"kind": "tab", "cli": "claude", "cwd": folder, "title": PLANNER_CHAT})
+            if code != 200:
+                return code, made
+            chat = mgr.get(made["chat"]["id"])
+            if chat is not None:
+                chat._waking = time.time()   # just started: its note waits until its Claude is up
+            return planner_api(mgr, "POST", ["settings"], {"chat": made["chat"]["id"]})
+    if op == "settings":
+        with _plan_lock:
+            conf = _plan_conf()
+            cid = str(body.get("chat") or "") if "chat" in body else str(conf.get("manager") or "")
+            if cid and "chat" in body and mgr.get(cid) is None:
+                return 404, {"error": "no such chat"}
+            days = body.get("done_days", _plan_days(conf))
+            if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 365:
+                return 400, {"error": "Done shows 1 to 365 days"}
+            introduced = conf.get("intro", conf.get("manager"))     # files from before "intro"
+            conf = dict(conf, manager=cid, done_days=days, intro=introduced,
+                        name=str(body.get("name", conf.get("name") or "")))
+            if not _plan_save_conf(conf):
+                return 500, {"error": "could not save the settings"}
+        code, out = look()
+        if cid and introduced != cid:                   # a new manager gets the note, until it went
+            sent = api(mgr, "POST", [cid, "send"], {"text": planner_intro(PLANNER_FILE)})
+            out["sent"] = sent[0] == 200
+            if sent[0] == 200:
+                with _plan_lock:
+                    _plan_save_conf(dict(_plan_conf(), intro=cid))
+            else:
+                out["error"] = sent[1].get("error")
+        return code, out
+    with _plan_lock:
+        try:
+            body = dict(body, who=_plan_name(_plan_conf()))      # you, by the name in Settings
+            old = _plan_read(PLANNER_FILE)
+            new = planner_apply(old, op, body)
+        except KeyError:
+            return 404, {"error": "unknown action"}
+        except LookupError as e:
+            return 409, {"error": str(e)}
+        except ValueError as e:
+            return 400, {"error": str(e)}
+        try:
+            os.makedirs(os.path.dirname(PLANNER_FILE), exist_ok=True)
+            path = os.path.realpath(PLANNER_FILE)          # a link to the file stays a link
+            with open(path + ".tmp", "w", encoding="utf-8") as f:
+                f.write(new)
+            if _plan_read(PLANNER_FILE) != old:            # the manager wrote it meanwhile
+                os.unlink(path + ".tmp")
+                return 409, {"error": "the planner changed; look again"}
+            os.replace(path + ".tmp", path)
+        except OSError as e:
+            return 500, {"error": "could not save: %s" % e}
+    code, out = look()
+    _plan_tell(mgr, out, op, body, old, new)
+    return code, out
+
+
+def _plan_hhmm(at):
+    return at.zfill(5) if at else ""
+
+
+def _plan_at(it):
+    return " ".join(x for x in (it["date"], _plan_hhmm(it["time"])) if x) or "no date"
+
+
+def planner_news(op, who, body, was, now):
+    """One line on a change from the page, for the manager: was and now are
+    the item before and after (None where there is none). None when the
+    change changed nothing."""
+    if op == "add":
+        text, date, at = _plan_fields(body)
+        pri = str(body.get("priority") or "medium").strip().lower()
+        where = ", ".join(x for x in (" ".join(x for x in (date, at) if x),
+                                      "priority " + pri.title() if pri != "medium" else "") if x)
+        return '%s added "%s"%s.' % (who, text, " (%s)" % where if where else "")
+    name = '"%s"' % was["text"]
+    if op == "delete":
+        return "%s deleted %s, with its description and comments." % (who, name)
+    if op == "toggle":
+        return "%s ticked %s: %s." % (who, name, "done" if now["done"] else "not done any more")
+    if op == "comment":
+        return "%s commented on %s: %s" % (who, name, " ".join(_text(body).split()))
+    out = []
+    if " ".join(now["text"].split()) != " ".join(was["text"].split()):
+        out.append('renamed it "%s"' % now["text"])
+    if _plan_at(now) != _plan_at(was):
+        out.append("date %s -> %s" % (_plan_at(was), _plan_at(now)))
+    if now["state"] != was["state"]:
+        out.append("put it on hold" if now["state"] == "paused" else "took it off hold")
+    if now["priority"] != was["priority"]:
+        out.append("priority " + now["priority"].title())
+    if now["assigned"] != was["assigned"]:
+        out.append("assigned it to %s" % (", ".join("@" + x for x in now["assigned"]) or "no one"))
+    if now["desc"] != was["desc"]:
+        out.append("new description: %s" % now["desc"].replace("\n", " / ")[:600] if now["desc"]
+                   else "took the description away")
+    return "%s changed %s: %s." % (who, name, "; ".join(out)) if out else None
+
+
+def _plan_tell(mgr, out, op, body, old, new):
+    """Tell the manager chat about any change from the page, and the tabs an
+    item is assigned to about a comment on it. out gets "told" (the chats
+    told) and, when one did not go, "error"."""
+    def item(text, i):
+        return next((x for x in planner_parse(text) if x["i"] == i), None) if isinstance(i, int) else None
+    was, now = item(old, body.get("i")), item(new, body.get("i"))
+    news = planner_news(op, body.get("who") or "Me", body, was, now)
+    if not news:
+        return
+    to = []                                  # (chat, words)
+    m = out.get("manager")
+    bad = []
+    if m and m["gone"]:                      # its tab was closed: the Planner gets its chat back
+        code, made = planner_api(mgr, "POST", ["start"], {})
+        m = made.get("manager") if code == 200 else None
+        if m:
+            out["manager"] = m
+        else:
+            bad.append("the Planner chat could not start again: %s" % (made.get("error") or code))
+    if m and not m["gone"]:
+        to.append((m["id"], "[Planner] %s\n(The planner is %s . Update it there if this asks for "
+                   "something; no need to answer otherwise.)" % (news, PLANNER_FILE)))
+    if op == "comment" and was:
+        tabs = mgr.tab_names()
+        for name in was["assigned"]:
+            chat = tabs.get(name)
+            if chat is not None and chat.id not in [c for c, _ in to]:
+                to.append((chat.id, "[Planner] %s\n(This item is assigned to you. The planner is %s ; "
+                           "the item and its comments are there.)" % (news, PLANNER_FILE)))
+    out["told"] = []
+    for cid, words in to:
+        sent = api(mgr, "POST", [cid, "send"], {"text": words})
+        chat = mgr.get(cid)
+        title = chat.meta.get("title") or cid if chat else cid
+        if sent[0] == 200:
+            out["told"].append(title)
+        else:
+            bad.append("%s: %s" % (title, sent[1].get("error")))
+    if bad:
+        out["error"] = "; ".join(bad)
+
+
 def api(mgr, method, parts, body):
     """(status, object) for /api/chats/<parts>; the caller has checked who and
     that typing from the phone is on."""
@@ -3719,7 +4275,8 @@ def api(mgr, method, parts, body):
                               "accounts": mgr.account_choices(), "account": mgr.account,
                               "modes": list(MODES), "models": list(MODELS),
                               "efforts": list(EFFORTS), "clis": clis, "usage": mgr.usage(),
-                              "nearby": mgr.nearby.on()},
+                              "nearby": mgr.nearby.on(),
+                              "planner": str(_plan_conf().get("manager") or "")},
                              **({"codex_accounts": mgr.account_choices("codex"),
                                  "codex_models": codex_models()} if "codex" in clis else {}),
                              **({"agy_models": mgr.agy_models()} if "agy" in clis else {}))
@@ -3788,6 +4345,8 @@ def api(mgr, method, parts, body):
     if op == "delete":
         if chat.meta.get("default"):
             return 400, {"error": "the main chat cannot be deleted"}
+        if chat.id == _plan_conf().get("manager"):
+            return 400, {"error": "the Planner's chat cannot be deleted"}
         if chat.mirrored and mgr.tab_ops:        # the chat and its tab are one: the tab closes too
             code, out = mgr.tab_ops("close", chat.meta["tab"]["id"], {})
             if code not in (200, 404):           # 404: the tab was gone already
