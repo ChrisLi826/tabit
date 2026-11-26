@@ -1482,18 +1482,85 @@ document.addEventListener("keydown", (ev) => {
 // --- attach: 📎 (phone: photos, camera, files), drop, or paste a screenshot.
 // The file goes to tabit's uploads folder; its path lands in the text box
 // for the agent to read.
+const PHOTO_MAX_SIDE = 1600;
+const PHOTO_MIN_SHRINK = 600 * 1024;
+async function shrinkPhoto(file, name) {
+  const raster = /^image\/(jpeg|webp|heic|heif)$/i.test(file?.type || "") ||
+    /\.(jpe?g|webp|heic|heif)$/i.test(name || "");
+  if (!raster || !file || file.size <= PHOTO_MIN_SHRINK) return { blob: file, name };
+  let src = null, url = null;
+  try {
+    let w = 0, h = 0;
+    if (typeof createImageBitmap === "function") {
+      src = await createImageBitmap(file);
+      w = src.width; h = src.height;
+    } else {
+      url = URL.createObjectURL(file);
+      src = await new Promise((ok, bad) => {
+        const img = new Image();
+        img.onload = () => ok(img); img.onerror = bad; img.src = url;
+      });
+      w = src.naturalWidth; h = src.naturalHeight;
+    }
+    const scale = Math.min(1, PHOTO_MAX_SIDE / Math.max(w, h, 1));
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(w * scale));
+    c.height = Math.max(1, Math.round(h * scale));
+    const ctx = c.getContext("2d");
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(src, 0, 0, c.width, c.height);
+    const blob = await new Promise((ok) => c.toBlob(ok, "image/jpeg", 0.84));
+    if (!blob || !blob.size || blob.size >= file.size) return { blob: file, name };
+    const stem = (name || "photo").replace(/\.[^.]+$/, "") || "photo";
+    return { blob, name: `${stem}.jpg` };
+  } catch (_e) {
+    return { blob: file, name };
+  } finally {
+    if (src && typeof src.close === "function") src.close();
+    if (url) URL.revokeObjectURL(url);
+  }
+}
+
+async function postUpload(name, blob, onRetry) {
+  // buffer up to 10 MB once so iOS Safari does not lose the File handle across retries
+  const payload = blob && blob.size <= 10 * 1024 * 1024 && typeof blob.arrayBuffer === "function"
+    ? await blob.arrayBuffer() : blob;
+  const url = `api/upload?name=${encodeURIComponent(name)}`;
+  let last;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: "POST", body: payload,
+        headers: { "Content-Type": "application/octet-stream", "X-Tabit": "1" },
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok) return body;
+      const msg = body.error || `HTTP ${res.status}`;
+      const retryable = res.status >= 502 || (res.status === 400 && msg === "upload cut short");
+      const err = new Error(msg);
+      if (!retryable || attempt === 3) { err.fatal = true; throw err; }
+      last = err;
+    } catch (e) {
+      if ((e && e.fatal) || attempt === 3) throw e;
+      last = e;
+    }
+    if (onRetry) onRetry(attempt);
+    await new Promise((r) => setTimeout(r, 1200 * attempt));
+  }
+  throw last;
+}
+
 async function upload(file, name) {
   const id = current;
   if (!id || $("attach").disabled) return;
   const straight = kbdOn;          // ⌨ mode types the path in; the box keeps a draft
-  dmsg(`uploading ${name} (${Math.round(file.size / 1024)} KB)…`);
+  dmsg(`uploading ${name} (${Math.max(1, Math.round(file.size / 1024))} KB)…`);
   try {
-    const res = await fetch(`api/upload?name=${encodeURIComponent(name)}`, {
-      method: "POST", body: file,
-      headers: { "Content-Type": "application/octet-stream", "X-Tabit": "1" },
-    });
-    const body = await res.json();
-    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    const { blob, name: outName } = await shrinkPhoto(file, name);
+    dmsg(`uploading ${outName} (${Math.max(1, Math.round(blob.size / 1024))} KB)…`);
+    const body = await postUpload(outName, blob, (n) =>
+      dmsg(`upload cut off; retrying (${n}/2)…`));
     const add = (prev) => (prev && !/\s$/.test(prev) ? prev + " " : prev) + body.path + " ";
     if (straight && current === id) { queueTyped(body.path + " "); $("kbd").focus(); }
     else if (current === id) {

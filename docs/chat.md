@@ -317,13 +317,14 @@ same as a menu in a Claude tab: a tap presses that option's number in the tab.
   full; a prompt taller than the screen says its top is cut). Tap a choice
   and **Answer**, and tabit presses the number, or the arrow keys and Enter,
   in the tab. Before every key it reads the menu again, and stops if it has
-  gone. **Skip** picks a numbered No; on a menu without numbers (the trust
-  question) it presses nothing and leaves the menu to the tab.
+  gone. **Skip** picks a numbered No, or presses Esc when a numbered menu has
+  no No; on a menu without numbers (the trust question) it presses nothing and
+  leaves the menu to the tab.
 - **Questions from the tab.** When the tab's Claude asks you to pick from a
   list, the chat shows the question as a card. Tap an option for each
   question and tap **Answer**; tabit presses the keys in the tab. **Skip**
-  presses Esc. Only single-choice questions come as cards (up to 4
-  questions of up to 4 options); answer other kinds in the tab. The card goes
+  presses Esc. Choice questions (single- or multi-select, up to 4 questions of
+  up to 4 options) come as cards; answer other kinds in the tab. The card goes
   away when the question is answered in the tab. While it is open, the chat
   does not type into the tab.
 

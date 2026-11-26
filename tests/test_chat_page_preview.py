@@ -15,7 +15,7 @@ def _run(body):
     with open(PAGE, encoding="utf-8") as f:
         src = f.read()
     code = "".join(re.search(r"^function %s\(.*?\n\}\n" % n, src, re.M | re.S).group(0)
-                   for n in ("pvBox", "pvOf"))
+                   for n in ("optPicked", "pvBox", "pvOf"))
     script = ("const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');\n"
               + code + body)
     out = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=False)
@@ -44,6 +44,16 @@ class TestPreview(unittest.TestCase):
         got = _run("console.log(JSON.stringify([pvOf(%s, true, {}), pvOf(%s, false, {})]))"
                    % (json.dumps(plain), json.dumps(Q)))
         self.assertEqual(got, ["", ""])              # no previews; answered with no pick
+
+    def test_picked_handles_single_and_multi_select(self):
+        got = _run("console.log(JSON.stringify(["
+                   "optPicked(%s, {'Which?': 'Two'}, 'Two'),"
+                   "optPicked(%s, {'Which?': 'Two'}, 'One'),"
+                   "optPicked(%s, {'Which?': ['One', 'Two']}, 'One'),"
+                   "optPicked(%s, {'Which?': ['One']}, 'Two'),"
+                   "optPicked(%s, {}, 'One')"
+                   "]))" % ((json.dumps(Q),) * 5))
+        self.assertEqual(got, [True, False, True, False, False])
 
 
 if __name__ == "__main__":

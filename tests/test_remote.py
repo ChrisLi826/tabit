@@ -540,6 +540,25 @@ class TestRemoteUpload(_ServerCase):
         self.assertFalse(os.path.exists(self.up) and any(
             f for _r, _d, fs in os.walk(self.up) for f in fs))                # nothing written
 
+    def test_cut_short_upload_cleans_up_without_crashing(self):
+        s = socket.socket(socket.AF_UNIX)
+        s.settimeout(5)
+        s.connect(self.sock)
+        extra = "".join(f"{k}: {v}\r\n" for k, v in self.ok.items() if v is not None)
+        s.sendall(f"POST /api/upload?name=cut.jpg HTTP/1.1\r\nHost: me.ts.net\r\n"
+                  f"Content-Length: 1000\r\n{extra}\r\n".encode() + b"0123456789")
+        s.close()
+        code, body = self.put("ok.jpg", b"good")
+        self.assertEqual(code, 200)
+        self.assertTrue(body["path"].endswith("ok.jpg"))
+        deadline = time.monotonic() + 2.0
+        while True:
+            files = [f for _r, _d, fs in os.walk(self.up) for f in fs]
+            if files == ["ok.jpg"] or time.monotonic() >= deadline:
+                break
+            time.sleep(0.02)
+        self.assertEqual(files, ["ok.jpg"])
+
 
 FAKE_TAILSCALE = r"""#!%(py)s
 import json, os, sys

@@ -185,6 +185,8 @@
   .ask .row button { flex: 1; min-width: 90px; }
   .ask .opts { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
   .ask .opts button.on { background: var(--blue); color: #111; border: 0; }
+  .ask .opts[data-multi] button::before { content: "☐ "; }
+  .ask .opts[data-multi] button.on::before { content: "☑ "; }
   .ask .q { font-weight: 600; margin-top: 6px; white-space: pre-line; }
   /* an option's preview is drawn with box lines: it must not wrap, so it scrolls sideways */
   .ask .pv { margin: 0 0 8px; } .ask .pv .hint { margin: 0 0 4px; }
@@ -1083,6 +1085,12 @@ function drawOne(me, ev) {
   return null;
 }
 
+// whether an option was picked in a question's answers (string or multi-select array)
+function optPicked(q, answers, label) {
+  const a = (answers || {})[q.question];
+  return Array.isArray(a) ? a.includes(label) : a === label;
+}
+
 // an AskUserQuestion option's preview, with its description above it
 function pvBox(o) {
   return `<div class="pv">${o.description ? `<div class="hint">${esc(o.description)}</div>` : ""}${o.preview ? `<pre>${esc(o.preview)}</pre>` : ""}</div>`;
@@ -1108,8 +1116,8 @@ function paintAsks(me) {
     let body = "";
     if (ev.questions) {
       // a menu read off a tab's screen brings the whole prompt: a long command is what you say yes to
-      body = (ev.detail ? `<pre class="prompt">${esc(ev.detail)}</pre>` : "") + ev.questions.map((q, i) => `<div class="q">${esc(q.question)}</div><div class="opts" data-q="${i}">${(q.options || []).map((o) =>
-        `<button type="button" data-l="${esc(o.label)}" title="${esc(o.description || "")}"${!open && (ev.answers || {})[q.question] === o.label ? ' class="on"' : ""}>${esc(o.label)}</button>`).join("")}</div>${pvOf(q, open, ev.answers)}`).join("");
+      body = (ev.detail ? `<pre class="prompt">${esc(ev.detail)}</pre>` : "") + ev.questions.map((q, i) => `<div class="q">${esc(q.question)}</div><div class="opts" data-q="${i}"${q.multiSelect ? ' data-multi="1"' : ""}>${(q.options || []).map((o) =>
+        `<button type="button" data-l="${esc(o.label)}" title="${esc(o.description || "")}"${!open && optPicked(q, ev.answers, o.label) ? ' class="on"' : ""}>${esc(o.label)}</button>`).join("")}</div>${pvOf(q, open, ev.answers)}`).join("");
       body += open ? '<div class="row"><button class="primary" data-act="answerq" disabled>Answer</button><button data-act="deny">Skip</button></div>' : "";
     } else {
       body = (ev.plan ? `<div class="what">${md(ev.plan)}</div>` : `<div class="what">${esc(ev.summary || "")}</div>`) +
@@ -1154,13 +1162,14 @@ $("msgs").addEventListener("click", async (e) => {
   }
   const opt = e.target.closest(".ask:not(.closed) .opts button");      // a closed card only shows the picks
   if (opt) {
-    opt.parentElement.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b === opt));
+    if (opt.parentElement.dataset.multi) opt.classList.toggle("on");
+    else opt.parentElement.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b === opt));
     const card = opt.closest(".ask"), pv = opt.parentElement.nextElementSibling;
     if (pv && pv.classList.contains("pv") && cur) {
       const o = cur.asks.get(card.dataset.rid).questions[opt.parentElement.dataset.q].options.find((x) => x.label === opt.dataset.l);
       pv.outerHTML = pvBox(o);
     }
-    card.querySelector('[data-act="answerq"]').disabled = card.querySelectorAll(".opts").length !== card.querySelectorAll(".opts .on").length;
+    card.querySelector('[data-act="answerq"]').disabled = [...card.querySelectorAll(".opts")].some((o) => !o.querySelector(".on"));
     return;
   }
   const b = e.target.closest(".ask button[data-act]");
@@ -1169,7 +1178,12 @@ $("msgs").addEventListener("click", async (e) => {
   const body = { rid, chat: card.dataset.chat, allow: act !== "deny", always: act === "always" };
   if (act === "answerq") {
     const ev = cur.asks.get(rid), answers = {};
-    card.querySelectorAll(".opts").forEach((o) => { answers[ev.questions[o.dataset.q].question] = o.querySelector(".on").dataset.l; });
+    card.querySelectorAll(".opts").forEach((o) => {
+      const q = ev.questions[o.dataset.q];
+      answers[q.question] = q.multiSelect
+        ? [...o.querySelectorAll(".on")].map((x) => x.dataset.l)
+        : o.querySelector(".on").dataset.l;
+    });
     body.answers = answers;
   }
   b.disabled = true;
@@ -1500,14 +1514,81 @@ async function send() {
 $("stop").onclick = async () => { try { await api(`${base(cur.kind)}/${cur.id}/stop`, {}); } catch (e) { status(e.message, true); } };
 
 // a file or a photo goes to tabit's uploads folder; its path goes into the message
-async function upload(file) {
-  const name = file.name || "paste." + (file.type.split("/")[1] || "bin");
-  status(`uploading ${name}…`);
+const PHOTO_MAX_SIDE = 1600;
+const PHOTO_MIN_SHRINK = 600 * 1024;
+async function shrinkPhoto(file, name) {
+  const raster = /^image\/(jpeg|webp|heic|heif)$/i.test(file?.type || "") ||
+    /\.(jpe?g|webp|heic|heif)$/i.test(name || "");
+  if (!raster || !file || file.size <= PHOTO_MIN_SHRINK) return { blob: file, name };
+  let src = null, url = null;
   try {
-    const res = await fetch(`api/upload?name=${encodeURIComponent(name)}`, { method: "POST", body: file,
-      headers: { "Content-Type": "application/octet-stream", "X-Tabit": "1" } });
-    const body = await res.json();
-    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    let w = 0, h = 0;
+    if (typeof createImageBitmap === "function") {
+      src = await createImageBitmap(file);
+      w = src.width; h = src.height;
+    } else {
+      url = URL.createObjectURL(file);
+      src = await new Promise((ok, bad) => {
+        const img = new Image();
+        img.onload = () => ok(img); img.onerror = bad; img.src = url;
+      });
+      w = src.naturalWidth; h = src.naturalHeight;
+    }
+    const scale = Math.min(1, PHOTO_MAX_SIDE / Math.max(w, h, 1));
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(w * scale));
+    c.height = Math.max(1, Math.round(h * scale));
+    const ctx = c.getContext("2d");
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(src, 0, 0, c.width, c.height);
+    const blob = await new Promise((ok) => c.toBlob(ok, "image/jpeg", 0.84));
+    if (!blob || !blob.size || blob.size >= file.size) return { blob: file, name };
+    const stem = (name || "photo").replace(/\.[^.]+$/, "") || "photo";
+    return { blob, name: `${stem}.jpg` };
+  } catch (_e) {
+    return { blob: file, name };
+  } finally {
+    if (src && typeof src.close === "function") src.close();
+    if (url) URL.revokeObjectURL(url);
+  }
+}
+
+async function postUpload(name, blob, onRetry) {
+  // buffer up to 10 MB once so iOS Safari does not lose the File handle across retries
+  const payload = blob && blob.size <= 10 * 1024 * 1024 && typeof blob.arrayBuffer === "function"
+    ? await blob.arrayBuffer() : blob;
+  const url = `api/upload?name=${encodeURIComponent(name)}`;
+  let last;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(url, { method: "POST", body: payload,
+        headers: { "Content-Type": "application/octet-stream", "X-Tabit": "1" } });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok) return body;
+      const msg = body.error || `HTTP ${res.status}`;
+      const retryable = res.status >= 502 || (res.status === 400 && msg === "upload cut short");
+      const err = new Error(msg);
+      if (!retryable || attempt === 3) { err.fatal = true; throw err; }
+      last = err;
+    } catch (e) {
+      if ((e && e.fatal) || attempt === 3) throw e;
+      last = e;
+    }
+    if (onRetry) onRetry(attempt);
+    await new Promise((r) => setTimeout(r, 1200 * attempt));
+  }
+  throw last;
+}
+
+async function upload(file) {
+  const rawName = file.name || "paste." + (file.type.split("/")[1] || "bin");
+  status(`uploading ${rawName}…`);
+  try {
+    const { blob, name } = await shrinkPhoto(file, rawName);
+    status(`uploading ${name} (${Math.max(1, Math.round(blob.size / 1024))} KB)…`);
+    const body = await postUpload(name, blob, (n) =>
+      status(`upload cut off; retrying ${name} (${n}/2)…`));
     const t = $("text");
     t.value = (t.value && !/\s$/.test(t.value) ? t.value + " " : t.value) + body.path + " ";
     t.dispatchEvent(new Event("input")); t.focus(); status("");
@@ -1878,10 +1959,7 @@ async function nearbySay(text) {
   if ($("nb-msg")) $("nb-msg").textContent = text;
 }
 async function sendFile(file) {    // upload one file; gives its path on this computer
-  const res = await fetch(`api/upload?name=${encodeURIComponent(file.name || "file")}`, { method: "POST", body: file,
-    headers: { "Content-Type": "application/octet-stream", "X-Tabit": "1" } });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  const body = await postUpload(file.name || "file", file);
   return body.path;
 }
 async function nearbySheet() {

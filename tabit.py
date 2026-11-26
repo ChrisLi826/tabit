@@ -2763,7 +2763,12 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 os.unlink(path)
             except OSError:
                 pass
-            self._json(400, {"error": str(e)})
+            print(f"[remote] upload failed ({name}, {size - left}/{size} bytes): {e}",
+                  file=sys.stderr)
+            try:
+                self._json(400, {"error": str(e)})
+            except OSError:
+                pass
             return
         print(f"[remote] upload -> {path} ({size} bytes)", file=sys.stderr)
         self._json(200, {"path": path, "size": size})

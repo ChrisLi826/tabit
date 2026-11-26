@@ -1028,6 +1028,8 @@ def screen_prompt(lines, cli="claude"):
     numbered = all(n is not None for n in numbers)
     if len(picks) < 2 or not (numbered or "Enter to confirm" in tail):
         return None
+    if any(re.match(r"(?:\[[ xX✓✔]\]|[☐☑])\s", p) for p in picks):
+        return None
     return _menu_card(rows, top, picks, numbers, chosen)
 
 
@@ -1177,11 +1179,9 @@ def transcript_model(path):
     return None
 
 
-def open_question(path):
-    """The AskUserQuestion at the end of a Claude transcript that has no answer
-    yet: {"id", "questions"}, or None. Only questions of single-choice
-    options count: a tap on the page can answer those, and the other kinds are
-    answered in the tab."""
+def _unanswered_ask(path):
+    """The AskUserQuestion at the end of a Claude transcript that has no
+    answer yet: {"id", "questions"}, or None."""
     try:
         size = os.path.getsize(path)
         start = max(0, size - MIRROR_TAIL)
@@ -1193,32 +1193,63 @@ def open_question(path):
     lines = data.splitlines()
     if start:
         lines = lines[1:]                   # the first line is cut in half
-    found, answered = None, set()
+    found, found_msg_id, answered = None, None, set()
     for line in lines:
         try:
             raw = json.loads(line)
         except ValueError:
             continue
-        content = (raw.get("message") or {}).get("content") if isinstance(raw, dict) else None
-        if raw.get("isSidechain") or not isinstance(content, list):
+        if not isinstance(raw, dict) or raw.get("isSidechain"):
             continue
+        msg = raw.get("message") or {}
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if raw.get("type") == "user":
+            if isinstance(content, str) and content.strip():
+                found, found_msg_id = None, None
+                continue
+            if isinstance(content, list):
+                has_result = False
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        answered.add(block.get("tool_use_id"))
+                        has_result = True
+                if not has_result and any(isinstance(b, dict) and b.get("type") == "text" for b in content):
+                    found, found_msg_id = None, None
+            continue
+        if not isinstance(content, list):
+            continue
+        msg_id = msg.get("id") if isinstance(msg, dict) else None
+        if raw.get("type") == "assistant" and found and msg_id and found_msg_id and msg_id != found_msg_id:
+            found, found_msg_id = None, None
         for block in content:
             if not isinstance(block, dict):
                 continue
             if block.get("type") == "tool_use" and block.get("name") == "AskUserQuestion":
                 found = {"id": block.get("id"), "questions": (block.get("input") or {}).get("questions")}
+                found_msg_id = msg_id
             elif block.get("type") == "tool_result":
                 answered.add(block.get("tool_use_id"))
     if not found or found["id"] in answered:
         return None
+    return found
+
+
+def _card_question(found):
     qs = found["questions"]
-    if (not isinstance(qs, list) or not 1 <= len(qs) <= 4 or not all(
-            isinstance(q, dict) and isinstance(q.get("question"), str) and not q.get("multiSelect")
+    return (isinstance(qs, list) and 1 <= len(qs) <= 4 and all(
+            isinstance(q, dict) and isinstance(q.get("question"), str)
             and isinstance(q.get("options"), list) and 1 <= len(q["options"]) <= 4
             and all(isinstance(o, dict) and isinstance(o.get("label"), str) for o in q["options"])
-            for q in qs)):
-        return None
-    return found
+            for q in qs))
+
+
+def open_question(path):
+    """The AskUserQuestion at the end of a Claude transcript that has no answer
+    yet: {"id", "questions"}, or None. Choice questions (single- or
+    multi-select, up to 4 questions of up to 4 options) count: a tap on the
+    page can answer those, and the other kinds are answered in the tab."""
+    found = _unanswered_ask(path)
+    return found if found and _card_question(found) else None
 
 
 def ask_of(raw):
@@ -1752,13 +1783,12 @@ class Chat(_Log):
             self._tab_answered = {i for i in self._tab_answered if not i.startswith("scr-")}
         asked = {rid: p for rid, p in self.pending.items() if p.get("tab")}
         claude = (self.meta["tab"].get("cli") or "claude") == "claude"
-        q = open_question(path) if self.tab_state == "waiting" and path and claude else None
-        if q and q["id"] in self._tab_answered:      # answered here: the transcript is not caught up yet
-            q = None
+        raw_q = _unanswered_ask(path) if self.tab_state == "waiting" and path and claude else None
+        q = raw_q if raw_q and _card_question(raw_q) and raw_q["id"] not in self._tab_answered else None
         card = None
         if q:
             card = {"rid": "tab-" + q["id"], "id": q["id"], "questions": q["questions"]}
-        elif self.tab_state == "waiting":
+        elif self.tab_state == "waiting" and not raw_q:
             sp = screen_prompt(info.get("screen"), self.meta["tab"].get("cli") or "claude")
             if sp and sp["id"] not in self._tab_answered:
                 card = {"rid": sp["id"], "id": sp["id"], "screen": sp, "questions": [
@@ -1780,8 +1810,10 @@ class Chat(_Log):
         self.emit(ev)
 
     def _answer_tab(self, held, allow, answers):
-        """Press the keys that answer the tab's question: a number picks an
-        option and moves on; with more than one question a last "1" submits."""
+        """Press the keys that answer the tab's question: a number picks or
+        toggles an option (Right moves past a multi-select question); a last "1"
+        submits when there is a review tab (more than one question, or any
+        multi-select)."""
         tab, cli = self.meta["tab"]["id"], self.meta["tab"].get("cli") or "claude"
         # The desk may have answered it since the last look: then a number
         # would land in the next prompt, and Esc would stop Claude.
@@ -1807,25 +1839,38 @@ class Chat(_Log):
             keys = []
             for q in qs:
                 labels = [o["label"] for o in q["options"]]
-                label = (answers or {}).get(q["question"])
-                if label not in labels:
-                    raise RuntimeError("pick one of the options for: %s" % q["question"])
-                keys.append(str(labels.index(label) + 1))
-                if any(o.get("preview") for o in q["options"]):
-                    keys.append("enter")     # with previews a number only moves there
-            if len(qs) > 1:
+                if q.get("multiSelect"):
+                    picked = (answers or {}).get(q["question"])
+                    if isinstance(picked, str):
+                        picked = [picked]
+                    if (not isinstance(picked, list) or not picked
+                            or not all(isinstance(x, str) and x in labels for x in picked)):
+                        raise RuntimeError("pick one or more options for: %s" % q["question"])
+                    for label in dict.fromkeys(picked):
+                        keys.append(str(labels.index(label) + 1))
+                    keys.append("right")         # move to the next question or Submit tab
+                else:
+                    label = (answers or {}).get(q["question"])
+                    if label not in labels:
+                        raise RuntimeError("pick one of the options for: %s" % q["question"])
+                    keys.append(str(labels.index(label) + 1))
+                    if any(o.get("preview") for o in q["options"]):
+                        keys.append("enter")     # with previews a number only moves there
+            if len(qs) > 1 or any(q.get("multiSelect") for q in qs):
                 keys.append("1")
         self._press(tab, keys)
 
     def _screen_keys(self, menu, held, allow, answers):
         """The keys for a menu on the screen: its number, or the arrows and Enter.
-        A skip picks a numbered No (what Esc does there); a menu without
-        numbers (the trust question, whose No and Esc both end Claude) gets
-        no key: the tab answers it."""
+        A skip picks a numbered No, or Esc when a numbered menu has no No; a menu
+        without numbers (the trust question, whose No and Esc both end Claude)
+        gets no key: the tab answers it."""
         if not allow:
             no = next((i for i, o in enumerate(menu["options"]) if re.match(r"No\b", o)), None)
             num = menu["numbers"][no] if no is not None else None
-            return [str(num)] if num is not None and num < 10 else []
+            if num is not None and num < 10:
+                return [str(num)]
+            return ["esc"] if menu["numbers"] and all(n is not None for n in menu["numbers"]) else []
         label = (answers or {}).get(held["input"]["questions"][0]["question"])
         if label not in menu["options"]:
             raise RuntimeError("pick one of the options")
@@ -2113,7 +2158,8 @@ class Chat(_Log):
         if allow:
             inp = dict(held["input"])
             if isinstance(answers, dict):
-                inp["answers"] = answers
+                inp["answers"] = {k: ", ".join(v) if isinstance(v, list) else v
+                                  for k, v in answers.items()}
             resp = {"behavior": "allow", "updatedInput": inp}
             if always and held["suggest"]:
                 resp["updatedPermissions"] = held["suggest"]

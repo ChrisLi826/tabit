@@ -283,6 +283,22 @@ class TestChat(Base):
         self.assertEqual([e for e in chat.events if e["t"] == "text"][-1]["text"],
                          "denied: not now")
 
+    def test_headless_multi_select_joins_answers_for_claude_and_keeps_list_in_event(self):
+        chat = self.new()
+        sent = []
+        chat.proc = type("P", (), {"poll": lambda self: None})()
+        chat._write = sent.append
+        chat.pending["rq-ms"] = {
+            "ev": {"t": "ask", "rid": "rq-ms"},
+            "input": {"questions": [{"question": "Pick", "multiSelect": True,
+                                     "options": [{"label": "A"}, {"label": "B"}]}]},
+            "suggest": None,
+        }
+        self.assertTrue(chat.answer("rq-ms", True, answers={"Pick": ["A", "B"]}))
+        chat.proc = None
+        self.assertEqual(sent[-1]["response"]["response"]["updatedInput"]["answers"], {"Pick": "A, B"})
+        self.assertEqual(chat.events[-1]["answers"], {"Pick": ["A", "B"]})
+
     def test_stop_ends_the_turn_and_the_chat_goes_on(self):
         chat = self.new()
         chat.send("slow")
@@ -773,6 +789,7 @@ class MirrorTest(Base):
         tc.MIRROR_EVERY = 3600       # the tests look by hand
         self.path = os.path.join(self.dir, "tx.jsonl")
         self.status = "idle"
+        self.screen = []
         self.calls = []
         shutil.copy(os.path.join(os.path.dirname(__file__), "fixtures", "chat",
                                  "tab_transcript.jsonl"), self.path)
@@ -781,8 +798,11 @@ class MirrorTest(Base):
             if tab != "t1":
                 return (404, {"error": "no"}) if text or key else {"error": "no"}
             if text is None and key is None:
-                return {"title": "MOT", "status": self.status,
+                info = {"title": "MOT", "status": self.status,
                         "transcript": self.path, "cli": "claude"}
+                if self.status == "blocked" or screen:
+                    info["screen"] = self.screen
+                return info
             self.calls.append((text, key, queue))
             return 200, {"ok": True}
         self.mgr.tab_hook = hook
@@ -904,23 +924,23 @@ class MirrorTest(Base):
         {"question": "Pick a size", "header": "Size", "multiSelect": False,
          "options": [{"label": "Small"}, {"label": "Large"}]}]
 
-    def ask_in_tab(self, questions=None, answered=False):
+    def ask_in_tab(self, questions=None, answered=False, qid="tu9"):
         use = {"type": "assistant", "message": {"content": [
-            {"type": "tool_use", "id": "tu9", "name": "AskUserQuestion",
+            {"type": "tool_use", "id": qid, "name": "AskUserQuestion",
              "input": {"questions": questions or self.QUESTIONS}}]}}
         lines = [use]
         if answered:
             lines.append({"type": "user", "message": {"content": [
-                {"type": "tool_result", "tool_use_id": "tu9", "content": "done"}]}})
+                {"type": "tool_result", "tool_use_id": qid, "content": "done"}]}})
         with open(self.path, "a") as f:
             f.write("".join(json.dumps(x) + "\n" for x in lines))
 
-    def asking(self, questions=None):
+    def asking(self, questions=None, qid="tu9"):
         self.addCleanup(setattr, tc, "ANSWER_STEP", tc.ANSWER_STEP)
         tc.ANSWER_STEP = 0
         chat = self.mirror()
         chat.mirror_poll()
-        self.ask_in_tab(questions)
+        self.ask_in_tab(questions, qid=qid)
         self.status = "blocked"
         chat.mirror_poll()
         return chat
@@ -1016,16 +1036,72 @@ class MirrorTest(Base):
         self.assertEqual(self.calls, [])
         self.assertEqual(chat.pending, {})
 
-    def test_no_card_for_an_answered_or_multiple_choice_question(self):
+    def test_no_card_for_an_answered_or_oversized_question(self):
         chat = self.mirror()
         chat.mirror_poll()
         self.ask_in_tab(answered=True)
         self.status = "blocked"
         chat.mirror_poll()
         self.assertEqual(chat.pending, {})
-        many = [dict(self.QUESTIONS[0], multiSelect=True)]
-        chat2 = self.asking(many)
+        too_many = [dict(self.QUESTIONS[0], options=[{"label": str(i)} for i in range(5)])]
+        self.screen = [" Pick a color", " ❯ 1. 0", "   2. 1", " Esc to cancel"]
+        chat2 = self.asking(too_many, qid="tu10")
         self.assertEqual(chat2.pending, {})
+
+    def test_multi_select_question_card_toggles_and_submits(self):
+        multi = [dict(self.QUESTIONS[0], multiSelect=True)]
+        chat = self.asking(multi)
+        self.assertIn("tab-tu9", chat.pending)
+        code, out = tc.api(self.mgr, "POST", [chat.id, "answer"], {
+            "rid": "tab-tu9", "allow": True,
+            "answers": {"Pick a color": ["Red", "Green", "Red"]}})
+        self.assertEqual(code, 200, out)
+        # duplicate "Red" is deduplicated; Right enters the Submit tab and "1" submits
+        self.assertEqual([k for _t, k, _q in self.calls], ["1", "3", "right", "1"])
+        self.assertEqual(chat.events[-1]["answers"], {"Pick a color": ["Red", "Green", "Red"]})
+        self.calls.clear()
+        chat2 = self.asking(multi, qid="tu10")
+        self.assertEqual(tc.api(self.mgr, "POST", [chat2.id, "answer"], {
+            "rid": "tab-tu10", "allow": True, "answers": {"Pick a color": []}})[0], 409)
+        self.assertEqual(tc.api(self.mgr, "POST", [chat2.id, "answer"], {
+            "rid": "tab-tu10", "allow": True, "answers": {"Pick a color": ["Purple"]}})[0], 409)
+        self.assertIn("tab-tu10", chat2.pending)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(tc.api(self.mgr, "POST", [chat2.id, "answer"], {
+            "rid": "tab-tu10", "allow": False})[0], 200)
+        self.assertEqual([k for _t, k, _q in self.calls], ["esc"])
+
+    def test_mixed_multi_and_single_select_questions_press_right_then_submit(self):
+        mixed = [dict(self.QUESTIONS[0], multiSelect=True), self.QUESTIONS[1]]
+        chat = self.asking(mixed)
+        code, out = tc.api(self.mgr, "POST", [chat.id, "answer"], {
+            "rid": "tab-tu9", "allow": True,
+            "answers": {"Pick a color": ["Red", "Blue"], "Pick a size": "Small"}})
+        self.assertEqual(code, 200, out)
+        self.assertEqual([k for _t, k, _q in self.calls], ["1", "2", "right", "1", "1"])
+
+    def test_answered_tab_question_does_not_fall_back_to_screen_card(self):
+        self.screen = [" Pick a color", " ❯ 1. Red", "   2. Blue", " Esc to cancel"]
+        chat = self.asking(self.QUESTIONS[:1])
+        code, out = tc.api(self.mgr, "POST", [chat.id, "answer"], {"rid": "tab-tu9", "allow": False})
+        self.assertEqual(code, 200, out)
+        self.assertEqual(chat.pending, {})
+        # transcript has not caught up yet: must not pop up a duplicate scr-... card
+        chat.mirror_poll()
+        self.assertEqual(chat.pending, {})
+
+    def test_orphaned_ask_before_later_turn_does_not_block_screen_menu(self):
+        chat = self.mirror()
+        chat.mirror_poll()
+        self.ask_in_tab(self.QUESTIONS[:1])      # orphaned question (never received tool_result)
+        with open(self.path, "a") as f:
+            f.write(json.dumps({"type": "user", "message": {"content": "continue"}}) + "\n")
+        self.status = "blocked"
+        self.screen = PERMISSION_SCREEN
+        chat.mirror_poll()
+        self.assertEqual(len(chat.pending), 1)
+        ev = next(iter(chat.pending.values()))["ev"]
+        self.assertTrue(ev["rid"].startswith("scr-"))
 
     def test_typing_waits_while_the_card_is_open(self):
         chat = self.asking()
@@ -2499,6 +2575,28 @@ class ScreenMenuTest(Base):
         ev = self.card()
         self.chat.answer(ev["rid"], False)
         self.assertEqual(self.keys, ["3"])
+
+    def test_skip_on_a_numbered_menu_without_no_presses_esc(self):
+        self.screen = [
+            " Would you like to proceed?",
+            " ❯ 1. Yes, clear context",
+            "   2. Yes, manually approve edits",
+            "   3. Type here to tell Claude what to change",
+            " Esc to cancel",
+        ]
+        ev = self.card()
+        self.chat.answer(ev["rid"], False)
+        self.assertEqual(self.keys, ["esc"])
+
+    def test_multi_select_checkbox_screen_is_no_menu(self):
+        self.assertIsNone(tc.screen_prompt([
+            " Pick changes",
+            " ❯ 1. [ ] First",
+            "   2. [ ] Second",
+            "   3. [ ] Type something",
+            "     Next",
+            " Enter to select · Esc to cancel",
+        ]))
 
     def test_the_whole_prompt_shows_however_long(self):
         cmd = ["   line %d of a long command" % i for i in range(12)]
