@@ -125,9 +125,18 @@
   #sheet { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: flex-end;
            justify-content: center; z-index: 9; }
   #sheet.on { display: flex; }
-  #sheet .card { background: var(--panel); border-radius: 14px 14px 0 0; width: min(100%, 520px);
+  /* as in Tabit Chat: a light blue edge, a dark ring, a title bar; from the
+     bottom on a phone, a box in the middle on a wide screen */
+  #sheet .card { background: var(--bg); border: 1.5px solid #7aa2f78c; border-bottom: 0; border-radius: 20px 20px 0 0;
+                 box-shadow: 0 0 0 4px #00000066, 0 22px 60px #000e; width: min(100%, 520px);
                  padding: 14px 16px calc(16px + env(safe-area-inset-bottom)); max-height: 85vh; overflow: auto;
                  overscroll-behavior: contain; }
+  #sheet .card > :is(h2, h3):first-child { position: sticky; top: -14px; z-index: 2; margin: -14px -16px 10px; padding: 13px 16px;
+                 background: #232842; border-bottom: 1px solid #7aa2f78c; }
+  @media (min-width: 900px) {
+    #sheet { align-items: center; }
+    #sheet .card { border-bottom: 1.5px solid #7aa2f78c; border-radius: 18px; padding-bottom: 16px; }
+  }
   #sheet h3 { margin: 0 0 10px; font-size: calc(16px * var(--fs, 1)); }
   #sheet [hidden] { display: none !important; }
   #sheet label { display: block; font-size: calc(12px * var(--fs, 1)); color: var(--dim); margin: 10px 0 4px; }

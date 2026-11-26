@@ -99,6 +99,115 @@
   .empty { color: var(--dim); text-align: center; padding: 56px 28px; line-height: 1.6; }
   .empty .big { font-size: 44px; margin-bottom: 8px; }
 
+  /* the planner (#p): your own to-dos and dates, kept by a chat you pick */
+  /* the Planner's line above the tabs: what is due today, what is late, what is next */
+  #pltoday { flex: none; display: flex; align-items: center; gap: 8px; margin: 8px 14px 0; padding: 9px 12px; border-radius: 12px;
+             background: var(--panel); border: 1px solid #ffffff0a; cursor: pointer; font-size: calc(13px * var(--fs, 1)); min-width: 0; }
+  #pltoday:hover, #pltoday.here { border-color: var(--plbox); }
+  #pltoday.late { border-color: #f7768e88; }
+  #pltoday b { flex: none; }
+  #pltoday .pt-av { margin-left: auto; width: 26px; height: 26px; font-size: 20px; }      /* the Planner chat, and its state */
+  #pltoday .pt-av .bub { right: -9px; top: -8px; width: 20px; height: 17px; } #pltoday .pt-av .bub b { font-size: 9px; gap: 1px; }
+  #pltoday .pt-av .bub i { width: 2px; height: 2px; }
+  #pltoday .n { flex: none; padding: 1px 8px; border-radius: 99px; background: #ffffff0d; color: var(--dim); }
+  #pltoday .n.late { color: var(--red); background: #f7768e1f; font-weight: 600; }
+  #pltoday { flex-wrap: wrap; row-gap: 4px; }
+  #pltoday .next { flex: 1 0 100%; min-width: 0; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #plset { font-size: 20px; line-height: 1; padding: 0 10px; }
+  #pl-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 14px 14px; overscroll-behavior: contain; }
+  #pl-list h3, #pl-list summary { margin: 16px 0 4px; font-size: calc(13px * var(--fs, 1)); color: var(--dim); font-weight: 600; letter-spacing: .04em; }
+  #pl-list summary { cursor: pointer; }
+  .pl-item { display: flex; align-items: flex-start; gap: 4px; margin: 0 0 8px; padding: 6px 12px 8px 2px; border-radius: 14px;
+             background: var(--panel); border: 1px solid #ffffff0a; cursor: pointer; }
+  .pl-item:active { background: #262b45; }
+  .pl-tick { flex: none; width: 40px; height: 32px; padding: 0; border: 0; background: none; font-size: 22px; color: var(--blue); }
+  .pl-body { flex: 1; min-width: 0; padding-top: 4px; }
+  .pl-t { overflow-wrap: anywhere; font-size: calc(16px * var(--fs, 1)); line-height: 1.35; }
+  .pl-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .pl-meta:empty { display: none; }
+  .pl-when { display: inline-block; max-width: 100%; padding: 1px 8px; border-radius: 99px; background: #ffffff0d; color: var(--dim);
+             font-size: calc(12px * var(--fs, 1)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pl-when.late { color: var(--red); background: #f7768e1f; }
+  .pl-when.pri-urgent { color: #fff; background: var(--red); font-weight: 600; }
+  .pl-when.pri-important { color: #111; background: var(--orange); font-weight: 600; }
+  .pl-when.pri-low { color: var(--dim); background: #ffffff0d; }
+  /* an open card: the item, outlined, with its fields under its words */
+  .pl-item.editing { cursor: default; border: 1.5px solid var(--plbox); background: #1a1e30; box-shadow: 0 8px 30px #0008; }
+  .pl-item.editing .pl-meta { display: none; }
+  .pl-item.editing .pl-t { cursor: pointer; padding-right: 40px; font-weight: 600; }
+  .pl-item { position: relative; }
+  .pl-edit .pl-close { position: absolute; top: 8px; right: 8px; }
+  .pl-edit { cursor: default; margin-top: 2px; }
+  .pl-item.done .pl-t { color: var(--dim); text-decoration: line-through; }
+  .pl-item.hold .pl-t, .pl-item.hold .pl-tick { color: var(--dim); }
+  #sheet .pl-row > div, #plnew .pl-row > div, .pl-edit .pl-row > div { flex: 1; min-width: 0; }
+  #plnew .plx, .pl-edit .plx { width: 34px; height: 34px; padding: 0; border-radius: 50%; }
+  #plnew .pl-notes, .pl-edit .pl-notes { margin: 6px 0 0; display: flex; flex-direction: column; gap: 6px; max-height: 30vh; overflow-y: auto; }
+  #plnew .pl-note, .pl-edit .pl-note { background: var(--panel); border-radius: 12px; padding: 6px 10px; overflow-wrap: anywhere; white-space: pre-wrap; }
+  #plnew .pl-note .hint, .pl-edit .pl-note .hint { margin: 0 0 2px; }
+  .pl-edit textarea#pe-desc { min-height: 5.5em; resize: vertical; }
+  .pl-who { border: 0; cursor: pointer; color: var(--blue); background: #7aa2f71f; font: inherit; font-size: calc(12px * var(--fs, 1)); }
+  .pl-who.gone { color: var(--dim); background: #ffffff0d; text-decoration: line-through; cursor: default; }
+  #sheet .pl-tabs, #plnew .pl-tabs, .pl-edit .pl-tabs { display: flex; flex-wrap: wrap; gap: 6px; max-height: 132px; overflow-y: auto; }
+  #sheet .pl-tabs button, #plnew .pl-tabs button, .pl-edit .pl-tabs button { padding: 5px 10px; border-radius: 99px; font-size: calc(13px * var(--fs, 1)); }
+  #sheet .pl-tabs button.on, #plnew .pl-tabs button.on, .pl-edit .pl-tabs button.on { background: var(--blue); color: #111; border: 0; }
+  #pl-list h4.h-urgent { color: var(--red); } #pl-list h4.h-important { color: var(--orange); } #pl-list h4.h-low { color: var(--dim); }
+  #pl-list h4 { margin: 14px 0 6px 4px; font-size: calc(13px * var(--fs, 1)); color: var(--fg); font-weight: 600; }
+  .pl-row select { flex: 0 1 30%; min-width: 0; }
+  .pl-row { display: flex; gap: 8px; }
+  .pl-row input { flex: 1; min-width: 0; }
+  #pl-msg { flex: none; padding: 8px 14px 0; font-size: calc(13px * var(--fs, 1)); color: var(--dim); } #pl-msg:empty { display: none; } #pl-msg.err { color: var(--red); }
+  #pl-list { padding-bottom: calc(96px + env(safe-area-inset-bottom)) !important; }   /* the last card clears the round button */
+
+  /* #p/c: the manager's conversation floats over the Planner, a box at the
+     lower right on a wide screen and a sheet from the bottom on a phone */
+  :root { --plbox: #7aa2f78c; --plshadow: 0 0 0 4px #00000066, 0 22px 60px #000e; }
+  #dlgbar { display: none; }
+  .plrs { display: none; position: absolute; z-index: 2; touch-action: none; }
+  @media (min-width: 900px) {            /* its left edge, top edge and top-left corner resize it */
+    body.planchat .plrs { display: block; }
+    .plrs[data-d="x"] { left: 0; top: 16px; bottom: 0; width: 7px; cursor: ew-resize; }
+    .plrs[data-d="y"] { top: 0; left: 16px; right: 0; height: 7px; cursor: ns-resize; }
+    .plrs[data-d="xy"] { left: 0; top: 0; width: 18px; height: 18px; cursor: nwse-resize; }
+    .plrs:hover, .plrs.on { background: #7aa2f744; }
+  }
+  body.planchat #talk { display: flex; position: fixed; z-index: 4; right: 24px; bottom: 96px; width: var(--plw, min(420px, calc(100vw - 48px)));
+                        height: var(--plh, min(640px, calc(100vh - 150px))); background: var(--bg); border: 1.5px solid var(--plbox);
+                        border-radius: 18px; box-shadow: var(--plshadow); overflow: hidden;
+                        transform-origin: 100% 100%; animation: plpop .16s ease-out; }
+  @keyframes plpop { from { opacity: 0; transform: translateY(12px) scale(.96); } to { opacity: 1; transform: none; } }
+  #plfab { position: fixed; z-index: 4; right: 24px; bottom: 24px; width: 56px; height: 56px; padding: 0; border: 0; border-radius: 50%;
+           background: linear-gradient(135deg, #6f97f2, #8f78f0); color: #fff; font-size: 26px; line-height: 1; box-shadow: 0 6px 20px #0009; }
+  #pladd { position: fixed; z-index: 4; right: 92px; bottom: 28px; width: 48px; height: 48px; padding: 0; border-radius: 50%;
+           background: var(--panel); border: 1px solid var(--line); color: var(--fg); font-size: 26px; line-height: 1; box-shadow: 0 6px 20px #0009; }
+  #plnew { display: none; position: fixed; z-index: 4; right: 24px; bottom: 96px; width: min(420px, calc(100vw - 48px));
+           max-height: calc(100vh - 150px); overflow-y: auto; background: var(--bg); border: 1.5px solid var(--plbox);
+           border-radius: 18px; box-shadow: var(--plshadow); padding: 0 16px 14px; transform-origin: 100% 100%; animation: plpop .16s ease-out; }
+  #plnew.on { display: block; }
+  #plnew .bar { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; margin: 0 -16px 4px;
+                padding: 10px 10px 10px 16px; background: #232842; border-bottom: 1px solid var(--plbox); }
+  #plnew .bar b { flex: 1; }
+  #plnew .acts button, .pl-edit .acts button { flex: 1; }
+  #pladd.open { transform: rotate(45deg); }              /* ＋ turns into ✕ while the box is open */
+  #plfab.open .ic { display: none; }
+  #plfab.open::after { content: "⌄"; font-size: 30px; display: block; margin-top: -10px; }
+  #plfab .bub { position: absolute; right: -8px; top: -9px; width: 28px; height: 24px; }   /* the manager's state, as on its picture */
+  #dlg-av { width: 32px; height: 32px; font-size: 24px; }
+  #dlg-av .bub { right: -9px; top: -8px; width: 20px; height: 17px; } #dlg-av .bub b { font-size: 9px; gap: 1px; } #dlg-av .bub i { width: 2px; height: 2px; }
+  body.planchat #dlgbar { display: flex; flex: none; align-items: center; gap: 8px; padding: 10px 10px 10px 14px; background: #232842; border-bottom: 1px solid var(--plbox); }
+  #dlgbar b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #dlg-st:empty { display: none; }
+  #dlg-x { width: 34px; height: 34px; padding: 0; border-radius: 50%; }
+  @media (max-width: 899px) {
+    body.planchat #talk { left: 0; right: 0; bottom: 0; top: 10vh; width: auto; height: auto; border-radius: 20px 20px 0 0; }
+    body.planchat #plfab { display: none; }            /* the sheet has its own ✕ */
+    #plfab { right: 16px; bottom: calc(18px + env(safe-area-inset-bottom)); }
+    #pladd { right: 84px; bottom: calc(22px + env(safe-area-inset-bottom)); }
+    body.planchat #pladd { display: none; }
+    #plnew { left: 0; right: 0; bottom: 0; width: auto; max-height: 90vh; border-radius: 20px 20px 0 0; }
+    body:has(#plnew.on) #plfab, body:has(#plnew.on) #pladd { display: none; }
+  }
+
   /* the conversation */
   #msgs { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 14px 8px; display: flex; flex-direction: column; gap: 10px;
           overscroll-behavior: contain; }
@@ -261,18 +370,27 @@
     border-radius: 10px; padding: 8px 10px; margin: 4px 0; font-size: calc(13px * var(--fs, 1)); }
   .nb-files a { display: block; font-size: calc(13px * var(--fs, 1)); }
   #sheet2 { position: fixed; inset: 0; background: #000a; display: none; align-items: flex-end; justify-content: center; z-index: 6; }
-  #sheet .in, #sheet2 .in { background: var(--bg); border: 1px solid var(--line); border-radius: 24px 24px 0 0; width: 100%; max-width: 560px;
+  /* a sheet looks like the Planner's boxes: a light blue edge, a dark ring, a title bar;
+     from the bottom on a phone, a box in the middle on a wide screen */
+  #sheet .in, #sheet2 .in { background: var(--bg); border: 1.5px solid var(--plbox); border-bottom: 0; border-radius: 20px 20px 0 0;
+               box-shadow: var(--plshadow); width: 100%; max-width: 560px;
                max-height: 92vh; overflow-y: auto; padding: 14px 16px calc(16px + env(safe-area-inset-bottom)); }
-  #sheet .in { background: var(--bg); border: 1px solid var(--line); border-radius: 24px 24px 0 0; width: 100%; max-width: 560px;
-               max-height: 92vh; overflow-y: auto; padding: 14px 16px calc(16px + env(safe-area-inset-bottom)); }
+  #sheet .in > :is(h2, h3):first-child, #sheet2 .in > :is(h2, h3):first-child {
+               position: sticky; top: -14px; z-index: 2; margin: -14px -16px 10px; padding: 13px 16px;
+               background: #232842; border-bottom: 1px solid var(--plbox); }
+  @media (min-width: 900px) {
+    #sheet, #sheet2 { align-items: center; }
+    #sheet .in, #sheet2 .in { border-bottom: 1.5px solid var(--plbox); border-radius: 18px; max-height: 86vh;
+                              padding-bottom: 16px; animation: plpop .16s ease-out; transform-origin: 50% 50%; }
+  }
   #sheet h2, #sheet2 h2 { margin: 0 0 10px; font-size: calc(18px * var(--fs, 1)); }
-  #sheet label, #sheet2 label { display: block; margin: 10px 0 4px; color: var(--dim); font-size: calc(13px * var(--fs, 1)); }
-  #sheet .acts, #sheet2 .acts { display: flex; gap: 8px; margin-top: 14px; }
+  #sheet label, #sheet2 label, #plnew label, .pl-edit label { display: block; margin: 10px 0 4px; color: var(--dim); font-size: calc(13px * var(--fs, 1)); }
+  #sheet .acts, #sheet2 .acts, #plnew .acts, .pl-edit .acts { display: flex; gap: 8px; margin-top: 14px; }
   #sheet .acts button, #sheet2 .acts button { flex: 1; }
   /* the Settings sheet (settings.js, shared with the terminal view) */
   #sheet h3 { margin: 0 0 10px; font-size: calc(18px * var(--fs, 1)); }
-  #sheet label.check { display: flex; align-items: center; gap: 8px; color: var(--fg); font-size: calc(14px * var(--fs, 1)); }
-  #sheet label.check input { width: auto; margin: 0; }
+  #sheet label.check, #plnew label.check, .pl-edit label.check { display: flex; align-items: center; gap: 8px; color: var(--fg); font-size: calc(14px * var(--fs, 1)); }
+  #sheet label.check input, #plnew label.check input, .pl-edit label.check input { width: auto; margin: 0; }
   #sheet .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
   #sheet .row button { flex: 1; padding: 10px; }
   #sheet .go { background: var(--blue); color: #111; border: 0; font-weight: 600; }
@@ -386,11 +504,12 @@
     #list { grid-column: 1; grid-row: 1 / 4; display: flex; border-right: 1px solid var(--line); background: #0c0e17; min-height: 0; }
     header { grid-column: 2; grid-row: 1; padding-top: 12px; }
     #conn { grid-column: 2; grid-row: 2; }
-    #talk { grid-column: 2; grid-row: 3; }
+    #talk, #plan { grid-column: 2; grid-row: 3; }
     #pick { grid-column: 2; grid-row: 1 / 4; display: grid; place-items: center; text-align: center; color: var(--dim); line-height: 1.7; }
     #pick .big { font-size: 54px; }
-    #talk.on ~ #pick { display: none; }
-    body:has(#talk:not(.on)) header { visibility: hidden; }
+    #talk.on ~ #pick, #plan.on ~ #pick { display: none; }
+    body:has(#talk:not(.on)):has(#plan:not(.on)) header { visibility: hidden; }
+    #pl-msg, #pl-list { padding-left: max(28px, calc((100% - 900px) / 2)); padding-right: max(28px, calc((100% - 900px) / 2)); }
     #grip { display: block; position: fixed; top: 0; bottom: 0; left: calc(var(--listw, 340px) - 4px); width: 9px; cursor: col-resize; z-index: 4; touch-action: none; }
     #grip:hover, #grip.on { background: #7aa2f744; }
     #back, #add, #nearby, #remote, #setbtn { display: none !important; }
@@ -411,6 +530,8 @@
     .b { font-size: calc(16px * var(--fs, 1)); } .b.ai { max-width: 100%; padding: 14px 18px; } .b.me { max-width: 75%; }
     .tool { max-width: 100%; }
     #jump { right: 40px; }
+    body.planchat #msgs { padding: 14px 14px 8px; } body.planchat #composer { padding: 6px 10px 12px; }
+    body.planchat #jump { right: 18px; }
   }
 </style>
 </head>
@@ -421,6 +542,7 @@
   <span id="hav" class="av sm" hidden></span>
   <div id="ttl"><h1 id="title">Chat</h1><div id="pill" class="pill" hidden></div></div>
   <button id="notify" type="button" title="tell me when the AI is done" hidden>🔕</button>
+  <button id="plset" type="button" title="Planner settings: its chat's model and effort, your name, Done days" hidden>⚙</button>
   <button id="more" type="button" hidden>⋯</button>
   <button id="add" type="button" class="primary">＋</button>
   <button id="nearby" type="button" title="Nearby: send to a tabit on this LAN">📡</button>
@@ -430,10 +552,11 @@
 <div id="conn">Reconnecting…</div>
 <main>
   <section id="list" class="view on">
-    <div id="sbhead"><h1>Chat</h1><button id="sb-add" type="button" class="primary" title="new chat">＋</button><button id="sb-nearby" type="button" title="Nearby: send to a tabit on this LAN">📡</button><a href="terminal" title="the terminal view"><button type="button">⌨</button></a><button id="sb-set" type="button" title="tabit settings: AI defaults, Claude accounts, update, restart">⚙</button></div>
+    <div id="sbhead"><h1>Chat</h1><button id="sb-add" type="button" class="primary" title="new chat">＋</button><button id="sb-nearby" type="button" title="Nearby: send to a tabit on this LAN" hidden>📡</button><a href="terminal" title="the terminal view"><button type="button">⌨</button></a><button id="sb-set" type="button" title="tabit settings: AI defaults, Claude accounts, update, restart">⚙</button></div>
     <div id="scroller">
     <div id="top">
     <div id="usage"></div>
+    <div id="pltoday" role="button" tabindex="0" title="open the Planner" hidden></div>
     <div id="tabs"><button data-k="chats" class="on">Chats</button><button data-k="groups">Groups</button></div>
     </div>
     <div id="cards"></div>
@@ -441,6 +564,8 @@
     <div id="searchbar"><input id="q" type="search" placeholder="Search chats" autocomplete="off"></div>
   </section>
   <section id="talk" class="view">
+    <div class="plrs" data-d="x" title="drag to resize, double-click to reset"></div><div class="plrs" data-d="y" title="drag to resize, double-click to reset"></div><div class="plrs" data-d="xy" title="drag to resize, double-click to reset"></div>
+    <div id="dlgbar"><span id="dlg-av" class="av sm"></span><b id="dlg-t"></b><span id="dlg-st" class="pill"></span><button id="dlg-x" type="button" title="close (back to the Planner)">✕</button></div>
     <div id="msgs"></div>
     <button id="jump" type="button">↓</button>
     <button id="pin" type="button" title="your message these replies answer: tap to go to it"></button>
@@ -463,6 +588,13 @@
       </div>
     </div>
   </section>
+  <section id="plan" class="view">
+    <div id="pl-msg"></div>
+    <div id="pl-list"></div>
+  </section>
+  <button id="plfab" type="button" title="talk to the Planner chat" hidden>💬</button>
+  <button id="pladd" type="button" title="add a to-do" hidden>＋</button>
+  <div id="plnew" role="dialog" aria-label="New to-do"></div>
   <div id="pick"><div><div class="big">💬</div>Pick a chat on the left,<br>or start a new one.</div></div>
 </main>
 <div id="sheet"><div class="in" id="sheetin"></div></div>
@@ -483,7 +615,14 @@ const WORK = ["📷", "🎥", "📡", "📶", "🌐", "🔌", "🔧", "🛠️",
 const RIDES = ["🚗", "🚕", "🚌", "🚓", "🚑", "🚒", "🚚", "🚜", "🏎️", "🏍️", "🚲", "🛴", "✈️", "🚁", "🚀", "🛸", "🚂", "🚄", "🚇", "⛵", "🚤", "🚢", "🛶", "🚡", "🛺", "🛻", "🚐", "🛵"];
 const SPORT = ["🏃", "🏃‍♀️", "🏃‍♂️", "👟", "🎽", "🥾", "⏱️", "🏅", "🥇", "🏆", "🚴", "🏊", "⛰️", "🧗"];
 // the animals also choose a chat's own picture (by its id): keep that list as it is
-const PICK = [["Animals", ANIMALS], ["Work", WORK], ["Rides", RIDES], ["Sport", SPORT]];
+const PEOPLE = ["🧐", "🤓", "🤵", "🤵‍♂️", "🤵‍♀️", "💁", "💁‍♂️", "💁‍♀️", "🧑‍💼", "👨‍💼", "👩‍💼", "🛎️"];      // a butler, a desk, an assistant
+const PICK = [["Animals", ANIMALS], ["Work", WORK], ["People", PEOPLE], ["Rides", RIDES], ["Sport", SPORT]];
+// people take a human skin tone, light to dark, not a turned colour; the faces and the bell take neither
+const TONES = ["\u{1F3FB}", "\u{1F3FC}", "\u{1F3FD}", "\u{1F3FE}", "\u{1F3FF}"];
+const untone = (e) => e.replace(/[\u{1F3FB}-\u{1F3FF}]/gu, "");
+const toneOf = (e) => (e.match(/[\u{1F3FB}-\u{1F3FF}]/u) || [""])[0];
+const canTone = (e) => PEOPLE.slice(2, -1).includes(untone(e));
+const toned = (e, t) => { const [first, ...rest] = [...untone(e)]; return first + t + rest.join(""); };
 const HUES = [0, 40, 90, 150, 200, 250, 300];     // how far the emoji's own colour is turned
 const emo = (f) => `<span class="em" style="filter:${f.f}">${esc(f.e)}</span>`;
 function face(r) {
@@ -504,28 +643,40 @@ function avOf(r) {
 function picker(host, r) {
   const pick = { emoji: r.emoji || "", hue: Number.isInteger(r.hue) ? r.hue : null };
   const any = (list) => list[Math.floor(Math.random() * list.length)];
-  const roll = (list) => { pick.emoji = any(list); pick.hue = any(HUES); };
+  const roll = (list) => {
+    pick.emoji = any(list); pick.hue = PEOPLE.includes(pick.emoji) ? 0 : any(HUES);
+    if (canTone(pick.emoji)) pick.emoji = toned(pick.emoji, any(TONES));
+  };
   if (r.roll) roll(PICK.flatMap(([, list]) => list));
   host.innerHTML = `<div class="pk"><div class="av big" id="pk-prev"></div>
     <div class="pk-tabs">${PICK.map(([name]) => `<button type="button" data-c="${name}">${name}</button>`).join("")}</div>
     <div class="pk-animals"></div>
     <div class="pk-hues"></div></div>`;
-  let cat = (PICK.find(([, list]) => list.includes(pick.emoji)) || PICK[0])[0];      // the shelf of the picture it has now
+  let cat = (PICK.find(([, list]) => list.includes(untone(pick.emoji))) || PICK[0])[0];      // the shelf of the picture it has now
+  let tone = toneOf(pick.emoji) || TONES[0];
   const paint = () => {
     host.querySelectorAll("[data-c]").forEach((b) => b.classList.toggle("on", b.dataset.c === cat));
-    host.querySelector(".pk-animals").innerHTML = PICK.find(([name]) => name === cat)[1].map((a) => `<button type="button" data-e="${a}">${a}</button>`).join("");
+    host.querySelector(".pk-animals").innerHTML = PICK.find(([name]) => name === cat)[1].map((a) =>
+      `<button type="button" data-e="${a}">${canTone(a) ? toned(a, tone) : a}</button>`).join("");
     const f = face(Object.assign({}, r, pick));
     const prev = host.querySelector("#pk-prev"); prev.innerHTML = emo(f);
-    host.querySelector(".pk-hues").innerHTML = `<button type="button" data-roll title="roll a new one">🎲</button>` +
-      HUES.map((h) => `<button type="button" data-h="${h}">${emo({ e: f.e, f: `hue-rotate(${h}deg)` })}</button>`).join("");
-    host.querySelectorAll("[data-e]").forEach((b) => b.classList.toggle("on", b.dataset.e === pick.emoji));
+    const person = PEOPLE.includes(untone(f.e));
+    host.querySelector(".pk-hues").innerHTML = `<button type="button" data-roll title="roll a new one">🎲</button>` + (person
+      ? (canTone(f.e) ? TONES.map((t) => `<button type="button" data-t="${t}" title="skin tone">${toned(f.e, t)}</button>`).join("") : "")
+      : HUES.map((h) => `<button type="button" data-h="${h}">${emo({ e: f.e, f: `hue-rotate(${h}deg)` })}</button>`).join(""));
+    host.querySelectorAll("[data-e]").forEach((b) => b.classList.toggle("on", b.dataset.e === untone(pick.emoji)));
+    host.querySelectorAll("[data-t]").forEach((b) => b.classList.toggle("on", b.dataset.t === toneOf(pick.emoji)));
     host.querySelectorAll("[data-h]").forEach((b) => b.classList.toggle("on", +b.dataset.h === pick.hue));
   };
   host.onclick = (e) => {
     const b = e.target.closest("button"); if (!b) return;
     if (b.dataset.roll !== undefined) roll(PICK.find(([name]) => name === cat)[1]);
     if (b.dataset.c !== undefined) cat = b.dataset.c;
-    if (b.dataset.e !== undefined) pick.emoji = b.dataset.e;
+    if (b.dataset.e !== undefined) {
+      pick.emoji = canTone(b.dataset.e) ? toned(b.dataset.e, tone) : b.dataset.e;
+      if (PEOPLE.includes(b.dataset.e)) pick.hue = 0;                   // a person keeps its own colours
+    }
+    if (b.dataset.t !== undefined) { tone = b.dataset.t; pick.emoji = toned(pick.emoji, tone); }
     if (b.dataset.h !== undefined) pick.hue = +b.dataset.h;
     paint();
   };
@@ -732,6 +883,7 @@ async function loadList() {
     $("cards").innerHTML = `<div class="empty">${esc(e.message)}<br><br><a href="terminal">Open the terminal view</a></div>`; return;
   }
   cfg = data;
+  planToday();
   nearbyWatch(data.nearby);          // another page may have turned receiving on
   const shown = new Set((data.usage || []).map((u) => useKey(u.cli, u.account)));
   only.forEach((k) => { if (!shown.has(k)) only.delete(k); });
@@ -739,7 +891,8 @@ async function loadList() {
   $("usage").classList.toggle("only", only.size > 0);
   const q = $("q").value.trim().toLowerCase();
   const uses = new Map((data.chats || []).map((c) => [c.id, chatUse(c)]));
-  const all = (kind === "chats" ? data.chats : data.groups).filter((r) => !r.default && (!only.size || picked(r, uses)));
+  const all = (kind === "chats" ? data.chats : data.groups)       // the planner manager lives in the Planner
+    .filter((r) => !r.default && !(kind === "chats" && r.id === data.planner) && (!only.size || picked(r, uses)));
   const rows = q ? all.filter((r) => `${r.title} ${r.last}`.toLowerCase().includes(q)) : all;
   if ((q || only.size) && !rows.length) { $("cards").innerHTML = '<div class="empty">Nothing found.</div>'; return; }
   if (!rows.length) {
@@ -786,6 +939,12 @@ $("tabs").addEventListener("click", (e) => {
 function route() {
   const m = location.hash.match(/^#([cg])\/(\w+)$/);
   closeStream(); screenClose();
+  clearInterval(planTimer); planTimer = null; $("plan").classList.remove("on"); $("pltoday").classList.remove("here");
+  document.body.classList.remove("planchat");
+  $("plfab").hidden = true; $("plfab").classList.remove("open"); $("plset").hidden = true; $("pladd").hidden = true;
+  if (location.hash !== "#p") planNewClose();
+  if (location.hash === "#p") { openPlan(); return; }
+  if (location.hash === "#p/c") { planChat(); return; }
   if (!m) { showList(); return; }
   openTalk(m[1] === "c" ? "chats" : "groups", m[2]);
 }
@@ -793,7 +952,7 @@ function showList() {
   cur = null;
   $("list").classList.add("on"); $("talk").classList.remove("on");
   $("title").textContent = "Chat"; $("back").hidden = true; $("pill").hidden = true; $("hav").hidden = true;
-  $("more").hidden = true; $("add").hidden = false; $("nearby").hidden = false; $("remote").hidden = false; $("setbtn").hidden = false; $("notify").hidden = true;
+  $("more").hidden = true; $("add").hidden = false; $("nearby").hidden = !NEARBY_SHOWN; $("remote").hidden = false; $("setbtn").hidden = false; $("notify").hidden = true;
   loadList();
   clearInterval(listTimer);
   listTimer = setInterval(() => { if (!document.hidden && (!cur || wide.matches)) loadList(); }, 5000);
@@ -803,6 +962,332 @@ $("back").onclick = () => { location.hash = ""; };
 $("q").addEventListener("input", loadList);
 $("sb-add").onclick = () => $("add").click();
 $("setbtn").onclick = $("sb-set").onclick = () => openTabitSettings(sheet, closeSheet);    // settings.js
+
+// --- the planner (#p): your own to-dos and dates in one file; a chat you pick keeps it
+let plan = null, planSeen = "", planTimer = null, planDoneOpen = false;
+const NEARBY_SHOWN = false;               // 📡 Nearby is hidden for now: true brings its button back
+$("sb-nearby").hidden = !NEARBY_SHOWN;
+let planAt = null;                       // AI tab name -> chat id
+async function planTabs() {
+  try { cfg = await api("api/chats"); } catch (_e) { return; }
+  planAt = new Map((cfg.chats || []).filter((c) => c.at).map((c) => [c.at, c.id]));
+  if (plan) paintPlan();
+}
+const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const hhmm = (t) => (t ? t.padStart(5, "0") : "");
+function openPlan() {
+  if (wide.matches) {                      // the list stays beside the planner
+    if (!listTimer) listTimer = setInterval(() => { if (!document.hidden) loadList(); }, 5000);
+    loadList();
+  } else { clearInterval(listTimer); listTimer = null; }
+  cur = null;
+  $("list").classList.remove("on"); $("talk").classList.remove("on"); $("plan").classList.add("on"); $("pltoday").classList.add("here");
+  planHead();
+  $("plfab").hidden = false; $("plset").hidden = false; $("pladd").hidden = false;
+  planSeen = ""; planEditing = null; planStale = false;
+  loadPlan(); planTabs();
+  planTimer = setInterval(() => { if (!document.hidden) loadPlan(); }, 5000);    // the manager may change it
+}
+// the line above the tabs: today's count, the late ones, the next one; a tap opens the Planner
+async function planToday() {
+  let p;
+  try { p = await api("api/planner"); } catch (_e) { $("pltoday").hidden = true; return; }
+  const today = ymd(new Date()), open = p.items.filter((x) => x.state === "open" && x.date);
+  const due = open.filter((x) => x.date === today).length, late = open.filter((x) => x.date < today).length;
+  const next = open.filter((x) => x.date >= today).sort((a, b) => (a.date + " " + hhmm(a.time)).localeCompare(b.date + " " + hhmm(b.time)))[0];
+  const when = next && (next.date === today ? next.time || "today" : planWhen(next));
+  const m = p.manager && !p.manager.gone ? p.manager : null, hv = m && avOf(m);
+  $("pltoday").innerHTML = `<b>📅 Planner</b>` + (due || late
+    ? `${due ? `<span class="n">${due} today</span>` : ""}${late ? `<span class="n late">${late} late</span>` : ""}`
+    : `<span class="n">nothing today</span>`) +
+    (m ? `<span class="av pt-av ${hv.cls}" title="${esc(m.title)}: ${esc(m.asks ? "waiting for you" : m.state)}; tap to talk">${hv.html}${bub(m)}</span>` : "") +
+    (next ? `<span class="next">next: ${esc(when)} · ${esc(next.text)}</span>` : "");
+  $("pltoday").classList.toggle("late", late > 0);
+  $("pltoday").hidden = false;
+}
+$("pltoday").onclick = (e) => { location.hash = e.target.closest(".pt-av") ? "#p/c" : "#p"; };
+$("pltoday").onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); location.hash = "#p"; } };
+// #p/c: the Planner, with the manager's conversation over it; ✕ closes it
+async function planChat() {
+  openPlan();
+  if (!plan?.manager || plan.manager.gone) await loadPlan();      // a chat started since the last look
+  const m = plan?.manager;
+  if (!m || m.gone) { location.hash = "#p"; return; }
+  if (location.hash !== "#p/c") return;           // gone somewhere else meanwhile
+  document.body.classList.add("planchat");
+  $("dlg-t").textContent = m.title || "Manager"; $("dlg-st").textContent = "";
+  const hv = avOf(m); $("dlg-av").className = "av sm " + hv.cls; $("dlg-av").innerHTML = hv.html + bub(m);
+  openTalk("chats", m.id);
+  $("plan").classList.add("on");                  // openTalk hid it: it stays behind the box
+  planHead();
+  $("plfab").hidden = false; $("plfab").classList.add("open"); $("plset").hidden = false; $("pladd").hidden = false;
+  $("text").focus();
+}
+$("dlg-x").onclick = () => { location.hash = "#p"; };
+// the box keeps the size you drag it to, in this browser; a double-click goes back to the first one
+function plSize(w, h) {
+  const W = Math.round(Math.max(320, Math.min(w, innerWidth - 48))), H = Math.round(Math.max(300, Math.min(h, innerHeight - 120)));
+  document.body.style.setProperty("--plw", W + "px"); document.body.style.setProperty("--plh", H + "px");
+  return [W, H];
+}
+try { const k = JSON.parse(localStorage.getItem("plchat-size")); if (Array.isArray(k)) plSize(k[0], k[1]); } catch (_e) { /* the first size */ }
+document.querySelectorAll("#talk .plrs").forEach((g) => {
+  g.addEventListener("pointerdown", (e) => {
+    e.preventDefault(); g.setPointerCapture(e.pointerId); g.classList.add("on");
+    const r = $("talk").getBoundingClientRect(), x0 = e.clientX, y0 = e.clientY, d = g.dataset.d;
+    let last = [r.width, r.height];
+    const move = (ev) => { last = plSize(d.includes("x") ? r.width + x0 - ev.clientX : r.width, d.includes("y") ? r.height + y0 - ev.clientY : r.height); };
+    const up = () => {
+      g.classList.remove("on"); g.removeEventListener("pointermove", move); g.removeEventListener("pointerup", up);
+      localStorage.setItem("plchat-size", JSON.stringify(last));
+    };
+    g.addEventListener("pointermove", move); g.addEventListener("pointerup", up);
+  });
+  g.addEventListener("dblclick", () => {
+    localStorage.removeItem("plchat-size");
+    document.body.style.removeProperty("--plw"); document.body.style.removeProperty("--plh");
+  });
+});
+$("plfab").onclick = async () => {
+  if (document.body.classList.contains("planchat")) { location.hash = "#p"; return; }
+  if (!(plan?.manager && !plan.manager.gone)) {           // the first time: the Planner's own chat
+    planSay("Starting the Planner chat…");
+    try { planTook(await api("api/planner/start", {})); planSay(""); }
+    catch (e) { planSay(e.message, true); return; }
+  }
+  location.hash = "#p/c";
+};
+// the round button: 💬, with the manager's state bubble when there is one
+function planFab(r) { $("plfab").innerHTML = `<span class="ic">💬</span>${r ? bub(r) : ""}`; }
+function planHead() {
+  $("title").textContent = "Planner"; $("back").hidden = false; $("pill").hidden = true; $("hav").hidden = true;
+  $("more").hidden = true; $("add").hidden = true; $("nearby").hidden = true; $("remote").hidden = true; $("setbtn").hidden = true; $("notify").hidden = true;
+}
+function planSay(text, bad) { $("pl-msg").textContent = text || ""; $("pl-msg").classList.toggle("err", !!bad); }
+function planTook(out) {
+  plan = out;
+  const seen = JSON.stringify(out);
+  if (seen !== planSeen) { planSeen = seen; if (planEditing === null) paintPlan(); else planStale = true; }
+}
+async function loadPlan() {
+  try { planTook(await api("api/planner")); if ($("pl-msg").classList.contains("err")) planSay(""); }
+  catch (e) { planSay(e.message, true); }
+}
+function planWhen(it) {
+  const d = new Date(it.date + "T00:00");
+  const day = it.date === ymd(new Date()) ? "Today" : isNaN(d) ? it.date       // a date the file got wrong
+    : d.toLocaleDateString(undefined, { weekday: "short", month: "numeric", day: "numeric" });
+  return it.time ? `${day} ${it.time}` : day;
+}
+// one item, a card: its words, then its chips; pri: false where the section says the priority
+function planRow(it, pri = true) {
+  const late = it.state === "open" && it.date && it.date < ymd(new Date());
+  const chip = (cls, t) => `<span class="pl-when${cls}">${esc(t)}</span>`;
+  const md = (d) => { const t = new Date(d + "T00:00"); return isNaN(t) ? d : t.toLocaleDateString(undefined, { month: "numeric", day: "numeric" }); };
+  return `<div class="pl-item ${it.state}${it.state === "paused" ? " hold" : ""}" data-i="${it.i}"><button type="button" class="pl-tick" title="${it.done ? "not done yet" : "done"}">${it.done ? "☑" : "☐"}</button>` +
+    `<div class="pl-body"><div class="pl-t">${esc(it.text)}</div><div class="pl-meta">${it.date && !it.done ? chip(late ? " late" : "", planWhen(it)) : ""}` +
+    `${pri && it.priority !== "medium" ? chip(" pri-" + it.priority, PRI[it.priority]) : ""}${it.donedate ? chip("", "✓ " + md(it.donedate)) : ""}` +
+    it.assigned.map((n) => `<button type="button" class="pl-when pl-who${planAt && !planAt.has(n) ? " gone" : ""}" data-who="${esc(n)}" title="open its chat">@${esc(n)}</button>`).join("") +
+    `${it.desc ? chip("", "📝") : ""}${it.notes.length ? chip("", "💬 " + it.notes.length) : ""}</div></div></div>`;
+}
+function paintPlan() {
+  const m = plan.manager;
+  planShown = plan.items;
+  // with no manager the round button picks one
+  $("plfab").title = m && !m.gone ? `talk to ${m.title || "the Planner chat"}` : "start the Planner chat";
+  if (!document.body.classList.contains("planchat")) planFab(m && !m.gone ? m : null);
+  const today = ymd(new Date()), at = (x) => x.date + " " + hhmm(x.time), by = (a, b) => at(a).localeCompare(at(b));
+  const of = (st) => plan.items.filter((x) => x.state === st);
+  const open = of("open"), hold = of("paused");
+  const rows = (l) => l.map((x) => planRow(x)).join("");
+  let html = [["Today", open.filter((x) => x.date && x.date <= today).sort(by)],
+              ["Coming up", open.filter((x) => x.date > today).sort(by)]]
+    .filter(([, l]) => l.length).map(([h, l]) => `<h3>${h}</h3>${rows(l)}`).join("");
+  // To-do: by priority, Urgent first, then what is on hold, greyed
+  const todo = open.filter((x) => !x.date);
+  if (todo.length || hold.length) {
+    html += "<h3>To-do</h3>" + Object.keys(PRI).map((p) => {
+      const l = todo.filter((x) => x.priority === p);
+      return l.length ? `<h4 class="h-${p}">${PRI[p]}</h4>` + l.map((x) => planRow(x, false)).join("") : "";
+    }).join("") + (hold.length ? `<h4>On hold</h4>${rows(hold)}` : "");
+  }
+  // Done: the last done_days days, the newest first; done before dates were kept, last
+  const since = ymd(new Date(Date.now() - (plan.done_days - 1) * 864e5));      // today is one of the days
+  const done = of("done").reverse().filter((x) => !x.donedate || x.donedate >= since)
+    .sort((a, b) => (b.donedate || "0").localeCompare(a.donedate || "0"));
+  if (done.length) html += `<details id="pl-done"${planDoneOpen ? " open" : ""}><summary>Done, last ${plan.done_days} days (${done.length})</summary>${rows(done)}</details>`;
+  $("pl-list").innerHTML = html || `<div class="empty"><div class="big">📅</div>Nothing planned yet.<br>Tap ＋ to add a to-do, or tell the Planner chat (💬).</div>`;
+}
+// one change; say() shows a refusal (the page's line, or the sheet's)
+async function planDo(op, body, say = planSay) {
+  try {
+    const out = await api("api/planner/" + op, body);
+    planTook(out);
+    const err = out.error ? `Saved, but not every chat was told: ${out.error}` : "";
+    say(err, !!err);
+    if (err && say !== planSay) planSay(err, true);      // the card may close: the page keeps it
+    return true;
+  }
+  catch (e) {
+    say(e.message + (e.status === 409 && planEditing !== null ? " Close this card and open it again." : ""), true);
+    if (e.status === 409) loadPlan();
+    return false;
+  }
+}
+// Microsoft Planner's priorities, most first; an item with none is medium
+const PRI = { urgent: "Urgent", important: "Important", medium: "Medium", low: "Low" };
+const priOpts = (pick) => Object.entries(PRI).map(([k, v]) => `<option value="${k}"${k === pick ? " selected" : ""}>${v}</option>`).join("");
+// an item's card, opened in place in the list: its words, date and time, on
+// hold, the description, the comments. While it is open the list is not
+// drawn again (that would take what is typed); it is when the card closes.
+let planEditing = null, planStale = false;
+let planShown = [];                      // the items the list shows: taps name these, even when a newer file waits
+function planEditClose() {
+  planEditing = null;
+  if (planStale) { planStale = false; paintPlan(); return; }
+  document.querySelectorAll("#pl-list .pl-item.editing").forEach((r) => { r.classList.remove("editing"); r.querySelector(".pl-edit")?.remove(); });
+}
+function planEdit(it) {
+  planNewClose();
+  const stale = planStale;
+  if (planEditing !== null) planEditClose();
+  if (stale) {                            // the list was drawn again: the same item, wherever it is now
+    it = planShown.find((x) => x.block === it.block);
+    if (!it) { planSay("That item changed meanwhile: tap it again.", true); return; }
+  }
+  const notes = it.notes.map((n) => `<div class="pl-note"><div class="hint">${esc(n.who || "")} ${esc(n.at || "")}</div>${esc(n.text)}</div>`).join("");
+  const row = $("pl-list").querySelector(`.pl-item[data-i="${it.i}"]`);
+  if (!row) return;
+  planEditing = it.i;
+  row.classList.add("editing");
+  const box = document.createElement("div");
+  box.className = "pl-edit";
+  box.innerHTML = `<button id="pe-x" type="button" class="plx pl-close" title="close (Esc)">✕</button>
+    <label>What</label><input id="pe-text" maxlength="500" value="${esc(it.text)}">
+    <div class="pl-row"><div><label>Date</label><input id="pe-date" type="date" value="${esc(it.date)}"></div>
+      <div><label>Time</label><input id="pe-time" type="time" value="${esc(hhmm(it.time))}"></div></div>
+    <label>Priority</label><select id="pe-pri">${priOpts(it.priority)}</select>
+    ${it.done ? "" : `<label class="check"><input id="pe-hold" type="checkbox"${it.state === "paused" ? " checked" : ""}> On hold (waiting, not late)</label>`}
+    <label>Assigned</label><div class="pl-tabs" id="pe-who">${[...it.assigned, ...[...(planAt?.keys() || [])].filter((n) => !it.assigned.includes(n)).sort()]
+      .map((n) => `<button type="button" data-who="${esc(n)}"${it.assigned.includes(n) ? ' class="on"' : ""}>@${esc(n)}</button>`).join("") || '<div class="hint">No AI tabs.</div>'}</div>
+    <label>Description</label><textarea id="pe-desc" rows="4">${esc(it.desc)}</textarea>
+    <label>Comments${it.notes.length ? ` (${it.notes.length})` : ""}</label><div class="pl-notes">${notes || '<div class="hint">None yet.</div>'}</div>
+    <div class="pl-row" style="margin-top:8px"><input id="pe-note" maxlength="2000" placeholder="Write a comment"><button type="button" id="pe-send">Send</button></div>
+    <div class="hint" id="pe-msg"></div>
+    <div class="acts"><button type="button" class="danger" id="pe-del">Delete</button><button type="button" id="pe-cancel">Cancel</button><button type="button" class="primary" id="pe-save">Save</button></div>`;
+  row.querySelector(".pl-body").append(box);
+  box.onkeydown = (e) => { if (e.key === "Escape") planEditClose(); };
+  if (row.getBoundingClientRect().top < 0 || row.getBoundingClientRect().top > innerHeight * .6) row.scrollIntoView({ block: "start", behavior: "smooth" });
+  const ref = { i: it.i, block: it.block };
+  const say = (t, bad) => { $("pe-msg").textContent = t || ""; $("pe-msg").style.color = bad ? "var(--red)" : ""; };
+  $("pe-cancel").onclick = $("pe-x").onclick = planEditClose;
+  $("pe-who").onclick = (e) => { const b = e.target.closest("button"); if (b) b.classList.toggle("on"); };
+  let busy = false;                       // one tap, one request
+  const once = (fn) => async () => { if (busy) return; busy = true; try { await fn(); } finally { busy = false; } };
+  $("pe-del").onclick = once(async () => { if (confirm("Delete this item, with its description and comments?") && await planDo("delete", ref, say)) planEditClose(); });
+  $("pe-save").onclick = once(async () => {
+    if (await planDo("edit", { ...ref, text: $("pe-text").value, date: $("pe-date").value, time: $("pe-time").value,
+      paused: !!$("pe-hold")?.checked, desc: $("pe-desc").value, priority: $("pe-pri").value,
+      assigned: [...document.querySelectorAll("#pe-who button.on")].map((b) => b.dataset.who) }, say)) planEditClose();
+  });
+  const send = once(async () => {
+    if (!$("pe-note").value.trim()) return;
+    const keep = { text: $("pe-text").value, date: $("pe-date").value, time: $("pe-time").value, desc: $("pe-desc").value };
+    const picked = [...document.querySelectorAll("#pe-who button.on")].map((b) => b.dataset.who), hold = $("pe-hold")?.checked,
+      pri = $("pe-pri").value;
+    if (!await planDo("comment", { ...ref, text: $("pe-note").value }, say)) return;
+    planEditClose();                                       // the list, drawn again with the comment
+    const now = plan.items.find((x) => x.i === it.i);       // the comment goes under it: same line
+    if (!now) return;
+    planEdit(now);
+    if (plan.error) say(`Saved, but not every chat was told: ${plan.error}`, true);
+    else if (plan.told?.length) say(`Told ${plan.told.join(", ")}.`);
+    if (keep.text !== it.text || keep.date !== it.date || keep.time !== hhmm(it.time) || keep.desc !== it.desc) {
+      $("pe-text").value = keep.text; $("pe-date").value = keep.date; $("pe-time").value = keep.time; $("pe-desc").value = keep.desc;
+    }
+    document.querySelectorAll("#pe-who button").forEach((b) => b.classList.toggle("on", picked.includes(b.dataset.who)));
+    if ($("pe-hold")) $("pe-hold").checked = !!hold;
+    $("pe-pri").value = pri;
+    $("pe-note").focus();
+  });
+  $("pe-send").onclick = send;
+  $("pe-note").onkeydown = (e) => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); send(); } };
+}
+async function planPick() {
+  if (!plan) return;
+  sheet(`<h2>Planner</h2>
+    <div class="hint">The Planner's own chat starts the first time you tap 💬. Tell it your to-dos and dates, and ask it what is coming up; its model and effort are set here then.</div>
+    <label>Your name on comments</label><input id="pp-name" maxlength="40" value="${esc(plan.name)}">
+    <label>Done shows the last … days</label><input id="pp-days" type="number" min="1" max="365" inputmode="numeric" value="${plan.done_days}">
+    <div class="hint" id="pp-msg"></div>
+    <div class="acts"><button type="button" id="pp-cancel">Cancel</button><button type="button" class="primary" id="pp-save">Save</button></div>`);
+  $("pp-cancel").onclick = closeSheet;
+  $("pp-save").onclick = async () => {
+    try { planTook(await api("api/planner/settings", { done_days: +$("pp-days").value, name: $("pp-name").value })); closeSheet(); }
+    catch (e) { $("pp-msg").textContent = e.message; }
+  };
+}
+$("pl-list").addEventListener("click", (e) => {
+  const who = e.target.closest(".pl-who");
+  if (who) {
+    const id = planAt?.get(who.dataset.who);
+    if (id) location.hash = id === plan.manager?.id ? "#p/c" : "#c/" + id;
+    return;
+  }
+  if (e.target.closest(".pl-edit")) return;
+  const row = e.target.closest(".pl-item"), it = row && planShown.find((x) => x.i === +row.dataset.i);
+  if (!it) return;
+  if (e.target.closest(".pl-tick")) { if (planEditing !== null) planEditClose(); planDo("toggle", { i: it.i, block: it.block }); }
+  else if (row.classList.contains("editing")) { if (e.target.closest(".pl-t")) planEditClose(); }     // its words close it; the rest of it does not
+  else planEdit(it);
+});
+// a tap outside the open card closes it: not in the chat box, nor on a sheet over it
+document.addEventListener("click", (e) => {
+  if (planEditing === null || !e.target.isConnected || e.target.closest(".pl-item, #talk, #sheet, #sheet2, #viewer, #plfab, #plset")) return;
+  planEditClose();
+});
+$("pl-list").addEventListener("toggle", (e) => { if (e.target.id === "pl-done") planDoneOpen = e.target.open; }, true);
+$("plset").onclick = () => (plan?.manager && !plan.manager.gone
+  ? settings({ kind: "chats", id: plan.manager.id, planner: true }) : planPick());
+// ＋: a new item, in a card like an item's; Enter in What saves it
+function planNewClose() { $("plnew").classList.remove("on"); $("plnew").innerHTML = ""; $("plnew").dataset.mode = ""; $("pladd").classList.remove("open"); }
+// the floating box over the Planner: "new" for ＋, "edit" for an item's card
+function planBox(mode, html) {
+  $("plnew").innerHTML = html; $("plnew").dataset.mode = mode; $("plnew").classList.add("on"); $("plnew").scrollTop = 0;
+  $("pladd").classList.toggle("open", mode === "new");
+  $("plnew").onkeydown = (e) => { if (e.key === "Escape") planNewClose(); };
+}
+function planNew() {
+  if (document.body.classList.contains("planchat")) location.hash = "#p";      // one box at a time
+  if (planEditing !== null) planEditClose();
+  planBox("new", `<div class="bar"><b>New to-do</b><button id="pn-x" type="button" class="plx" title="close (Esc)">✕</button></div>
+    <label>What</label><input id="pn-text" maxlength="500" placeholder="what to do" autocomplete="off">
+    <div class="pl-row"><div><label>Date</label><input id="pn-date" type="date"></div>
+      <div><label>Time</label><input id="pn-time" type="time"></div></div>
+    <label>Priority</label><select id="pn-pri">${priOpts("medium")}</select>
+    <label>Assigned</label><div class="pl-tabs" id="pn-who">${[...(planAt?.keys() || [])].sort()
+      .map((n) => `<button type="button" data-who="${esc(n)}">@${esc(n)}</button>`).join("") || '<div class="hint">No AI tabs.</div>'}</div>
+    <label>Description</label><textarea id="pn-desc" rows="3"></textarea>
+    <div class="hint" id="pn-msg"></div>
+    <div class="acts"><button type="button" id="pn-cancel">Cancel</button><button type="button" class="primary" id="pn-save">Save</button></div>`);
+  const say = (t, bad) => { $("pn-msg").textContent = t || ""; $("pn-msg").style.color = bad ? "var(--red)" : ""; };
+  $("pn-cancel").onclick = $("pn-x").onclick = planNewClose;
+  $("pn-who").onclick = (e) => { const b = e.target.closest("button"); if (b) b.classList.toggle("on"); };
+  const save = async () => {
+    const go = $("pn-save");
+    if (go.disabled) return;
+    if (!$("pn-text").value.trim()) { say("Write what to do first.", true); $("pn-text").focus(); return; }
+    go.disabled = true;                   // one tap, one item
+    const ok = await planDo("add", { text: $("pn-text").value, date: $("pn-date").value, time: $("pn-time").value,
+      priority: $("pn-pri").value, desc: $("pn-desc").value,
+      assigned: [...document.querySelectorAll("#pn-who button.on")].map((b) => b.dataset.who) }, say);
+    if (ok) planNewClose(); else go.disabled = false;
+  };
+  $("pn-save").onclick = save;
+  $("pn-text").onkeydown = (e) => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); save(); } };
+  $("pn-text").focus();
+}
+$("pladd").onclick = () => ($("plnew").dataset.mode === "new" ? planNewClose() : planNew());
 
 // --- one conversation -------------------------------------------------------
 function closeStream() { if (cur && cur.es) { cur.es.close(); cur.es = null; } }
@@ -903,6 +1388,17 @@ function take(me, d) {
 
 function header(me) {
   const m = me.meta;
+  $("stop").hidden = me.state !== "working" && me.state !== "waiting";
+  if (document.body.classList.contains("planchat")) {
+    const asks = me.state === "waiting" || (me.pending && me.pending.size);
+    $("dlg-t").textContent = m.title;
+    const st = { state: me.state, asks: me.pending ? me.pending.size : 0 }, hv = avOf(m);
+    $("dlg-av").className = "av sm " + hv.cls; $("dlg-av").innerHTML = hv.html + bub(st);
+    planFab(st);
+    $("dlg-st").className = "pill" + (asks ? " waiting" : "");
+    $("dlg-st").textContent = asks ? "waiting for you" : me.state === "working" ? "working…" : "Planner chat";
+    return;
+  }
   $("title").textContent = m.title;
   const hav = $("hav"); const hv = avOf(m); hav.hidden = false; hav.className = "av sm " + hv.cls; hav.style.cssText = hv.style; hav.innerHTML = hv.html + bub({ state: me.state, asks: me.pending ? me.pending.size : 0 });
   const p = $("pill");
@@ -911,7 +1407,6 @@ function header(me) {
   p.hidden = false; p.className = "pill" + (asks ? " waiting" : "");
   p.textContent = asks ? "waiting for you"
     : me.kind === "chats" ? (m.tab ? m.tab.group || "tab" : m.mode) : `${(m.members || []).length} chats`;
-  $("stop").hidden = me.state !== "working" && me.state !== "waiting";
     const chips = $("chips");
   if (me.kind === "groups") {
     chips.style.display = "flex";
@@ -1822,7 +2317,7 @@ $("hav").onclick = $("ttl").onclick = profile;
 const settings = async (t = cur) => {
   if (!t) return;
   if (!t.meta) {
-    try { t = { kind: t.kind, id: t.id, meta: (await api(`${base(t.kind)}/${t.id}`)).meta }; } catch (e) { return; }
+    try { t = { kind: t.kind, id: t.id, planner: t.planner, meta: (await api(`${base(t.kind)}/${t.id}`)).meta }; } catch (e) { return; }
   }
   const m = t.meta;
   if (!cfg) { try { cfg = await api("api/chats"); } catch (e) { return; } }   // a chat opened straight from a link
@@ -1863,7 +2358,7 @@ const settings = async (t = cur) => {
     const [agyModel, agyEffort] = agy ? (/^(.+)-(low|medium|high|xhigh|max)$/.exec(m.tab.model || "") || [0, m.tab.model || "", ""]).slice(1) : ["", ""];
     const modelNow = codex ? m.tab.model || "" : agyModel;
     if ((codex || agy) && modelNow && !cmodels.some((x) => x.name === modelNow)) cmodels.push({ name: modelNow, label: modelNow, efforts: ["", ...(agyEffort ? [agyEffort] : [])] });
-    sheet(`<h2>Chat</h2><div id="e-look"></div><div class="hint">${m.tab ? "Its tab in tabit: the name is the tab’s name" : esc(tilde(m.cwd))}</div>
+    sheet(`<h2>${t.planner ? "Planner" : "Chat"}</h2><div id="e-look"></div><div class="hint">${m.tab ? "Its tab in tabit: the name is the tab’s name" : esc(tilde(m.cwd))}</div>
       <label>Name</label><input id="e-title" value="${esc(m.title)}" maxlength="80">
       <div ${grok ? "hidden" : ""}><div ${agy ? "hidden" : ""}><label>Account</label><select id="e-account">${accts.map((a) => `<option value="${esc(a.name)}"${a.name === (m.account || "") ? " selected" : ""}>${esc(a.label)}</option>`).join("")}</select></div>
       <div ${m.tab ? "hidden" : ""}><label>When Claude wants to do something</label><select id="e-mode">${opts(cfg.modes, m.mode, (x) => MODE_NAME[x])}</select>
@@ -1875,8 +2370,10 @@ const settings = async (t = cur) => {
       <div class="hint" ${m.tab && m.tab.model ? "" : "hidden"}>${m.tab ? "Answering as " + esc(m.tab.model) + (grok ? ". Its login and model are set in its tab." : (agy ? ". Its login is set in its tab." : "") + " A new model starts with the next message, and only when the tab is not busy.") : ""}</div>
       <div ${m.tab ? "hidden" : ""}><label>Connectors</label><button type="button" id="e-reload">↻ Reload Claude</button>
       <div class="hint" id="e-reloaded">Changed a connector (Gmail, Strava…)? Tap this. The chat keeps its history.</div></div>
+      ${t.planner ? `<label>Your name on comments</label><input id="pp-name" maxlength="40" value="${esc(plan.name)}">
+      <label>Done shows the last … days</label><input id="pp-days" type="number" min="1" max="365" inputmode="numeric" value="${plan.done_days}">` : ""}
       <div class="hint" id="e-err" style="color:var(--red)"></div>
-      <div class="acts">${m.default ? "" : '<button type="button" class="danger" id="e-del">Delete</button>'}<button type="button" id="e-cancel">Cancel</button><button type="button" class="primary" id="e-save">Save</button></div>`);
+      <div class="acts">${m.default || t.planner ? "" : '<button type="button" class="danger" id="e-del">Delete</button>'}<button type="button" id="e-cancel">Cancel</button><button type="button" class="primary" id="e-save">Save</button></div>`);
     $("e-reload").onclick = async () => {
       try { await api(`api/chats/${t.id}/reload`, {}); $("e-err").textContent = ""; $("e-reloaded").textContent = "Done. Your next message starts a fresh Claude."; }
       catch (e) { $("e-err").textContent = e.message; }
@@ -1896,7 +2393,13 @@ const settings = async (t = cur) => {
     const asked = () => grok ? { title: $("e-title").value, ...look.get() }
       : agy ? { title: $("e-title").value, model: $("e-model").value, effort: $("e-effort").value, ...look.get() }
       : { title: $("e-title").value, mode: $("e-mode").value, model: $("e-model").value, effort: $("e-effort").value, ...($("e-account").value !== (m.account || "") ? { account: $("e-account").value } : {}), ...look.get() };
-    $("e-save").onclick = async () => { try { await api(`api/chats/${t.id}/edit`, asked()); done(); } catch (e) { $("e-err").textContent = e.message; } };
+    $("e-save").onclick = async () => {
+      try {
+        await api(`api/chats/${t.id}/edit`, asked());
+        if (t.planner) planTook(await api("api/planner/settings", { done_days: +$("pp-days").value, name: $("pp-name").value }));
+        done();
+      } catch (e) { $("e-err").textContent = e.message; }
+    };
     if ($("e-del")) $("e-del").onclick = async () => { if (!confirm(m.tab ? "Delete this chat? Its tab in tabit closes too." : "Delete this chat and its history?")) return; try { await api(`api/chats/${t.id}/delete`, {}); gone(); } catch (e) { $("e-err").textContent = e.message; } };
   }
   $("e-cancel").onclick = closeSheet;
