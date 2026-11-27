@@ -406,7 +406,7 @@ DEFAULT_AI_CLIS = [
     {"cli": "agy", "try": ["-c", "--continue"]},
 ]
 # used when user types a CLI not in the list
-APP_VERSION = "v2.4.0"
+APP_VERSION = "v2.4.0.1"
 # Taiwan main dish of the major version + a fresh snack or drink, picked at
 # release time (no public future pool). Display: v2.0.2 · Danzai Noodles + Mango Shaved Ice
 APP_CODENAME = "Railway Bento + Brown Sugar Ginger Tea"
