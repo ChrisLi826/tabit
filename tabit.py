@@ -7873,7 +7873,13 @@ if (data !== null) {{
         if hook_raw is not None:
             self._ai_follow_session(row)
         term = getattr(row, "term", None)
-        text = "" if hook_raw == "idle" else self._term_tail_text(
+        # an idle tab's screen is read only when it changed since the hook:
+        # claude can ask before a turn starts, and no hook says so
+        ep0 = getattr(row, "_agent_episode", None)
+        pty = (ep0.last_pty if ep0 is not None
+               else getattr(row, "_agent_last_pty_activity", 0.0)) or 0.0
+        text = "" if (hook_raw == "idle" and pty <= getattr(
+            row, "_agent_hook_mtime", 0)) else self._term_tail_text(
             term, max_lines=self._AGENT_TAIL_LINES)
         now = time.time()
         if hook_raw == "blocked" and as_ is not None and as_.bottom_live_busy(
@@ -7891,6 +7897,12 @@ if (data !== null) {{
                 and self._agent_hook_screen_says(
                     row, "asking", as_.dialog_open(text))):
             # a sub-agent asks; a Stop from an older hooks file did not know
+            hook_raw = "blocked"
+        if (hook_raw == "idle" and text and as_ is not None
+                and self._agent_hook_screen_says(
+                    row, "asking", as_.dialog_open(text))):
+            # "resume this long, idle conversation?" comes before the
+            # prompt is sent, so no hook runs for it
             hook_raw = "blocked"
         if (hook_raw == "working" and as_ is not None
                 and self._agent_hook_screen_says(

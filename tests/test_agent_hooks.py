@@ -479,6 +479,19 @@ class TestHookBeatsScreen(unittest.TestCase):
     def test_idle_does_not_read_the_screen(self):
         self.assertEqual(self.run_update("idle", self.BUSY), ("idle", False))
 
+    # Claude Code asks this before a prompt to a long idle conversation goes in
+    RESUME = (" This conversation has been inactive for 1h 8m and is 269.2k tokens long.\n"
+              " Resuming it will use about 5% of your 5-hour usage limit.\n\n"
+              " ❯ 1. Resume\n   2. Start a new conversation  Claude can look this one up\n\n"
+              " Enter to confirm · Esc to resume\n")
+
+    def test_idle_asking_before_a_turn_is_blocked(self):
+        # the screen changed after the idle hook: it is read
+        self.assertEqual(self.run_update("idle", self.RESUME, pty_age=1), ("blocked", True))
+
+    def test_idle_with_a_changed_screen_and_no_question(self):
+        self.assertEqual(self.run_update("idle", self.QUIET, pty_age=1)[0], "idle")
+
     def test_background_with_nobody_asking(self):
         for screen in (self.QUIET,) + self.NOT_ASKING:
             self.assertEqual(self.run_update("background", screen)[0], "background", screen)

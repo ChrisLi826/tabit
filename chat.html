@@ -28,7 +28,7 @@
   html, body { height: 100%; margin: 0; background: var(--bg); -webkit-tap-highlight-color: transparent; }
   * { box-sizing: border-box; }
   body { color: var(--fg); font: calc(16px * var(--fs, 1))/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif; -webkit-font-smoothing: antialiased;
-         display: flex; flex-direction: column; overflow: hidden; }
+         display: flex; flex-direction: column; overflow: hidden; padding: var(--kbt, 0px) 0 var(--kbb, 0px); }
   button, select, input, textarea { font: inherit; color: inherit; }
   button { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
            padding: 8px 14px; cursor: pointer; transition: transform .12s, filter .12s; }
@@ -199,12 +199,12 @@
   #dlg-st:empty { display: none; }
   #dlg-x { width: 34px; height: 34px; padding: 0; border-radius: 50%; }
   @media (max-width: 899px) {
-    body.planchat #talk { left: 0; right: 0; bottom: 0; top: 10vh; width: auto; height: auto; border-radius: 20px 20px 0 0; }
+    body.planchat #talk { left: 0; right: 0; bottom: var(--kbb, 0px); top: calc(10vh + var(--kbt, 0px)); width: auto; height: auto; border-radius: 20px 20px 0 0; }
     body.planchat #plfab { display: none; }            /* the sheet has its own ✕ */
     #plfab { right: 16px; bottom: calc(18px + env(safe-area-inset-bottom)); }
     #pladd { right: 84px; bottom: calc(22px + env(safe-area-inset-bottom)); }
     body.planchat #pladd { display: none; }
-    #plnew { left: 0; right: 0; bottom: 0; width: auto; max-height: 90vh; border-radius: 20px 20px 0 0; }
+    #plnew { left: 0; right: 0; bottom: var(--kbb, 0px); width: auto; max-height: calc(90vh - var(--kbt, 0px) - var(--kbb, 0px)); border-radius: 20px 20px 0 0; }
     body:has(#plnew.on) #plfab, body:has(#plnew.on) #pladd { display: none; }
   }
 
@@ -323,6 +323,10 @@
 
   /* typing */
   #composer { flex: none; padding: 6px 10px calc(8px + env(safe-area-inset-bottom)); background: linear-gradient(to top, var(--bg) 70%, #0f111a00); }
+  /* the keyboard covers the home bar: no room for it. On a phone a focused
+     box means the keyboard is up, also where iOS shrinks the page for it */
+  body.kbup #composer, body.kbup #searchbar { padding-bottom: 6px; }
+  @media (pointer: coarse) { #composer:focus-within, #searchbar:focus-within { padding-bottom: 6px; } }
   #chips { display: none; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
   #chips button.on { background: #7aa2f733; border-color: #7aa2f7; }
   #chips button { padding: 3px 10px; font-size: calc(13px * var(--fs, 1)); border-radius: 99px; }
@@ -958,6 +962,18 @@ function showList() {
   listTimer = setInterval(() => { if (!document.hidden && (!cur || wide.matches)) loadList(); }, 5000);
 }
 window.addEventListener("hashchange", route);
+// With the iPhone keyboard up, iOS keeps the page its full height under the
+// keyboard and slides it up as it likes. Pad the page (and the floating
+// boxes) so they fill just the part the keyboard leaves, as remote.html does.
+const vv = window.visualViewport;
+function fitKbd() {
+  const kb = vv && Math.abs(vv.scale - 1) < 0.01 ? innerHeight - vv.height - vv.offsetTop : 0, up = kb >= 50;
+  const s = document.documentElement.style;
+  s.setProperty("--kbt", up ? `${vv.offsetTop}px` : "0px");
+  s.setProperty("--kbb", up ? `${kb}px` : "0px");
+  document.body.classList.toggle("kbup", up);
+}
+if (vv) { vv.addEventListener("resize", fitKbd); vv.addEventListener("scroll", fitKbd); }
 $("back").onclick = () => { location.hash = ""; };
 $("q").addEventListener("input", loadList);
 $("sb-add").onclick = () => $("add").click();
