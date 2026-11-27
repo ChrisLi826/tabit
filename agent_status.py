@@ -327,7 +327,7 @@ def hard_idle_prompt(text: str, patterns: Optional[PatternPack] = None) -> bool:
 # under the options. Narrower than the blocked pack, which also takes the
 # "accept edits on" mode line and "Do you want to …" in a reply.
 _DIALOG_CURSOR = re.compile(r"^\s*❯\s*\d+\.\s", re.M)
-_DIALOG_FOOT = re.compile(r"^\s*Esc to cancel\b", re.M | re.I)
+_DIALOG_FOOT = re.compile(r"^\s*(?:Esc to cancel|Enter to confirm)\b", re.M | re.I)
 
 
 def dialog_open(text: str) -> bool:
